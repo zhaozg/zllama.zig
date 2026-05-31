@@ -12,10 +12,10 @@
 **目标：** 在 x86_64 CPU 上稳定运行 Qwen 3.5 9B Q4_K_M，达到 ≥10 tok/s。
 
 - [x] 项目初始化和 `build.zig` 配置
-- [x] ggml 源码集成（submodule）
+- [x] ggml 已安装在 /usr/local 目录
 - [x] `ggml.zig` 安全封装（Context, Tensor, CGraph）
 - [x] GGUF v2 解析器（元数据 + 张量索引）
-- [ ] GGUF v3 支持（64 位字段、32 字节对齐）
+- [x] GGUF v3 支持（64 位字段、32 字节对齐）
 - [ ] Qwen 3.5 基础架构搭建（全注意力层、RMSNorm、RoPE、SwiGLU）
 - [ ] CPU 后端多线程执行
 - [ ] 分词器（BPE）实现 + 特殊 token 处理
