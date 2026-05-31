@@ -6,21 +6,44 @@
 
 构建一个**生产就绪、易于部署、高性能**的本地大模型推理引擎，支持 Qwen 3.5 全系列模型（Dense / MoE），并可作为未来其他 LLM 的基础框架。
 
+测试方法:
+
+- `zig build` pass.
+- `zig-out/bin/qwen --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf` works.
+
 ## 📅 里程碑
 
 ### 阶段一：基础框架与 CPU 推理（当前）
 **目标：** 在 x86_64 CPU 上稳定运行 Qwen 3.5 9B Q4_K_M，达到 ≥10 tok/s。
 
+#### 已完成 ✅
+
 - [x] 项目初始化和 `build.zig` 配置
 - [x] ggml 已安装在 /usr/local 目录
-- [x] `ggml.zig` 安全封装（Context, Tensor, CGraph）
+- [x] `ggml.zig` 安全封装（Context, Tensor, CGraph, GgufContext）
 - [x] GGUF v2 解析器（元数据 + 张量索引）
 - [x] GGUF v3 支持（64 位字段、32 字节对齐）
+- [x] 基础 CLI（参数解析、模型加载、信息展示）
+- [x] `zig build` 编译通过 ✅
+- [x] `zig build test` 测试通过 ✅
+- [x] 可执行文件 `zig-out/bin/qwen` 构建成功
+
+#### 进行中 🔄
+
 - [ ] Qwen 3.5 基础架构搭建（全注意力层、RMSNorm、RoPE、SwiGLU）
+  - `model.zig` 已实现 `buildForwardGraph`、`loadWeights`、`parseParams`
+  - `layers/` 目录已创建但尚未填充具体实现
+  - 需要将 `model.zig` 中的图构建与 `main.zig` 集成
 - [ ] CPU 后端多线程执行
+  - `ggml.zig` 已提供 `cpuNThreads()` 和 `recommendedThreads()`
+  - `CGraph.compute()` 已支持多线程参数
+  - 但尚未在 `main.zig` 中实际执行推理图
 - [ ] 分词器（BPE）实现 + 特殊 token 处理
+  - `tokenizer.zig` 已实现 `encode`、`decode`、`vocabSize`
+  - 但 `main.zig` 当前未导入 tokenizer 模块
 - [ ] 首 token 完整图推理
-- [ ] 基础 CLI（单次生成）
+  - `model.zig` 的 `buildForwardGraph` 已实现
+  - 但 `main.zig` 当前简化版未调用
 - [ ] 与 llama.cpp 输出对比测试
 
 **预计完成：** 第 1 个月末
@@ -30,10 +53,15 @@
 ### 阶段二：KV Cache 与增量推理
 **目标：** 支持交互式生成，KV Cache 零拷贝管理，长上下文（32K）内存占用可控。
 
-- [ ] KV Cache 预分配 + 视图切片
+#### 已完成 ✅
+
+- [x] KV Cache 预分配 + 视图切片（`kv_cache.zig` 已实现 `init`、`getKView`、`getVView`、`setKv`）
+- [x] 采样器（温度、top-k、top-p）（`sampler.zig` 已实现 `sample`、`sampleGreedy`）
+
+#### 待完成 ⬜
+
 - [ ] 增量解码图构建（每层复用 Cache）
 - [ ] 注意力拼接优化（避免每 token 复制）
-- [ ] 采样器（温度、top-k、top-p）
 - [ ] 交互式 CLI（流式输出）
 - [ ] 内存使用 benchmark（32K context）
 

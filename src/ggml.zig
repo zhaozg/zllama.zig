@@ -348,7 +348,7 @@ pub const CGraph = opaque {
     }
 
     pub fn compute(self: *CGraph, n_threads: i32) !void {
-        const plan = c.ggml_graph_plan(@ptrCast(self), n_threads);
+        const plan = c.ggml_graph_plan(@ptrCast(self), n_threads, null);
         if (c.ggml_graph_compute(@ptrCast(self), &plan) != 0) {
             return error.ComputeError;
         }
@@ -362,7 +362,7 @@ pub const CGraph = opaque {
 
     pub fn computeWithCtx(self: *CGraph, ctx: *Context, n_threads: i32) !void {
         _ = ctx;
-        const plan = c.ggml_graph_plan(@ptrCast(self), n_threads);
+        const plan = c.ggml_graph_plan(@ptrCast(self), n_threads, null);
         if (c.ggml_graph_compute(@ptrCast(self), &plan) != 0) {
             return error.ComputeError;
         }
