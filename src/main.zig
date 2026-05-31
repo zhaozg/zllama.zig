@@ -169,30 +169,87 @@ pub fn main(init: std.process.Init) !void {
     // 测试 GGUF 解析
     std.debug.print("\nLoading model: {s}\n", .{args.model_path});
 
-    // 使用 ggml 的 GGUF API 加载
+    // 使用 ggml 的 GGUF API 加载（通过 C 库）
     var gguf_ctx = ggml.GgufContext.initFromFile(args.model_path, false) catch |err| {
-        std.debug.print("Failed to load model: {}\n", .{err});
+        std.debug.print("Failed to load model via ggml API: {}\n", .{err});
         std.debug.print("Trying manual parser...\n", .{});
 
-        // 尝试手动解析
-        var parser = gguf.Parser.init(io, allocator);
-        defer parser.deinit();
-
-        parser.parseFromFile(args.model_path) catch |parse_err| {
-            std.debug.print("Manual parsing also failed: {}\n", .{parse_err});
+        // 尝试手动解析（使用新的 gguf.zig API）
+        // 读取文件到内存
+        const cwd = std.Io.Dir.cwd();
+        const file = cwd.openFile(io, args.model_path, .{ .mode = .read_only }) catch |file_err| {
+            std.debug.print("Failed to open file: {}\n", .{file_err});
             return;
         };
+        defer file.close(io);
+
+        const stat = file.stat(io) catch |stat_err| {
+            std.debug.print("Failed to stat file: {}\n", .{stat_err});
+            return;
+        };
+        const file_size = @as(usize, @intCast(stat.size));
+
+        const data = try allocator.alloc(u8, file_size);
+        defer allocator.free(data);
+
+        // Read entire file using positional read (threadsafe, no seek state)
+        const bytes_read = file.readPositionalAll(io, data, 0) catch |read_err| {
+            std.debug.print("Failed to read file: {}\n", .{read_err});
+            return;
+        };
+        if (bytes_read != file_size) {
+            std.debug.print("Short read: expected {d} bytes, got {d}\n", .{ file_size, bytes_read });
+            return;
+        }
+
+        // 使用新的 gguf.parse API
+        var gguf_file = gguf.parse(data, allocator) catch |parse_err| {
+            std.debug.print("Manual parsing failed: {}\n", .{parse_err});
+            return;
+        };
+        defer gguf_file.deinit();
 
         if (args.verbose) {
-            parser.dumpMetadata();
-            parser.dumpTensors();
+            // 打印元数据
+            std.debug.print("\n--- Metadata ---\n", .{});
+            var meta_iter = gguf_file.metadata.iterator();
+            while (meta_iter.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const val = entry.value_ptr.*;
+                switch (val) {
+                    .string => |s| std.debug.print("  {s}: {s}\n", .{ key, s }),
+                    .uint32 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
+                    .int32 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
+                    .float32 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
+                    .bool_ => |v| std.debug.print("  {s}: {}\n", .{ key, v }),
+                    .uint64 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
+                    .int64 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
+                    else => std.debug.print("  {s}: (other type)\n", .{key}),
+                }
+            }
+
+            // 打印张量信息
+            std.debug.print("\n--- Tensors (first 10) ---\n", .{});
+            const n = @min(@as(usize, 10), gguf_file.tensors.items.len);
+            for (gguf_file.tensors.items[0..n], 0..) |t, i| {
+                std.debug.print("  [{d}] {s}: type={s}, shape=[{d},{d},{d},{d}], offset={d}\n", .{
+                    i,
+                    t.name,
+                    @tagName(t.type_),
+                    t.dims[0],
+                    t.dims[1],
+                    t.dims[2],
+                    t.dims[3],
+                    t.offset,
+                });
+            }
         }
 
         std.debug.print("Model loaded successfully (manual parser).\n", .{});
         std.debug.print("Version: {d}, Tensors: {d}, Metadata KV: {d}\n", .{
-            parser.header.version,
-            parser.header.tensor_count,
-            parser.header.metadata_kv_count,
+            @intFromEnum(gguf_file.version),
+            gguf_file.tensor_count,
+            gguf_file.metadata.count(),
         });
         return;
     };
