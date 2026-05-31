@@ -140,15 +140,39 @@ pub const GgufValue = union(enum) {
 // ============================================================================
 
 pub const Context = opaque {
+    /// 使用 ggml_init(params) 初始化上下文
     pub fn init(mem_size: usize) !*Context {
-        const ctx = c.ggml_init(mem_size);
+        const params = c.struct_ggml_init_params{
+            .mem_size = mem_size,
+            .mem_buffer = null,
+            .no_alloc = false,
+        };
+        const ctx = c.ggml_init(params);
         if (ctx == null) return error.OutOfMemory;
         return @ptrCast(ctx);
     }
 
+    /// 使用外部缓冲区初始化
     pub fn initWithBuffer(mem_size: usize, mem_buffer: ?*anyopaque) !*Context {
         const buf = mem_buffer orelse return error.OutOfMemory;
-        const ctx = c.ggml_init_with_buf(mem_size, buf);
+        const params = c.struct_ggml_init_params{
+            .mem_size = mem_size,
+            .mem_buffer = buf,
+            .no_alloc = false,
+        };
+        const ctx = c.ggml_init(params);
+        if (ctx == null) return error.OutOfMemory;
+        return @ptrCast(ctx);
+    }
+
+    /// 初始化上下文，不分配张量数据内存（用于加载模型）
+    pub fn initNoAlloc(mem_size: usize) !*Context {
+        const params = c.struct_ggml_init_params{
+            .mem_size = mem_size,
+            .mem_buffer = null,
+            .no_alloc = true,
+        };
+        const ctx = c.ggml_init(params);
         if (ctx == null) return error.OutOfMemory;
         return @ptrCast(ctx);
     }
@@ -172,53 +196,53 @@ pub const Context = opaque {
     pub fn newTensor(self: *Context, typ: Type, ne: []const i64) !*Tensor {
         const tensor = c.ggml_new_tensor(@ptrCast(self), @intFromEnum(typ), ne.ptr);
         if (tensor == null) return error.OutOfMemory;
-        return @ptrCast(tensor);
+        return @ptrCast(@alignCast(tensor));
     }
 
     pub fn newTensor1d(self: *Context, typ: Type, ne0: i64) !*Tensor {
         const tensor = c.ggml_new_tensor_1d(@ptrCast(self), @intFromEnum(typ), ne0);
         if (tensor == null) return error.OutOfMemory;
-        return @ptrCast(tensor);
+        return @ptrCast(@alignCast(tensor));
     }
 
     pub fn newTensor2d(self: *Context, typ: Type, ne0: i64, ne1: i64) !*Tensor {
         const tensor = c.ggml_new_tensor_2d(@ptrCast(self), @intFromEnum(typ), ne0, ne1);
         if (tensor == null) return error.OutOfMemory;
-        return @ptrCast(tensor);
+        return @ptrCast(@alignCast(tensor));
     }
 
     pub fn newTensor3d(self: *Context, typ: Type, ne0: i64, ne1: i64, ne2: i64) !*Tensor {
         const tensor = c.ggml_new_tensor_3d(@ptrCast(self), @intFromEnum(typ), ne0, ne1, ne2);
         if (tensor == null) return error.OutOfMemory;
-        return @ptrCast(tensor);
+        return @ptrCast(@alignCast(tensor));
     }
 
     pub fn newTensor4d(self: *Context, typ: Type, ne0: i64, ne1: i64, ne2: i64, ne3: i64) !*Tensor {
         const tensor = c.ggml_new_tensor_4d(@ptrCast(self), @intFromEnum(typ), ne0, ne1, ne2, ne3);
         if (tensor == null) return error.OutOfMemory;
-        return @ptrCast(tensor);
+        return @ptrCast(@alignCast(tensor));
     }
 
     pub fn dupTensor(self: *Context, src: *Tensor) !*Tensor {
-        const tensor = c.ggml_dup_tensor(@ptrCast(self), @ptrCast(src));
+        const tensor = c.ggml_dup_tensor(@ptrCast(self), @ptrCast(@alignCast(src)));
         if (tensor == null) return error.OutOfMemory;
-        return @ptrCast(tensor);
+        return @ptrCast(@alignCast(tensor));
     }
 
     pub fn viewTensor(self: *Context, src: *Tensor) *Tensor {
-        return @ptrCast(c.ggml_view_tensor(@ptrCast(self), @ptrCast(src)));
+        return @ptrCast(c.ggml_view_tensor(@ptrCast(self), @ptrCast(@alignCast(src))));
     }
 
     pub fn view1d(self: *Context, src: *Tensor, ne0: i64, offset: usize) *Tensor {
-        return @ptrCast(c.ggml_view_1d(@ptrCast(self), @ptrCast(src), ne0, offset));
+        return @ptrCast(c.ggml_view_1d(@ptrCast(self), @ptrCast(@alignCast(src)), ne0, offset));
     }
 
     pub fn view2d(self: *Context, src: *Tensor, ne0: i64, ne1: i64, nb1: usize, offset: usize) *Tensor {
-        return @ptrCast(c.ggml_view_2d(@ptrCast(self), @ptrCast(src), ne0, ne1, nb1, offset));
+        return @ptrCast(c.ggml_view_2d(@ptrCast(self), @ptrCast(@alignCast(src)), ne0, ne1, nb1, offset));
     }
 
-    pub fn view3d(self: *Context, src: *Tensor, ne0: i64, ne2: i64, ne2_alt: i64, nb1: usize, nb2: usize, offset: usize) *Tensor {
-        return @ptrCast(c.ggml_view_3d(@ptrCast(self), @ptrCast(src), ne0, ne2, ne2_alt, nb1, nb2, offset));
+    pub fn view3d(self: *Context, src: *Tensor, ne0: i64, ne1: i64, ne2: i64, nb1: usize, nb2: usize, offset: usize) *Tensor {
+        return @ptrCast(c.ggml_view_3d(@ptrCast(self), @ptrCast(@alignCast(src)), ne0, ne1, ne2, nb1, nb2, offset));
     }
 
     pub fn newBuffer(self: *Context, nbytes: usize) !*anyopaque {
@@ -230,11 +254,11 @@ pub const Context = opaque {
     pub fn firstTensor(self: *Context) ?*Tensor {
         const tensor = c.ggml_get_first_tensor(@ptrCast(self));
         if (tensor == null) return null;
-        return @ptrCast(tensor);
+        return @ptrCast(@alignCast(tensor));
     }
 
     pub fn nextTensor(self: *Context, tensor: *Tensor) ?*Tensor {
-        const next = c.ggml_get_next_tensor(@ptrCast(self), @ptrCast(tensor));
+        const next = c.ggml_get_next_tensor(@ptrCast(self), @ptrCast(@alignCast(tensor)));
         if (next == null) return null;
         return @ptrCast(next);
     }
@@ -242,7 +266,7 @@ pub const Context = opaque {
     pub fn getTensor(self: *Context, name: [:0]const u8) ?*Tensor {
         const tensor = c.ggml_get_tensor(@ptrCast(self), name.ptr);
         if (tensor == null) return null;
-        return @ptrCast(tensor);
+        return @ptrCast(@alignCast(tensor));
     }
 };
 
@@ -256,23 +280,22 @@ pub const Tensor = opaque {
     }
 
     pub fn setName(self: *Tensor, name: [:0]const u8) void {
-        c.ggml_set_name(@ptrCast(self), name.ptr);
+        _ = c.ggml_set_name(@ptrCast(@alignCast(self)), name.ptr);
     }
 
     pub fn setParam(self: *Tensor) void {
-        c.ggml_set_param(@ptrCast(self), null);
+        c.ggml_set_param(@ptrCast(self));
     }
 
     pub fn shape(self: *Tensor) [4]i64 {
         var ne: [4]i64 = undefined;
-        c.ggml_unravel_index(@ptrCast(self), 0, &ne);
+        c.ggml_unravel_index(@ptrCast(self), 0, &ne[0], &ne[1], &ne[2], &ne[3]);
         return ne;
     }
 
     pub fn strides(self: *Tensor) [4]usize {
-        const nb: [4]usize = undefined;
-        _ = c.ggml_nbytes(@ptrCast(self));
-        return nb;
+        _ = self;
+        return .{ 0, 0, 0, 0 };
     }
 
     pub fn typeOf(self: *Tensor) Type {
@@ -284,12 +307,12 @@ pub const Tensor = opaque {
     }
 
     pub fn data(self: *Tensor) *anyopaque {
-        return c.ggml_get_data(@ptrCast(self));
+        return c.ggml_get_data(@ptrCast(@alignCast(self)));
     }
 
     pub fn dataBytes(self: *Tensor) []u8 {
-        const nbytes = c.ggml_nbytes(@ptrCast(self));
-        const ptr = c.ggml_get_data(@ptrCast(self));
+        const nbytes = c.ggml_nbytes(@ptrCast(@alignCast(self)));
+        const ptr = c.ggml_get_data(@ptrCast(@alignCast(self)));
         return @as([*]u8, @ptrCast(ptr))[0..nbytes];
     }
 
@@ -300,19 +323,23 @@ pub const Tensor = opaque {
     }
 
     pub fn setZero(self: *Tensor) void {
-        c.ggml_set_zero(@ptrCast(self));
+        _ = c.ggml_set_zero(@ptrCast(@alignCast(self)));
     }
 
     pub fn setF32(self: *Tensor, idx: usize, val: f32) void {
-        c.ggml_set_f32(@ptrCast(self), @intCast(idx), val);
+        c.ggml_set_f32_1d(@ptrCast(self), @intCast(idx), val);
     }
 
     pub fn getF32(self: *Tensor, idx: usize) f32 {
-        return c.ggml_get_f32(@ptrCast(self), @intCast(idx));
+        return c.ggml_get_f32_1d(@ptrCast(self), @intCast(idx));
     }
 
     pub fn setAllF32(self: *Tensor, val: f32) void {
-        c.ggml_set_f32_1d(@ptrCast(self), 0, val);
+        const n = self.nelements();
+        var i: i64 = 0;
+        while (i < n) : (i += 1) {
+            c.ggml_set_f32_1d(@ptrCast(self), @intCast(i), val);
+        }
     }
 
     pub fn nDims(self: *Tensor) usize {
@@ -320,7 +347,7 @@ pub const Tensor = opaque {
     }
 
     pub fn print(self: *Tensor) void {
-        c.ggml_print(@ptrCast(self), null, null);
+        c.ggml_print_objects(@ptrCast(self));
     }
 };
 
@@ -330,10 +357,8 @@ pub const Tensor = opaque {
 
 pub const CGraph = opaque {
     pub fn init(ctx: *Context) !*CGraph {
-        const n = c.ggml_graph_n_tasks(@ptrCast(ctx));
         const graph = c.ggml_new_graph(@ptrCast(ctx));
         if (graph == null) return error.OutOfMemory;
-        _ = n;
         return @ptrCast(graph);
     }
 
@@ -344,12 +369,19 @@ pub const CGraph = opaque {
     }
 
     pub fn buildForwardExpand(self: *CGraph, tensor: *Tensor) void {
-        c.ggml_build_forward_expand(@ptrCast(self), @ptrCast(tensor));
+        c.ggml_build_forward_expand(@ptrCast(self), @ptrCast(@alignCast(tensor)));
     }
 
     pub fn compute(self: *CGraph, n_threads: i32) !void {
-        const plan = c.ggml_graph_plan(@ptrCast(self), n_threads, null);
-        if (c.ggml_graph_compute(@ptrCast(self), &plan) != 0) {
+        // 使用 ggml_backend API 执行计算
+        _ = n_threads;
+
+        // 先初始化 CPU backend
+        const backend = c.ggml_backend_init_best();
+        if (backend == null) return error.BackendInitFailed;
+        defer c.ggml_backend_free(backend);
+
+        if (c.ggml_backend_graph_compute(backend, @ptrCast(self)) != 0) {
             return error.ComputeError;
         }
     }
@@ -361,9 +393,7 @@ pub const CGraph = opaque {
     }
 
     pub fn computeWithCtx(self: *CGraph, ctx: *Context, n_threads: i32) !void {
-        _ = ctx;
-        const plan = c.ggml_graph_plan(@ptrCast(self), n_threads, null);
-        if (c.ggml_graph_compute(@ptrCast(self), &plan) != 0) {
+        if (c.ggml_graph_compute_with_ctx(@ptrCast(ctx), @ptrCast(self), n_threads) != 0) {
             return error.ComputeError;
         }
     }
@@ -373,7 +403,7 @@ pub const CGraph = opaque {
     }
 
     pub fn print(self: *CGraph) void {
-        c.ggml_graph_print(@ptrCast(self), null);
+        c.ggml_graph_print(@ptrCast(self));
     }
 
     pub fn dumpDot(self: *CGraph, f: *anyopaque) void {
@@ -529,27 +559,27 @@ pub const GgufMetaIterator = struct {
 /// 矩阵乘法: result = a * b
 /// a: [M, K], b: [K, N], result: [M, N]
 pub fn mulMat(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
-    return @ptrCast(c.ggml_mul_mat(@ptrCast(ctx), @ptrCast(a), @ptrCast(b)));
+    return @ptrCast(c.ggml_mul_mat(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b))));
 }
 
 /// 逐元素乘法
 pub fn mul(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
-    return @ptrCast(c.ggml_mul(@ptrCast(ctx), @ptrCast(a), @ptrCast(b)));
+    return @ptrCast(c.ggml_mul(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b))));
 }
 
 /// 逐元素加法
 pub fn add(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
-    return @ptrCast(c.ggml_add(@ptrCast(ctx), @ptrCast(a), @ptrCast(b)));
+    return @ptrCast(c.ggml_add(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b))));
 }
 
 /// 张量拷贝
 pub fn cpy(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
-    return @ptrCast(c.ggml_cpy(@ptrCast(ctx), @ptrCast(a), @ptrCast(b)));
+    return @ptrCast(c.ggml_cpy(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b))));
 }
 
 /// RMS 归一化
 pub fn rmsNorm(ctx: *Context, a: *Tensor, eps: f32) *Tensor {
-    return @ptrCast(c.ggml_rms_norm(@ptrCast(ctx), @ptrCast(a), eps));
+    return @ptrCast(c.ggml_rms_norm(@ptrCast(ctx), @ptrCast(@alignCast(a)), eps));
 }
 
 /// RoPE 位置编码（扩展版本）
@@ -569,9 +599,9 @@ pub fn ropeExt(
 ) *Tensor {
     return @ptrCast(c.ggml_rope_ext(
         @ptrCast(ctx),
-        @ptrCast(a),
-        @ptrCast(pos),
-        @ptrCast(pos),
+        @ptrCast(@alignCast(a)),
+        @ptrCast(@alignCast(pos)),
+        @ptrCast(@alignCast(pos)),
         n_dims,
         mode,
         n_ctx_orig,
@@ -586,62 +616,62 @@ pub fn ropeExt(
 
 /// 缩放
 pub fn scale(ctx: *Context, a: *Tensor, s: f32) *Tensor {
-    return @ptrCast(c.ggml_scale(@ptrCast(ctx), @ptrCast(a), s));
+    return @ptrCast(c.ggml_scale(@ptrCast(ctx), @ptrCast(@alignCast(a)), s));
 }
 
 /// Softmax
 pub fn softMax(ctx: *Context, a: *Tensor) *Tensor {
-    return @ptrCast(c.ggml_soft_max(@ptrCast(ctx), @ptrCast(a)));
+    return @ptrCast(c.ggml_soft_max(@ptrCast(ctx), @ptrCast(@alignCast(a))));
 }
 
 /// 对角线 mask 无穷
 pub fn diagMaskInf(ctx: *Context, a: *Tensor, n_past: i32) *Tensor {
-    return @ptrCast(c.ggml_diag_mask_inf(@ptrCast(ctx), @ptrCast(a), n_past));
+    return @ptrCast(c.ggml_diag_mask_inf(@ptrCast(ctx), @ptrCast(@alignCast(a)), n_past));
 }
 
 /// 置换
 pub fn permute(ctx: *Context, a: *Tensor, axis0: i32, axis1: i32, axis2: i32, axis3: i32) *Tensor {
-    return @ptrCast(c.ggml_permute(@ptrCast(ctx), @ptrCast(a), axis0, axis1, axis2, axis3));
+    return @ptrCast(c.ggml_permute(@ptrCast(ctx), @ptrCast(@alignCast(a)), axis0, axis1, axis2, axis3));
 }
 
 /// 连续化
 pub fn cont(ctx: *Context, a: *Tensor) *Tensor {
-    return @ptrCast(c.ggml_cont(@ptrCast(ctx), @ptrCast(a)));
+    return @ptrCast(c.ggml_cont(@ptrCast(ctx), @ptrCast(@alignCast(a))));
 }
 
 /// 重塑为 2D
 pub fn reshape2d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64) *Tensor {
-    return @ptrCast(c.ggml_reshape_2d(@ptrCast(ctx), @ptrCast(a), ne0, ne1));
+    return @ptrCast(c.ggml_reshape_2d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1));
 }
 
 /// 重塑为 3D
 pub fn reshape3d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, ne2: i64) *Tensor {
-    return @ptrCast(c.ggml_reshape_3d(@ptrCast(ctx), @ptrCast(a), ne0, ne1, ne2));
+    return @ptrCast(c.ggml_reshape_3d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, ne2));
 }
 
 /// 重塑为 4D
 pub fn reshape4d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, ne2: i64, ne3: i64) *Tensor {
-    return @ptrCast(c.ggml_reshape_4d(@ptrCast(ctx), @ptrCast(a), ne0, ne1, ne2, ne3));
+    return @ptrCast(c.ggml_reshape_4d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, ne2, ne3));
 }
 
 /// 重复张量以匹配目标形状
 pub fn repeat(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
-    return @ptrCast(c.ggml_repeat(@ptrCast(ctx), @ptrCast(a), @ptrCast(b)));
+    return @ptrCast(c.ggml_repeat(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b))));
 }
 
 /// SiLU 激活函数
 pub fn silu(ctx: *Context, a: *Tensor) *Tensor {
-    return @ptrCast(c.ggml_silu(@ptrCast(ctx), @ptrCast(a)));
+    return @ptrCast(c.ggml_silu(@ptrCast(ctx), @ptrCast(@alignCast(a))));
 }
 
 /// 设置输出张量
 pub fn setOutput(tensor: *Tensor) void {
-    c.ggml_set_output(@ptrCast(tensor));
+    c.ggml_set_output(@ptrCast(@alignCast(tensor)));
 }
 
 /// 1D 卷积
 pub fn conv1d(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, p0: i32, d0: i32) *Tensor {
-    return @ptrCast(c.ggml_conv_1d(@ptrCast(ctx), @ptrCast(a), @ptrCast(b), s0, p0, d0));
+    return @ptrCast(c.ggml_conv_1d(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, p0, d0));
 }
 
 

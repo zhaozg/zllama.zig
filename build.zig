@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     });
     ggml_mod.addIncludePath(include_path);
     ggml_mod.linkSystemLibrary("ggml-base", .{});
+    ggml_mod.linkSystemLibrary("ggml", .{});
 
     if (target.result.os.tag == .macos) {
         ggml_mod.linkFramework("Metal", .{});
@@ -35,6 +36,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ggml", ggml_mod);
     exe_mod.addIncludePath(include_path);
     exe_mod.linkSystemLibrary("ggml-base", .{});
+    exe_mod.linkSystemLibrary("ggml", .{});
 
     const exe = b.addExecutable(.{
         .name = "qwen",
@@ -53,6 +55,7 @@ pub fn build(b: *std.Build) void {
     });
     ggml_test_mod.addIncludePath(include_path);
     ggml_test_mod.linkSystemLibrary("ggml-base", .{});
+    ggml_test_mod.linkSystemLibrary("ggml", .{});
     if (target.result.os.tag == .macos) {
         ggml_test_mod.linkFramework("Metal", .{});
         ggml_test_mod.linkFramework("Foundation", .{});
@@ -77,6 +80,7 @@ pub fn build(b: *std.Build) void {
     gguf_test_mod.addImport("ggml", ggml_mod);
     gguf_test_mod.addIncludePath(include_path);
     gguf_test_mod.linkSystemLibrary("ggml-base", .{});
+    gguf_test_mod.linkSystemLibrary("ggml", .{});
 
     const gguf_test = b.addTest(.{
         .name = "gguf-test",
@@ -94,6 +98,7 @@ pub fn build(b: *std.Build) void {
     main_test_mod.addImport("ggml", ggml_mod);
     main_test_mod.addIncludePath(include_path);
     main_test_mod.linkSystemLibrary("ggml-base", .{});
+    main_test_mod.linkSystemLibrary("ggml", .{});
 
     const main_test = b.addTest(.{
         .name = "main-test",

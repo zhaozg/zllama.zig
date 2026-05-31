@@ -182,7 +182,7 @@ pub const Tokenizer = struct {
 
     /// 解码：将 token ID 列表转换为文本
     pub fn decode(self: *const Tokenizer, tokens: []const u32, allocator: std.mem.Allocator) ![]u8 {
-        var result = std.ArrayList(u8).init(allocator);
+        var result = std.ArrayList(u8).empty;
 
         for (tokens) |token_id| {
             // 跳过特殊 token
@@ -196,14 +196,14 @@ pub const Tokenizer = struct {
             // 查找 token 字符串
             if (token_id < self.vocab.items.len) {
                 const token_str = self.vocab.items[token_id];
-                try result.appendSlice(token_str);
+                try result.appendSlice(allocator, token_str);
             } else {
                 // 未知 token，使用 UNK
                 log.debug("Unknown token id: {d}", .{token_id});
             }
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(allocator);
     }
 
     /// 将字节映射到 token ID（简化实现）

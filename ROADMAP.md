@@ -53,11 +53,13 @@
   - 需要将各模块集成到 `main.zig` 的主循环中
 - [ ] 与 llama.cpp 输出对比测试
 
-**预计完成：** 第 1 个月末
-
----
-
-### 阶段二：KV Cache 与增量推理
+- [x] 首 token 完整图推理
+  - `model.zig` 的 `buildForwardGraph` 已实现
+  - `main.zig` 已集成 model/tokenizer/sampler/kv_cache 模块
+  - 推理循环：编码 prompt → 构建计算图 → 执行 → 采样 → 增量生成
+  - 时间测量使用 POSIX clock_gettime
+  - 贪心采样（sampleGreedy）已实现
+- [ ] 与 llama.cpp 输出对比测试
 **目标：** 支持交互式生成，KV Cache 零拷贝管理，长上下文（32K）内存占用可控。
 
 #### 已完成 ✅

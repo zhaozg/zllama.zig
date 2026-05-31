@@ -40,12 +40,22 @@ pub const KVCache = struct {
         for (0..n_layer) |i| {
             // K Cache: [max_seq_len, n_kv_head, head_dim]
             const k = try ctx.newTensor3d(.f32, @intCast(max_seq_len), @intCast(n_kv_head), @intCast(head_dim));
-            k.setName(std.fmt.allocPrint(allocator, "cache.k.{d}", .{i}) catch unreachable);
+            {
+                var buf: [64]u8 = undefined;
+                const slice = try std.fmt.bufPrint(&buf, "cache.k.{d}", .{i});
+                buf[slice.len] = 0;
+                k.setName(buf[0..slice.len :0]);
+            }
             k.setZero();
 
             // V Cache: [max_seq_len, n_kv_head, head_dim]
             const v = try ctx.newTensor3d(.f32, @intCast(max_seq_len), @intCast(n_kv_head), @intCast(head_dim));
-            v.setName(std.fmt.allocPrint(allocator, "cache.v.{d}", .{i}) catch unreachable);
+            {
+                var buf: [64]u8 = undefined;
+                const slice = try std.fmt.bufPrint(&buf, "cache.v.{d}", .{i});
+                buf[slice.len] = 0;
+                v.setName(buf[0..slice.len :0]);
+            }
             v.setZero();
 
             layers[i] = LayerCache{

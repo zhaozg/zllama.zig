@@ -2,10 +2,30 @@
 //!
 //! Qwen 3.5 本地推理引擎 - 主入口点
 //! 处理 CLI 参数、初始化、推理循环
+//! 实现首 token 完整图推理
 
 const std = @import("std");
 const ggml = @import("ggml.zig");
 const gguf = @import("gguf.zig");
+const model = @import("model.zig");
+const tokenizer = @import("tokenizer.zig");
+const sampler = @import("sampler.zig");
+const kv_cache = @import("kv_cache.zig");
+
+const log = std.log.scoped(.main);
+
+// ============================================================================
+// 时间工具
+// ============================================================================
+
+/// 获取当前毫秒时间戳（使用 POSIX clock_gettime）
+fn currentTimeMs() i64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return @as(i64, ts.sec) * 1000 + @as(i64, @divTrunc(ts.nsec, 1000000));
+}
 
 // ============================================================================
 // CLI 参数
@@ -114,17 +134,258 @@ const CliArgs = struct {
 };
 
 // ============================================================================
+// 推理引擎
+// ============================================================================
+
+const InferenceEngine = struct {
+    allocator: std.mem.Allocator,
+    ggml_ctx: *ggml.Context,
+    params: model.ModelParams,
+    weights: model.ModelWeights,
+    tok: tokenizer.Tokenizer,
+    sampler_state: sampler.Sampler,
+    kv_cache_mgr: kv_cache.KVCache,
+    n_threads: i32,
+    verbose: bool,
+
+    pub fn init(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        model_path: [:0]const u8,
+        cli_args: *const CliArgs,
+    ) !InferenceEngine {
+        // 读取 GGUF 文件
+        const cwd = std.Io.Dir.cwd();
+        const file = try cwd.openFile(io, model_path, .{ .mode = .read_only });
+        defer file.close(io);
+
+        const stat = try file.stat(io);
+        const file_size = @as(usize, @intCast(stat.size));
+
+        const gguf_data = try allocator.alloc(u8, file_size);
+        defer allocator.free(gguf_data);
+
+        const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
+        if (bytes_read != file_size) {
+            log.err("Short read: expected {d} bytes, got {d}", .{ file_size, bytes_read });
+            return error.FileReadError;
+        }
+
+        // 解析 GGUF
+        var gguf_file = try gguf.parse(gguf_data, allocator);
+
+        // 解析模型参数
+        var params = try model.parseParams(&gguf_file, allocator);
+
+        if (cli_args.verbose) {
+            log.info("Model parameters:", .{});
+            log.info("  n_vocab={d}, n_embd={d}, n_head={d}, n_kv_head={d}", .{
+                params.n_vocab, params.n_embd, params.n_head, params.n_kv_head,
+            });
+            log.info("  n_layer={d}, n_ff={d}, n_head_dim={d}", .{
+                params.n_layer, params.n_ff, params.n_head_dim,
+            });
+            log.info("  max_seq_len={d}, rope_theta={d}, rope_dim={d}", .{
+                params.max_seq_len, params.rope_theta, params.rope_dim,
+            });
+            log.info("  full_attn_interval={d}, ssm_inner={d}", .{
+                params.full_attention_interval, params.ssm_inner_size,
+            });
+        }
+
+        // 初始化分词器
+        var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
+        log.info("Tokenizer: {d} tokens", .{tok.vocabSize()});
+
+        // 计算 ggml context 大小
+        const n_threads = if (cli_args.n_threads > 0) cli_args.n_threads else ggml.recommendedThreads();
+
+        // 估算内存需求
+        const mem_size_estimate = blk: {
+            const base_mem: usize = 1024 * 1024 * 1024; // 1GB base
+            const per_layer: usize = @as(usize, @intCast(
+                (params.n_embd * (params.n_ff * 3 + params.n_embd * 2) * 4) +
+                (params.ssm_inner_size * params.n_embd * 4 * 3)
+            ));
+            break :blk base_mem + per_layer * params.n_layer * 2;
+        };
+        log.info("Estimated memory: {d} MB", .{mem_size_estimate / (1024 * 1024)});
+
+        // 初始化 ggml context
+        const ggml_ctx = try ggml.Context.init(mem_size_estimate);
+
+        // 加载权重
+        const weights = try model.loadWeights(&gguf_file, &params, ggml_ctx, allocator);
+
+        // 初始化 KV Cache
+        const max_seq_len = @min(params.max_seq_len, 2048);
+        const kv_cache_mgr = try kv_cache.KVCache.init(
+            ggml_ctx,
+            params.n_layer,
+            params.n_kv_head,
+            params.n_head_dim,
+            max_seq_len,
+            allocator,
+        );
+
+        // 初始化采样器
+        const sampler_state = sampler.Sampler.init(.{
+            .temperature = cli_args.temperature,
+            .top_k = cli_args.top_k,
+            .top_p = cli_args.top_p,
+        });
+
+        return InferenceEngine{
+            .allocator = allocator,
+            .ggml_ctx = ggml_ctx,
+            .params = params,
+            .weights = weights,
+            .tok = tok,
+            .sampler_state = sampler_state,
+            .kv_cache_mgr = kv_cache_mgr,
+            .n_threads = n_threads,
+            .verbose = cli_args.verbose,
+        };
+    }
+
+    pub fn deinit(self: *InferenceEngine) void {
+        self.kv_cache_mgr.deinit(self.allocator);
+        self.weights.deinit(self.allocator);
+        self.tok.deinit();
+        self.ggml_ctx.deinit();
+    }
+
+    /// 运行推理：编码 prompt -> 首 token -> 增量生成
+    pub fn generate(self: *InferenceEngine, prompt: []const u8, max_tokens: u32) !void {
+        // 1. 编码 prompt
+        var input_tokens = try self.tok.encode(prompt);
+        defer input_tokens.deinit(self.allocator);
+
+        const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
+        log.info("Prompt: {d} tokens", .{n_prompt_tokens});
+
+        if (self.verbose) {
+            std.debug.print("Input tokens: ", .{});
+            for (input_tokens.items[0..@min(@as(usize, 10), input_tokens.items.len)]) |t| {
+                std.debug.print("{d} ", .{t});
+            }
+            if (input_tokens.items.len > 10) std.debug.print("...", .{});
+            std.debug.print("\n", .{});
+        }
+
+        // 2. 构建输入张量
+        const input_tensor = try self.ggml_ctx.newTensor1d(.i32, n_prompt_tokens);
+        {
+            const data = input_tensor.dataBytes();
+            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
+            for (input_tokens.items, 0..) |token, j| { slice[j] = @as(i32, @intCast(token)); }
+        }
+
+        // 3. 构建计算图
+        log.info("Building forward graph...", .{});
+        var graph = try ggml.CGraph.init(self.ggml_ctx);
+        const logits = try model.buildForwardGraph(
+            self.ggml_ctx,
+            &self.weights,
+            input_tensor,
+            n_prompt_tokens,
+            self.n_threads,
+        );
+        graph.buildForwardExpand(logits);
+
+        // 4. 执行计算
+        log.info("Computing forward pass...", .{});
+        const start_time = currentTimeMs();
+        try graph.compute(self.n_threads);
+        const end_time = currentTimeMs();
+        const elapsed_ms = end_time - start_time;
+
+        log.info("Forward pass completed in {d} ms ({d:.2} tok/s)", .{
+            elapsed_ms,
+            @as(f64, @floatFromInt(n_prompt_tokens)) / (@as(f64, @floatFromInt(elapsed_ms)) / 1000.0),
+        });
+
+        // 5. 采样首 token
+        const first_token = sampler.Sampler.sampleGreedy(logits);
+        log.info("First token: {d}", .{first_token});
+
+        // 6. 解码并输出
+        var output_tokens = std.ArrayList(u32).empty;
+        defer output_tokens.deinit(self.allocator);
+
+        try output_tokens.append(self.allocator, @as(u32, @intCast(first_token)));
+
+        // 解码首 token
+        const first_token_u32 = @as(u32, @intCast(first_token));
+        const first_text = try self.tok.decode(&.{first_token_u32}, self.allocator);
+        defer self.allocator.free(first_text);
+        std.debug.print("\n{s}", .{first_text});
+
+        // 7. 增量生成剩余 tokens
+        var current_token: u32 = @intCast(first_token);
+        var pos: i32 = n_prompt_tokens;
+
+        while (output_tokens.items.len < max_tokens) {
+            // 检查 EOS
+            if (current_token == self.tok.special.eos) {
+                log.info("EOS token reached", .{});
+                break;
+            }
+
+            // 构建单 token 输入
+            const single_input = try self.ggml_ctx.newTensor1d(.i32, 1);
+            {
+                const data = single_input.dataBytes();
+                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1];
+                slice[0] = @as(i32, @intCast(current_token));
+            }
+
+            // 构建增量计算图
+            var inc_graph = try ggml.CGraph.init(self.ggml_ctx);
+            const inc_logits = try model.buildForwardGraph(
+                self.ggml_ctx,
+                &self.weights,
+                single_input,
+                1,
+                self.n_threads,
+            );
+            inc_graph.buildForwardExpand(inc_logits);
+
+            try inc_graph.compute(self.n_threads);
+
+            // 采样
+            const next_token = sampler.Sampler.sampleGreedy(inc_logits);
+
+            // 解码
+            const next_token_u32 = @as(u32, @intCast(next_token));
+            const text = try self.tok.decode(&.{next_token_u32}, self.allocator);
+            defer self.allocator.free(text);
+            std.debug.print("{s}", .{text});
+
+            try output_tokens.append(self.allocator, next_token_u32);
+            current_token = next_token_u32;
+            pos += 1;
+
+            // 重置 ggml context 以释放中间张量内存
+            self.ggml_ctx.reset();
+        }
+
+        std.debug.print("\n", .{});
+
+        const total_tokens = output_tokens.items.len + @as(usize, @intCast(n_prompt_tokens));
+        log.info("Generated {d} tokens (total {d})", .{ output_tokens.items.len, total_tokens });
+    }
+};
+
+// ============================================================================
 // 主函数
-// Zig 0.16.0: main 可接受 std.process.Init 参数
-// 使用 Init 参数可以获取 args 和 io 等系统资源
+// ============================================================================
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
 
     // 解析 CLI 参数
-    // Zig 0.16.0: 使用 init.minimal.args 获取实际的命令行参数
-    // 在 macOS/Linux 上，Args 的 Vector 是 []const [*:0]const u8
-    // Args.Iterator.init() 在非 Windows/非 WASI 平台上不需要 allocator
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     defer args_iter.deinit();
 
@@ -165,159 +426,28 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // 测试 GGUF 解析
+    // 初始化推理引擎
     std.debug.print("\nLoading model: {s}\n", .{args.model_path});
 
-    // 使用 ggml 的 GGUF API 加载（通过 C 库）
-    var gguf_ctx = ggml.GgufContext.initFromFile(args.model_path, false) catch |err| {
-        std.debug.print("Failed to load model via ggml API: {}\n", .{err});
-        std.debug.print("Trying manual parser...\n", .{});
-
-        // 尝试手动解析（使用新的 gguf.zig API）
-        // 读取文件到内存
-        const cwd = std.Io.Dir.cwd();
-        const file = cwd.openFile(io, args.model_path, .{ .mode = .read_only }) catch |file_err| {
-            std.debug.print("Failed to open file: {}\n", .{file_err});
-            return;
-        };
-        defer file.close(io);
-
-        const stat = file.stat(io) catch |stat_err| {
-            std.debug.print("Failed to stat file: {}\n", .{stat_err});
-            return;
-        };
-        const file_size = @as(usize, @intCast(stat.size));
-
-        const data = try allocator.alloc(u8, file_size);
-        defer allocator.free(data);
-
-        // Read entire file using positional read (threadsafe, no seek state)
-        const bytes_read = file.readPositionalAll(io, data, 0) catch |read_err| {
-            std.debug.print("Failed to read file: {}\n", .{read_err});
-            return;
-        };
-        if (bytes_read != file_size) {
-            std.debug.print("Short read: expected {d} bytes, got {d}\n", .{ file_size, bytes_read });
-            return;
-        }
-
-        // 使用新的 gguf.parse API
-        var gguf_file = gguf.parse(data, allocator) catch |parse_err| {
-            std.debug.print("Manual parsing failed: {}\n", .{parse_err});
-            return;
-        };
-        defer gguf_file.deinit();
-
-        if (args.verbose) {
-            // 打印元数据
-            std.debug.print("\n--- Metadata ---\n", .{});
-            var meta_iter = gguf_file.metadata.iterator();
-            while (meta_iter.next()) |entry| {
-                const key = entry.key_ptr.*;
-                const val = entry.value_ptr.*;
-                switch (val) {
-                    .string => |s| std.debug.print("  {s}: {s}\n", .{ key, s }),
-                    .uint32 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                    .int32 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                    .float32 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                    .bool_ => |v| std.debug.print("  {s}: {}\n", .{ key, v }),
-                    .uint64 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                    .int64 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                    else => std.debug.print("  {s}: (other type)\n", .{key}),
-                }
-            }
-
-            // 打印张量信息
-            std.debug.print("\n--- Tensors (first 10) ---\n", .{});
-            const n = @min(@as(usize, 10), gguf_file.tensors.items.len);
-            for (gguf_file.tensors.items[0..n], 0..) |t, i| {
-                std.debug.print("  [{d}] {s}: type={s}, shape=[{d},{d},{d},{d}], offset={d}\n", .{
-                    i,
-                    t.name,
-                    @tagName(t.type_),
-                    t.dims[0],
-                    t.dims[1],
-                    t.dims[2],
-                    t.dims[3],
-                    t.offset,
-                });
-            }
-        }
-
-        std.debug.print("Model loaded successfully (manual parser).\n", .{});
-        std.debug.print("Version: {d}, Tensors: {d}, Metadata KV: {d}\n", .{
-            @intFromEnum(gguf_file.version),
-            gguf_file.tensor_count,
-            gguf_file.metadata.count(),
-        });
+    var engine = InferenceEngine.init(io, allocator, args.model_path, &args) catch |err| {
+        log.err("Failed to initialize inference engine: {}", .{err});
         return;
     };
-    defer gguf_ctx.deinit();
+    defer engine.deinit();
 
-    std.debug.print("Model loaded successfully (ggml API).\n", .{});
-
-    // 打印模型信息
-    const version = gguf_ctx.version();
-    const n_tensors = gguf_ctx.nTensors();
-    const n_kv = gguf_ctx.nKv();
-    std.debug.print("GGUF version: {d}\n", .{version});
-    std.debug.print("Tensors: {d}\n", .{n_tensors});
-    std.debug.print("Metadata KV pairs: {d}\n", .{n_kv});
-
-    // 打印元数据
-    if (args.verbose) {
-        std.debug.print("\n--- Metadata ---\n", .{});
-        var meta_iter = gguf_ctx.initMeta();
-        while (meta_iter.next()) |entry| {
-            const key = entry.key;
-            const val = entry.value;
-            switch (val) {
-                .string => |s| std.debug.print("  {s}: {s}\n", .{ key, s }),
-                .int32 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                .uint32 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                .float32 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                .bool => |v| std.debug.print("  {s}: {}\n", .{ key, v }),
-                .int64 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                .uint64 => |v| std.debug.print("  {s}: {d}\n", .{ key, v }),
-                else => std.debug.print("  {s}: (other type)\n", .{key}),
-            }
-        }
-
-        // 打印张量信息
-        std.debug.print("\n--- Tensors (first 10) ---\n", .{});
-        const n = @min(@as(i64, 10), n_tensors);
-        var i: i32 = 0;
-        while (i < n) : (i += 1) {
-            const info = gguf_ctx.tensorInfo(i);
-            std.debug.print("  [{d}] {s}: type={s}, shape=[{d},{d},{d},{d}], offset={d}\n", .{
-                i,
-                info.name,
-                info.typ.name(),
-                info.ne[0],
-                info.ne[1],
-                info.ne[2],
-                info.ne[3],
-                info.offset,
-            });
-        }
-    }
-
-    // 获取关联的 ggml 上下文
-    const ggml_ctx = gguf_ctx.ggmlCtx() orelse {
-        std.debug.print("Warning: no ggml context from GGUF\n", .{});
-        return;
-    };
-
-    _ = ggml_ctx;
-
-    std.debug.print("\nModel loaded. Ready for inference.\n", .{});
+    std.debug.print("Model loaded successfully.\n", .{});
     std.debug.print("Prompt: \"{s}\"\n", .{args.prompt});
     std.debug.print("Max tokens: {d}\n", .{args.max_tokens});
     std.debug.print("Temperature: {d}\n", .{args.temperature});
     std.debug.print("Top-K: {d}, Top-P: {d}\n", .{ args.top_k, args.top_p });
 
-    // TODO: 阶段二 - 实现推理循环
-    std.debug.print("\nInference not yet implemented (Phase 2).\n", .{});
+    // 运行推理
+    std.debug.print("\n--- Generation ---\n", .{});
+    engine.generate(args.prompt, args.max_tokens) catch |err| {
+        log.err("Generation failed: {}", .{err});
+        return;
+    };
+    std.debug.print("\n--- Done ---\n", .{});
 }
 
 // ============================================================================
@@ -325,10 +455,9 @@ pub fn main(init: std.process.Init) !void {
 // ============================================================================
 
 test "CliArgs parse" {
-    // Test that CliArgs can be constructed
-    const args = CliArgs{};
-    try std.testing.expectEqual(@as(u32, 256), args.max_tokens);
-    try std.testing.expectEqual(@as(f32, 0.7), args.temperature);
+    const test_args = CliArgs{};
+    try std.testing.expectEqual(@as(u32, 256), test_args.max_tokens);
+    try std.testing.expectEqual(@as(f32, 0.7), test_args.temperature);
 }
 
 test "ggml version available" {
