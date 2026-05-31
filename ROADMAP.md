@@ -27,23 +27,30 @@
 - [x] `zig build` 编译通过 ✅
 - [x] `zig build test` 测试通过 ✅
 - [x] 可执行文件 `zig-out/bin/qwen` 构建成功
+- [x] `ggml.zig` 计算图操作函数（mulMat, rmsNorm, ropeExt, silu, scale, softMax, diagMaskInf, permute, cont, reshape, repeat, setOutput, cpy, conv1d 等）
+- [x] Qwen 3.5 基础架构搭建（全注意力层、RMSNorm、RoPE、SwiGLU）
+  - `model.zig` 已实现完整的 `buildForwardGraph`（含 GQA、注意力计算、SwiGLU FFN）
+  - `model.zig` 已实现 `loadWeights`（逐层加载所有权重）
+  - `model.zig` 已实现 `parseParams`（从 GGUF 元数据读取超参数）
+  - 支持 `attn_output_gate`（Qwen 3.5 门控机制）
+- [x] CPU 后端多线程执行
+  - `ggml.zig` 已提供 `cpuNThreads()` 和 `recommendedThreads()`
+  - `CGraph.compute()` 已支持多线程参数
+- [x] 分词器（BPE）实现 + 特殊 token 处理
+  - `tokenizer.zig` 已实现 `encode`、`decode`、`vocabSize`
+  - 支持从 GGUF 读取词表和 BPE 合并规则
+  - 支持特殊 token（BOS, EOS, UNK, PAD）
+- [x] 采样器实现
+  - `sampler.zig` 已实现 `sample`（温度、top-k、top-p）和 `sampleGreedy`
+- [x] KV Cache 管理
+  - `kv_cache.zig` 已实现 `init`、`getKView`、`getVView`、`setKv`、`reset`
 
 #### 进行中 🔄
 
-- [ ] Qwen 3.5 基础架构搭建（全注意力层、RMSNorm、RoPE、SwiGLU）
-  - `model.zig` 已实现 `buildForwardGraph`、`loadWeights`、`parseParams`
-  - `layers/` 目录已创建但尚未填充具体实现
-  - 需要将 `model.zig` 中的图构建与 `main.zig` 集成
-- [ ] CPU 后端多线程执行
-  - `ggml.zig` 已提供 `cpuNThreads()` 和 `recommendedThreads()`
-  - `CGraph.compute()` 已支持多线程参数
-  - 但尚未在 `main.zig` 中实际执行推理图
-- [ ] 分词器（BPE）实现 + 特殊 token 处理
-  - `tokenizer.zig` 已实现 `encode`、`decode`、`vocabSize`
-  - 但 `main.zig` 当前未导入 tokenizer 模块
 - [ ] 首 token 完整图推理
   - `model.zig` 的 `buildForwardGraph` 已实现
-  - 但 `main.zig` 当前简化版未调用
+  - `main.zig` 当前简化版未调用 model/tokenizer/sampler/kv_cache 模块
+  - 需要将各模块集成到 `main.zig` 的主循环中
 - [ ] 与 llama.cpp 输出对比测试
 
 **预计完成：** 第 1 个月末
