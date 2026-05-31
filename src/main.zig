@@ -122,11 +122,10 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
     // 解析 CLI 参数
-    // Zig 0.16.0: 使用 Args.Iterator.initAllocator 替代 argsWithAllocator
+    // Zig 0.16.0: 使用 init.minimal.args 获取实际的命令行参数
     // 在 macOS/Linux 上，Args 的 Vector 是 []const [*:0]const u8
-    // 我们通过 std.process.Args.Iterator.initAllocator 传入空的 Args 来获取迭代器
-    // 注意：在 Zig 0.16.0 中，非 Windows 平台使用 Posix 实现，init 不需要 allocator
-    var args_iter = std.process.Args.Iterator.init(std.process.Args{ .vector = @as([]const [*:0]const u8, &.{}) });
+    // Args.Iterator.init() 在非 Windows/非 WASI 平台上不需要 allocator
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     defer args_iter.deinit();
 
     const args = CliArgs.parse(&args_iter) catch |err| {

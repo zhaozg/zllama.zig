@@ -385,9 +385,12 @@ pub const CGraph = opaque {
 // GGUF 上下文封装
 // ============================================================================
 
-pub const GgufContext = opaque {
+pub const GgufContext = struct {
+    inner: *c.struct_gguf_context,
+    ggml_ctx: ?*Context,
+
     /// 从文件初始化 GGUF 上下文
-    pub fn initFromFile(path: [:0]const u8, no_alloc: bool) !*GgufContext {
+    pub fn initFromFile(path: [:0]const u8, no_alloc: bool) !GgufContext {
         var ctx: ?*c.struct_ggml_context = null;
         const params = c.struct_gguf_init_params{
             .no_alloc = no_alloc,
@@ -395,69 +398,76 @@ pub const GgufContext = opaque {
         };
         const gguf_ctx = c.gguf_init_from_file(path.ptr, params);
         if (gguf_ctx == null) return error.InvalidModel;
-        return @ptrCast(gguf_ctx);
+        return GgufContext{
+            .inner = gguf_ctx.?,
+            .ggml_ctx = if (ctx) |cptr| @ptrCast(cptr) else null,
+        };
     }
 
     /// 释放 GGUF 上下文
     pub fn deinit(self: *GgufContext) void {
-        c.gguf_free(@ptrCast(self));
+        c.gguf_free(self.inner);
     }
 
     /// 获取 GGUF 版本
     pub fn version(self: *GgufContext) u32 {
-        return c.gguf_get_version(@ptrCast(self));
+        return c.gguf_get_version(self.inner);
     }
 
     /// 获取张量数量
     pub fn nTensors(self: *GgufContext) i64 {
-        return c.gguf_get_n_tensors(@ptrCast(self));
+        return c.gguf_get_n_tensors(self.inner);
     }
 
     /// 获取元数据键值对数量
     pub fn nKv(self: *GgufContext) i64 {
-        return c.gguf_get_n_kv(@ptrCast(self));
+        return c.gguf_get_n_kv(self.inner);
     }
 
     /// 获取元数据键名
     pub fn key(self: *GgufContext, i: i64) [:0]const u8 {
-        return std.mem.sliceTo(c.gguf_get_key(@ptrCast(self), i), 0);
+        return std.mem.sliceTo(c.gguf_get_key(self.inner, i), 0);
     }
 
     /// 获取元数据值类型
     pub fn kvType(self: *GgufContext, k: [:0]const u8) GgufValueType {
-        return @enumFromInt(c.gguf_get_kv_type(@ptrCast(self), k.ptr));
+        return @enumFromInt(c.gguf_get_kv_type(self.inner, k.ptr));
     }
 
     /// 获取元数据值（自动检测类型）
     pub fn kvValue(self: *GgufContext, k: [:0]const u8) !GgufValue {
-        const c_ctx = @as(*const c.struct_gguf_context, @ptrCast(self));
-        const key_id = c.gguf_find_key(c_ctx, k.ptr);
+        const key_id = c.gguf_find_key(self.inner, k.ptr);
         if (key_id < 0) return error.KeyNotFound;
-        const typ = c.gguf_get_kv_type(c_ctx, key_id);
+        const typ = c.gguf_get_kv_type(self.inner, key_id);
         return switch (typ) {
-            c.GGUF_TYPE_UINT8 => GgufValue{ .uint8 = c.gguf_get_val_u8(c_ctx, key_id) },
-            c.GGUF_TYPE_INT8 => GgufValue{ .int8 = c.gguf_get_val_i8(c_ctx, key_id) },
-            c.GGUF_TYPE_UINT16 => GgufValue{ .uint16 = c.gguf_get_val_u16(c_ctx, key_id) },
-            c.GGUF_TYPE_INT16 => GgufValue{ .int16 = c.gguf_get_val_i16(c_ctx, key_id) },
-            c.GGUF_TYPE_UINT32 => GgufValue{ .uint32 = c.gguf_get_val_u32(c_ctx, key_id) },
-            c.GGUF_TYPE_INT32 => GgufValue{ .int32 = c.gguf_get_val_i32(c_ctx, key_id) },
-            c.GGUF_TYPE_FLOAT32 => GgufValue{ .float32 = c.gguf_get_val_f32(c_ctx, key_id) },
-            c.GGUF_TYPE_BOOL => GgufValue{ .bool = c.gguf_get_val_bool(c_ctx, key_id) },
-            c.GGUF_TYPE_STRING => GgufValue{ .string = std.mem.sliceTo(c.gguf_get_val_str(c_ctx, key_id), 0) },
-            c.GGUF_TYPE_UINT64 => GgufValue{ .uint64 = c.gguf_get_val_u64(c_ctx, key_id) },
-            c.GGUF_TYPE_INT64 => GgufValue{ .int64 = c.gguf_get_val_i64(c_ctx, key_id) },
-            c.GGUF_TYPE_FLOAT64 => GgufValue{ .float64 = c.gguf_get_val_f64(c_ctx, key_id) },
+            c.GGUF_TYPE_UINT8 => GgufValue{ .uint8 = c.gguf_get_val_u8(self.inner, key_id) },
+            c.GGUF_TYPE_INT8 => GgufValue{ .int8 = c.gguf_get_val_i8(self.inner, key_id) },
+            c.GGUF_TYPE_UINT16 => GgufValue{ .uint16 = c.gguf_get_val_u16(self.inner, key_id) },
+            c.GGUF_TYPE_INT16 => GgufValue{ .int16 = c.gguf_get_val_i16(self.inner, key_id) },
+            c.GGUF_TYPE_UINT32 => GgufValue{ .uint32 = c.gguf_get_val_u32(self.inner, key_id) },
+            c.GGUF_TYPE_INT32 => GgufValue{ .int32 = c.gguf_get_val_i32(self.inner, key_id) },
+            c.GGUF_TYPE_FLOAT32 => GgufValue{ .float32 = c.gguf_get_val_f32(self.inner, key_id) },
+            c.GGUF_TYPE_BOOL => GgufValue{ .bool = c.gguf_get_val_bool(self.inner, key_id) },
+            c.GGUF_TYPE_STRING => GgufValue{ .string = std.mem.sliceTo(c.gguf_get_val_str(self.inner, key_id), 0) },
+            c.GGUF_TYPE_UINT64 => GgufValue{ .uint64 = c.gguf_get_val_u64(self.inner, key_id) },
+            c.GGUF_TYPE_INT64 => GgufValue{ .int64 = c.gguf_get_val_i64(self.inner, key_id) },
+            c.GGUF_TYPE_FLOAT64 => GgufValue{ .float64 = c.gguf_get_val_f64(self.inner, key_id) },
             c.GGUF_TYPE_ARRAY => {
-                const arr_typ = c.gguf_get_arr_type(c_ctx, key_id);
-                const arr_n = c.gguf_get_arr_n(c_ctx, key_id);
-                const arr_data = c.gguf_get_arr_data(c_ctx, key_id);
-                const data_slice = @as([*]const u8, @ptrCast(arr_data))[0..@as(usize, @intCast(arr_n))];
-                return GgufValue{
-                    .array = .{
-                        .typ = @enumFromInt(arr_typ),
-                        .items = data_slice,
-                    },
+                const arr_typ = c.gguf_get_arr_type(self.inner, key_id);
+                const arr_n = c.gguf_get_arr_n(self.inner, key_id);
+                if (arr_typ == c.GGUF_TYPE_STRING) {
+                    return GgufValue{ .array = .{ .typ = @enumFromInt(arr_typ), .items = &.{} } };
+                }
+                const arr_data = c.gguf_get_arr_data(self.inner, key_id);
+                const elem_size: usize = switch (arr_typ) {
+                    c.GGUF_TYPE_UINT8, c.GGUF_TYPE_INT8, c.GGUF_TYPE_BOOL => 1,
+                    c.GGUF_TYPE_UINT16, c.GGUF_TYPE_INT16 => 2,
+                    c.GGUF_TYPE_UINT32, c.GGUF_TYPE_INT32, c.GGUF_TYPE_FLOAT32 => 4,
+                    c.GGUF_TYPE_UINT64, c.GGUF_TYPE_INT64, c.GGUF_TYPE_FLOAT64 => 8,
+                    else => 1,
                 };
+                const data_slice = @as([*]const u8, @ptrCast(arr_data))[0 .. @as(usize, @intCast(arr_n)) * elem_size];
+                return GgufValue{ .array = .{ .typ = @enumFromInt(arr_typ), .items = data_slice } };
             },
             else => error.UnknownType,
         };
@@ -465,11 +475,8 @@ pub const GgufContext = opaque {
 
     /// 获取张量信息
     pub fn tensorInfo(self: *GgufContext, i: i64) struct { name: [:0]const u8, n_dims: u32, ne: [4]i64, typ: Type, offset: u64 } {
-        const c_ctx = @as(*const c.struct_gguf_context, @ptrCast(self));
-        const name = std.mem.sliceTo(c.gguf_get_tensor_name(c_ctx, i), 0);
-        const typ: c.ggml_type = c.gguf_get_tensor_type(c_ctx, i);
-        // ggml 0.13.1 没有 gguf_get_tensor_info，使用独立 API
-        // 注意：n_dims, ne, offset 需要从 ggml tensor 获取
+        const name = std.mem.sliceTo(c.gguf_get_tensor_name(self.inner, i), 0);
+        const typ: c.ggml_type = c.gguf_get_tensor_type(self.inner, i);
         return .{
             .name = name,
             .n_dims = 0,
@@ -481,7 +488,6 @@ pub const GgufContext = opaque {
 
     /// 获取张量数据指针
     pub fn tensorData(self: *GgufContext, name: [:0]const u8) ?*anyopaque {
-        // ggml 0.13.1 没有 gguf_get_tensor_data
         _ = self;
         _ = name;
         return null;
@@ -489,9 +495,7 @@ pub const GgufContext = opaque {
 
     /// 获取关联的 ggml 上下文
     pub fn ggmlCtx(self: *GgufContext) ?*Context {
-        // ggml 0.13.1 的 gguf_context 不直接暴露 ggml_context
-        _ = self;
-        return null;
+        return self.ggml_ctx;
     }
 
     /// 初始化元数据迭代器
