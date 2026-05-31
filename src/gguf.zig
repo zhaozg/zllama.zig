@@ -359,18 +359,34 @@ pub fn parseWithOptions(data: []const u8, allocator: std.mem.Allocator, options:
 
     // Parse metadata
     var metadata: std.StringHashMapUnmanaged(MetadataValue) = .{};
-    errdefer metadata.deinit(allocator);
+    errdefer {
+        var it = metadata.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            freeMetadataValue(allocator, entry.value_ptr.*);
+        }
+        metadata.deinit(allocator);
+    }
 
     for (0..metadata_count) |_| {
         const key = try reader.readString(allocator);
         errdefer allocator.free(key);
         const val = try reader.readMetadataValue(allocator);
+        errdefer {
+            allocator.free(key);
+            freeMetadataValue(allocator, val);
+        }
         try metadata.put(allocator, key, val);
     }
 
     // Parse tensor descriptors
     var tensors: std.ArrayList(TensorInfo) = .empty;
-    errdefer tensors.deinit(allocator);
+    errdefer {
+        for (tensors.items) |t| {
+            allocator.free(t.name);
+        }
+        tensors.deinit(allocator);
+    }
 
     for (0..tensor_count) |_| {
         const name = try reader.readString(allocator);
@@ -403,6 +419,15 @@ pub fn parseWithOptions(data: []const u8, allocator: std.mem.Allocator, options:
     };
     const tensor_data_offset = (reader.pos + alignment - 1) & ~(alignment - 1);
 
+    // Debug: print vocab size
+    if (metadata.get("tokenizer.ggml.tokens")) |val| {
+        if (val == .array) {
+            log.debug("vocab size: {d}", .{val.array.len});
+        }
+    } else {
+        log.warn("tokenizer.ggml.tokens not found in metadata", .{});
+    }
+
     return GGUFFile{
         .version = version,
         .tensor_count = tensor_count,
@@ -412,8 +437,6 @@ pub fn parseWithOptions(data: []const u8, allocator: std.mem.Allocator, options:
         .allocator = allocator,
     };
 }
-
-/// Simple sequential reader over a byte slice.
 const Reader = struct {
     data: []const u8,
     pos: u64,

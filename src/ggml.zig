@@ -194,7 +194,8 @@ pub const Context = opaque {
     }
 
     pub fn newTensor(self: *Context, typ: Type, ne: []const i64) !*Tensor {
-        const tensor = c.ggml_new_tensor(@ptrCast(self), @intFromEnum(typ), ne.ptr);
+        // ggml_new_tensor(ctx, type, n_dims, *ne) — 需要 n_dims 参数
+        const tensor = c.ggml_new_tensor(@ptrCast(self), @intFromEnum(typ), @intCast(ne.len), ne.ptr);
         if (tensor == null) return error.OutOfMemory;
         return @ptrCast(@alignCast(tensor));
     }
@@ -274,6 +275,11 @@ pub const Context = opaque {
 // ggml_tensor 封装
 // ============================================================================
 
+/// 内部辅助：将 opaque Tensor 指针转换为 C struct 指针
+fn asCStruct(tensor: *Tensor) *c.struct_ggml_tensor {
+    return @ptrCast(@alignCast(tensor));
+}
+
 pub const Tensor = opaque {
     pub fn getName(self: *Tensor) [:0]const u8 {
         return std.mem.sliceTo(c.ggml_get_name(@ptrCast(self)), 0);
@@ -287,19 +293,22 @@ pub const Tensor = opaque {
         c.ggml_set_param(@ptrCast(self));
     }
 
+    /// 获取张量形状 [ne0, ne1, ne2, ne3]
     pub fn shape(self: *Tensor) [4]i64 {
-        var ne: [4]i64 = undefined;
-        c.ggml_unravel_index(@ptrCast(self), 0, &ne[0], &ne[1], &ne[2], &ne[3]);
-        return ne;
+        const ct = asCStruct(self);
+        return ct.ne;
     }
 
+    /// 获取张量步长（字节）[nb0, nb1, nb2, nb3]
     pub fn strides(self: *Tensor) [4]usize {
-        _ = self;
-        return .{ 0, 0, 0, 0 };
+        const ct = asCStruct(self);
+        return ct.nb;
     }
 
+    /// 获取张量数据类型
     pub fn typeOf(self: *Tensor) Type {
-        return @enumFromInt(c.ggml_tensor_get_type(@ptrCast(self)));
+        const ct = asCStruct(self);
+        return @enumFromInt(ct.type);
     }
 
     pub fn nelements(self: *Tensor) i64 {
@@ -326,19 +335,27 @@ pub const Tensor = opaque {
         _ = c.ggml_set_zero(@ptrCast(@alignCast(self)));
     }
 
+    /// 通过直接内存访问设置标量值（ggml 0.13.1 无 ggml_set_f32_1d）
     pub fn setF32(self: *Tensor, idx: usize, val: f32) void {
-        c.ggml_set_f32_1d(@ptrCast(self), @intCast(idx), val);
+        const ct = asCStruct(self);
+        const ptr = @as([*]f32, @ptrCast(ct.data));
+        ptr[idx] = val;
     }
 
+    /// 通过直接内存访问获取标量值（ggml 0.13.1 无 ggml_get_f32_1d）
     pub fn getF32(self: *Tensor, idx: usize) f32 {
-        return c.ggml_get_f32_1d(@ptrCast(self), @intCast(idx));
+        const ct = asCStruct(self);
+        const ptr = @as([*]f32, @ptrCast(ct.data));
+        return ptr[idx];
     }
 
     pub fn setAllF32(self: *Tensor, val: f32) void {
         const n = self.nelements();
+        const ct = asCStruct(self);
+        const ptr = @as([*]f32, @ptrCast(ct.data));
         var i: i64 = 0;
         while (i < n) : (i += 1) {
-            c.ggml_set_f32_1d(@ptrCast(self), @intCast(i), val);
+            ptr[@as(usize, @intCast(i))] = val;
         }
     }
 
@@ -373,10 +390,8 @@ pub const CGraph = opaque {
     }
 
     pub fn compute(self: *CGraph, n_threads: i32) !void {
-        // 使用 ggml_backend API 执行计算
         _ = n_threads;
-
-        // 先初始化 CPU backend
+        // 使用 ggml_backend API 执行计算
         const backend = c.ggml_backend_init_best();
         if (backend == null) return error.BackendInitFailed;
         defer c.ggml_backend_free(backend);
@@ -674,6 +689,13 @@ pub fn conv1d(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, p0: i32, d0: i32) 
     return @ptrCast(c.ggml_conv_1d(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, p0, d0));
 }
 
+/// 行查找（embedding lookup）
+/// a: [n_embd, n_rows] — 数据矩阵
+/// b: [n_indices] — 行索引（i32 类型）
+/// 返回: [n_embd, n_indices]
+pub fn getRows(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @ptrCast(c.ggml_get_rows(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b))));
+}
 
 // ============================================================================
 // 工具函数

@@ -85,7 +85,12 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Model
 
     // 基础维度
     params.n_vocab = gguf_file.getU32("llama.vocab_size") orelse
-        gguf_file.getU32("tokenizer.ggml.tokens") orelse 0;
+        blk: {
+            if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
+                if (val == .array) break :blk @intCast(val.array.len);
+            }
+            break :blk 0;
+        };
     params.n_embd = gguf_file.getU32("llama.embedding_length") orelse
         gguf_file.getU32("qwen35.embedding_length") orelse 0;
     params.n_head = gguf_file.getU32("llama.head_count") orelse
@@ -240,7 +245,7 @@ pub fn buildForwardGraph(
     _ = n_threads;
 
     // Token 嵌入
-    var cur = ggml.mulMat(ctx, weights.token_embd, input_tokens);
+    var cur = ggml.getRows(ctx, weights.token_embd, input_tokens);
     cur.setName("token_embd");
 
     // 逐层处理
