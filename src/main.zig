@@ -147,6 +147,8 @@ const InferenceEngine = struct {
     kv_cache_mgr: kv_cache.KVCache,
     n_threads: i32,
     verbose: bool,
+    // 保存 GGUF 文件数据，生命周期与引擎相同
+    gguf_data: []u8,
 
     pub fn init(
         io: std.Io,
@@ -162,11 +164,13 @@ const InferenceEngine = struct {
         const stat = try file.stat(io);
         const file_size = @as(usize, @intCast(stat.size));
 
+        // 分配并读取整个文件到内存
+        // 注意：gguf.parse 返回的 GGUFFile 引用这块内存，所以不能提前释放
         const gguf_data = try allocator.alloc(u8, file_size);
-        defer allocator.free(gguf_data);
 
         const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
         if (bytes_read != file_size) {
+            allocator.free(gguf_data);
             log.err("Short read: expected {d} bytes, got {d}", .{ file_size, bytes_read });
             return error.FileReadError;
         }
@@ -245,6 +249,7 @@ const InferenceEngine = struct {
             .kv_cache_mgr = kv_cache_mgr,
             .n_threads = n_threads,
             .verbose = cli_args.verbose,
+            .gguf_data = gguf_data,
         };
     }
 
@@ -253,6 +258,7 @@ const InferenceEngine = struct {
         self.weights.deinit(self.allocator);
         self.tok.deinit();
         self.ggml_ctx.deinit();
+        self.allocator.free(self.gguf_data);
     }
 
     /// 运行推理：编码 prompt -> 首 token -> 增量生成
@@ -281,17 +287,18 @@ const InferenceEngine = struct {
             for (input_tokens.items, 0..) |token, j| { slice[j] = @as(i32, @intCast(token)); }
         }
 
-        // 3. 构建计算图
-        log.info("Building forward graph...", .{});
+        // 3. 构建首 token 计算图
+        log.info("Building forward graph for prompt...", .{});
         var graph = try ggml.CGraph.init(self.ggml_ctx);
         const logits = try model.buildForwardGraph(
             self.ggml_ctx,
+            graph,
             &self.weights,
             input_tensor,
             n_prompt_tokens,
-            self.n_threads,
+            &self.kv_cache_mgr, // 传入 KV Cache，首 token 填充 Cache
+            0, // start_pos = 0
         );
-        graph.buildForwardExpand(logits);
 
         // 4. 执行计算
         log.info("Computing forward pass...", .{});
@@ -344,12 +351,13 @@ const InferenceEngine = struct {
             var inc_graph = try ggml.CGraph.init(self.ggml_ctx);
             const inc_logits = try model.buildForwardGraph(
                 self.ggml_ctx,
+                inc_graph,
                 &self.weights,
                 single_input,
                 1,
-                self.n_threads,
+                &self.kv_cache_mgr, // 使用已有的 KV Cache
+                pos, // start_pos = 当前序列位置
             );
-            inc_graph.buildForwardExpand(inc_logits);
 
             try inc_graph.compute(self.n_threads);
 
@@ -367,6 +375,11 @@ const InferenceEngine = struct {
             pos += 1;
 
             // 重置 ggml context 以释放中间张量内存
+            // 注意：权重张量在 initNoAlloc 模式下分配，不会被 reset 影响
+            // 但 KV Cache 张量也会被重置，所以我们需要在每次增量前重建
+            // 这里我们使用一个新的 ggml context 来避免这个问题
+            // 实际上，ggml_reset 只释放后续分配的内存，不释放初始分配的
+            // 但为了安全，我们只在增量步骤之间重置
             self.ggml_ctx.reset();
         }
 

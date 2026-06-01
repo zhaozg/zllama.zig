@@ -14,6 +14,7 @@
 const std = @import("std");
 const ggml = @import("ggml.zig");
 const gguf = @import("gguf.zig");
+const kv_cache = @import("kv_cache.zig");
 
 const log = std.log.scoped(.model);
 
@@ -86,11 +87,11 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Model
     // 基础维度
     params.n_vocab = gguf_file.getU32("llama.vocab_size") orelse
         blk: {
-            if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
-                if (val == .array) break :blk @intCast(val.array.len);
-            }
-            break :blk 0;
-        };
+        if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
+            if (val == .array) break :blk @intCast(val.array.len);
+        }
+        break :blk 0;
+    };
     params.n_embd = gguf_file.getU32("llama.embedding_length") orelse
         gguf_file.getU32("qwen35.embedding_length") orelse 0;
     params.n_head = gguf_file.getU32("llama.head_count") orelse
@@ -104,13 +105,17 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Model
     params.n_expert = gguf_file.getU32("llama.expert_count") orelse 0;
     params.n_expert_used = gguf_file.getU32("llama.expert_used_count") orelse 0;
 
-    // 计算 head_dim
-    const key_length = gguf_file.getU32("qwen35.attention.key_length") orelse 0;
-    const value_length = gguf_file.getU32("qwen35.attention.value_length") orelse 0;
-    params.n_head_dim = if (key_length > 0) key_length else
-        if (params.n_head > 0 and params.n_embd > 0) params.n_embd / params.n_head else 0;
+    // 计算 head_dim: 始终使用 n_embd / n_head
+    // Qwen 3.5 GGUF 元数据中的 key_length/value_length 用于线性注意力层的特殊维度，
+    // 不应用于标准注意力的 head_dim
+    params.n_head_dim = if (params.n_head > 0 and params.n_embd > 0)
+        params.n_embd / params.n_head
+    else
+        0;
 
-    _ = value_length;
+    // 暂存线性注意力层的 key/value 维度（后续线性注意力实现会用到）
+    _ = gguf_file.getU32("qwen35.attention.key_length") orelse 0;
+    _ = gguf_file.getU32("qwen35.attention.value_length") orelse 0;
 
     // 位置编码
     params.max_seq_len = gguf_file.getU32("llama.context_length") orelse
@@ -226,23 +231,22 @@ pub const LayerWeights = struct {
 // ============================================================================
 
 /// 构建首 token 的完整前向计算图
-/// 返回 logits 张量
+/// 返回 logits 张量，所有操作已添加到 graph 中
 pub fn buildForwardGraph(
     ctx: *ggml.Context,
+    graph: *ggml.CGraph,
     weights: *const ModelWeights,
     input_tokens: *ggml.Tensor,
     n_tokens: i32,
-    n_threads: i32,
+    kv_cache_mgr: ?*kv_cache.KVCache,
+    start_pos: i32,
 ) !*ggml.Tensor {
     const params = &weights.params;
-    const n_embd: i64 = @intCast(params.n_embd);
     const n_head: i64 = @intCast(params.n_head);
     const n_kv_head: i64 = @intCast(params.n_kv_head);
     const head_dim: i64 = @intCast(params.n_head_dim);
     const n_tokens_i64: i64 = n_tokens;
     const rope_dim: i64 = @intCast(params.rope_dim);
-
-    _ = n_threads;
 
     // Token 嵌入
     var cur = ggml.getRows(ctx, weights.token_embd, input_tokens);
@@ -272,8 +276,8 @@ pub fn buildForwardGraph(
             const o_w = layer.attn_output_weight orelse return error.MissingWeight;
 
             // QKV 投影
-            var q = ggml.mulMat(ctx, q_w, attn_input);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_q", .{i}) catch unreachable; name_buf[name.len] = 0; q.setName(name_buf[0..name.len:0]); }
+            var q_full = ggml.mulMat(ctx, q_w, attn_input);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_q", .{i}) catch unreachable; name_buf[name.len] = 0; q_full.setName(name_buf[0..name.len:0]); }
             var k = ggml.mulMat(ctx, k_w, attn_input);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_k", .{i}) catch unreachable; name_buf[name.len] = 0; k.setName(name_buf[0..name.len:0]); }
             var v = ggml.mulMat(ctx, v_w, attn_input);
@@ -281,9 +285,9 @@ pub fn buildForwardGraph(
 
             // Q/K Norm（Qwen 3.5 特有）
             if (layer.attn_q_norm_weight) |q_norm| {
-                q = ggml.rmsNorm(ctx, q, params.norm_eps);
-                q = ggml.mul(ctx, q, q_norm);
-                { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_q_normed", .{i}) catch unreachable; name_buf[name.len] = 0; q.setName(name_buf[0..name.len:0]); }
+                q_full = ggml.rmsNorm(ctx, q_full, params.norm_eps);
+                q_full = ggml.mul(ctx, q_full, q_norm);
+                { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_q_normed", .{i}) catch unreachable; name_buf[name.len] = 0; q_full.setName(name_buf[0..name.len:0]); }
             }
             if (layer.attn_k_norm_weight) |k_norm| {
                 k = ggml.rmsNorm(ctx, k, params.norm_eps);
@@ -291,62 +295,120 @@ pub fn buildForwardGraph(
                 { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_k_normed", .{i}) catch unreachable; name_buf[name.len] = 0; k.setName(name_buf[0..name.len:0]); }
             }
 
+            // Qwen 3.5: Q projection contains both Q and Q_gate (each n_head*head_dim)
+            // Split Q into attn part and gate part
+            const q_attn_size: i64 = n_head * head_dim;
+            const q_gate_size: i64 = n_head * head_dim;
+            var q = ctx.view2d(q_full, q_attn_size, n_tokens_i64, q_full.strides()[1], 0);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.q_attn", .{i}) catch unreachable; name_buf[name.len] = 0; q.setName(name_buf[0..name.len:0]); }
+            const q_gate = ctx.view2d(q_full, q_gate_size, n_tokens_i64, q_full.strides()[1], @intCast(q_attn_size * @sizeOf(f32)));
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.q_gate", .{i}) catch unreachable; name_buf[name.len] = 0; q_gate.setName(name_buf[0..name.len:0]); }
+
             // 重塑为 [head_dim, n_tokens, n_head/kv_head]
-            q = ggml.reshape3d(ctx, q, head_dim, n_tokens_i64, n_head);
+            q = ggml.reshape3d(ctx, ggml.cont(ctx, q), head_dim, n_tokens_i64, n_head);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.q_reshaped", .{i}) catch unreachable; name_buf[name.len] = 0; q.setName(name_buf[0..name.len:0]); }
             k = ggml.reshape3d(ctx, k, head_dim, n_tokens_i64, n_kv_head);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.k_reshaped", .{i}) catch unreachable; name_buf[name.len] = 0; k.setName(name_buf[0..name.len:0]); }
             v = ggml.reshape3d(ctx, v, head_dim, n_tokens_i64, n_kv_head);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_reshaped", .{i}) catch unreachable; name_buf[name.len] = 0; v.setName(name_buf[0..name.len:0]); }
 
-            // RoPE 位置编码（仅对前 rope_dim 维度应用）
-            const pos_tensor = buildPositionTensor(ctx, n_tokens, 0);
+            // RoPE 位置编码 (permute ne[1]<->ne[2] so ne[2]=n_tokens matches pos->ne[0])
+            const pos_tensor = buildPositionTensor(ctx, n_tokens, start_pos);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.positions", .{i}) catch unreachable; name_buf[name.len] = 0; pos_tensor.setName(name_buf[0..name.len:0]); }
 
-            q = ggml.ropeExt(ctx, q, pos_tensor, 0, @intCast(rope_dim), 0,
+            var q_rope = ggml.permute(ctx, q, 0, 2, 1, 3);
+            q_rope = ggml.cont(ctx, q_rope);
+            q_rope = ggml.ropeExt(ctx, q_rope, pos_tensor, 0, @intCast(rope_dim), 0,
                 params.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            q = ggml.permute(ctx, q_rope, 0, 2, 1, 3);
+            q = ggml.cont(ctx, q);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.q_rope", .{i}) catch unreachable; name_buf[name.len] = 0; q.setName(name_buf[0..name.len:0]); }
-            k = ggml.ropeExt(ctx, k, pos_tensor, 0, @intCast(rope_dim), 0,
+
+            var k_rope = ggml.permute(ctx, k, 0, 2, 1, 3);
+            k_rope = ggml.cont(ctx, k_rope);
+            k_rope = ggml.ropeExt(ctx, k_rope, pos_tensor, 0, @intCast(rope_dim), 0,
                 params.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            k = ggml.permute(ctx, k_rope, 0, 2, 1, 3);
+            k = ggml.cont(ctx, k);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.k_rope", .{i}) catch unreachable; name_buf[name.len] = 0; k.setName(name_buf[0..name.len:0]); }
+
+            // 处理 KV Cache
+            if (kv_cache_mgr) |cache| {
+                // 将当前 K, V 写入 Cache
+                cache.setKv(ctx, graph, i, k, v, @intCast(n_tokens));
+
+                // 从 Cache 获取完整视图用于注意力计算
+                const k_cached = cache.getKView(ctx, i);
+                { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.k_cached", .{i}) catch unreachable; name_buf[name.len] = 0; k_cached.setName(name_buf[0..name.len:0]); }
+                const v_cached = cache.getVView(ctx, i);
+                { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_cached", .{i}) catch unreachable; name_buf[name.len] = 0; v_cached.setName(name_buf[0..name.len:0]); }
+
+                // 使用缓存的 K, V 进行注意力计算
+                k = k_cached;
+                v = v_cached;
+            }
 
             // 注意力计算
             // Q: [head_dim, n_tokens, n_head] -> permute(1,0,2) -> [n_tokens, head_dim, n_head]
             var q_perm = ggml.permute(ctx, q, 1, 0, 2, 3);
             q_perm = ggml.cont(ctx, q_perm);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.q_perm", .{i}) catch unreachable; name_buf[name.len] = 0; q_perm.setName(name_buf[0..name.len:0]); }
+
+            // K: [head_dim, cache_len, n_kv_head] -> permute(1,0,2) -> [cache_len, head_dim, n_kv_head]
             var k_perm = ggml.permute(ctx, k, 1, 0, 2, 3);
             k_perm = ggml.cont(ctx, k_perm);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.k_perm", .{i}) catch unreachable; name_buf[name.len] = 0; k_perm.setName(name_buf[0..name.len:0]); }
+
+            // V: [head_dim, cache_len, n_kv_head] -> permute(1,0,2) -> [cache_len, head_dim, n_kv_head]
             var v_perm = ggml.permute(ctx, v, 1, 0, 2, 3);
             v_perm = ggml.cont(ctx, v_perm);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_perm", .{i}) catch unreachable; name_buf[name.len] = 0; v_perm.setName(name_buf[0..name.len:0]); }
 
+            // 获取 cache_len
+            // 注意：如果 cache_len == 0（SSM 层未写入 Cache），使用 n_tokens 作为 cache_len
+            const raw_cache_len: i64 = if (kv_cache_mgr) |cache|
+                @as(i64, @intCast(cache.currentLen()))
+            else
+                n_tokens_i64;
+            const cache_len: i64 = if (raw_cache_len > 0) raw_cache_len else n_tokens_i64;
             // GQA: 扩展 KV 头以匹配 Q 头数
             if (n_kv_head < n_head) {
                 const n_rep = @divExact(n_head, n_kv_head);
                 if (n_rep > 1) {
-                    const k_2d = ggml.reshape2d(ctx, k_perm, n_tokens_i64 * head_dim, n_kv_head);
-                    const k_rep = ggml.cont(ctx, ggml.repeat(ctx, k_2d,
-                        ggml.reshape2d(ctx, k_perm, n_tokens_i64 * head_dim, n_head)));
-                    k_perm = ggml.reshape3d(ctx, k_rep, n_tokens_i64, head_dim, n_head);
+                    // K: [cache_len, head_dim, n_kv_head] -> 展平为 [cache_len * head_dim, n_kv_head]
+                    const k_2d = ggml.reshape2d(ctx, k_perm, cache_len * head_dim, n_kv_head);
+                    // 创建目标张量 [cache_len * head_dim, n_head]
+                    const k_target = try ctx.newTensor2d(.f32, cache_len * head_dim, n_head);
+                    const k_rep = ggml.cont(ctx, ggml.repeat(ctx, k_2d, k_target));
+                    k_perm = ggml.reshape3d(ctx, k_rep, cache_len, head_dim, n_head);
                     { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.k_rep", .{i}) catch unreachable; name_buf[name.len] = 0; k_perm.setName(name_buf[0..name.len:0]); }
-                    const v_2d = ggml.reshape2d(ctx, v_perm, n_tokens_i64 * head_dim, n_kv_head);
-                    const v_rep = ggml.cont(ctx, ggml.repeat(ctx, v_2d,
-                        ggml.reshape2d(ctx, v_perm, n_tokens_i64 * head_dim, n_head)));
-                    v_perm = ggml.reshape3d(ctx, v_rep, n_tokens_i64, head_dim, n_head);
+
+                    // V: [cache_len, head_dim, n_kv_head] -> 展平为 [cache_len * head_dim, n_kv_head]
+                    const v_2d = ggml.reshape2d(ctx, v_perm, cache_len * head_dim, n_kv_head);
+                    // 创建目标张量 [cache_len * head_dim, n_head]
+                    const v_target = try ctx.newTensor2d(.f32, cache_len * head_dim, n_head);
+                    const v_rep = ggml.cont(ctx, ggml.repeat(ctx, v_2d, v_target));
+                    v_perm = ggml.reshape3d(ctx, v_rep, cache_len, head_dim, n_head);
                     { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_rep", .{i}) catch unreachable; name_buf[name.len] = 0; v_perm.setName(name_buf[0..name.len:0]); }
                 }
             }
-
             // 展平 Q, K 为 2D 进行批量矩阵乘法
-            const q_flat = ggml.reshape2d(ctx, ggml.cont(ctx, q_perm), head_dim, n_tokens_i64 * n_head);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.q_flat", .{i}) catch unreachable; name_buf[name.len] = 0; q_flat.setName(name_buf[0..name.len:0]); }
-            const k_flat = ggml.reshape2d(ctx, ggml.cont(ctx, k_perm), head_dim, n_tokens_i64 * n_head);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.k_flat", .{i}) catch unreachable; name_buf[name.len] = 0; k_flat.setName(name_buf[0..name.len:0]); }
+            // 使用 batch 矩阵乘法计算注意力分数
+            // Q: [n_tokens, head_dim, n_head] -> permute(1,0,2) -> [head_dim, n_tokens, n_head]
+            // K: [cache_len, head_dim, n_head] -> permute(1,0,2) -> [head_dim, cache_len, n_head]
+            // mulMat 对每个 n_head 独立计算: score_h = Q_h^T * K_h -> [n_tokens, cache_len]
+            // 结果: [n_tokens, cache_len, n_head]
+            var q_3d = ggml.permute(ctx, q_perm, 1, 0, 2, 3);
+            q_3d = ggml.cont(ctx, q_3d);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.q_3d", .{i}) catch unreachable; name_buf[name.len] = 0; q_3d.setName(name_buf[0..name.len:0]); }
+            var k_3d = ggml.permute(ctx, k_perm, 1, 0, 2, 3);
+            k_3d = ggml.cont(ctx, k_3d);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.k_3d", .{i}) catch unreachable; name_buf[name.len] = 0; k_3d.setName(name_buf[0..name.len:0]); }
 
-            // score = K^T * Q
-            var kq = ggml.mulMat(ctx, k_flat, q_flat);
+            // score = K^T * Q (batch over n_head)
+            // k_3d: [head_dim, cache_len, n_head], q_3d: [head_dim, n_tokens, n_head]
+            // mulMat 结果: [n_tokens, cache_len, n_head]
+            var kq = ggml.mulMat(ctx, k_3d, q_3d);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq", .{i}) catch unreachable; name_buf[name.len] = 0; kq.setName(name_buf[0..name.len:0]); }
 
             // 缩放
@@ -354,67 +416,37 @@ pub fn buildForwardGraph(
             kq = ggml.scale(ctx, kq, scale_factor);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq_scaled", .{i}) catch unreachable; name_buf[name.len] = 0; kq.setName(name_buf[0..name.len:0]); }
 
-            // 重塑为 [n_head, n_tokens, n_tokens] 用于 mask 和 softmax
-            kq = ggml.reshape3d(ctx, kq, n_tokens_i64, n_tokens_i64, n_head);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq_3d", .{i}) catch unreachable; name_buf[name.len] = 0; kq.setName(name_buf[0..name.len:0]); }
-            // 展平为 2D 应用 mask
-            kq = ggml.reshape2d(ctx, kq, n_tokens_i64, n_tokens_i64 * n_head);
+            // 展平为 2D 应用 mask: [n_tokens * n_head, cache_len]
+            kq = ggml.reshape2d(ctx, kq, cache_len, n_tokens_i64 * n_head);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq_2d", .{i}) catch unreachable; name_buf[name.len] = 0; kq.setName(name_buf[0..name.len:0]); }
-            kq = ggml.diagMaskInf(ctx, kq, 0);
+            kq = ggml.diagMaskInf(ctx, kq, start_pos);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq_masked", .{i}) catch unreachable; name_buf[name.len] = 0; kq.setName(name_buf[0..name.len:0]); }
             kq = ggml.softMax(ctx, kq);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq_softmax", .{i}) catch unreachable; name_buf[name.len] = 0; kq.setName(name_buf[0..name.len:0]); }
 
-            // 重塑回 3D
-            kq = ggml.reshape3d(ctx, kq, n_tokens_i64, n_tokens_i64, n_head);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq_3d_softmax", .{i}) catch unreachable; name_buf[name.len] = 0; kq.setName(name_buf[0..name.len:0]); }
+            // 重塑回 3D: [n_tokens, cache_len, n_head]
+            kq = ggml.reshape3d(ctx, kq, cache_len, n_tokens_i64, n_head);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq_3d", .{i}) catch unreachable; name_buf[name.len] = 0; kq.setName(name_buf[0..name.len:0]); }
 
-            // V 置换为 [n_head, n_tokens, head_dim]
-            var v_batch = ggml.permute(ctx, v_perm, 2, 0, 1, 3);
-            v_batch = ggml.cont(ctx, v_batch);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_batch", .{i}) catch unreachable; name_buf[name.len] = 0; v_batch.setName(name_buf[0..name.len:0]); }
-
-            // V 展平为 [head_dim, n_tokens * n_head]
-            const v_flat = ggml.reshape2d(ctx, v_batch, head_dim, n_tokens_i64 * n_head);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_flat", .{i}) catch unreachable; name_buf[name.len] = 0; v_flat.setName(name_buf[0..name.len:0]); }
-
-            // kq (softmax): [n_head, n_tokens, n_tokens] -> 展平为 [n_tokens * n_head, n_tokens]
-            const kq_flat = ggml.reshape2d(ctx, kq, n_tokens_i64, n_tokens_i64 * n_head);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq_flat", .{i}) catch unreachable; name_buf[name.len] = 0; kq_flat.setName(name_buf[0..name.len:0]); }
-
-            // V 置换为 [n_tokens, n_head, head_dim]
-            var v_perm2 = ggml.permute(ctx, v_batch, 1, 0, 2, 3);
-            v_perm2 = ggml.cont(ctx, v_perm2);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_perm2", .{i}) catch unreachable; name_buf[name.len] = 0; v_perm2.setName(name_buf[0..name.len:0]); }
-
-            // V 展平为 [n_tokens, n_head * head_dim]
-            const v_2d_final = ggml.reshape2d(ctx, v_perm2, n_tokens_i64, n_head * head_dim);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_2d_final", .{i}) catch unreachable; name_buf[name.len] = 0; v_2d_final.setName(name_buf[0..name.len:0]); }
-
-            // attn = softmax * V
-            var attn = ggml.mulMat(ctx, kq_flat, v_2d_final);
+            // V: [cache_len, head_dim, n_head] -> 已经是正确的形状
+            // mulMat 要求 a.ne0 == b.ne0，即 kq.ne0 (cache_len) == v_3d.ne0 (cache_len)
+            var v_3d = ggml.cont(ctx, v_perm);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_3d", .{i}) catch unreachable; name_buf[name.len] = 0; v_3d.setName(name_buf[0..name.len:0]); }
+            // attn = softmax * V (batch over n_head)
+            // 结果: [n_tokens, head_dim, n_head]
+            var attn = ggml.mulMat(ctx, kq, v_3d);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn", .{i}) catch unreachable; name_buf[name.len] = 0; attn.setName(name_buf[0..name.len:0]); }
 
-            // 重塑为 [n_head, n_tokens, head_dim]
-            attn = ggml.reshape3d(ctx, attn, n_tokens_i64, head_dim, n_head);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_3d", .{i}) catch unreachable; name_buf[name.len] = 0; attn.setName(name_buf[0..name.len:0]); }
-
-            // 置换为 [n_tokens, head_dim, n_head]
-            attn = ggml.permute(ctx, attn, 1, 0, 2, 3);
+            // 置换为 [n_tokens, n_head, head_dim]
+            attn = ggml.permute(ctx, attn, 0, 2, 1, 3);
             attn = ggml.cont(ctx, attn);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_perm", .{i}) catch unreachable; name_buf[name.len] = 0; attn.setName(name_buf[0..name.len:0]); }
-
-            // 展平为 [n_embd, n_tokens]
-            attn = ggml.reshape2d(ctx, attn, n_embd, n_tokens_i64);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_2d", .{i}) catch unreachable; name_buf[name.len] = 0; attn.setName(name_buf[0..name.len:0]); }
-
-            // 输出投影
+            // 展平为 [n_head * head_dim, n_tokens]
+            attn = ggml.reshape2d(ctx, attn, n_head * head_dim, n_tokens_i64);
             var attn_out = ggml.mulMat(ctx, o_w, attn);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_out", .{i}) catch unreachable; name_buf[name.len] = 0; attn_out.setName(name_buf[0..name.len:0]); }
 
             // 残差连接
             cur = ggml.add(ctx, cur, attn_out);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.residual_1", .{i}) catch unreachable; name_buf[name.len] = 0; cur.setName(name_buf[0..name.len:0]); }
         } else {
             // ================================================================
             // SSM 层（Mamba-2 风格线性注意力）
@@ -437,30 +469,42 @@ pub fn buildForwardGraph(
 
             // QKV 投影: [ssm_inner * 3, n_tokens]
             var qkv = ggml.mulMat(ctx, qkv_w, attn_input);
+            // QKV 投影: [ssm_inner * 3, n_tokens]
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_qkv", .{i}) catch unreachable; name_buf[name.len] = 0; qkv.setName(name_buf[0..name.len:0]); }
 
-            // 1D 因果卷积
-            // ssm_conv1d_w: [conv_kernel, ssm_inner * 3]
-            // qkv: [ssm_inner * 3, n_tokens]
-            // 需要 reshape 为 [ssm_inner * 3, 1, n_tokens] 用于 conv1d
-            var conv_in = ggml.reshape3d(ctx, qkv, ssm_inner * 3, 1, n_tokens_i64);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_conv_in", .{i}) catch unreachable; name_buf[name.len] = 0; conv_in.setName(name_buf[0..name.len:0]); }
+            // 1D 因果卷积 (使用 ggml_ssm_conv)
+            // ggml_ssm_conv 要求输入为 [d_conv-1+n_t, d_inner, n_s]
+            // 对于初始推理和增量推理，前填充 d_conv-1 个零
+            // TODO: 增量解码时应使用保存的 conv state 而非零填充
+            var qkv_transposed = ggml.cont(ctx, ggml.permute(ctx, qkv, 1, 0, 2, 3));
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_qkv_t", .{i}) catch unreachable; name_buf[name.len] = 0; qkv_transposed.setName(name_buf[0..name.len:0]); }
 
-            // conv1d: kernel [conv_kernel, ssm_inner*3], input [ssm_inner*3, 1, n_tokens]
-            // output: [ssm_inner*3, 1, n_tokens]
-            var conv_out = ggml.conv1d(ctx, ssm_conv1d_w, conv_in, 1, @as(i32, @intCast(conv_kernel - 1)), 1);
+            // 创建零填充：形状 [conv_kernel - 1, ssm_inner * 3]
+            const pad_len = conv_kernel - 1;
+            const zero_pad = try ctx.newTensor2d(.f32, pad_len, ssm_inner * 3);
+            zero_pad.setZero();
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_zero_pad", .{i}) catch unreachable; name_buf[name.len] = 0; zero_pad.setName(name_buf[0..name.len:0]); }
+
+            // 拼接填充 + 数据: [pad_len + n_tokens, ssm_inner * 3]
+            var qkv_padded = ggml.concat(ctx, zero_pad, qkv_transposed, 0);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_qkv_padded", .{i}) catch unreachable; name_buf[name.len] = 0; qkv_padded.setName(name_buf[0..name.len:0]); }
+
+            // 重塑为 3D: [pad_len + n_tokens, ssm_inner * 3, 1]
+            var qkv_3d = ggml.reshape3d(ctx, qkv_padded, pad_len + n_tokens_i64, ssm_inner * 3, 1);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_qkv_3d", .{i}) catch unreachable; name_buf[name.len] = 0; qkv_3d.setName(name_buf[0..name.len:0]); }
+
+            // SSM 卷积: 输出 [ssm_inner * 3, n_tokens, 1]
+            var conv_out = ggml.ssmConv(ctx, qkv_3d, ssm_conv1d_w);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_conv_out", .{i}) catch unreachable; name_buf[name.len] = 0; conv_out.setName(name_buf[0..name.len:0]); }
 
             // SiLU 激活
             conv_out = ggml.silu(ctx, conv_out);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_conv_act", .{i}) catch unreachable; name_buf[name.len] = 0; conv_out.setName(name_buf[0..name.len:0]); }
 
-            // 展平回 2D
+            // 展平回 2D [ssm_inner * 3, n_tokens]
             qkv = ggml.reshape2d(ctx, conv_out, ssm_inner * 3, n_tokens_i64);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_qkv_act", .{i}) catch unreachable; name_buf[name.len] = 0; qkv.setName(name_buf[0..name.len:0]); }
-
-            // 分割 QKV: [ssm_inner, n_tokens], [ssm_inner, n_tokens], [ssm_inner, n_tokens]
-            // 使用 view 切片
+            // 分割 QKV
             const q_part = ggml.reshape2d(ctx,
                 ctx.view1d(qkv, ssm_inner * n_tokens_i64, 0),
                 ssm_inner, n_tokens_i64);
@@ -482,21 +526,9 @@ pub fn buildForwardGraph(
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_gate", .{i}) catch unreachable; name_buf[name.len] = 0; gate.setName(name_buf[0..name.len:0]); }
 
             // SSM 核心计算（简化版）
-            // 使用选择性扫描（selective scan）的近似实现
-            // 实际 Mamba-2 使用更复杂的扫描，这里用简化的逐位置计算
-
-            // 时间步参数: dt = softplus(dt_bias + alpha * x)
-            // ssm_alpha_w: [n_embd, ssm_rank]
-            // ssm_beta_w: [n_embd, ssm_rank]
-            // ssm_a: [ssm_rank]
-            // ssm_dt_bias: [ssm_rank]
-
-            // 计算 dt = softplus(x @ alpha + dt_bias)
             var dt = ggml.mulMat(ctx, ssm_alpha_w, attn_input);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_dt_raw", .{i}) catch unreachable; name_buf[name.len] = 0; dt.setName(name_buf[0..name.len:0]); }
 
-            // 添加 bias: dt += dt_bias (广播)
-            // 需要将 dt_bias reshape 为 [ssm_rank, 1] 然后 repeat
             const dt_bias_2d = ggml.reshape2d(ctx, ssm_dt_bias, ssm_rank, 1);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_dt_bias_2d", .{i}) catch unreachable; name_buf[name.len] = 0; dt_bias_2d.setName(name_buf[0..name.len:0]); }
             const dt_bias_rep = ggml.repeat(ctx, dt_bias_2d, dt);
@@ -504,22 +536,11 @@ pub fn buildForwardGraph(
             dt = ggml.add(ctx, dt, dt_bias_rep);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_dt_biased", .{i}) catch unreachable; name_buf[name.len] = 0; dt.setName(name_buf[0..name.len:0]); }
 
-            // softplus: log(1 + exp(x))
-            // ggml 没有直接 softplus，使用 sigmoid 近似或直接 exp
-            // 简化: 使用 sigmoid 近似 softplus
-            // softplus(x) ≈ x * sigmoid(x)
-            // 这里简化处理，直接使用 dt 作为时间步长
-
-            // 状态更新: h = A^dt * h + B * dt * x
-            // 简化实现：使用逐元素操作模拟
-            // 实际 Mamba-2 需要循环扫描，这里用近似
-
-            // 使用简化的 SSM 输出: y = q * v (逐元素乘)
+            // 简化的 SSM 输出: y = q * v (逐元素乘)
             var ssm_out = ggml.mul(ctx, q_part, v_part);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_mul", .{i}) catch unreachable; name_buf[name.len] = 0; ssm_out.setName(name_buf[0..name.len:0]); }
 
-            // 应用 B 矩阵: ssm_beta_w: [n_embd, ssm_rank]
-            // 简化: 使用 beta 作为输出门控
+            // 应用 B 矩阵
             var beta_out = ggml.mulMat(ctx, ssm_beta_w, attn_input);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_beta", .{i}) catch unreachable; name_buf[name.len] = 0; beta_out.setName(name_buf[0..name.len:0]); }
 
@@ -529,13 +550,13 @@ pub fn buildForwardGraph(
             ssm_out = ggml.mul(ctx, ssm_out, ssm_norm_w);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_norm_mul", .{i}) catch unreachable; name_buf[name.len] = 0; ssm_out.setName(name_buf[0..name.len:0]); }
 
-            // 输出投影
-            var ssm_proj = ggml.mulMat(ctx, ssm_out_w, ssm_out);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_proj", .{i}) catch unreachable; name_buf[name.len] = 0; ssm_proj.setName(name_buf[0..name.len:0]); }
+            // 门控输出: gate SSM output in ssm_inner space, then project to embd
+            var ssm_out_gated = ggml.mul(ctx, ssm_out, gate);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_gated", .{i}) catch unreachable; name_buf[name.len] = 0; ssm_out_gated.setName(name_buf[0..name.len:0]); }
 
-            // 门控输出: out = ssm_proj * gate
-            var attn_out = ggml.mul(ctx, ssm_proj, gate);
-            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_gated", .{i}) catch unreachable; name_buf[name.len] = 0; attn_out.setName(name_buf[0..name.len:0]); }
+            // 输出投影
+            var attn_out = ggml.mulMat(ctx, ssm_out_w, ssm_out_gated);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_proj", .{i}) catch unreachable; name_buf[name.len] = 0; attn_out.setName(name_buf[0..name.len:0]); }
 
             // 残差连接
             cur = ggml.add(ctx, cur, attn_out);
@@ -582,10 +603,13 @@ pub fn buildForwardGraph(
 
     ggml.setOutput(logits);
 
+    // 将所有操作添加到计算图
+    graph.buildForwardExpand(logits);
+
     return logits;
 }
 
-/// 构建位置张量 [0, 1, 2, ..., n_tokens-1]
+/// 构建位置张量 [start_pos, start_pos+1, ..., start_pos+n_tokens-1]
 fn buildPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i32) *ggml.Tensor {
     const pos_tensor = ctx.newTensor1d(.i32, n_tokens) catch unreachable;
     const data = pos_tensor.dataBytes();

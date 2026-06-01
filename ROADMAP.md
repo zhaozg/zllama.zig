@@ -14,7 +14,9 @@
 ## 📅 里程碑
 
 ### 阶段一：基础框架与 CPU 推理（当前）
+
 **目标：** 在 x86_64 CPU 上稳定运行 Qwen 3.5 9B Q4_K_M，达到 ≥10 tok/s。
+提示:  deps/ggml/include 为ggml的头文件，`ggml.zig` 是对 ggml C API 的 Zig 封装，提供了更安全、易用的接口。
 
 #### 已完成 ✅
 
@@ -44,22 +46,21 @@
   - `sampler.zig` 已实现 `sample`（温度、top-k、top-p）和 `sampleGreedy`
 - [x] KV Cache 管理
   - `kv_cache.zig` 已实现 `init`、`getKView`、`getVView`、`setKv`、`reset`
+- [x] 首 token 完整图推理
+  - [x] `model.zig` 的 `buildForwardGraph` 接受 `CGraph` 参数，将操作添加到计算图
+  - [x] `main.zig` 已集成 model/tokenizer/sampler/kv_cache 模块
+  - [x] 推理循环：编码 prompt → 构建计算图 → 执行 → 采样 → 增量生成
+  - [x] 时间测量使用 POSIX clock_gettime
+  - [x] 贪心采样（sampleGreedy）已实现
+  - [x] KV Cache 集成：首 token 填充 Cache，增量生成复用 Cache
+  - [x] GGUF 数据生命周期修复：文件数据在引擎生命周期内保持有效
+  - [x] `zig-out/bin/qwen --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf` works.
 
 #### 进行中 🔄
 
-- [ ] 首 token 完整图推理
-  - `model.zig` 的 `buildForwardGraph` 已实现
-  - `main.zig` 当前简化版未调用 model/tokenizer/sampler/kv_cache 模块
-  - 需要将各模块集成到 `main.zig` 的主循环中
 - [ ] 与 llama.cpp 输出对比测试
 
-- [x] 首 token 完整图推理
-  - `model.zig` 的 `buildForwardGraph` 已实现
-  - `main.zig` 已集成 model/tokenizer/sampler/kv_cache 模块
-  - 推理循环：编码 prompt → 构建计算图 → 执行 → 采样 → 增量生成
-  - 时间测量使用 POSIX clock_gettime
-  - 贪心采样（sampleGreedy）已实现
-- [ ] 与 llama.cpp 输出对比测试
+### 阶段二：增量解码与长上下文支持
 **目标：** 支持交互式生成，KV Cache 零拷贝管理，长上下文（32K）内存占用可控。
 
 #### 已完成 ✅

@@ -117,9 +117,11 @@ pub const KVCache = struct {
     /// 将新的 K, V 写入 Cache
     /// new_k: [1, n_kv_head, head_dim] 或 [n_tokens, n_kv_head, head_dim]
     /// new_v: [1, n_kv_head, head_dim] 或 [n_tokens, n_kv_head, head_dim]
+    /// graph: 计算图，用于将 ggml_cpy 操作注册到图中
     pub fn setKv(
         self: *KVCache,
         ctx: *ggml.Context,
+        graph: *ggml.CGraph,
         layer_idx: usize,
         new_k: *ggml.Tensor,
         new_v: *ggml.Tensor,
@@ -139,14 +141,16 @@ pub const KVCache = struct {
             @intCast(n_kv_head * head_dim * @sizeOf(f32)),
             @intCast(head_dim * @sizeOf(f32)),
             @intCast(offset * token_size));
-        _ = ggml.cpy(ctx, new_k, k_dst);
+        const k_cpy = ggml.cpy(ctx, new_k, k_dst);
+        graph.buildForwardExpand(k_cpy);
 
         const v_dst = ctx.view3d(layer.v,
             @intCast(n_tokens), n_kv_head, head_dim,
             @intCast(n_kv_head * head_dim * @sizeOf(f32)),
             @intCast(head_dim * @sizeOf(f32)),
             @intCast(offset * token_size));
-        _ = ggml.cpy(ctx, new_v, v_dst);
+        const v_cpy = ggml.cpy(ctx, new_v, v_dst);
+        graph.buildForwardExpand(v_cpy);
 
         layer.current_len += n_tokens;
     }

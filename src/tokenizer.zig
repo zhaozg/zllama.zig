@@ -57,6 +57,8 @@ pub const Tokenizer = struct {
         var tok = Tokenizer{
             .allocator = allocator,
         };
+        // 如果后续初始化失败，清理已分配的资源
+        errdefer tok.deinit();
 
         // 读取特殊 token
         tok.special = SpecialTokens.fromGGUF(gguf_file);
@@ -124,11 +126,20 @@ pub const Tokenizer = struct {
 
     /// 释放分词器资源
     pub fn deinit(self: *Tokenizer) void {
+        // 首先释放 vocab_reverse 哈希表（它的 key 只是 vocab 字符串的引用，不拥有内存）
+        self.vocab_reverse.deinit(self.allocator);
+
+        // 释放 vocab 中每个元素的实际字符串内存
         for (self.vocab.items) |item| {
             self.allocator.free(item);
         }
         self.vocab.deinit(self.allocator);
-        self.vocab_reverse.deinit(self.allocator);
+
+        // 释放 merges 哈希表中的每个 key（这些 key 是 allocPrint 创建的）
+        var it = self.merges.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
         self.merges.deinit(self.allocator);
     }
 

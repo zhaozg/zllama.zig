@@ -312,7 +312,7 @@ pub const Tensor = opaque {
     }
 
     pub fn nelements(self: *Tensor) i64 {
-        return c.ggml_nelements(@ptrCast(self));
+        return c.ggml_nelements(@ptrCast(@alignCast(self)));
     }
 
     pub fn data(self: *Tensor) *anyopaque {
@@ -327,7 +327,7 @@ pub const Tensor = opaque {
 
     pub fn dataF32(self: *Tensor) []f32 {
         const n = self.nelements();
-        const ptr = c.ggml_get_data_f32(@ptrCast(self));
+        const ptr = c.ggml_get_data_f32(@ptrCast(@alignCast(self)));
         return @as([*]f32, @ptrCast(ptr))[0..@as(usize, @intCast(n))];
     }
 
@@ -616,7 +616,7 @@ pub fn ropeExt(
         @ptrCast(ctx),
         @ptrCast(@alignCast(a)),
         @ptrCast(@alignCast(pos)),
-        @ptrCast(@alignCast(pos)),
+        null,  // c: second position tensor (NULL = not used)
         n_dims,
         mode,
         n_ctx_orig,
@@ -656,11 +656,15 @@ pub fn cont(ctx: *Context, a: *Tensor) *Tensor {
 
 /// 重塑为 2D
 pub fn reshape2d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64) *Tensor {
+    const s = a.shape();
+    std.log.debug("reshape2d: [{d},{d},{d},{d}] -> [{d},{d}] nelem={d} expected={d}", .{ s[0], s[1], s[2], s[3], ne0, ne1, a.nelements(), ne0 * ne1 });
     return @ptrCast(c.ggml_reshape_2d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1));
 }
 
 /// 重塑为 3D
 pub fn reshape3d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, ne2: i64) *Tensor {
+    const s = a.shape();
+    std.log.debug("reshape3d: [{d},{d},{d},{d}] -> [{d},{d},{d}] nelem={d} expected={d}", .{ s[0], s[1], s[2], s[3], ne0, ne1, ne2, a.nelements(), ne0 * ne1 * ne2 });
     return @ptrCast(c.ggml_reshape_3d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, ne2));
 }
 
@@ -679,6 +683,13 @@ pub fn silu(ctx: *Context, a: *Tensor) *Tensor {
     return @ptrCast(c.ggml_silu(@ptrCast(ctx), @ptrCast(@alignCast(a))));
 }
 
+/// 转置张量
+pub fn transpose(ctx: *Context, a: *Tensor) *Tensor {
+    return @ptrCast(c.ggml_transpose(@ptrCast(ctx), @ptrCast(@alignCast(a))));
+}
+
+
+
 /// 设置输出张量
 pub fn setOutput(tensor: *Tensor) void {
     c.ggml_set_output(@ptrCast(@alignCast(tensor)));
@@ -689,6 +700,18 @@ pub fn conv1d(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, p0: i32, d0: i32) 
     return @ptrCast(c.ggml_conv_1d(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, p0, d0));
 }
 
+/// SSM 卷积（Mamba-2 风格）
+/// sx: [d_conv-1+n_t, d_inner, n_s] — 3D 输入（包含历史状态）
+/// c:  [d_conv, d_inner] — 2D 卷积核
+/// 返回: [d_inner, n_t, n_s] — 3D 输出
+pub fn ssmConv(ctx: *Context, sx: *Tensor, kernel: *Tensor) *Tensor {
+    return @ptrCast(c.ggml_ssm_conv(@ptrCast(ctx), @ptrCast(@alignCast(sx)), @ptrCast(@alignCast(kernel))));
+}
+
+/// 沿指定轴拼接两个张量
+pub fn concat(ctx: *Context, a: *Tensor, b: *Tensor, axis: i32) *Tensor {
+    return @ptrCast(c.ggml_concat(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), axis));
+}
 /// 行查找（embedding lookup）
 /// a: [n_embd, n_rows] — 数据矩阵
 /// b: [n_indices] — 行索引（i32 类型）
@@ -764,4 +787,323 @@ test "CpuFeatures" {
 test "recommendedThreads" {
     const n = recommendedThreads();
     try testing.expect(n >= 1);
+}
+
+test "conv1d basic" {
+    // 测试 ggml_conv_1d 的正确调用方式
+    // kernel: [kernel_size, n_channels] -> ne[0]=kernel_size, ne[1]=n_channels
+    // data:   [n_tokens, n_channels]    -> ne[0]=n_tokens, ne[1]=n_channels
+    const kernel_size: i64 = 4;
+    const n_channels: i64 = 6;
+    const n_tokens: i64 = 10;
+
+    // 估算内存大小
+    const mem_size = 1024 * 1024; // 1MB
+    var ctx = try Context.init(mem_size);
+    defer ctx.deinit();
+
+    // 创建 kernel: [kernel_size, n_channels]
+    const kernel = try ctx.newTensor2d(.f32, kernel_size, n_channels);
+    kernel.setName("test_conv_kernel");
+    // 初始化 kernel 数据
+    {
+        const data = kernel.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i % 4 + 1)) * 0.1;
+        }
+    }
+
+    // 创建 data: [n_tokens, n_channels]
+    const data_tensor = try ctx.newTensor2d(.f32, n_tokens, n_channels);
+    data_tensor.setName("test_conv_data");
+    {
+        const data = data_tensor.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i)) * 0.01;
+        }
+    }
+
+    // 执行 conv1d: stride=1, padding=kernel_size-1 (因果卷积), dilation=1
+    var graph = try CGraph.init(ctx);
+    const result = conv1d(ctx, kernel, data_tensor, 1, @as(i32, @intCast(kernel_size - 1)), 1);
+    result.setName("test_conv_result");
+    setOutput(result);
+    graph.buildForwardExpand(result);
+
+    // 计算
+    try graph.compute(1);
+
+    // 验证输出形状: [n_tokens, n_channels]
+    const shape = result.shape();
+    try testing.expectEqual(n_tokens, shape[0]);
+    try testing.expectEqual(n_channels, shape[1]);
+
+    std.debug.print("conv1d test passed: output shape [{d}, {d}]\n", .{ shape[0], shape[1] });
+}
+
+test "conv1d with transpose" {
+    // 测试 model.zig 中的使用模式:
+    // 输入是 [n_channels, n_tokens]，需要转置为 [n_tokens, n_channels] 再调用 conv1d
+    const kernel_size: i64 = 4;
+    const n_channels: i64 = 6;
+    const n_tokens: i64 = 10;
+
+    const mem_size = 1024 * 1024;
+    var ctx = try Context.init(mem_size);
+    defer ctx.deinit();
+
+    // 创建 kernel: [kernel_size, n_channels]
+    const kernel = try ctx.newTensor2d(.f32, kernel_size, n_channels);
+    kernel.setName("test_conv_kernel");
+    {
+        const data = kernel.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i % 4 + 1)) * 0.1;
+        }
+    }
+
+    // 创建输入: [n_channels, n_tokens] (类似 model.zig 中的 qkv)
+    const input = try ctx.newTensor2d(.f32, n_channels, n_tokens);
+    input.setName("test_input");
+    {
+        const data = input.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i)) * 0.01;
+        }
+    }
+
+    // 转置为 [n_tokens, n_channels]
+    var graph = try CGraph.init(ctx);
+    const transposed = cont(ctx, permute(ctx, input, 1, 0, 2, 3));
+    transposed.setName("test_transposed");
+
+    // conv1d
+    const result = conv1d(ctx, kernel, transposed, 1, @as(i32, @intCast(kernel_size - 1)), 1);
+    result.setName("test_conv_result");
+
+    // 转置回 [n_channels, n_tokens]
+    const result_t = cont(ctx, permute(ctx, result, 1, 0, 2, 3));
+    result_t.setName("test_result_t");
+
+    setOutput(result_t);
+    graph.buildForwardExpand(result_t);
+
+    try graph.compute(1);
+
+    const shape = result_t.shape();
+    try testing.expectEqual(n_channels, shape[0]);
+    try testing.expectEqual(n_tokens, shape[1]);
+
+    std.debug.print("conv1d transpose test passed: output shape [{d}, {d}]\n", .{ shape[0], shape[1] });
+}
+
+
+test "ssmConv basic" {
+    // 测试 ggml_ssm_conv 的正确调用方式
+    // ggml_ssm_conv 要求:
+    //   sx: 3D 张量 [d_conv-1+n_t, d_inner, n_s]
+    //   c:  2D 矩阵 [d_conv, d_inner]
+    // 输出: [d_inner, n_t, n_s]
+    const d_conv: i64 = 4;
+    const d_inner: i64 = 6;
+    const n_t: i64 = 10;
+    const n_s: i64 = 1;
+
+    const mem_size = 1024 * 1024;
+    var ctx = try Context.init(mem_size);
+    defer ctx.deinit();
+
+    // 创建 kernel c: [d_conv, d_inner]
+    const kernel = try ctx.newTensor2d(.f32, d_conv, d_inner);
+    kernel.setName("test_ssm_conv_kernel");
+    {
+        const data = kernel.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i % 4 + 1)) * 0.1;
+        }
+    }
+
+    // 创建输入 sx: [d_conv-1+n_t, d_inner, n_s]
+    const sx = try ctx.newTensor3d(.f32, d_conv - 1 + n_t, d_inner, n_s);
+    sx.setName("test_ssm_conv_sx");
+    {
+        const data = sx.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i)) * 0.01;
+        }
+    }
+
+    // 执行 ssmConv
+    var graph = try CGraph.init(ctx);
+    const result = ssmConv(ctx, sx, kernel);
+    result.setName("test_ssm_conv_result");
+    setOutput(result);
+    graph.buildForwardExpand(result);
+
+    // 计算
+    try graph.compute(1);
+
+    // 验证输出形状: [d_inner, n_t, n_s]
+    const shape = result.shape();
+    try testing.expectEqual(d_inner, shape[0]);
+    try testing.expectEqual(n_t, shape[1]);
+    try testing.expectEqual(n_s, shape[2]);
+
+    std.debug.print("ssmConv test passed: output shape [{d}, {d}, {d}]\n", .{ shape[0], shape[1], shape[2] });
+}
+
+test "ssmConv with concat and view3d" {
+    // 测试 model.zig 中的使用模式:
+    // 1. 创建卷积状态 [d_conv-1, d_inner]
+    // 2. 创建输入数据 [n_t, d_inner]
+    // 3. concat 拼接为 [d_conv-1+n_t, d_inner]
+    // 4. view3d 创建 3D 视图 [d_conv-1+n_t, d_inner, 1]
+    // 5. ssmConv 执行卷积
+    const d_conv: i64 = 4;
+    const d_inner: i64 = 6;
+    const n_t: i64 = 10;
+
+    const mem_size = 1024 * 1024;
+    var ctx = try Context.init(mem_size);
+    defer ctx.deinit();
+
+    // 创建 kernel: [d_conv, d_inner]
+    const kernel = try ctx.newTensor2d(.f32, d_conv, d_inner);
+    kernel.setName("test_kernel");
+    {
+        const data = kernel.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i % 4 + 1)) * 0.1;
+        }
+    }
+
+    // 创建卷积状态: [d_conv-1, d_inner]（零填充）
+    const conv_state = try ctx.newTensor2d(.f32, d_conv - 1, d_inner);
+    conv_state.setName("test_conv_state");
+    conv_state.setZero();
+
+    // 创建输入数据: [n_t, d_inner]
+    const input = try ctx.newTensor2d(.f32, n_t, d_inner);
+    input.setName("test_input");
+    {
+        const data = input.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i)) * 0.01;
+        }
+    }
+
+    // concat 拼接: [d_conv-1+n_t, d_inner]
+    var graph = try CGraph.init(ctx);
+    const concat_result = concat(ctx, conv_state, input, 0);
+    concat_result.setName("test_concat");
+
+    // 确保连续
+    const concat_cont = cont(ctx, concat_result);
+    concat_cont.setName("test_concat_cont");
+
+    // view3d 创建 3D 视图: [d_conv-1+n_t, d_inner, 1]
+    const sx_3d = ctx.view3d(concat_cont,
+        d_conv - 1 + n_t,
+        d_inner,
+        1,
+        @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32))),
+        @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32) * d_inner)),
+        0);
+    sx_3d.setName("test_sx_3d");
+
+    // ssmConv
+    const result = ssmConv(ctx, sx_3d, kernel);
+    result.setName("test_ssm_conv_result");
+    setOutput(result);
+    graph.buildForwardExpand(result);
+
+    // 计算
+    try graph.compute(1);
+
+    // 验证输出形状: [d_inner, n_t, 1]
+    const shape = result.shape();
+    try testing.expectEqual(d_inner, shape[0]);
+    try testing.expectEqual(n_t, shape[1]);
+    try testing.expectEqual(@as(i64, 1), shape[2]);
+
+    std.debug.print("ssmConv concat+view3d test passed: output shape [{d}, {d}, {d}]\n", .{ shape[0], shape[1], shape[2] });
+}
+
+test "conv1d vs ssmConv equivalence" {
+    // 验证 conv1d 和 ssmConv 在相同输入下产生相同形状的输出
+    const d_conv: i64 = 4;
+    const d_inner: i64 = 6;
+    const n_t: i64 = 10;
+
+    const mem_size = 2 * 1024 * 1024;
+    var ctx = try Context.init(mem_size);
+    defer ctx.deinit();
+
+    // 创建 kernel: [d_conv, d_inner]
+    const kernel = try ctx.newTensor2d(.f32, d_conv, d_inner);
+    kernel.setName("test_kernel");
+    {
+        const data = kernel.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i % 4 + 1)) * 0.1;
+        }
+    }
+
+    // 创建输入数据: [n_t, d_inner]
+    const input = try ctx.newTensor2d(.f32, n_t, d_inner);
+    input.setName("test_input");
+    {
+        const data = input.dataF32();
+        for (data, 0..) |*v, i| {
+            v.* = @as(f32, @floatFromInt(i)) * 0.01;
+        }
+    }
+
+    // conv1d: kernel [d_conv, d_inner], data [n_t, d_inner]
+    var graph1 = try CGraph.init(ctx);
+    const conv1d_result = conv1d(ctx, kernel, input, 1, @as(i32, @intCast(d_conv - 1)), 1);
+    conv1d_result.setName("test_conv1d_result");
+    setOutput(conv1d_result);
+    graph1.buildForwardExpand(conv1d_result);
+    try graph1.compute(1);
+
+    const conv1d_shape = conv1d_result.shape();
+    try testing.expectEqual(n_t, conv1d_shape[0]);
+    try testing.expectEqual(d_inner, conv1d_shape[1]);
+
+    // ssmConv: 需要先创建带历史状态的输入
+    const conv_state = try ctx.newTensor2d(.f32, d_conv - 1, d_inner);
+    conv_state.setName("test_conv_state");
+    conv_state.setZero();
+
+    var graph2 = try CGraph.init(ctx);
+    const concat_result = concat(ctx, conv_state, input, 0);
+    concat_result.setName("test_concat");
+
+    const concat_cont = cont(ctx, concat_result);
+    concat_cont.setName("test_concat_cont");
+
+    const sx_3d = ctx.view3d(concat_cont,
+        d_conv - 1 + n_t,
+        d_inner,
+        1,
+        @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32))),
+        @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32) * d_inner)),
+        0);
+    sx_3d.setName("test_sx_3d");
+
+    const ssm_conv_result = ssmConv(ctx, sx_3d, kernel);
+    ssm_conv_result.setName("test_ssm_conv_result");
+    setOutput(ssm_conv_result);
+    graph2.buildForwardExpand(ssm_conv_result);
+    try graph2.compute(1);
+
+    const ssm_conv_shape = ssm_conv_result.shape();
+    try testing.expectEqual(d_inner, ssm_conv_shape[0]);
+    try testing.expectEqual(n_t, ssm_conv_shape[1]);
+    try testing.expectEqual(@as(i64, 1), ssm_conv_shape[2]);
+
+    std.debug.print("conv1d vs ssmConv equivalence test passed\n", .{});
+    std.debug.print("  conv1d output:  [{d}, {d}]\n", .{ conv1d_shape[0], conv1d_shape[1] });
+    std.debug.print("  ssmConv output: [{d}, {d}, {d}]\n", .{ ssm_conv_shape[0], ssm_conv_shape[1], ssm_conv_shape[2] });
 }
