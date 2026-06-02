@@ -37,12 +37,12 @@ pub const KVCache = struct {
     ) !KVCache {
         var layers = try allocator.alloc(LayerCache, n_layer);
 
-        // 临时启用内存分配（如果 context 是 initNoAlloc 模式）
-        // 这样 KV Cache 张量会有实际的数据内存
-        ctx.setNoAlloc(false);
+        // 保持 no_alloc 模式不变（由调用方负责统一分配内存）
+        // KV Cache 张量只创建元数据，不分配物理内存
+        // 内存将在 backendAllocCtxTensors 时由 backend 统一分配
 
         for (0..n_layer) |i| {
-            // K Cache: [max_seq_len, n_kv_head, head_dim]
+            // K Cache: [max_seq_len, n_kv_head, head_dim]（不分配内存，由 backend 统一分配）
             const k = try ctx.newTensor3d(.f32, @intCast(max_seq_len), @intCast(n_kv_head), @intCast(head_dim));
             {
                 var buf: [64]u8 = undefined;
@@ -50,9 +50,9 @@ pub const KVCache = struct {
                 buf[slice.len] = 0;
                 k.setName(buf[0..slice.len :0]);
             }
-            k.setZero();
+            // 注意：此时 k.data 为 NULL，内存将在 backendAllocCtxTensors 时分配
 
-            // V Cache: [max_seq_len, n_kv_head, head_dim]
+            // V Cache: [max_seq_len, n_kv_head, head_dim]（不分配内存，由 backend 统一分配）
             const v = try ctx.newTensor3d(.f32, @intCast(max_seq_len), @intCast(n_kv_head), @intCast(head_dim));
             {
                 var buf: [64]u8 = undefined;
@@ -60,7 +60,7 @@ pub const KVCache = struct {
                 buf[slice.len] = 0;
                 v.setName(buf[0..slice.len :0]);
             }
-            v.setZero();
+            // 注意：此时 v.data 为 NULL，内存将在 backendAllocCtxTensors 时分配
 
             layers[i] = LayerCache{
                 .k = k,
@@ -68,9 +68,6 @@ pub const KVCache = struct {
                 .current_len = 0,
             };
         }
-
-        // 恢复 no_alloc 模式
-        ctx.setNoAlloc(true);
 
         log.info("KV Cache initialized: {d} layers, {d} x {d} x {d} = {d} elements per layer",
             .{ n_layer, max_seq_len, n_kv_head, head_dim, max_seq_len * n_kv_head * head_dim });
@@ -83,10 +80,12 @@ pub const KVCache = struct {
         };
     }
 
+
     /// 释放 KV Cache
     pub fn deinit(self: *KVCache, allocator: std.mem.Allocator) void {
         allocator.free(self.layers);
     }
+
 
     /// 重置所有层的 Cache
     pub fn reset(self: *KVCache) void {

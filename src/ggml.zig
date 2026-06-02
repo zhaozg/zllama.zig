@@ -17,12 +17,9 @@ pub const c = @cImport({
     @cInclude("ggml.h");
     @cInclude("ggml-cpu.h");
     @cInclude("ggml-backend.h");
+    @cInclude("ggml-alloc.h");
     @cInclude("gguf.h");
 });
-
-// ============================================================================
-// 类型定义
-// ============================================================================
 
 /// ggml 数据类型枚举
 pub const Type = enum(c.ggml_type) {
@@ -460,6 +457,83 @@ pub const CGraph = opaque {
         c.ggml_graph_dump_dot(@ptrCast(self), null, @ptrCast(f));
     }
 };
+
+
+// ============================================================================
+// Backend 封装
+// ============================================================================
+pub const Backend = c.struct_ggml_backend;
+pub const BackendBufferType = c.struct_ggml_backend_buffer_type;
+pub fn backendCpuInit() !*Backend {
+    const backend = c.ggml_backend_cpu_init();
+    if (backend == null) return error.OutOfMemory;
+    return @ptrCast(backend);
+}
+
+pub fn backendCpuBufferType() *BackendBufferType {
+    return @ptrCast(c.ggml_backend_cpu_buffer_type());
+}
+
+
+
+/// 获取 backend 的默认 buffer type
+pub fn backendGetDefaultBufferType(backend: *Backend) *BackendBufferType {
+    return @ptrCast(c.ggml_backend_get_default_buffer_type(@ptrCast(backend)));
+}
+
+/// 为 context 中所有未分配的张量分配内存
+/// 权重张量（已通过 setDataPtr 设置）不会被重新分配
+pub fn backendAllocCtxTensors(ctx: *Context, backend: *Backend) !void {
+    const buf = c.ggml_backend_alloc_ctx_tensors(@ptrCast(ctx), @ptrCast(backend));
+    if (buf == null) {
+        // 可能所有张量都已分配，这不是错误
+        log.debug("backendAllocCtxTensors: no tensors needed allocation (or all already allocated)", .{});
+    }
+}
+
+/// 使用指定的 buffer type 为 context 中所有未分配的张量分配内存
+pub fn backendAllocCtxTensorsFromBuft(ctx: *Context, buft: *BackendBufferType) !void {
+    const buf = c.ggml_backend_alloc_ctx_tensors_from_buft(@ptrCast(ctx), @ptrCast(buft));
+    if (buf == null) {
+        log.debug("backendAllocCtxTensorsFromBuft: no tensors needed allocation", .{});
+    }
+}
+
+/// 释放 backend
+pub fn backendFree(backend: *Backend) void {
+    c.ggml_backend_free(@ptrCast(backend));
+}
+
+// ============================================================================
+
+// Graph Allocator (gallocr) 封装
+// ============================================================================
+
+/// Graph allocator 句柄
+pub const Gallocr = opaque {
+    /// 创建新的 graph allocator
+    pub fn init(buft: *BackendBufferType) !*Gallocr {
+        const galloc = c.ggml_gallocr_new(buft);
+        if (galloc == null) return error.OutOfMemory;
+        return @ptrCast(galloc);
+    }
+
+    /// 分配计算图的内存
+    pub fn allocGraph(self: *Gallocr, graph: *CGraph) bool {
+        return c.ggml_gallocr_alloc_graph(@ptrCast(self), @ptrCast(graph));
+    }
+
+    /// 释放 graph allocator
+    pub fn free(self: *Gallocr) void {
+        c.ggml_gallocr_free(@ptrCast(self));
+    }
+};
+
+/// 设置输入张量（告诉 allocator 此张量不会被覆盖）
+pub fn setInput(tensor: *Tensor) void {
+    c.ggml_set_input(@ptrCast(@alignCast(tensor)));
+}
+
 
 // ============================================================================
 // GGUF 上下文封装

@@ -135,11 +135,10 @@ const CliArgs = struct {
 
 // ============================================================================
 // 推理引擎
-// ============================================================================
-
 const InferenceEngine = struct {
     allocator: std.mem.Allocator,
-    ggml_ctx: *ggml.Context,
+    ctx_weights: *ggml.Context,  // 权重 context（no_alloc=false，权重通过 setDataPtr 指向 GGUF 数据）
+    ctx_graph: *ggml.Context,    // 计算图 context（no_alloc=true，由 backend 统一分配内存）
     params: model.ModelParams,
     weights: model.ModelWeights,
     tok: tokenizer.Tokenizer,
@@ -149,6 +148,7 @@ const InferenceEngine = struct {
     verbose: bool,
     // 保存 GGUF 文件数据，生命周期与引擎相同
     gguf_data: []u8,
+
 
     pub fn init(
         io: std.Io,
@@ -211,30 +211,49 @@ const InferenceEngine = struct {
         // 估算内存需求
         const mem_size_estimate = blk: {
             const base_mem: usize = 1024 * 1024 * 1024; // 1GB base
-            const per_layer: usize = @as(usize, @intCast(
-                (params.n_embd * (params.n_ff * 3 + params.n_embd * 2) * 4) +
-                (params.ssm_inner_size * params.n_embd * 4 * 3)
-            ));
+            const per_layer: usize = @as(usize, @intCast((params.n_embd * (params.n_ff * 3 + params.n_embd * 2) * 4) +
+                (params.ssm_inner_size * params.n_embd * 4 * 3)));
             break :blk base_mem + per_layer * params.n_layer * 2;
         };
         log.info("Estimated memory: {d} MB", .{mem_size_estimate / (1024 * 1024)});
 
-        // 使用 initNoAlloc 加载权重，这样 ggml_reset 不会释放权重张量
-        const ggml_ctx = try ggml.Context.initNoAlloc(mem_size_estimate);
+        // ==========================================
+        // 创建权重 context（no_alloc=false，权重通过 setDataPtr 指向 GGUF 数据）
+        // ==========================================
+        const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
 
-        // 加载权重
-        const weights = try model.loadWeights(&gguf_file, gguf_data, &params, ggml_ctx, allocator);
+        // 加载权重（使用 setDataPtr 指向 GGUF 文件数据，不额外分配内存）
+        const weights = try model.loadWeights(&gguf_file, gguf_data, &params, ctx_weights, allocator);
 
-        // 初始化 KV Cache
+        // ==========================================
+        // 创建计算图 context（no_alloc=true，由 backend 统一分配内存）
+        // ==========================================
+        const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
+
+        // 初始化 KV Cache（在 ctx_graph 中创建张量，no_alloc=true）
         const max_seq_len = @min(params.max_seq_len, 2048);
         const kv_cache_mgr = try kv_cache.KVCache.init(
-            ggml_ctx,
+            ctx_graph,
             params.n_layer,
             params.n_kv_head,
             params.n_head_dim,
             max_seq_len,
             allocator,
         );
+
+
+        // 这包括 KV Cache 张量 (k, v) 以及后续计算图中的中间张量
+
+        log.info("Allocating graph context memory via backend...", .{});
+        {
+            const buft = ggml.backendCpuBufferType();
+            // 为 ctx_graph 中所有未分配的张量分配内存
+            // KV Cache 的 k/v 张量此时 data 为 NULL，会被分配
+            try ggml.backendAllocCtxTensorsFromBuft(ctx_graph, buft);
+            log.info("Graph context memory allocated successfully", .{});
+        }
+
+
 
         // 初始化采样器
         const sampler_state = sampler.Sampler.init(.{
@@ -245,7 +264,8 @@ const InferenceEngine = struct {
 
         return InferenceEngine{
             .allocator = allocator,
-            .ggml_ctx = ggml_ctx,
+            .ctx_weights = ctx_weights,
+            .ctx_graph = ctx_graph,
             .params = params,
             .weights = weights,
             .tok = tok,
@@ -257,14 +277,20 @@ const InferenceEngine = struct {
         };
     }
 
+
+
     pub fn deinit(self: *InferenceEngine) void {
         self.kv_cache_mgr.deinit(self.allocator);
         self.weights.deinit(self.allocator);
         self.tok.deinit();
-        self.ggml_ctx.deinit();
+        self.ctx_graph.deinit();
+        self.ctx_weights.deinit();
         self.allocator.free(self.gguf_data);
     }
 
+
+
+    /// 运行推理：编码 prompt -> 首 token -> 增量生成
     /// 运行推理：编码 prompt -> 首 token -> 增量生成
     pub fn generate(self: *InferenceEngine, prompt: []const u8, max_tokens: u32) !void {
         // 1. 编码 prompt
@@ -283,31 +309,46 @@ const InferenceEngine = struct {
             std.debug.print("\n", .{});
         }
 
-        // 2. 构建输入张量
-        // 临时启用分配，因为 context 是 initNoAlloc 模式
-        self.ggml_ctx.setNoAlloc(false);
-        const input_tensor = try self.ggml_ctx.newTensor1d(.i32, n_prompt_tokens);
-        self.ggml_ctx.setNoAlloc(true);
-        {
-            const data = input_tensor.dataBytes();
-            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
-            for (input_tokens.items, 0..) |token, j| { slice[j] = @as(i32, @intCast(token)); }
-        }
+        // 2. 构建输入张量（在 ctx_graph 中创建，no_alloc=true，由 gallocr 分配内存）
+        self.ctx_graph.setNoAlloc(false);
+        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
+        self.ctx_graph.setNoAlloc(true);
 
         // 3. 构建首 token 计算图
         log.info("Building forward graph for prompt...", .{});
-        var graph = try ggml.CGraph.init(self.ggml_ctx);
+        var graph = try ggml.CGraph.init(self.ctx_graph);
         const logits = try model.buildForwardGraph(
-            self.ggml_ctx,
+            self.ctx_graph,
             graph,
             &self.weights,
             input_tensor,
             n_prompt_tokens,
             &self.kv_cache_mgr, // 传入 KV Cache，首 token 填充 Cache
             0, // start_pos = 0
+            true, // is_qwen
         );
 
-        // 4. 执行计算
+        // 4. 使用 Graph Allocator 为计算图分配中间张量内存
+        log.info("Allocating graph memory...", .{});
+        const buft = ggml.backendCpuBufferType();
+        var galloc = try ggml.Gallocr.init(buft);
+        defer galloc.free();
+
+        if (!galloc.allocGraph(graph)) {
+            log.err("Failed to allocate graph memory", .{});
+            return error.GraphAllocFailed;
+        }
+
+        // 写入输入张量数据（内存已由 gallocr 分配）
+        {
+            const data = input_tensor.dataBytes();
+            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
+            for (input_tokens.items, 0..) |token, j| {
+                slice[j] = @as(i32, @intCast(token));
+            }
+        }
+
+        // 5. 执行计算
         log.info("Computing forward pass...", .{});
         const start_time = currentTimeMs();
         try graph.compute(self.n_threads);
@@ -319,23 +360,22 @@ const InferenceEngine = struct {
             @as(f64, @floatFromInt(n_prompt_tokens)) / (@as(f64, @floatFromInt(elapsed_ms)) / 1000.0),
         });
 
-        // 5. 采样首 token
+        // 6. 采样首 token
         const first_token = sampler.Sampler.sampleGreedy(logits);
         log.info("First token: {d}", .{first_token});
 
-        // 6. 解码并输出
+        // 7. 解码并输出
         var output_tokens = std.ArrayList(u32).empty;
         defer output_tokens.deinit(self.allocator);
 
         try output_tokens.append(self.allocator, @as(u32, @intCast(first_token)));
 
-        // 解码首 token
         const first_token_u32 = @as(u32, @intCast(first_token));
         const first_text = try self.tok.decode(&.{first_token_u32}, self.allocator);
         defer self.allocator.free(first_text);
         std.debug.print("\n{s}", .{first_text});
 
-        // 7. 增量生成剩余 tokens
+        // 8. 增量生成剩余 tokens
         var current_token: u32 = @intCast(first_token);
         var pos: i32 = n_prompt_tokens;
 
@@ -347,26 +387,38 @@ const InferenceEngine = struct {
             }
 
             // 构建单 token 输入
-            self.ggml_ctx.setNoAlloc(false);
-            const single_input = try self.ggml_ctx.newTensor1d(.i32, 1);
-            self.ggml_ctx.setNoAlloc(true);
-            {
-                const data = single_input.dataBytes();
-                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1];
-                slice[0] = @as(i32, @intCast(current_token));
-            }
+            self.ctx_graph.setNoAlloc(false);
+            const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
+            self.ctx_graph.setNoAlloc(true);
 
             // 构建增量计算图
-            var inc_graph = try ggml.CGraph.init(self.ggml_ctx);
+            var inc_graph = try ggml.CGraph.init(self.ctx_graph);
             const inc_logits = try model.buildForwardGraph(
-                self.ggml_ctx,
+                self.ctx_graph,
                 inc_graph,
                 &self.weights,
                 single_input,
                 1,
                 &self.kv_cache_mgr, // 使用已有的 KV Cache
                 pos, // start_pos = 当前序列位置
+                true, // is_qwen
             );
+
+            // 使用 gallocr 分配增量图的内存
+            var inc_galloc = try ggml.Gallocr.init(buft);
+            defer inc_galloc.free();
+
+            if (!inc_galloc.allocGraph(inc_graph)) {
+                log.err("Failed to allocate incremental graph memory", .{});
+                return error.GraphAllocFailed;
+            }
+
+            // 写入输入 token 数据
+            {
+                const data = single_input.dataBytes();
+                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1];
+                slice[0] = @as(i32, @intCast(current_token));
+            }
 
             try inc_graph.compute(self.n_threads);
 
@@ -383,11 +435,10 @@ const InferenceEngine = struct {
             current_token = next_token_u32;
             pos += 1;
 
-            // 注意：ggml_reset 会释放所有张量，包括权重张量
-            // 由于权重张量在同一个 ggml context 中分配，我们不能调用 reset
-            // 相反，我们依赖 ggml 的图计算来管理中间张量内存
-            // 对于长序列生成，可以考虑使用单独的 context 管理中间张量
-            // self.ggml_ctx.reset();  // 已禁用：会释放权重张量
+            // 重置计算图 context，释放中间张量
+            // 注意：ctx_graph 只包含计算图张量和 KV Cache，不包含权重
+            // 权重在 ctx_weights 中，不受 reset 影响
+            self.ctx_graph.reset();
         }
 
         std.debug.print("\n", .{});
@@ -395,11 +446,9 @@ const InferenceEngine = struct {
         const total_tokens = output_tokens.items.len + @as(usize, @intCast(n_prompt_tokens));
         log.info("Generated {d} tokens (total {d})", .{ output_tokens.items.len, total_tokens });
     }
+
 };
 
-// ============================================================================
-// 主函数
-// ============================================================================
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;

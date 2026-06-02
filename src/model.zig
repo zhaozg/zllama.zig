@@ -250,6 +250,7 @@ pub fn buildForwardGraph(
     n_tokens: i32,
     kv_cache_mgr: ?*kv_cache.KVCache,
     start_pos: i32,
+    is_qwen: bool,
 ) !*ggml.Tensor {
     const params = &weights.params;
     const n_head: i64 = @intCast(params.n_head);
@@ -257,6 +258,8 @@ pub fn buildForwardGraph(
     const head_dim: i64 = @intCast(params.n_head_dim);
     const n_tokens_i64: i64 = n_tokens;
     const rope_dim: i64 = @intCast(params.rope_dim);
+
+    _ = is_qwen;
 
     // Token 嵌入
     std.debug.print("TOKEN_EMBD_BEFORE: token_embd ne={d}\n", .{weights.token_embd.nelements()});
