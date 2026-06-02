@@ -52,6 +52,10 @@ pub const ModelParams = struct {
     ssm_time_step_rank: u32 = 16, // SSM 时间步秩
     ssm_inner_size: u32 = 2048, // SSM 内部维度
 
+    // Qwen 3.5 全注意力层 K/V 维度（与 head_dim 可能不同）
+    attn_key_length: u32 = 0,   // 每个 KV 头的 key 维度 (来自 qwen35.attention.key_length)
+    attn_value_length: u32 = 0, // 每个 KV 头的 value 维度 (来自 qwen35.attention.value_length)
+
     // 分词器
     tokenizer_name: []const u8 = "",
 
@@ -105,19 +109,23 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Model
     params.n_expert = gguf_file.getU32("llama.expert_count") orelse 0;
     params.n_expert_used = gguf_file.getU32("llama.expert_used_count") orelse 0;
 
-    // 计算 head_dim: 始终使用 n_embd / n_head
-    // Qwen 3.5 GGUF 元数据中的 key_length/value_length 用于线性注意力层的特殊维度，
-    // 不应用于标准注意力的 head_dim
-    params.n_head_dim = if (params.n_head > 0 and params.n_embd > 0)
-        params.n_embd / params.n_head
-    else
-        0;
+    // 读取 Qwen 3.5 全注意力层的 K/V 维度（优先使用显式声明的 head_dim）
+    // Qwen3.5 的 head_dim 可能不等于 n_embd / n_head，必须从元数据读取
+    params.attn_key_length = gguf_file.getU32("qwen35.attention.key_length") orelse
+        gguf_file.getU32("llama.attention.key_length") orelse 0;
+    params.attn_value_length = gguf_file.getU32("qwen35.attention.value_length") orelse
+        gguf_file.getU32("llama.attention.value_length") orelse 0;
 
-    // 暂存线性注意力层的 key/value 维度（后续线性注意力实现会用到）
-    _ = gguf_file.getU32("qwen35.attention.key_length") orelse 0;
-    _ = gguf_file.getU32("qwen35.attention.value_length") orelse 0;
-
-    // 位置编码
+    // 计算 head_dim: 优先使用显式声明的 key_length，否则回退到 n_embd / n_head
+    if (params.attn_key_length > 0) {
+        params.n_head_dim = params.attn_key_length;
+        log.info("  Using explicit head_dim={d} from qwen35.attention.key_length", .{params.n_head_dim});
+    } else if (params.n_head > 0 and params.n_embd > 0) {
+        params.n_head_dim = params.n_embd / params.n_head;
+        log.info("  Computed head_dim={d} = n_embd({d}) / n_head({d})", .{params.n_head_dim, params.n_embd, params.n_head});
+    } else {
+        params.n_head_dim = 0;
+    }
     params.max_seq_len = gguf_file.getU32("llama.context_length") orelse
         gguf_file.getU32("qwen35.context_length") orelse 32768;
     params.rope_theta = gguf_file.getF32("llama.rope.freq_base") orelse
