@@ -2,7 +2,14 @@
 //!
 //! Qwen 3.5 本地推理引擎 - 主入口点
 //! 处理 CLI 参数、初始化、推理循环
-//! 实现首 token 完整图推理
+//! 实现首 token 完整图推理 + 增量解码
+//!
+//! 解码流程：
+//! 1. 编码 prompt -> token IDs
+//! 2. 首 token 完整前向计算（填充 KV Cache）
+//! 3. 增量生成后续 tokens（每次 1 个 token）
+//! 4. 所有 token 收集后一次性解码，确保 UTF-8 字节序列正确组合
+//! 5. 输出完整文本
 
 const std = @import("std");
 const ggml = @import("ggml.zig");
@@ -239,8 +246,10 @@ const InferenceEngine = struct {
         }
 
         // 初始化分词器
+        // Tokenizer.init 内部会读取 general.name 元数据，
+        // 如果检测到 Qwen 模型，会自动强制使用 tiktoken 模式
         var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
-        logger.info("Tokenizer: {d} tokens", .{tok.vocabSize()});
+        logger.info("Tokenizer: {d} tokens (model: {s})", .{ tok.vocabSize(), @tagName(tok.model) });
 
         // 计算 ggml context 大小
         const n_threads = if (cli_args.n_threads > 0) cli_args.n_threads else ggml.recommendedThreads();
@@ -328,7 +337,7 @@ const InferenceEngine = struct {
     }
 
     /// 运行推理：编码 prompt -> 首 token -> 增量生成
-    /// 运行推理：编码 prompt -> 首 token -> 增量生成
+    /// 所有 token 收集后一次性解码，确保 UTF-8 字节序列正确组合
     pub fn generate(self: *InferenceEngine, prompt: []const u8, max_tokens: u32) !void {
         // 1. 编码 prompt
         var input_tokens = try self.tok.encode(prompt);
@@ -390,30 +399,28 @@ const InferenceEngine = struct {
         try graph.compute(self.n_threads);
         const end_time = currentTimeMs();
         const elapsed_ms = end_time - start_time;
-
+        // 6. 采样首 token
         logger.info("Forward pass completed in {d} ms ({d:.2} tok/s)", .{
             elapsed_ms,
             @as(f64, @floatFromInt(n_prompt_tokens)) / (@as(f64, @floatFromInt(elapsed_ms)) / 1000.0),
         });
 
-        // 6. 采样首 token
         const first_token = sampler.Sampler.sampleGreedy(logits);
         logger.info("First token: {d}", .{first_token});
 
-        // 7. 解码并输出
+        // 7. 收集所有生成的 token，不立即解码（避免字节 token 单独打印导致乱码）
         var output_tokens = std.ArrayList(u32).empty;
         defer output_tokens.deinit(self.allocator);
 
         try output_tokens.append(self.allocator, @as(u32, @intCast(first_token)));
 
-        const first_token_u32 = @as(u32, @intCast(first_token));
-        const first_text = try self.tok.decode(&.{first_token_u32}, self.allocator);
-        defer self.allocator.free(first_text);
-        std.debug.print("\n{s}", .{first_text});
-
         // 8. 增量生成剩余 tokens
         var current_token: u32 = @intCast(first_token);
         var pos: i32 = n_prompt_tokens;
+
+        // 用于统计性能
+        const gen_start_time = currentTimeMs();
+        var gen_token_count: u32 = 0;
 
         while (output_tokens.items.len < max_tokens) {
             // 检查 EOS
@@ -457,19 +464,15 @@ const InferenceEngine = struct {
             }
 
             try inc_graph.compute(self.n_threads);
-
             // 采样
             const next_token = sampler.Sampler.sampleGreedy(inc_logits);
 
-            // 解码
+            // 收集 token，不立即解码（避免字节 token 单独打印导致乱码）
             const next_token_u32 = @as(u32, @intCast(next_token));
-            const text = try self.tok.decode(&.{next_token_u32}, self.allocator);
-            defer self.allocator.free(text);
-            std.debug.print("{s}", .{text});
-
             try output_tokens.append(self.allocator, next_token_u32);
             current_token = next_token_u32;
             pos += 1;
+            gen_token_count += 1;
 
             // 释放并重新创建计算图 context，避免内存泄漏
             // 注意：ctx_graph 只包含计算图张量，不包含权重和 KV Cache
@@ -479,8 +482,33 @@ const InferenceEngine = struct {
             self.ctx_graph.setNoAlloc(true);
         }
 
-        std.debug.print("\n", .{});
+        // 统计生成性能
+        const gen_end_time = currentTimeMs();
+        const gen_elapsed_ms = gen_end_time - gen_start_time;
+        if (gen_token_count > 0 and gen_elapsed_ms > 0) {
+            logger.info("Generation: {d} tokens in {d} ms ({d:.2} tok/s)", .{
+                gen_token_count,
+                gen_elapsed_ms,
+                @as(f64, @floatFromInt(gen_token_count)) / (@as(f64, @floatFromInt(gen_elapsed_ms)) / 1000.0),
+            });
+        }
 
+        // 9. 一次性解码所有生成的 token，确保 UTF-8 字节序列正确组合
+        const decoded_text = try self.tok.decode(output_tokens.items, self.allocator);
+        defer self.allocator.free(decoded_text);
+
+        // 验证 UTF-8 完整性
+        if (!std.unicode.utf8ValidateSlice(decoded_text)) {
+            logger.warn("Generated text contains invalid UTF-8 sequences", .{});
+            // 调试：打印十六进制转储
+            if (self.verbose) {
+                logger.warn("Hex dump of first 64 bytes:", .{});
+                tokenizer.hexDump(decoded_text[0..@min(decoded_text.len, @as(usize, 64))]);
+            }
+        }
+
+        // 10. 输出解码后的完整文本
+        std.debug.print("{s}\n", .{decoded_text});
         const total_tokens = output_tokens.items.len + @as(usize, @intCast(n_prompt_tokens));
         logger.info("Generated {d} tokens (total {d})", .{ output_tokens.items.len, total_tokens });
     }
@@ -544,7 +572,7 @@ pub fn main(init: std.process.Init) !void {
     logger.info("Loading model: {s}", .{args.model_path});
 
     var engine = InferenceEngine.init(io, allocator, args.model_path, &args) catch |err| {
-        logger.err("Failed to initialize inference engine: {}", .{err});
+        logger.err("Failed to initialize inference engine: {}\n", .{err});
         return;
     };
     defer engine.deinit();
@@ -558,7 +586,7 @@ pub fn main(init: std.process.Init) !void {
     // 运行推理
     logger.info("--- Generation ---", .{});
     engine.generate(args.prompt, args.max_tokens) catch |err| {
-        logger.err("Generation failed: {}", .{err});
+        logger.err("Generation failed: {}\n", .{err});
         return;
     };
     logger.info("--- Done ---", .{});
@@ -568,13 +596,15 @@ pub fn main(init: std.process.Init) !void {
 // 测试
 // ============================================================================
 
+const testing = std.testing;
+
 test "CliArgs parse" {
     const test_args = CliArgs{};
-    try std.testing.expectEqual(@as(u32, 256), test_args.max_tokens);
-    try std.testing.expectEqual(@as(f32, 0.7), test_args.temperature);
+    try testing.expectEqual(@as(u32, 256), test_args.max_tokens);
+    try testing.expectEqual(@as(f32, 0.7), test_args.temperature);
 }
 
 test "ggml version available" {
     const v = ggml.version();
-    try std.testing.expect(v.len > 0);
+    try testing.expect(v.len > 0);
 }

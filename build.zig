@@ -88,6 +88,25 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&gguf_test.step);
 
+    // tokenizer.zig 测试
+    const tokenizer_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/tokenizer.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    tokenizer_test_mod.addImport("ggml", ggml_mod);
+    tokenizer_test_mod.addImport("gguf", gguf_test_mod);
+    tokenizer_test_mod.addIncludePath(include_path);
+    tokenizer_test_mod.linkSystemLibrary("ggml-base", .{});
+    tokenizer_test_mod.linkSystemLibrary("ggml", .{});
+
+    const tokenizer_test = b.addTest(.{
+        .name = "tokenizer-test",
+        .root_module = tokenizer_test_mod,
+    });
+    test_step.dependOn(&tokenizer_test.step);
+
     // main.zig 测试
     const main_test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
