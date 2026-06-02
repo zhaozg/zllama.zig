@@ -140,6 +140,8 @@ const InferenceEngine = struct {
     ctx_weights: *ggml.Context,  // 权重 context（no_alloc=false，权重通过 setDataPtr 指向 GGUF 数据）
     ctx_graph: *ggml.Context,    // 计算图 context（no_alloc=true，由 backend 统一分配内存）
     params: model.ModelParams,
+    ctx_kv_cache: *ggml.Context, // KV Cache context（与 ctx_graph 分离，避免 reset 时被释放）
+
     weights: model.ModelWeights,
     tok: tokenizer.Tokenizer,
     sampler_state: sampler.Sampler,
@@ -224,16 +226,15 @@ const InferenceEngine = struct {
 
         // 加载权重（使用 setDataPtr 指向 GGUF 文件数据，不额外分配内存）
         const weights = try model.loadWeights(&gguf_file, gguf_data, &params, ctx_weights, allocator);
-
         // ==========================================
-        // 创建计算图 context（no_alloc=true，由 backend 统一分配内存）
+        // 创建 KV Cache context（与 ctx_graph 分离，避免 reset 时被释放）
         // ==========================================
-        const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
+        const ctx_kv_cache = try ggml.Context.initNoAlloc(mem_size_estimate);
 
-        // 初始化 KV Cache（在 ctx_graph 中创建张量，no_alloc=true）
+        // 初始化 KV Cache（在 ctx_kv_cache 中创建张量，no_alloc=true）
         const max_seq_len = @min(params.max_seq_len, 2048);
         const kv_cache_mgr = try kv_cache.KVCache.init(
-            ctx_graph,
+            ctx_kv_cache,
             params.n_layer,
             params.n_kv_head,
             params.n_head_dim,
@@ -241,14 +242,18 @@ const InferenceEngine = struct {
             allocator,
         );
 
+        // ==========================================
+        // 创建计算图 context（no_alloc=true，由 backend 统一分配内存）
+        const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
 
-        // 这包括 KV Cache 张量 (k, v) 以及后续计算图中的中间张量
 
-        log.info("Allocating graph context memory via backend...", .{});
+        log.info("Allocating KV Cache memory via backend...", .{});
         {
             const buft = ggml.backendCpuBufferType();
-            // 为 ctx_graph 中所有未分配的张量分配内存
-            // KV Cache 的 k/v 张量此时 data 为 NULL，会被分配
+            // 为 ctx_kv_cache 中所有未分配的张量分配内存
+            try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, buft);
+            log.info("KV Cache memory allocated successfully", .{});
+
             try ggml.backendAllocCtxTensorsFromBuft(ctx_graph, buft);
             log.info("Graph context memory allocated successfully", .{});
         }
@@ -267,6 +272,8 @@ const InferenceEngine = struct {
             .ctx_weights = ctx_weights,
             .ctx_graph = ctx_graph,
             .params = params,
+            .ctx_kv_cache = ctx_kv_cache,
+
             .weights = weights,
             .tok = tok,
             .sampler_state = sampler_state,
@@ -284,6 +291,8 @@ const InferenceEngine = struct {
         self.weights.deinit(self.allocator);
         self.tok.deinit();
         self.ctx_graph.deinit();
+        self.ctx_kv_cache.deinit();
+
         self.ctx_weights.deinit();
         self.allocator.free(self.gguf_data);
     }
@@ -435,11 +444,14 @@ const InferenceEngine = struct {
             current_token = next_token_u32;
             pos += 1;
 
-            // 重置计算图 context，释放中间张量
-            // 注意：ctx_graph 只包含计算图张量和 KV Cache，不包含权重
-            // 权重在 ctx_weights 中，不受 reset 影响
-            self.ctx_graph.reset();
+            // 释放并重新创建计算图 context，避免内存泄漏
+            // 注意：ctx_graph 只包含计算图张量，不包含权重和 KV Cache
+            // 权重在 ctx_weights 中，KV Cache 在 ctx_kv_cache 中，不受影响
+            self.ctx_graph.deinit();
+            self.ctx_graph = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
+            self.ctx_graph.setNoAlloc(true);
         }
+
 
         std.debug.print("\n", .{});
 

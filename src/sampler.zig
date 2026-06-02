@@ -46,8 +46,12 @@ pub const Sampler = struct {
     /// logits: [n_vocab] f32 张量
     pub fn sampleGreedy(logits: *ggml.Tensor) i32 {
         const data = logits.dataBytes();
-        const n_vocab = @divExact(data.len, @as(usize, @sizeOf(f32)));
-        const scores = @as([*]f32, @ptrCast(@alignCast(data.ptr)))[0..n_vocab];
+        const ne = logits.ne();
+        // logits 形状为 [n_vocab, n_tokens]，取最后一个 token
+        const n_vocab = @as(usize, @intCast(ne[0]));
+        const n_tokens = @max(@as(usize, @intCast(ne[1])), 1);
+        const stride = n_vocab;
+        const scores = @as([*]f32, @ptrCast(@alignCast(data.ptr)))[(n_tokens - 1) * stride .. (n_tokens - 1) * stride + n_vocab];
 
         var best_idx: i32 = 0;
         var best_val: f32 = scores[0];
@@ -59,4 +63,5 @@ pub const Sampler = struct {
         }
         return best_idx;
     }
+
 };

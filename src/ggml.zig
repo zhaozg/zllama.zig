@@ -320,6 +320,13 @@ pub const Tensor = opaque {
         return c.ggml_nelements(@ptrCast(@alignCast(self)));
     }
 
+    pub fn ne(self: *Tensor) [4]i64 {
+        const ct = asCStruct(self);
+        return ct.ne;
+    }
+
+
+
     // 设置张量的数据指针（用于 initNoAlloc 模式）
     pub fn setDataPtr(self: *Tensor, ptr: *anyopaque) void {
         var ct = asCStruct(self);

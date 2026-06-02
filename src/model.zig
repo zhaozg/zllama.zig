@@ -252,6 +252,7 @@ pub fn buildForwardGraph(
     start_pos: i32,
     is_qwen: bool,
 ) !*ggml.Tensor {
+
     const params = &weights.params;
     const n_head: i64 = @intCast(params.n_head);
     const n_kv_head: i64 = @intCast(params.n_kv_head);
@@ -389,6 +390,7 @@ pub fn buildForwardGraph(
                 @as(i64, @intCast(cache.currentLen()))
             else
                 n_tokens_i64;
+
 
             // 注意力计算
             // Q: [head_dim, n_tokens, n_head] -> permute(1,0,2) -> [n_tokens, head_dim, n_head]
