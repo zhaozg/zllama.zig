@@ -5,6 +5,8 @@
 //! 使用 `opaque {}` 类型包装不透明指针。
 
 const std = @import("std");
+const log = std.log.scoped(.ggml);
+
 const builtin = @import("builtin");
 
 // ============================================================================
@@ -389,29 +391,48 @@ pub const CGraph = opaque {
         c.ggml_build_forward_expand(@ptrCast(self), @ptrCast(@alignCast(tensor)));
     }
 
-    pub fn compute(self: *CGraph, n_threads: i32) !void {
-        _ = n_threads;
-        // 使用 ggml_backend API 执行计算
+    pub fn compute(self: *CGraph, _n_threads: i32) !void {
+        _ = _n_threads;
+
+        // 加载所有可用的后端（动态库）
+        c.ggml_backend_load_all();
+
+        // 先尝试使用 ggml_backend API（Metal/CUDA 加速）
         const backend = c.ggml_backend_init_best();
-        if (backend == null) return error.BackendInitFailed;
-        defer c.ggml_backend_free(backend);
+        if (backend) |b| {
+            defer c.ggml_backend_free(b);
+            if (c.ggml_backend_graph_compute(b, @ptrCast(self)) == 0) return;
+            // backend 计算失败，回退到 CPU
+            log.warn("ggml_backend_graph_compute failed, falling back to CPU", .{});
+        } else {
+            log.info("No GPU backend available, using CPU", .{});
+        }
 
-        if (c.ggml_backend_graph_compute(backend, @ptrCast(self)) != 0) {
+        // CPU 回退路径：使用 ggml_backend CPU 后端
+        const cpu_backend = c.ggml_backend_init_by_type(c.GGML_BACKEND_DEVICE_TYPE_CPU, null);
+        if (cpu_backend) |b| {
+            defer c.ggml_backend_free(b);
+            if (c.ggml_backend_graph_compute(b, @ptrCast(self)) == 0) return;
             return error.ComputeError;
         }
+
+        return error.BackendInitFailed;
     }
 
-    pub fn computeWithPlan(self: *CGraph, cplan: *c.struct_ggml_cplan) !void {
-        if (c.ggml_graph_compute(@ptrCast(self), cplan) != 0) {
-            return error.ComputeError;
-        }
-    }
 
-    pub fn computeWithCtx(self: *CGraph, ctx: *Context, n_threads: i32) !void {
-        if (c.ggml_graph_compute_with_ctx(@ptrCast(ctx), @ptrCast(self), n_threads) != 0) {
-            return error.ComputeError;
-        }
-    }
+    // computeWithPlan and computeWithCtx are not available in Homebrew ggml
+    // (ggml_graph_compute is in libggml-cpu.so, loaded dynamically via ggml_backend)
+    // pub fn computeWithPlan(self: *CGraph, cplan: *c.struct_ggml_cplan) !void {
+    //     if (c.ggml_graph_compute(@ptrCast(self), cplan) != 0) {
+    //         return error.ComputeError;
+    //     }
+    // }
+    //
+    // pub fn computeWithCtx(self: *CGraph, ctx: *Context, n_threads: i32) !void {
+    //     if (c.ggml_graph_compute_with_ctx(@ptrCast(ctx), @ptrCast(self), n_threads) != 0) {
+    //         return error.ComputeError;
+    //     }
+    // }
 
     pub fn reset(self: *CGraph) void {
         c.ggml_graph_reset(@ptrCast(self));
