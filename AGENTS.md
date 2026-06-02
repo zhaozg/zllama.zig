@@ -86,6 +86,7 @@ qwen-engine/
 │   ├── tokenizer.zig            # BPE 分词器
 │   ├── sampler.zig              # Top-p / Top-k 采样
 │   └── backend.zig              # 多后端抽象（CPU/Metal/CUDA）
+├── llama.cpp/                   # llama.cpp 相关代码（可参考实现过程）
 └── deps/ggml/                   # ggml 源码（submodule 或拷贝）
 ```
 
@@ -115,8 +116,8 @@ qwen-engine/
 
 ## 📚 参考材料
 
-- [ggml 源码](https://github.com/ggerganov/ggml)
-- [llama.cpp Qwen 支持](https://github.com/ggerganov/llama.cpp/tree/master/models/qwen)
+- [ggml 源码](deps/ggml/)
+- [llama.cpp Qwen 支持](deps/llama.cpp/src/models/qwen*.cpp)
 - [GGUF 规范](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
 - [Zig 0.16.0 文档](https://ziglang.org/documentation/0.16.0/)
 

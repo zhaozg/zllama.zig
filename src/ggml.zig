@@ -187,6 +187,12 @@ pub const Context = opaque {
         c.ggml_reset(@ptrCast(self));
     }
 
+
+    pub fn setNoAlloc(self: *Context, no_alloc: bool) void {
+        c.ggml_set_no_alloc(@ptrCast(self), no_alloc);
+    }
+
+
     pub fn usedMem(self: *Context) usize {
         return c.ggml_used_mem(@ptrCast(self));
     }
@@ -316,6 +322,14 @@ pub const Tensor = opaque {
     pub fn nelements(self: *Tensor) i64 {
         return c.ggml_nelements(@ptrCast(@alignCast(self)));
     }
+
+    // 设置张量的数据指针（用于 initNoAlloc 模式）
+    pub fn setDataPtr(self: *Tensor, ptr: *anyopaque) void {
+        var ct = asCStruct(self);
+        ct.data = ptr;
+    }
+
+
 
     pub fn data(self: *Tensor) *anyopaque {
         return c.ggml_get_data(@ptrCast(@alignCast(self)));

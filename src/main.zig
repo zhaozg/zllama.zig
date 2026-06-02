@@ -219,11 +219,11 @@ const InferenceEngine = struct {
         };
         log.info("Estimated memory: {d} MB", .{mem_size_estimate / (1024 * 1024)});
 
-        // 初始化 ggml context
-        const ggml_ctx = try ggml.Context.init(mem_size_estimate);
+        // 使用 initNoAlloc 加载权重，这样 ggml_reset 不会释放权重张量
+        const ggml_ctx = try ggml.Context.initNoAlloc(mem_size_estimate);
 
         // 加载权重
-        const weights = try model.loadWeights(&gguf_file, &params, ggml_ctx, allocator);
+        const weights = try model.loadWeights(&gguf_file, gguf_data, &params, ggml_ctx, allocator);
 
         // 初始化 KV Cache
         const max_seq_len = @min(params.max_seq_len, 2048);
@@ -284,7 +284,10 @@ const InferenceEngine = struct {
         }
 
         // 2. 构建输入张量
+        // 临时启用分配，因为 context 是 initNoAlloc 模式
+        self.ggml_ctx.setNoAlloc(false);
         const input_tensor = try self.ggml_ctx.newTensor1d(.i32, n_prompt_tokens);
+        self.ggml_ctx.setNoAlloc(true);
         {
             const data = input_tensor.dataBytes();
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
@@ -344,7 +347,9 @@ const InferenceEngine = struct {
             }
 
             // 构建单 token 输入
+            self.ggml_ctx.setNoAlloc(false);
             const single_input = try self.ggml_ctx.newTensor1d(.i32, 1);
+            self.ggml_ctx.setNoAlloc(true);
             {
                 const data = single_input.dataBytes();
                 const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1];
@@ -378,13 +383,11 @@ const InferenceEngine = struct {
             current_token = next_token_u32;
             pos += 1;
 
-            // 重置 ggml context 以释放中间张量内存
-            // 注意：权重张量在 initNoAlloc 模式下分配，不会被 reset 影响
-            // 但 KV Cache 张量也会被重置，所以我们需要在每次增量前重建
-            // 这里我们使用一个新的 ggml context 来避免这个问题
-            // 实际上，ggml_reset 只释放后续分配的内存，不释放初始分配的
-            // 但为了安全，我们只在增量步骤之间重置
-            self.ggml_ctx.reset();
+            // 注意：ggml_reset 会释放所有张量，包括权重张量
+            // 由于权重张量在同一个 ggml context 中分配，我们不能调用 reset
+            // 相反，我们依赖 ggml 的图计算来管理中间张量内存
+            // 对于长序列生成，可以考虑使用单独的 context 管理中间张量
+            // self.ggml_ctx.reset();  // 已禁用：会释放权重张量
         }
 
         std.debug.print("\n", .{});

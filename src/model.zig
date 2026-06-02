@@ -98,9 +98,11 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Model
     };
     params.n_embd = gguf_file.getU32("llama.embedding_length") orelse
         gguf_file.getU32("qwen35.embedding_length") orelse 0;
-    params.n_head = gguf_file.getU32("llama.head_count") orelse
+    params.n_head = gguf_file.getU32("llama.attention.head_count") orelse
+        gguf_file.getU32("llama.head_count") orelse
         gguf_file.getU32("qwen35.attention.head_count") orelse 0;
-    params.n_kv_head = gguf_file.getU32("llama.head_count_kv") orelse
+    params.n_kv_head = gguf_file.getU32("llama.attention.head_count_kv") orelse
+        gguf_file.getU32("llama.head_count_kv") orelse
         gguf_file.getU32("qwen35.attention.head_count_kv") orelse params.n_head;
     params.n_layer = gguf_file.getU32("llama.block_count") orelse
         gguf_file.getU32("qwen35.block_count") orelse 0;
@@ -257,9 +259,10 @@ pub fn buildForwardGraph(
     const rope_dim: i64 = @intCast(params.rope_dim);
 
     // Token 嵌入
+    std.debug.print("TOKEN_EMBD_BEFORE: token_embd ne={d}\n", .{weights.token_embd.nelements()});
     var cur = ggml.getRows(ctx, weights.token_embd, input_tokens);
     cur.setName("token_embd");
-
+    std.debug.print("TOKEN_EMBD_AFTER: cur ne={d}, input_tokens ne={d}, token_embd ne={d}\n", .{cur.nelements(), input_tokens.nelements(), weights.token_embd.nelements()});
     // 逐层处理
     for (weights.layers, 0..) |*layer, i| {
         const layer_idx: u32 = @intCast(i);
@@ -269,9 +272,22 @@ pub fn buildForwardGraph(
         var name_buf: [128]u8 = undefined;
 
         // --- 注意力前的 RMSNorm ---
+        std.debug.print("PRE_ATTN_NORM_DEBUG: layer={d} cur ne={d}\n", .{i, cur.nelements()});
         var attn_input = ggml.rmsNorm(ctx, cur, params.norm_eps);
         { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_norm", .{i}) catch unreachable; name_buf[name.len] = 0; attn_input.setName(name_buf[0..name.len:0]); }
-        attn_input = ggml.mul(ctx, attn_input, layer.attn_norm_weight);
+        // 调试：打印形状
+        {
+            const a_ne = attn_input.nelements();
+            const b_ne = layer.attn_norm_weight.nelements();
+            const cur_ne = cur.nelements();
+            std.debug.print("MUL_DEBUG: cur ne={d}, attn_input ne={d}, norm_weight ne={d}, n_tokens={d}\n", .{cur_ne, a_ne, b_ne, n_tokens_i64});
+        }
+        attn_input = ggml.mul(ctx, attn_input, ggml.reshape2d(ctx, layer.attn_norm_weight, @intCast(params.n_embd), 1));
+        { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_norm_mul", .{i}) catch unreachable; name_buf[name.len] = 0; attn_input.setName(name_buf[0..name.len:0]); }
+
+        if (is_full_attn) {
+        }
+        attn_input = ggml.mul(ctx, attn_input, ggml.reshape2d(ctx, layer.attn_norm_weight, @intCast(params.n_embd), 1));
         { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_norm_mul", .{i}) catch unreachable; name_buf[name.len] = 0; attn_input.setName(name_buf[0..name.len:0]); }
 
         if (is_full_attn) {
@@ -292,14 +308,22 @@ pub fn buildForwardGraph(
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_v", .{i}) catch unreachable; name_buf[name.len] = 0; v.setName(name_buf[0..name.len:0]); }
 
             // Q/K Norm（Qwen 3.5 特有）
-            if (layer.attn_q_norm_weight) |q_norm| {
+            if (layer.attn_q_norm_weight) |q_norm_raw| {
                 q_full = ggml.rmsNorm(ctx, q_full, params.norm_eps);
-                q_full = ggml.mul(ctx, q_full, q_norm);
+                // q_norm 是 [head_dim]，需要 repeat 到 [n_head * head_dim]
+                const q_norm_2d = ggml.reshape2d(ctx, q_norm_raw, head_dim, 1);
+                const q_norm_target = try ctx.newTensor2d(.f32, n_head * head_dim, 1);
+                const q_norm_rep = ggml.repeat(ctx, q_norm_2d, q_norm_target);
+                q_full = ggml.mul(ctx, q_full, q_norm_rep);
                 { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_q_normed", .{i}) catch unreachable; name_buf[name.len] = 0; q_full.setName(name_buf[0..name.len:0]); }
             }
-            if (layer.attn_k_norm_weight) |k_norm| {
+            if (layer.attn_k_norm_weight) |k_norm_raw| {
                 k = ggml.rmsNorm(ctx, k, params.norm_eps);
-                k = ggml.mul(ctx, k, k_norm);
+                // k_norm 是 [head_dim]，需要 repeat 到 [n_kv_head * head_dim]
+                const k_norm_2d = ggml.reshape2d(ctx, k_norm_raw, head_dim, 1);
+                const k_norm_target = try ctx.newTensor2d(.f32, n_kv_head * head_dim, 1);
+                const k_norm_rep = ggml.repeat(ctx, k_norm_2d, k_norm_target);
+                k = ggml.mul(ctx, k, k_norm_rep);
                 { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_k_normed", .{i}) catch unreachable; name_buf[name.len] = 0; k.setName(name_buf[0..name.len:0]); }
             }
 
@@ -346,6 +370,7 @@ pub fn buildForwardGraph(
                 cache.setKv(ctx, graph, i, k, v, @intCast(n_tokens));
 
                 // 从 Cache 获取完整视图用于注意力计算
+                // 注意：setKv 已经更新了 current_len，所以 getKView 返回包含新 token 的视图
                 const k_cached = cache.getKView(ctx, i);
                 { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.k_cached", .{i}) catch unreachable; name_buf[name.len] = 0; k_cached.setName(name_buf[0..name.len:0]); }
                 const v_cached = cache.getVView(ctx, i);
@@ -355,6 +380,12 @@ pub fn buildForwardGraph(
                 k = k_cached;
                 v = v_cached;
             }
+
+            // 重新计算 cache_len（setKv 可能已更新 current_len）
+            const cache_len_after: i64 = if (kv_cache_mgr) |cache|
+                @as(i64, @intCast(cache.currentLen()))
+            else
+                n_tokens_i64;
 
             // 注意力计算
             // Q: [head_dim, n_tokens, n_head] -> permute(1,0,2) -> [n_tokens, head_dim, n_head]
@@ -372,13 +403,8 @@ pub fn buildForwardGraph(
             v_perm = ggml.cont(ctx, v_perm);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_perm", .{i}) catch unreachable; name_buf[name.len] = 0; v_perm.setName(name_buf[0..name.len:0]); }
 
-            // 获取 cache_len
-            // 注意：如果 cache_len == 0（SSM 层未写入 Cache），使用 n_tokens 作为 cache_len
-            const raw_cache_len: i64 = if (kv_cache_mgr) |cache|
-                @as(i64, @intCast(cache.currentLen()))
-            else
-                n_tokens_i64;
-            const cache_len: i64 = if (raw_cache_len > 0) raw_cache_len else n_tokens_i64;
+            // 使用 setKv 后更新的 cache_len
+            const cache_len: i64 = cache_len_after;
             // GQA: 扩展 KV 头以匹配 Q 头数
             if (n_kv_head < n_head) {
                 const n_rep = @divExact(n_head, n_kv_head);
@@ -455,6 +481,7 @@ pub fn buildForwardGraph(
 
             // 残差连接
             cur = ggml.add(ctx, cur, attn_out);
+            std.debug.print("ATTN_OUT_DEBUG: layer={d} cur ne={d}, attn_out ne={d}\n", .{i, cur.nelements(), attn_out.nelements()});
         } else {
             // ================================================================
             // SSM 层（Mamba-2 风格线性注意力）
@@ -489,7 +516,9 @@ pub fn buildForwardGraph(
 
             // 创建零填充：形状 [conv_kernel - 1, ssm_inner * 3]
             const pad_len = conv_kernel - 1;
+            ctx.setNoAlloc(false);
             const zero_pad = try ctx.newTensor2d(.f32, pad_len, ssm_inner * 3);
+            ctx.setNoAlloc(true);
             zero_pad.setZero();
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_zero_pad", .{i}) catch unreachable; name_buf[name.len] = 0; zero_pad.setName(name_buf[0..name.len:0]); }
 
@@ -555,7 +584,15 @@ pub fn buildForwardGraph(
             // 应用 ssm_norm
             ssm_out = ggml.rmsNorm(ctx, ssm_out, params.norm_eps);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_norm", .{i}) catch unreachable; name_buf[name.len] = 0; ssm_out.setName(name_buf[0..name.len:0]); }
-            ssm_out = ggml.mul(ctx, ssm_out, ssm_norm_w);
+            // ssm_norm_w 是分组 norm 权重 [ssm_inner / group_count]
+            // 使用 ggml_repeat 扩展到 [ssm_inner, n_tokens]
+            const ssm_norm_2d = ggml.reshape2d(ctx, ssm_norm_w, @divExact(ssm_inner, @as(i64, @intCast(params.ssm_group_count))), 1);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_norm_2d", .{i}) catch unreachable; name_buf[name.len] = 0; ssm_norm_2d.setName(name_buf[0..name.len:0]); }
+            // 创建目标张量并 repeat
+            const ssm_norm_target = try ctx.newTensor2d(.f32, ssm_inner, n_tokens_i64);
+            const ssm_norm_rep = ggml.repeat(ctx, ssm_norm_2d, ssm_norm_target);
+            { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_norm_rep", .{i}) catch unreachable; name_buf[name.len] = 0; ssm_norm_rep.setName(name_buf[0..name.len:0]); }
+            ssm_out = ggml.mul(ctx, ssm_out, ssm_norm_rep);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_norm_mul", .{i}) catch unreachable; name_buf[name.len] = 0; ssm_out.setName(name_buf[0..name.len:0]); }
 
             // 门控输出: gate SSM output in ssm_inner space, then project to embd
@@ -569,12 +606,14 @@ pub fn buildForwardGraph(
             // 残差连接
             cur = ggml.add(ctx, cur, attn_out);
             { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.residual_1", .{i}) catch unreachable; name_buf[name.len] = 0; cur.setName(name_buf[0..name.len:0]); }
+            std.debug.print("SSM_OUT_DEBUG: layer={d} cur ne={d}, attn_out ne={d}\n", .{i, cur.nelements(), attn_out.nelements()});
         }
 
         // --- Post-Attention Norm ---
         var post_attn = ggml.rmsNorm(ctx, cur, params.norm_eps);
         { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.post_attn_norm", .{i}) catch unreachable; name_buf[name.len] = 0; post_attn.setName(name_buf[0..name.len:0]); }
-        post_attn = ggml.mul(ctx, post_attn, layer.post_attention_norm_weight);
+        std.debug.print("POST_ATTN_DEBUG: layer={d} cur ne={d}, post_attn ne={d}\n", .{i, cur.nelements(), post_attn.nelements()});
+        post_attn = ggml.mul(ctx, post_attn, ggml.reshape2d(ctx, layer.post_attention_norm_weight, @intCast(params.n_embd), 1));
         { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.post_attn_norm_mul", .{i}) catch unreachable; name_buf[name.len] = 0; post_attn.setName(name_buf[0..name.len:0]); }
 
         // --- SwiGLU FFN ---
@@ -591,17 +630,19 @@ pub fn buildForwardGraph(
 
         var ffn_out = ggml.mulMat(ctx, layer.ffn_down_weight, ffn_hidden);
         { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_out", .{i}) catch unreachable; name_buf[name.len] = 0; ffn_out.setName(name_buf[0..name.len:0]); }
-
         // 残差连接
         cur = ggml.add(ctx, cur, ffn_out);
         { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.residual_2", .{i}) catch unreachable; name_buf[name.len] = 0; cur.setName(name_buf[0..name.len:0]); }
+        std.debug.print("FFN_OUT_DEBUG: layer={d} cur ne={d}, ffn_out ne={d}\n", .{i, cur.nelements(), ffn_out.nelements()});
+        { const name = std.fmt.bufPrint(&name_buf, "blk.{d}.residual_2", .{i}) catch unreachable; name_buf[name.len] = 0; cur.setName(name_buf[0..name.len:0]); }
+        std.debug.print("FFN_OUT_DEBUG: layer={d} cur ne={d}, ffn_out ne={d}\n", .{i, cur.nelements(), ffn_out.nelements()});
     }
 
     // --- 最终 RMSNorm ---
     cur = ggml.rmsNorm(ctx, cur, params.norm_eps);
     cur.setName("output_norm");
 
-    cur = ggml.mul(ctx, cur, weights.output_norm_weight);
+    cur = ggml.mul(ctx, cur, ggml.reshape2d(ctx, weights.output_norm_weight, @intCast(params.n_embd), 1));
     cur.setName("output_norm_mul");
 
     // --- 输出投影 ---
@@ -619,7 +660,9 @@ pub fn buildForwardGraph(
 
 /// 构建位置张量 [start_pos, start_pos+1, ..., start_pos+n_tokens-1]
 fn buildPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i32) *ggml.Tensor {
+    ctx.setNoAlloc(false);
     const pos_tensor = ctx.newTensor1d(.i32, n_tokens) catch unreachable;
+    ctx.setNoAlloc(true);
     const data = pos_tensor.dataBytes();
     const pos_slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_tokens))];
     for (0..@as(usize, @intCast(n_tokens))) |i| {
@@ -628,13 +671,15 @@ fn buildPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i32) *ggml.
     return pos_tensor;
 }
 
+
+
 // ============================================================================
 // 模型加载
 // ============================================================================
 
-/// 从 GGUF 文件加载模型权重
 pub fn loadWeights(
     gguf_file: *const gguf.GGUFFile,
+    gguf_data: []const u8,
     params: *const ModelParams,
     ctx: *ggml.Context,
     allocator: std.mem.Allocator,
@@ -644,19 +689,19 @@ pub fn loadWeights(
     log.info("Loading model weights...", .{});
 
     // Token 嵌入
-    const token_embd = findOrCreateTensor(ctx, gguf_file, "token_embd.weight") catch |err| {
+    const token_embd = findOrCreateTensor(ctx, gguf_file, gguf_data, "token_embd.weight") catch |err| {
         log.err("Failed to load token_embd.weight: {}", .{err});
         return error.MissingWeight;
     };
     token_embd.setName("token_embd.weight");
-
+    std.debug.print("TOKEN_EMBD_SHAPE: ne={d}\n", .{token_embd.nelements()});
     // 输出层（可能不存在，与 token_embd 共享）
-    const output_weight = findOrCreateTensor(ctx, gguf_file, "output.weight") catch null;
+    const output_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, "output.weight") catch null;
     if (output_weight) |ow| {
         ow.setName("output.weight");
     }
 
-    const output_norm_weight = findOrCreateTensor(ctx, gguf_file, "output_norm.weight") catch |err| {
+    const output_norm_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, "output_norm.weight") catch |err| {
         log.err("Failed to load output_norm.weight: {}", .{err});
         return error.MissingWeight;
     };
@@ -684,24 +729,24 @@ pub fn loadWeights(
         var layer_weights = LayerWeights{
             .prefix = prefix,
             .layer_type = if (is_full_attn) .full_attention else .ssm,
-            .attn_norm_weight = findOrCreateTensor(ctx, gguf_file, attn_norm_name) catch |err| {
+            .attn_norm_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, attn_norm_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ attn_norm_name, err });
                 return error.MissingWeight;
             },
-            .post_attention_norm_weight = findOrCreateTensor(ctx, gguf_file, post_attn_norm_name) catch |err| {
+            .post_attention_norm_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, post_attn_norm_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ post_attn_norm_name, err });
                 return error.MissingWeight;
             },
             .ffn_norm_weight = undefined, // 稍后设置
-            .ffn_gate_weight = findOrCreateTensor(ctx, gguf_file, ffn_gate_name) catch |err| {
+            .ffn_gate_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, ffn_gate_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ ffn_gate_name, err });
                 return error.MissingWeight;
             },
-            .ffn_up_weight = findOrCreateTensor(ctx, gguf_file, ffn_up_name) catch |err| {
+            .ffn_up_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, ffn_up_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ ffn_up_name, err });
                 return error.MissingWeight;
             },
-            .ffn_down_weight = findOrCreateTensor(ctx, gguf_file, ffn_down_name) catch |err| {
+            .ffn_down_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, ffn_down_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ ffn_down_name, err });
                 return error.MissingWeight;
             },
@@ -721,19 +766,19 @@ pub fn loadWeights(
             const o_name = try std.fmt.allocPrint(allocator, "{s}.attn_output.weight", .{prefix});
             defer allocator.free(o_name);
 
-            layer_weights.attn_q_weight = findOrCreateTensor(ctx, gguf_file, q_name) catch |err| {
+            layer_weights.attn_q_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, q_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ q_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.attn_k_weight = findOrCreateTensor(ctx, gguf_file, k_name) catch |err| {
+            layer_weights.attn_k_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, k_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ k_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.attn_v_weight = findOrCreateTensor(ctx, gguf_file, v_name) catch |err| {
+            layer_weights.attn_v_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, v_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ v_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.attn_output_weight = findOrCreateTensor(ctx, gguf_file, o_name) catch |err| {
+            layer_weights.attn_output_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, o_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ o_name, err });
                 return error.MissingWeight;
             };
@@ -744,8 +789,8 @@ pub fn loadWeights(
             const k_norm_name = try std.fmt.allocPrint(allocator, "{s}.attn_k_norm.weight", .{prefix});
             defer allocator.free(k_norm_name);
 
-            layer_weights.attn_q_norm_weight = findOrCreateTensor(ctx, gguf_file, q_norm_name) catch null;
-            layer_weights.attn_k_norm_weight = findOrCreateTensor(ctx, gguf_file, k_norm_name) catch null;
+            layer_weights.attn_q_norm_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, q_norm_name) catch null;
+            layer_weights.attn_k_norm_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, k_norm_name) catch null;
 
             log.debug("  Layer {d}: full attention (Q/K/V/O + norms)", .{i});
         } else {
@@ -769,39 +814,39 @@ pub fn loadWeights(
             const ssm_out_name = try std.fmt.allocPrint(allocator, "{s}.ssm_out.weight", .{prefix});
             defer allocator.free(ssm_out_name);
 
-            layer_weights.attn_qkv_weight = findOrCreateTensor(ctx, gguf_file, qkv_name) catch |err| {
+            layer_weights.attn_qkv_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, qkv_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ qkv_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.attn_gate_weight = findOrCreateTensor(ctx, gguf_file, gate_name) catch |err| {
+            layer_weights.attn_gate_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, gate_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ gate_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.ssm_conv1d_weight = findOrCreateTensor(ctx, gguf_file, conv_name) catch |err| {
+            layer_weights.ssm_conv1d_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, conv_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ conv_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.ssm_a = findOrCreateTensor(ctx, gguf_file, ssm_a_name) catch |err| {
+            layer_weights.ssm_a = findOrCreateTensor(ctx, gguf_file, gguf_data, ssm_a_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ ssm_a_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.ssm_dt_bias = findOrCreateTensor(ctx, gguf_file, dt_bias_name) catch |err| {
+            layer_weights.ssm_dt_bias = findOrCreateTensor(ctx, gguf_file, gguf_data, dt_bias_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ dt_bias_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.ssm_alpha_weight = findOrCreateTensor(ctx, gguf_file, alpha_name) catch |err| {
+            layer_weights.ssm_alpha_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, alpha_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ alpha_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.ssm_beta_weight = findOrCreateTensor(ctx, gguf_file, beta_name) catch |err| {
+            layer_weights.ssm_beta_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, beta_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ beta_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.ssm_norm_weight = findOrCreateTensor(ctx, gguf_file, ssm_norm_name) catch |err| {
+            layer_weights.ssm_norm_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, ssm_norm_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ ssm_norm_name, err });
                 return error.MissingWeight;
             };
-            layer_weights.ssm_out_weight = findOrCreateTensor(ctx, gguf_file, ssm_out_name) catch |err| {
+            layer_weights.ssm_out_weight = findOrCreateTensor(ctx, gguf_file, gguf_data, ssm_out_name) catch |err| {
                 log.err("Failed to load {s}: {}", .{ ssm_out_name, err });
                 return error.MissingWeight;
             };
@@ -827,6 +872,7 @@ pub fn loadWeights(
 fn findOrCreateTensor(
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
+    gguf_data: []const u8,
     name: []const u8,
 ) !*ggml.Tensor {
     // 尝试从 GGUF 文件查找
@@ -836,6 +882,8 @@ fn findOrCreateTensor(
         const dims = info.dims;
         const typ: ggml.Type = @enumFromInt(@intFromEnum(info.type_));
 
+        // 临时启用分配，创建张量元数据
+        ctx.setNoAlloc(false);
         const tensor = switch (n_dims) {
             1 => try ctx.newTensor1d(typ, @intCast(dims[0])),
             2 => try ctx.newTensor2d(typ, @intCast(dims[0]), @intCast(dims[1])),
@@ -843,12 +891,27 @@ fn findOrCreateTensor(
             4 => try ctx.newTensor4d(typ, @intCast(dims[0]), @intCast(dims[1]), @intCast(dims[2]), @intCast(dims[3])),
             else => return error.UnsupportedTensorDims,
         };
+        ctx.setNoAlloc(true);
+
+        // 设置张量数据指针，指向 GGUF 文件中的张量数据
+        const data_offset = gguf_file.tensor_data_offset + info.offset;
+        if (data_offset + info.sizeBytes() <= gguf_data.len) {
+            const data_ptr = @as(*anyopaque, @ptrCast(@constCast(&gguf_data[data_offset])));
+            tensor.setDataPtr(data_ptr);
+        } else {
+            log.err("Tensor '{s}' data out of bounds: offset={}, size={}, file_size={}", .{
+                name, data_offset, info.sizeBytes(), gguf_data.len,
+            });
+            return error.TensorDataOutOfBounds;
+        }
+
         tensor.setName(@ptrCast(name));
         return tensor;
     }
-
     return error.TensorNotFound;
 }
+
+
 
 // ============================================================================
 // 测试

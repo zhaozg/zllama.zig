@@ -37,6 +37,10 @@ pub const KVCache = struct {
     ) !KVCache {
         var layers = try allocator.alloc(LayerCache, n_layer);
 
+        // 临时启用内存分配（如果 context 是 initNoAlloc 模式）
+        // 这样 KV Cache 张量会有实际的数据内存
+        ctx.setNoAlloc(false);
+
         for (0..n_layer) |i| {
             // K Cache: [max_seq_len, n_kv_head, head_dim]
             const k = try ctx.newTensor3d(.f32, @intCast(max_seq_len), @intCast(n_kv_head), @intCast(head_dim));
@@ -64,6 +68,9 @@ pub const KVCache = struct {
                 .current_len = 0,
             };
         }
+
+        // 恢复 no_alloc 模式
+        ctx.setNoAlloc(true);
 
         log.info("KV Cache initialized: {d} layers, {d} x {d} x {d} = {d} elements per layer",
             .{ n_layer, max_seq_len, n_kv_head, head_dim, max_seq_len * n_kv_head * head_dim });
@@ -155,16 +162,17 @@ pub const KVCache = struct {
         layer.current_len += n_tokens;
     }
 
-    /// 获取当前 Cache 长度
+    /// 获取当前 Cache 长度（取所有层的最大值）
     pub fn currentLen(self: *KVCache) u32 {
-        if (self.layers.len == 0) return 0;
-        return self.layers[0].current_len;
+        var max_len: u32 = 0;
+        for (self.layers) |layer| {
+            if (layer.current_len > max_len) {
+                max_len = layer.current_len;
+            }
+        }
+        return max_len;
     }
 };
-
-// ============================================================================
-// 测试
-// ============================================================================
 
 const testing = std.testing;
 
