@@ -205,6 +205,7 @@ pub const TensorInfo = struct {
     offset: u64, // offset from start of tensor data section
 
     /// Multiply the active tensor dimensions to get the logical element count.
+    /// Multiply the active tensor dimensions to get the logical element count.
     /// @param self Tensor descriptor to inspect.
     /// @returns The total number of logical elements across the first `n_dims` entries in `dims`.
     pub fn numElements(self: *const TensorInfo) u64 {
@@ -215,6 +216,9 @@ pub const TensorInfo = struct {
         return n;
     }
 
+
+    /// @param self Tensor descriptor to inspect.
+    /// @returns The total number of logical elements across the first `n_dims` entries in `dims`.
     /// Compute the serialized tensor byte size for the descriptor's GGML storage format.
     /// @param self Tensor descriptor to inspect.
     /// @returns The number of bytes occupied by the tensor payload, rounded up to whole quantization blocks.
@@ -240,25 +244,20 @@ pub const GGUFFile = struct {
     /// Tensor descriptors.
     tensors: std.ArrayList(TensorInfo),
     tensor_data_offset: u64, // file offset where tensor data begins
-    /// Allocator for owned resources.
+    /// Allocator for map/list control blocks (not for strings/arrays).
     allocator: std.mem.Allocator,
+    /// Arena allocator holding all parsed strings and arrays.
+    arena: std.heap.ArenaAllocator,
 
-    /// Release metadata keys, metadata payloads, and tensor names owned by the parsed file.
+    /// Release all memory owned by the parsed file.
     /// @param self Parsed GGUF file to tear down in place.
     pub fn deinit(self: *GGUFFile) void {
-        // Free metadata string values and keys
-        var it = self.metadata.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            freeMetadataValue(self.allocator, entry.value_ptr.*);
-        }
+        // Free the hash map's internal control block (keys/values point to arena memory).
         self.metadata.deinit(self.allocator);
-
-        // Free tensor names
-        for (self.tensors.items) |t| {
-            self.allocator.free(t.name);
-        }
+        // Free the tensor list's internal control block (names point to arena memory).
         self.tensors.deinit(self.allocator);
+        // Free all arena memory (metadata keys, string values, array elements, tensor names).
+        self.arena.deinit();
         self.* = undefined;
     }
 
@@ -310,19 +309,6 @@ pub const GGUFFile = struct {
     }
 };
 
-fn freeMetadataValue(allocator: std.mem.Allocator, val: MetadataValue) void {
-    switch (val) {
-        .string => |s| allocator.free(s),
-        .array => |arr| {
-            for (arr) |item| {
-                freeMetadataValue(allocator, item);
-            }
-            allocator.free(arr);
-        },
-        else => {},
-    }
-}
-
 /// Optional flags that control GGUF parsing behavior (e.g. summary logging).
 pub const ParseOptions = struct {
     log_summary: bool = true,
@@ -337,7 +323,12 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
 }
 
 /// Parse a GGUF file from a byte slice with optional logging control.
+/// Uses ArenaAllocator internally to ensure no memory leaks on error paths.
 pub fn parseWithOptions(data: []const u8, allocator: std.mem.Allocator, options: ParseOptions) !GGUFFile {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const arena_alloc = arena.allocator();
+
     var reader = Reader{ .data = data, .pos = 0 };
 
     // Header
@@ -357,40 +348,22 @@ pub fn parseWithOptions(data: []const u8, allocator: std.mem.Allocator, options:
         });
     }
 
-    // Parse metadata
+    // Parse metadata: all strings and arrays allocated from arena
     var metadata: std.StringHashMapUnmanaged(MetadataValue) = .{};
-    errdefer {
-        var it = metadata.iterator();
-        while (it.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            freeMetadataValue(allocator, entry.value_ptr.*);
-        }
-        metadata.deinit(allocator);
-    }
+    errdefer metadata.deinit(allocator);
 
     for (0..metadata_count) |_| {
-        const key = try reader.readString(allocator);
-        errdefer allocator.free(key);
-        const val = try reader.readMetadataValue(allocator);
-        errdefer {
-            allocator.free(key);
-            freeMetadataValue(allocator, val);
-        }
+        const key = try reader.readString(arena_alloc);
+        const val = try reader.readMetadataValue(arena_alloc);
         try metadata.put(allocator, key, val);
     }
 
     // Parse tensor descriptors
     var tensors: std.ArrayList(TensorInfo) = .empty;
-    errdefer {
-        for (tensors.items) |t| {
-            allocator.free(t.name);
-        }
-        tensors.deinit(allocator);
-    }
+    errdefer tensors.deinit(allocator);
 
     for (0..tensor_count) |_| {
-        const name = try reader.readString(allocator);
-        errdefer allocator.free(name);
+        const name = try reader.readString(arena_alloc);
 
         const n_dims = reader.readU32();
         var dims: [4]u64 = .{ 1, 1, 1, 1 };
@@ -435,6 +408,7 @@ pub fn parseWithOptions(data: []const u8, allocator: std.mem.Allocator, options:
         .tensors = tensors,
         .tensor_data_offset = tensor_data_offset,
         .allocator = allocator,
+        .arena = arena,
     };
 }
 const Reader = struct {

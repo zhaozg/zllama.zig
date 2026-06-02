@@ -168,6 +168,8 @@ const InferenceEngine = struct {
         // 注意：gguf.parse 返回的 GGUFFile 引用这块内存，所以不能提前释放
         const gguf_data = try allocator.alloc(u8, file_size);
 
+        errdefer allocator.free(gguf_data);
+
         const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
         if (bytes_read != file_size) {
             allocator.free(gguf_data);
@@ -177,6 +179,8 @@ const InferenceEngine = struct {
 
         // 解析 GGUF
         var gguf_file = try gguf.parse(gguf_data, allocator);
+
+        defer gguf_file.deinit();
 
         // 解析模型参数
         var params = try model.parseParams(&gguf_file, allocator);
