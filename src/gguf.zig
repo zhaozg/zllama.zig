@@ -216,7 +216,6 @@ pub const TensorInfo = struct {
         return n;
     }
 
-
     /// @param self Tensor descriptor to inspect.
     /// @returns The total number of logical elements across the first `n_dims` entries in `dims`.
     /// Compute the serialized tensor byte size for the descriptor's GGML storage format.

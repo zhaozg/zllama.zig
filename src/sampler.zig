@@ -63,5 +63,4 @@ pub const Sampler = struct {
         }
         return best_idx;
     }
-
 };

@@ -10,6 +10,12 @@ const log = std.log.scoped(.ggml);
 const builtin = @import("builtin");
 
 // ============================================================================
+// 全局状态
+// ============================================================================
+
+var backends_loaded: bool = false;
+
+// ============================================================================
 // 原始 C API
 // ============================================================================
 
@@ -184,11 +190,9 @@ pub const Context = opaque {
         c.ggml_reset(@ptrCast(self));
     }
 
-
     pub fn setNoAlloc(self: *Context, no_alloc: bool) void {
         c.ggml_set_no_alloc(@ptrCast(self), no_alloc);
     }
-
 
     pub fn usedMem(self: *Context) usize {
         return c.ggml_used_mem(@ptrCast(self));
@@ -325,15 +329,11 @@ pub const Tensor = opaque {
         return ct.ne;
     }
 
-
-
     // 设置张量的数据指针（用于 initNoAlloc 模式）
     pub fn setDataPtr(self: *Tensor, ptr: *anyopaque) void {
         var ct = asCStruct(self);
         ct.data = ptr;
     }
-
-
 
     pub fn data(self: *Tensor) *anyopaque {
         return c.ggml_get_data(@ptrCast(@alignCast(self)));
@@ -411,9 +411,12 @@ pub const CGraph = opaque {
 
     pub fn compute(self: *CGraph, _n_threads: i32) !void {
         _ = _n_threads;
-
-        // 加载所有可用的后端（动态库）
-        c.ggml_backend_load_all();
+        // 加载所有可用的后端（动态库），只加载一次
+        if (!backends_loaded) {
+            c.ggml_backend_load_all();
+            backends_loaded = true;
+            log.info("Backends loaded", .{});
+        }
 
         // 先尝试使用 ggml_backend API（Metal/CUDA 加速）
         const backend = c.ggml_backend_init_best();
@@ -436,7 +439,6 @@ pub const CGraph = opaque {
 
         return error.BackendInitFailed;
     }
-
 
     // computeWithPlan and computeWithCtx are not available in Homebrew ggml
     // (ggml_graph_compute is in libggml-cpu.so, loaded dynamically via ggml_backend)
@@ -465,7 +467,6 @@ pub const CGraph = opaque {
     }
 };
 
-
 // ============================================================================
 // Backend 封装
 // ============================================================================
@@ -480,8 +481,6 @@ pub fn backendCpuInit() !*Backend {
 pub fn backendCpuBufferType() *BackendBufferType {
     return @ptrCast(c.ggml_backend_cpu_buffer_type());
 }
-
-
 
 /// 获取 backend 的默认 buffer type
 pub fn backendGetDefaultBufferType(backend: *Backend) *BackendBufferType {
@@ -540,7 +539,6 @@ pub const Gallocr = opaque {
 pub fn setInput(tensor: *Tensor) void {
     c.ggml_set_input(@ptrCast(@alignCast(tensor)));
 }
-
 
 // ============================================================================
 // GGUF 上下文封装
@@ -732,7 +730,7 @@ pub fn ropeExt(
         @ptrCast(ctx),
         @ptrCast(@alignCast(a)),
         @ptrCast(@alignCast(pos)),
-        null,  // c: second position tensor (NULL = not used)
+        null, // c: second position tensor (NULL = not used)
         n_dims,
         mode,
         n_ctx_orig,
@@ -803,8 +801,6 @@ pub fn silu(ctx: *Context, a: *Tensor) *Tensor {
 pub fn transpose(ctx: *Context, a: *Tensor) *Tensor {
     return @ptrCast(c.ggml_transpose(@ptrCast(ctx), @ptrCast(@alignCast(a))));
 }
-
-
 
 /// 设置输出张量
 pub fn setOutput(tensor: *Tensor) void {
@@ -1013,7 +1009,6 @@ test "conv1d with transpose" {
     std.debug.print("conv1d transpose test passed: output shape [{d}, {d}]\n", .{ shape[0], shape[1] });
 }
 
-
 test "ssmConv basic" {
     // 测试 ggml_ssm_conv 的正确调用方式
     // ggml_ssm_conv 要求:
@@ -1118,13 +1113,7 @@ test "ssmConv with concat and view3d" {
     concat_cont.setName("test_concat_cont");
 
     // view3d 创建 3D 视图: [d_conv-1+n_t, d_inner, 1]
-    const sx_3d = ctx.view3d(concat_cont,
-        d_conv - 1 + n_t,
-        d_inner,
-        1,
-        @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32))),
-        @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32) * d_inner)),
-        0);
+    const sx_3d = ctx.view3d(concat_cont, d_conv - 1 + n_t, d_inner, 1, @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32))), @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32) * d_inner)), 0);
     sx_3d.setName("test_sx_3d");
 
     // ssmConv
@@ -1199,13 +1188,7 @@ test "conv1d vs ssmConv equivalence" {
     const concat_cont = cont(ctx, concat_result);
     concat_cont.setName("test_concat_cont");
 
-    const sx_3d = ctx.view3d(concat_cont,
-        d_conv - 1 + n_t,
-        d_inner,
-        1,
-        @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32))),
-        @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32) * d_inner)),
-        0);
+    const sx_3d = ctx.view3d(concat_cont, d_conv - 1 + n_t, d_inner, 1, @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32))), @as(usize, @intCast((d_conv - 1 + n_t) * @sizeOf(f32) * d_inner)), 0);
     sx_3d.setName("test_sx_3d");
 
     const ssm_conv_result = ssmConv(ctx, sx_3d, kernel);

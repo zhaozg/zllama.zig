@@ -14,13 +14,13 @@ const log = std.log.scoped(.tokenizer);
 
 /// 特殊 token 的 ID
 pub const SpecialTokens = struct {
-    bos: u32 = 1,       // Beginning of sequence
-    eos: u32 = 2,       // End of sequence
-    unk: u32 = 0,       // Unknown token
-    pad: u32 = 0,       // Padding
-    sep: u32 = 2,       // Separator
-    cls: u32 = 1,       // Classifier
-    mask: u32 = 0,      // Mask token
+    bos: u32 = 1, // Beginning of sequence
+    eos: u32 = 2, // End of sequence
+    unk: u32 = 0, // Unknown token
+    pad: u32 = 0, // Padding
+    sep: u32 = 2, // Separator
+    cls: u32 = 1, // Classifier
+    mask: u32 = 0, // Mask token
 
     pub fn fromGGUF(gguf_file: *const gguf.GGUFFile) SpecialTokens {
         return SpecialTokens{
@@ -105,7 +105,7 @@ pub const Tokenizer = struct {
                             // 合并规则格式: "token1 token2"
                             if (std.mem.indexOfScalar(u8, s, ' ')) |space_pos| {
                                 const left = s[0..space_pos];
-                                const right = s[space_pos+1..];
+                                const right = s[space_pos + 1 ..];
                                 const key = try std.fmt.allocPrint(allocator, "{s}|{s}", .{ left, right });
                                 try tok.merges.put(allocator, key, @intCast(i));
                             }
@@ -118,8 +118,7 @@ pub const Tokenizer = struct {
             }
         }
 
-        log.info("Tokenizer initialized: {d} tokens, special: bos={d}, eos={d}, unk={d}",
-            .{ tok.vocab.items.len, tok.special.bos, tok.special.eos, tok.special.unk });
+        log.info("Tokenizer initialized: {d} tokens, special: bos={d}, eos={d}, unk={d}", .{ tok.vocab.items.len, tok.special.bos, tok.special.eos, tok.special.unk });
 
         return tok;
     }
@@ -169,7 +168,7 @@ pub const Tokenizer = struct {
             // 尝试匹配所有 token
             for (self.vocab.items, 0..) |token_str, id| {
                 if (pos + token_str.len <= text.len and
-                    std.mem.eql(u8, text[pos..pos+token_str.len], token_str))
+                    std.mem.eql(u8, text[pos .. pos + token_str.len], token_str))
                 {
                     if (token_str.len > best_len) {
                         best_len = token_str.len;

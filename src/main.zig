@@ -12,7 +12,39 @@ const tokenizer = @import("tokenizer.zig");
 const sampler = @import("sampler.zig");
 const kv_cache = @import("kv_cache.zig");
 
-const log = std.log.scoped(.main);
+// 在 main.zig 或其他根文件中
+pub const std_options: std.Options = .{
+    .log_level = .info, // 确保所有级别的日志都能进入你的自定义 logFn
+    // .logFn 会在下一步被定义
+};
+
+const logger = std.log.scoped(.main);
+
+// ============================================================================
+// 运行时日志级别控制
+// ============================================================================
+
+var runtime_log_level: std.log.Level = .info;
+
+pub fn setLogLevel(level: std.log.Level) void {
+    runtime_log_level = level;
+}
+
+pub fn getLogLevel() std.log.Level {
+    return runtime_log_level;
+}
+
+pub fn log(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    // 运行时级别过滤
+    if (@intFromEnum(level) > @intFromEnum(runtime_log_level)) return;
+    // 调用默认日志实现
+    std.log.defaultLog(level, scope, format, args);
+}
 
 // ============================================================================
 // 时间工具
@@ -40,6 +72,7 @@ const CliArgs = struct {
     top_p: f32 = 0.9,
     n_threads: i32 = 0, // 0 = auto
     verbose: bool = false,
+    debug: bool = false,
     help: bool = false,
 
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
@@ -53,58 +86,60 @@ const CliArgs = struct {
                 result.help = true;
             } else if (std.mem.eql(u8, arg, "--model") or std.mem.eql(u8, arg, "-m")) {
                 result.model_path = args_it.next() orelse {
-                    std.debug.print("Error: --model requires a path argument\n", .{});
+                    logger.err("--model requires a path argument", .{});
                     return error.InvalidArgs;
                 };
             } else if (std.mem.eql(u8, arg, "--prompt") or std.mem.eql(u8, arg, "-p")) {
                 result.prompt = args_it.next() orelse {
-                    std.debug.print("Error: --prompt requires a string argument\n", .{});
+                    logger.err("--prompt requires a string argument", .{});
                     return error.InvalidArgs;
                 };
             } else if (std.mem.eql(u8, arg, "--max-tokens") or std.mem.eql(u8, arg, "-n")) {
                 result.max_tokens = std.fmt.parseUnsigned(u32, args_it.next() orelse {
-                    std.debug.print("Error: --max-tokens requires a number\n", .{});
+                    logger.err("--max-tokens requires a number", .{});
                     return error.InvalidArgs;
                 }, 10) catch {
-                    std.debug.print("Error: invalid --max-tokens value\n", .{});
+                    logger.err("invalid --max-tokens value", .{});
                     return error.InvalidArgs;
                 };
             } else if (std.mem.eql(u8, arg, "--temperature") or std.mem.eql(u8, arg, "-t")) {
                 result.temperature = std.fmt.parseFloat(f32, args_it.next() orelse {
-                    std.debug.print("Error: --temperature requires a number\n", .{});
+                    logger.err("--temperature requires a number", .{});
                     return error.InvalidArgs;
                 }) catch {
-                    std.debug.print("Error: invalid --temperature value\n", .{});
+                    logger.err("invalid --temperature value", .{});
                     return error.InvalidArgs;
                 };
             } else if (std.mem.eql(u8, arg, "--top-k") or std.mem.eql(u8, arg, "-k")) {
                 result.top_k = std.fmt.parseUnsigned(u32, args_it.next() orelse {
-                    std.debug.print("Error: --top-k requires a number\n", .{});
+                    logger.err("--top-k requires a number", .{});
                     return error.InvalidArgs;
                 }, 10) catch {
-                    std.debug.print("Error: invalid --top-k value\n", .{});
+                    logger.err("invalid --top-k value", .{});
                     return error.InvalidArgs;
                 };
             } else if (std.mem.eql(u8, arg, "--top-p") or std.mem.eql(u8, arg, "-tp")) {
                 result.top_p = std.fmt.parseFloat(f32, args_it.next() orelse {
-                    std.debug.print("Error: --top-p requires a number\n", .{});
+                    logger.err("--top-p requires a number", .{});
                     return error.InvalidArgs;
                 }) catch {
-                    std.debug.print("Error: invalid --top-p value\n", .{});
+                    logger.err("invalid --top-p value", .{});
                     return error.InvalidArgs;
                 };
             } else if (std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "-th")) {
                 result.n_threads = std.fmt.parseInt(i32, args_it.next() orelse {
-                    std.debug.print("Error: --threads requires a number\n", .{});
+                    logger.err("--threads requires a number", .{});
                     return error.InvalidArgs;
                 }, 10) catch {
-                    std.debug.print("Error: invalid --threads value\n", .{});
+                    logger.err("invalid --threads value", .{});
                     return error.InvalidArgs;
                 };
             } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
                 result.verbose = true;
+            } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
+                result.debug = true;
             } else {
-                std.debug.print("Warning: unknown argument '{s}'\n", .{arg});
+                logger.warn("unknown argument '{s}'", .{arg});
             }
         }
 
@@ -127,6 +162,7 @@ const CliArgs = struct {
             \\  -tp, --top-p <F>      Top-P 采样 (默认: 0.9)
             \\  -th, --threads <N>    线程数 (默认: auto)
             \\  -v, --verbose         详细输出
+            \\  -d, --debug           输出调试日志
             \\
         ;
         std.debug.print("{s}", .{help_text});
@@ -137,8 +173,8 @@ const CliArgs = struct {
 // 推理引擎
 const InferenceEngine = struct {
     allocator: std.mem.Allocator,
-    ctx_weights: *ggml.Context,  // 权重 context（no_alloc=false，权重通过 setDataPtr 指向 GGUF 数据）
-    ctx_graph: *ggml.Context,    // 计算图 context（no_alloc=true，由 backend 统一分配内存）
+    ctx_weights: *ggml.Context, // 权重 context（no_alloc=false，权重通过 setDataPtr 指向 GGUF 数据）
+    ctx_graph: *ggml.Context, // 计算图 context（no_alloc=true，由 backend 统一分配内存）
     params: model.ModelParams,
     ctx_kv_cache: *ggml.Context, // KV Cache context（与 ctx_graph 分离，避免 reset 时被释放）
 
@@ -150,7 +186,6 @@ const InferenceEngine = struct {
     verbose: bool,
     // 保存 GGUF 文件数据，生命周期与引擎相同
     gguf_data: []u8,
-
 
     pub fn init(
         io: std.Io,
@@ -175,7 +210,7 @@ const InferenceEngine = struct {
         const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
         if (bytes_read != file_size) {
             allocator.free(gguf_data);
-            log.err("Short read: expected {d} bytes, got {d}", .{ file_size, bytes_read });
+            logger.err("Short read: expected {d} bytes, got {d}", .{ file_size, bytes_read });
             return error.FileReadError;
         }
 
@@ -188,24 +223,24 @@ const InferenceEngine = struct {
         var params = try model.parseParams(&gguf_file, allocator);
 
         if (cli_args.verbose) {
-            log.info("Model parameters:", .{});
-            log.info("  n_vocab={d}, n_embd={d}, n_head={d}, n_kv_head={d}", .{
+            logger.info("Model parameters:", .{});
+            logger.info("  n_vocab={d}, n_embd={d}, n_head={d}, n_kv_head={d}", .{
                 params.n_vocab, params.n_embd, params.n_head, params.n_kv_head,
             });
-            log.info("  n_layer={d}, n_ff={d}, n_head_dim={d}", .{
+            logger.info("  n_layer={d}, n_ff={d}, n_head_dim={d}", .{
                 params.n_layer, params.n_ff, params.n_head_dim,
             });
-            log.info("  max_seq_len={d}, rope_theta={d}, rope_dim={d}", .{
+            logger.info("  max_seq_len={d}, rope_theta={d}, rope_dim={d}", .{
                 params.max_seq_len, params.rope_theta, params.rope_dim,
             });
-            log.info("  full_attn_interval={d}, ssm_inner={d}", .{
+            logger.info("  full_attn_interval={d}, ssm_inner={d}", .{
                 params.full_attention_interval, params.ssm_inner_size,
             });
         }
 
         // 初始化分词器
         var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
-        log.info("Tokenizer: {d} tokens", .{tok.vocabSize()});
+        logger.info("Tokenizer: {d} tokens", .{tok.vocabSize()});
 
         // 计算 ggml context 大小
         const n_threads = if (cli_args.n_threads > 0) cli_args.n_threads else ggml.recommendedThreads();
@@ -217,7 +252,7 @@ const InferenceEngine = struct {
                 (params.ssm_inner_size * params.n_embd * 4 * 3)));
             break :blk base_mem + per_layer * params.n_layer * 2;
         };
-        log.info("Estimated memory: {d} MB", .{mem_size_estimate / (1024 * 1024)});
+        logger.info("Estimated memory: {d} MB", .{mem_size_estimate / (1024 * 1024)});
 
         // ==========================================
         // 创建权重 context（no_alloc=false，权重通过 setDataPtr 指向 GGUF 数据）
@@ -246,19 +281,16 @@ const InferenceEngine = struct {
         // 创建计算图 context（no_alloc=true，由 backend 统一分配内存）
         const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
 
-
-        log.info("Allocating KV Cache memory via backend...", .{});
+        logger.info("Allocating KV Cache memory via backend...", .{});
         {
             const buft = ggml.backendCpuBufferType();
             // 为 ctx_kv_cache 中所有未分配的张量分配内存
             try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, buft);
-            log.info("KV Cache memory allocated successfully", .{});
+            logger.info("KV Cache memory allocated successfully", .{});
 
             try ggml.backendAllocCtxTensorsFromBuft(ctx_graph, buft);
-            log.info("Graph context memory allocated successfully", .{});
+            logger.info("Graph context memory allocated successfully", .{});
         }
-
-
 
         // 初始化采样器
         const sampler_state = sampler.Sampler.init(.{
@@ -284,8 +316,6 @@ const InferenceEngine = struct {
         };
     }
 
-
-
     pub fn deinit(self: *InferenceEngine) void {
         self.kv_cache_mgr.deinit(self.allocator);
         self.weights.deinit(self.allocator);
@@ -297,8 +327,6 @@ const InferenceEngine = struct {
         self.allocator.free(self.gguf_data);
     }
 
-
-
     /// 运行推理：编码 prompt -> 首 token -> 增量生成
     /// 运行推理：编码 prompt -> 首 token -> 增量生成
     pub fn generate(self: *InferenceEngine, prompt: []const u8, max_tokens: u32) !void {
@@ -307,15 +335,14 @@ const InferenceEngine = struct {
         defer input_tokens.deinit(self.allocator);
 
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
-        log.info("Prompt: {d} tokens", .{n_prompt_tokens});
+        logger.info("Prompt: {d} tokens", .{n_prompt_tokens});
 
         if (self.verbose) {
-            std.debug.print("Input tokens: ", .{});
+            logger.debug("Input tokens: ", .{});
             for (input_tokens.items[0..@min(@as(usize, 10), input_tokens.items.len)]) |t| {
-                std.debug.print("{d} ", .{t});
+                logger.debug("{d} ", .{t});
             }
-            if (input_tokens.items.len > 10) std.debug.print("...", .{});
-            std.debug.print("\n", .{});
+            if (input_tokens.items.len > 10) logger.debug("...", .{});
         }
 
         // 2. 构建输入张量（在 ctx_graph 中创建，no_alloc=true，由 gallocr 分配内存）
@@ -324,7 +351,7 @@ const InferenceEngine = struct {
         self.ctx_graph.setNoAlloc(true);
 
         // 3. 构建首 token 计算图
-        log.info("Building forward graph for prompt...", .{});
+        logger.info("Building forward graph for prompt...", .{});
         var graph = try ggml.CGraph.init(self.ctx_graph);
         const logits = try model.buildForwardGraph(
             self.ctx_graph,
@@ -338,13 +365,13 @@ const InferenceEngine = struct {
         );
 
         // 4. 使用 Graph Allocator 为计算图分配中间张量内存
-        log.info("Allocating graph memory...", .{});
+        logger.info("Allocating graph memory...", .{});
         const buft = ggml.backendCpuBufferType();
         var galloc = try ggml.Gallocr.init(buft);
         defer galloc.free();
 
         if (!galloc.allocGraph(graph)) {
-            log.err("Failed to allocate graph memory", .{});
+            logger.err("Failed to allocate graph memory", .{});
             return error.GraphAllocFailed;
         }
 
@@ -358,20 +385,20 @@ const InferenceEngine = struct {
         }
 
         // 5. 执行计算
-        log.info("Computing forward pass...", .{});
+        logger.info("Computing forward pass...", .{});
         const start_time = currentTimeMs();
         try graph.compute(self.n_threads);
         const end_time = currentTimeMs();
         const elapsed_ms = end_time - start_time;
 
-        log.info("Forward pass completed in {d} ms ({d:.2} tok/s)", .{
+        logger.info("Forward pass completed in {d} ms ({d:.2} tok/s)", .{
             elapsed_ms,
             @as(f64, @floatFromInt(n_prompt_tokens)) / (@as(f64, @floatFromInt(elapsed_ms)) / 1000.0),
         });
 
         // 6. 采样首 token
         const first_token = sampler.Sampler.sampleGreedy(logits);
-        log.info("First token: {d}", .{first_token});
+        logger.info("First token: {d}", .{first_token});
 
         // 7. 解码并输出
         var output_tokens = std.ArrayList(u32).empty;
@@ -391,7 +418,7 @@ const InferenceEngine = struct {
         while (output_tokens.items.len < max_tokens) {
             // 检查 EOS
             if (current_token == self.tok.special.eos) {
-                log.info("EOS token reached", .{});
+                logger.info("EOS token reached", .{});
                 break;
             }
 
@@ -418,7 +445,7 @@ const InferenceEngine = struct {
             defer inc_galloc.free();
 
             if (!inc_galloc.allocGraph(inc_graph)) {
-                log.err("Failed to allocate incremental graph memory", .{});
+                logger.err("Failed to allocate incremental graph memory", .{});
                 return error.GraphAllocFailed;
             }
 
@@ -452,15 +479,12 @@ const InferenceEngine = struct {
             self.ctx_graph.setNoAlloc(true);
         }
 
-
         std.debug.print("\n", .{});
 
         const total_tokens = output_tokens.items.len + @as(usize, @intCast(n_prompt_tokens));
-        log.info("Generated {d} tokens (total {d})", .{ output_tokens.items.len, total_tokens });
+        logger.info("Generated {d} tokens (total {d})", .{ output_tokens.items.len, total_tokens });
     }
-
 };
-
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -483,52 +507,61 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // 设置日志级别
+    if (args.debug) {
+        setLogLevel(.debug);
+    } else if (args.verbose) {
+        setLogLevel(.info);
+    } else {
+        setLogLevel(.warn);
+    }
+
     // 打印版本信息
-    std.debug.print("Qwen Engine v0.1.0 (ggml {s})\n", .{ggml.version()});
+    logger.info("Qwen Engine v0.1.0 (ggml {s})", .{ggml.version()});
 
     // 检测 CPU 特性
     if (args.verbose) {
-        std.debug.print("CPU features:\n", .{});
-        std.debug.print("  AVX2:  {}\n", .{ggml.CpuFeatures.hasAvx2()});
-        std.debug.print("  AVX:   {}\n", .{ggml.CpuFeatures.hasAvx()});
-        std.debug.print("  NEON:  {}\n", .{ggml.CpuFeatures.hasNeon()});
-        std.debug.print("  Metal: {}\n", .{ggml.CpuFeatures.hasMetal()});
-        std.debug.print("  CUDA:  {}\n", .{ggml.CpuFeatures.hasCuda()});
+        logger.info("CPU features:", .{});
+        logger.info("  AVX2:  {}", .{ggml.CpuFeatures.hasAvx2()});
+        logger.info("  AVX:   {}", .{ggml.CpuFeatures.hasAvx()});
+        logger.info("  NEON:  {}", .{ggml.CpuFeatures.hasNeon()});
+        logger.info("  Metal: {}", .{ggml.CpuFeatures.hasMetal()});
+        logger.info("  CUDA:  {}", .{ggml.CpuFeatures.hasCuda()});
     }
 
     // 确定线程数
     const n_threads = if (args.n_threads > 0) args.n_threads else ggml.recommendedThreads();
-    std.debug.print("Using {d} threads\n", .{n_threads});
+    logger.info("Using {d} threads", .{n_threads});
 
     // 如果没有指定模型路径，显示帮助
     if (args.model_path.len == 0) {
-        std.debug.print("Error: no model specified. Use --model <path> to specify a GGUF model file.\n", .{});
-        std.debug.print("\nTip: You can also run with --help to see all options.\n", .{});
+        logger.err("no model specified. Use --model <path> to specify a GGUF model file.", .{});
+        logger.err("Tip: You can also run with --help to see all options.", .{});
         return;
     }
 
     // 初始化推理引擎
-    std.debug.print("\nLoading model: {s}\n", .{args.model_path});
+    logger.info("Loading model: {s}", .{args.model_path});
 
     var engine = InferenceEngine.init(io, allocator, args.model_path, &args) catch |err| {
-        log.err("Failed to initialize inference engine: {}", .{err});
+        logger.err("Failed to initialize inference engine: {}", .{err});
         return;
     };
     defer engine.deinit();
 
-    std.debug.print("Model loaded successfully.\n", .{});
-    std.debug.print("Prompt: \"{s}\"\n", .{args.prompt});
-    std.debug.print("Max tokens: {d}\n", .{args.max_tokens});
-    std.debug.print("Temperature: {d}\n", .{args.temperature});
-    std.debug.print("Top-K: {d}, Top-P: {d}\n", .{ args.top_k, args.top_p });
+    logger.info("Model loaded successfully.", .{});
+    logger.info("Prompt: \"{s}\"", .{args.prompt});
+    logger.info("Max tokens: {d}", .{args.max_tokens});
+    logger.info("Temperature: {d}", .{args.temperature});
+    logger.info("Top-K: {d}, Top-P: {d}", .{ args.top_k, args.top_p });
 
     // 运行推理
-    std.debug.print("\n--- Generation ---\n", .{});
+    logger.info("--- Generation ---", .{});
     engine.generate(args.prompt, args.max_tokens) catch |err| {
-        log.err("Generation failed: {}", .{err});
+        logger.err("Generation failed: {}", .{err});
         return;
     };
-    std.debug.print("\n--- Done ---\n", .{});
+    logger.info("--- Done ---", .{});
 }
 
 // ============================================================================

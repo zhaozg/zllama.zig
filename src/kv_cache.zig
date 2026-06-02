@@ -14,9 +14,9 @@ const log = std.log.scoped(.kv_cache);
 
 /// 单层的 KV Cache
 pub const LayerCache = struct {
-    k: *ggml.Tensor,  // [max_seq_len, n_kv_head, head_dim]
-    v: *ggml.Tensor,  // [max_seq_len, n_kv_head, head_dim]
-    current_len: u32,  // 当前已使用的长度
+    k: *ggml.Tensor, // [max_seq_len, n_kv_head, head_dim]
+    v: *ggml.Tensor, // [max_seq_len, n_kv_head, head_dim]
+    current_len: u32, // 当前已使用的长度
 };
 
 /// KV Cache 管理器
@@ -69,8 +69,7 @@ pub const KVCache = struct {
             };
         }
 
-        log.info("KV Cache initialized: {d} layers, {d} x {d} x {d} = {d} elements per layer",
-            .{ n_layer, max_seq_len, n_kv_head, head_dim, max_seq_len * n_kv_head * head_dim });
+        log.info("KV Cache initialized: {d} layers, {d} x {d} x {d} = {d} elements per layer", .{ n_layer, max_seq_len, n_kv_head, head_dim, max_seq_len * n_kv_head * head_dim });
 
         return KVCache{
             .layers = layers,
@@ -80,12 +79,10 @@ pub const KVCache = struct {
         };
     }
 
-
     /// 释放 KV Cache
     pub fn deinit(self: *KVCache, allocator: std.mem.Allocator) void {
         allocator.free(self.layers);
     }
-
 
     /// 重置所有层的 Cache
     pub fn reset(self: *KVCache) void {
@@ -101,10 +98,7 @@ pub const KVCache = struct {
         const n_kv_head: i64 = @intCast(self.n_kv_head);
         const head_dim: i64 = @intCast(self.head_dim);
 
-        return ctx.view3d(layer.k, len, n_kv_head, head_dim,
-            @intCast(n_kv_head * head_dim * @sizeOf(f32)),
-            @intCast(head_dim * @sizeOf(f32)),
-            0);
+        return ctx.view3d(layer.k, len, n_kv_head, head_dim, @intCast(n_kv_head * head_dim * @sizeOf(f32)), @intCast(head_dim * @sizeOf(f32)), 0);
     }
 
     /// 获取指定层的 V Cache 视图 [current_len, n_kv_head, head_dim]
@@ -114,10 +108,7 @@ pub const KVCache = struct {
         const n_kv_head: i64 = @intCast(self.n_kv_head);
         const head_dim: i64 = @intCast(self.head_dim);
 
-        return ctx.view3d(layer.v, len, n_kv_head, head_dim,
-            @intCast(n_kv_head * head_dim * @sizeOf(f32)),
-            @intCast(head_dim * @sizeOf(f32)),
-            0);
+        return ctx.view3d(layer.v, len, n_kv_head, head_dim, @intCast(n_kv_head * head_dim * @sizeOf(f32)), @intCast(head_dim * @sizeOf(f32)), 0);
     }
 
     /// 将新的 K, V 写入 Cache
@@ -142,19 +133,11 @@ pub const KVCache = struct {
         const head_dim: i64 = @intCast(self.head_dim);
         const token_size = n_kv_head * head_dim * @sizeOf(f32);
 
-        const k_dst = ctx.view3d(layer.k,
-            @intCast(n_tokens), n_kv_head, head_dim,
-            @intCast(n_kv_head * head_dim * @sizeOf(f32)),
-            @intCast(head_dim * @sizeOf(f32)),
-            @intCast(offset * token_size));
+        const k_dst = ctx.view3d(layer.k, @intCast(n_tokens), n_kv_head, head_dim, @intCast(n_kv_head * head_dim * @sizeOf(f32)), @intCast(head_dim * @sizeOf(f32)), @intCast(offset * token_size));
         const k_cpy = ggml.cpy(ctx, new_k, k_dst);
         graph.buildForwardExpand(k_cpy);
 
-        const v_dst = ctx.view3d(layer.v,
-            @intCast(n_tokens), n_kv_head, head_dim,
-            @intCast(n_kv_head * head_dim * @sizeOf(f32)),
-            @intCast(head_dim * @sizeOf(f32)),
-            @intCast(offset * token_size));
+        const v_dst = ctx.view3d(layer.v, @intCast(n_tokens), n_kv_head, head_dim, @intCast(n_kv_head * head_dim * @sizeOf(f32)), @intCast(head_dim * @sizeOf(f32)), @intCast(offset * token_size));
         const v_cpy = ggml.cpy(ctx, new_v, v_dst);
         graph.buildForwardExpand(v_cpy);
 
