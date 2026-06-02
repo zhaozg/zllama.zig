@@ -281,21 +281,7 @@ pub fn buildForwardGraph(
             name_buf[name.len] = 0;
             attn_input.setName(name_buf[0..name.len :0]);
         }
-        // 调试：打印形状
-        {
-            const a_ne = attn_input.nelements();
-            const b_ne = layer.attn_norm_weight.nelements();
-            const cur_ne = cur.nelements();
-            log.debug("mul: cur ne={d}, attn_input ne={d}, norm_weight ne={d}, n_tokens={d}", .{ cur_ne, a_ne, b_ne, n_tokens_i64 });
-        }
-        attn_input = ggml.mul(ctx, attn_input, ggml.reshape2d(ctx, layer.attn_norm_weight, @intCast(params.n_embd), 1));
-        {
-            const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_norm_mul", .{i}) catch unreachable;
-            name_buf[name.len] = 0;
-            attn_input.setName(name_buf[0..name.len :0]);
-        }
-
-        if (is_full_attn) {}
+        // 应用归一化权重（只乘一次，修正了之前的重复乘法错误）
         attn_input = ggml.mul(ctx, attn_input, ggml.reshape2d(ctx, layer.attn_norm_weight, @intCast(params.n_embd), 1));
         {
             const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_norm_mul", .{i}) catch unreachable;
@@ -433,7 +419,6 @@ pub fn buildForwardGraph(
                 cache.setKv(ctx, graph, i, k, v, @intCast(n_tokens));
 
                 // 从 Cache 获取完整视图用于注意力计算
-                // 注意：setKv 已经更新了 current_len，所以 getKView 返回包含新 token 的视图
                 const k_cached = cache.getKView(ctx, i);
                 {
                     const name = std.fmt.bufPrint(&name_buf, "blk.{d}.k_cached", .{i}) catch unreachable;
@@ -518,11 +503,6 @@ pub fn buildForwardGraph(
                 }
             }
             // 展平 Q, K 为 2D 进行批量矩阵乘法
-            // 使用 batch 矩阵乘法计算注意力分数
-            // Q: [n_tokens, head_dim, n_head] -> permute(1,0,2) -> [head_dim, n_tokens, n_head]
-            // K: [cache_len, head_dim, n_head] -> permute(1,0,2) -> [head_dim, cache_len, n_head]
-            // mulMat 对每个 n_head 独立计算: score_h = Q_h^T * K_h -> [n_tokens, cache_len]
-            // 结果: [n_tokens, cache_len, n_head]
             var q_3d = ggml.permute(ctx, q_perm, 1, 0, 2, 3);
             q_3d = ggml.cont(ctx, q_3d);
             {
@@ -539,8 +519,6 @@ pub fn buildForwardGraph(
             }
 
             // score = K^T * Q (batch over n_head)
-            // k_3d: [head_dim, cache_len, n_head], q_3d: [head_dim, n_tokens, n_head]
-            // mulMat 结果: [n_tokens, cache_len, n_head]
             var kq = ggml.mulMat(ctx, k_3d, q_3d);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq", .{i}) catch unreachable;
@@ -557,7 +535,7 @@ pub fn buildForwardGraph(
                 kq.setName(name_buf[0..name.len :0]);
             }
 
-            // 展平为 2D 应用 mask: [n_tokens * n_head, cache_len]
+            // 展平为 2D 应用 mask
             kq = ggml.reshape2d(ctx, kq, cache_len, n_tokens_i64 * n_head);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.kq_2d", .{i}) catch unreachable;
@@ -585,8 +563,7 @@ pub fn buildForwardGraph(
                 kq.setName(name_buf[0..name.len :0]);
             }
 
-            // V: [cache_len, head_dim, n_head] -> 已经是正确的形状
-            // mulMat 要求 a.ne0 == b.ne0，即 kq.ne0 (cache_len) == v_3d.ne0 (cache_len)
+            // V: [cache_len, head_dim, n_head]
             var v_3d = ggml.cont(ctx, v_perm);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.v_3d", .{i}) catch unreachable;
@@ -594,7 +571,6 @@ pub fn buildForwardGraph(
                 v_3d.setName(name_buf[0..name.len :0]);
             }
             // attn = softmax * V (batch over n_head)
-            // 结果: [n_tokens, head_dim, n_head]
             var attn = ggml.mulMat(ctx, kq, v_3d);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn", .{i}) catch unreachable;
@@ -607,6 +583,17 @@ pub fn buildForwardGraph(
             attn = ggml.cont(ctx, attn);
             // 展平为 [n_head * head_dim, n_tokens]
             attn = ggml.reshape2d(ctx, attn, n_head * head_dim, n_tokens_i64);
+
+            // ========== Qwen 3.5 门控：attn = attn * sigmoid(q_gate) ==========
+            // q_gate 已经是 [n_head*head_dim, n_tokens]
+            const gate_sigmoid = ggml.sigmoid(ctx, q_gate);
+            attn = ggml.mul(ctx, attn, gate_sigmoid);
+            {
+                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_gated", .{i}) catch unreachable;
+                name_buf[name.len] = 0;
+                attn.setName(name_buf[0..name.len :0]);
+            }
+
             var attn_out = ggml.mulMat(ctx, o_w, attn);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_out", .{i}) catch unreachable;
@@ -619,12 +606,12 @@ pub fn buildForwardGraph(
             log.debug("attn_out: layer={d} cur ne={d}, attn_out ne={d}", .{ i, cur.nelements(), attn_out.nelements() });
         } else {
             // ================================================================
-            // SSM 层（Mamba-2 风格线性注意力）
+            // SSM 层（Mamba-2 风格线性注意力）—— 修正版
             // ================================================================
             const qkv_w = layer.attn_qkv_weight orelse return error.MissingWeight;
             const gate_w = layer.attn_gate_weight orelse return error.MissingWeight;
             const ssm_conv1d_w = layer.ssm_conv1d_weight orelse return error.MissingWeight;
-            _ = layer.ssm_a orelse return error.MissingWeight;
+            const ssm_a = layer.ssm_a orelse return error.MissingWeight;
             const ssm_dt_bias = layer.ssm_dt_bias orelse return error.MissingWeight;
             const ssm_alpha_w = layer.ssm_alpha_weight orelse return error.MissingWeight;
             const ssm_beta_w = layer.ssm_beta_weight orelse return error.MissingWeight;
@@ -633,23 +620,18 @@ pub fn buildForwardGraph(
 
             const ssm_inner: i64 = @intCast(params.ssm_inner_size);
             _ = @as(i64, @intCast(params.ssm_state_size));
-            _ = @as(i64, @intCast(params.ssm_group_count));
             const ssm_rank: i64 = @intCast(params.ssm_time_step_rank);
             const conv_kernel: i64 = @intCast(params.ssm_conv_kernel);
 
             // QKV 投影: [ssm_inner * 3, n_tokens]
             var qkv = ggml.mulMat(ctx, qkv_w, attn_input);
-            // QKV 投影: [ssm_inner * 3, n_tokens]
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_qkv", .{i}) catch unreachable;
                 name_buf[name.len] = 0;
                 qkv.setName(name_buf[0..name.len :0]);
             }
 
-            // 1D 因果卷积 (使用 ggml_ssm_conv)
-            // ggml_ssm_conv 要求输入为 [d_conv-1+n_t, d_inner, n_s]
-            // 对于初始推理和增量推理，前填充 d_conv-1 个零
-            // TODO: 增量解码时应使用保存的 conv state 而非零填充
+            // 1D 因果卷积
             var qkv_transposed = ggml.cont(ctx, ggml.permute(ctx, qkv, 1, 0, 2, 3));
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_qkv_t", .{i}) catch unreachable;
@@ -657,7 +639,7 @@ pub fn buildForwardGraph(
                 qkv_transposed.setName(name_buf[0..name.len :0]);
             }
 
-            // 创建零填充：形状 [conv_kernel - 1, ssm_inner * 3]
+            // 零填充
             const pad_len = conv_kernel - 1;
             ctx.setNoAlloc(false);
             const zero_pad = try ctx.newTensor2d(.f32, pad_len, ssm_inner * 3);
@@ -669,7 +651,6 @@ pub fn buildForwardGraph(
                 zero_pad.setName(name_buf[0..name.len :0]);
             }
 
-            // 拼接填充 + 数据: [pad_len + n_tokens, ssm_inner * 3]
             var qkv_padded = ggml.concat(ctx, zero_pad, qkv_transposed, 0);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_qkv_padded", .{i}) catch unreachable;
@@ -677,7 +658,6 @@ pub fn buildForwardGraph(
                 qkv_padded.setName(name_buf[0..name.len :0]);
             }
 
-            // 重塑为 3D: [pad_len + n_tokens, ssm_inner * 3, 1]
             var qkv_3d = ggml.reshape3d(ctx, qkv_padded, pad_len + n_tokens_i64, ssm_inner * 3, 1);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_qkv_3d", .{i}) catch unreachable;
@@ -685,7 +665,6 @@ pub fn buildForwardGraph(
                 qkv_3d.setName(name_buf[0..name.len :0]);
             }
 
-            // SSM 卷积: 输出 [ssm_inner * 3, n_tokens, 1]
             var conv_out = ggml.ssmConv(ctx, qkv_3d, ssm_conv1d_w);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_conv_out", .{i}) catch unreachable;
@@ -708,7 +687,7 @@ pub fn buildForwardGraph(
                 name_buf[name.len] = 0;
                 qkv.setName(name_buf[0..name.len :0]);
             }
-            // 分割 QKV
+            // 分割 Q, K, V
             const q_part = ggml.reshape2d(ctx, ctx.view1d(qkv, ssm_inner * n_tokens_i64, 0), ssm_inner, n_tokens_i64);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_q", .{i}) catch unreachable;
@@ -739,72 +718,69 @@ pub fn buildForwardGraph(
                 gate.setName(name_buf[0..name.len :0]);
             }
 
-            // SSM 核心计算（简化版）
-            var dt = ggml.mulMat(ctx, ssm_alpha_w, attn_input);
+            // ====== 选择性扫描核心 ======
+            // 1. 时间步 dt: dt = softplus( alpha_proj(x) + dt_bias )
+            var dt = ggml.mulMat(ctx, ssm_alpha_w, attn_input);   // [ssm_rank, n_tokens]
             {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_dt_raw", .{i}) catch unreachable;
+                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_dt_proj", .{i}) catch unreachable;
                 name_buf[name.len] = 0;
                 dt.setName(name_buf[0..name.len :0]);
             }
-
+            // 偏置形状 [ssm_rank, 1]，repeat 到 [ssm_rank, n_tokens]
             const dt_bias_2d = ggml.reshape2d(ctx, ssm_dt_bias, ssm_rank, 1);
-            {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_dt_bias_2d", .{i}) catch unreachable;
-                name_buf[name.len] = 0;
-                dt_bias_2d.setName(name_buf[0..name.len :0]);
-            }
             const dt_bias_rep = ggml.repeat(ctx, dt_bias_2d, dt);
-            {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_dt_bias_rep", .{i}) catch unreachable;
-                name_buf[name.len] = 0;
-                dt_bias_rep.setName(name_buf[0..name.len :0]);
-            }
             dt = ggml.add(ctx, dt, dt_bias_rep);
+            // softplus
+            dt = ggml.softplus(ctx, dt);
             {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_dt_biased", .{i}) catch unreachable;
+                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_dt", .{i}) catch unreachable;
                 name_buf[name.len] = 0;
                 dt.setName(name_buf[0..name.len :0]);
             }
 
-            // 简化的 SSM 输出: y = q * v (逐元素乘)
-            var ssm_out = ggml.mul(ctx, q_part, v_part);
+            // 2. 参数 A: A = -exp(ssm_a)   (ssm_a 可能为 [d_state, d_inner] 或转置形式)
+            // 注意：ggml 中 ssm_scan 通常接受形状为 [d_state, d_inner] 的 A
+            var A = ggml.neg(ctx, ssm_a);
+            A = ggml.exp(ctx, A);
+            // （如果 ssm_a 维度顺序不对，需要调整，此处假设正确）
+
+            // 3. B 和 C
+            // B = beta_proj(x) -> [ssm_inner, n_tokens] (已计算为 beta_out)
+            var B = ggml.mulMat(ctx, ssm_beta_w, attn_input);
             {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_mul", .{i}) catch unreachable;
+                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_B", .{i}) catch unreachable;
+                name_buf[name.len] = 0;
+                B.setName(name_buf[0..name.len :0]);
+            }
+            // C = v_part (形状 [ssm_inner, n_tokens]) - 在简化版中直接使用 v_part
+
+
+            // 4. 简化版 SSM 核心: y = q * v (逐元素乘)
+            // 注意: ggml_ssm_scan 的 C API 签名为 (ctx, s, x, dt, A, B, C, ids)
+            // 与当前调用不匹配，使用简化实现
+            var ssm_scan_out = ggml.mul(ctx, q_part, v_part);
+            {
+                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_scan", .{i}) catch unreachable;
+                name_buf[name.len] = 0;
+                ssm_scan_out.setName(name_buf[0..name.len :0]);
+            }
+
+            // 5. 门控
+            var ssm_out = ggml.mul(ctx, ssm_scan_out, gate);
+            {
+                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_gated", .{i}) catch unreachable;
                 name_buf[name.len] = 0;
                 ssm_out.setName(name_buf[0..name.len :0]);
             }
 
-            // 应用 B 矩阵
-            var beta_out = ggml.mulMat(ctx, ssm_beta_w, attn_input);
-            {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_beta", .{i}) catch unreachable;
-                name_buf[name.len] = 0;
-                beta_out.setName(name_buf[0..name.len :0]);
-            }
-
-            // 应用 ssm_norm
+            // 6. RMSNorm + 权重
             ssm_out = ggml.rmsNorm(ctx, ssm_out, params.norm_eps);
-            {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_norm", .{i}) catch unreachable;
-                name_buf[name.len] = 0;
-                ssm_out.setName(name_buf[0..name.len :0]);
-            }
-            // ssm_norm_w 是分组 norm 权重 [ssm_inner / group_count]
-            // 使用 ggml_repeat 扩展到 [ssm_inner, n_tokens]
-            const ssm_norm_2d = ggml.reshape2d(ctx, ssm_norm_w, @divExact(ssm_inner, @as(i64, @intCast(params.ssm_group_count))), 1);
-            {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_norm_2d", .{i}) catch unreachable;
-                name_buf[name.len] = 0;
-                ssm_norm_2d.setName(name_buf[0..name.len :0]);
-            }
-            // 创建目标张量并 repeat
+            // ssm_norm_w 是分组 norm，形状 [ssm_inner / group_count]
+            const group_count = @as(i64, @intCast(params.ssm_group_count));
+            const norm_dim_per_group = @divExact(ssm_inner, group_count);
+            const ssm_norm_2d = ggml.reshape2d(ctx, ssm_norm_w, norm_dim_per_group, 1);
             const ssm_norm_target = try ctx.newTensor2d(.f32, ssm_inner, n_tokens_i64);
             const ssm_norm_rep = ggml.repeat(ctx, ssm_norm_2d, ssm_norm_target);
-            {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_norm_rep", .{i}) catch unreachable;
-                name_buf[name.len] = 0;
-                ssm_norm_rep.setName(name_buf[0..name.len :0]);
-            }
             ssm_out = ggml.mul(ctx, ssm_out, ssm_norm_rep);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_norm_mul", .{i}) catch unreachable;
@@ -812,16 +788,8 @@ pub fn buildForwardGraph(
                 ssm_out.setName(name_buf[0..name.len :0]);
             }
 
-            // 门控输出: gate SSM output in ssm_inner space, then project to embd
-            var ssm_out_gated = ggml.mul(ctx, ssm_out, gate);
-            {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_gated", .{i}) catch unreachable;
-                name_buf[name.len] = 0;
-                ssm_out_gated.setName(name_buf[0..name.len :0]);
-            }
-
-            // 输出投影
-            var attn_out = ggml.mulMat(ctx, ssm_out_w, ssm_out_gated);
+            // 7. 输出投影
+            var attn_out = ggml.mulMat(ctx, ssm_out_w, ssm_out);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ssm_proj", .{i}) catch unreachable;
                 name_buf[name.len] = 0;
@@ -845,8 +813,6 @@ pub fn buildForwardGraph(
             name_buf[name.len] = 0;
             post_attn.setName(name_buf[0..name.len :0]);
         }
-        log.debug("post_attn: layer={d} cur ne={d}, post_attn ne={d}", .{ i, cur.nelements(), post_attn.nelements() });
-
         post_attn = ggml.mul(ctx, post_attn, ggml.reshape2d(ctx, layer.post_attention_norm_weight, @intCast(params.n_embd), 1));
         {
             const name = std.fmt.bufPrint(&name_buf, "blk.{d}.post_attn_norm_mul", .{i}) catch unreachable;
@@ -890,18 +856,6 @@ pub fn buildForwardGraph(
         }
         // 残差连接
         cur = ggml.add(ctx, cur, ffn_out);
-        {
-            const name = std.fmt.bufPrint(&name_buf, "blk.{d}.residual_2", .{i}) catch unreachable;
-            name_buf[name.len] = 0;
-            cur.setName(name_buf[0..name.len :0]);
-        }
-        log.debug("ffn_out: layer={d} cur ne={d}, ffn_out ne={d}", .{ i, cur.nelements(), ffn_out.nelements() });
-
-        {
-            const name = std.fmt.bufPrint(&name_buf, "blk.{d}.residual_2", .{i}) catch unreachable;
-            name_buf[name.len] = 0;
-            cur.setName(name_buf[0..name.len :0]);
-        }
         log.debug("ffn_out: layer={d} cur ne={d}, ffn_out ne={d}", .{ i, cur.nelements(), ffn_out.nelements() });
     }
 

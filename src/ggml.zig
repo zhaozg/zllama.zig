@@ -701,6 +701,18 @@ pub fn add(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
     return @ptrCast(c.ggml_add(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b))));
 }
 
+
+/// 取负
+pub fn neg(ctx: *Context, a: *Tensor) *Tensor {
+    return @ptrCast(c.ggml_neg(@ptrCast(ctx), @ptrCast(@alignCast(a))));
+}
+
+/// 指数运算
+pub fn exp(ctx: *Context, a: *Tensor) *Tensor {
+    return @ptrCast(c.ggml_exp(@ptrCast(ctx), @ptrCast(@alignCast(a))));
+}
+
+
 /// 张量拷贝
 pub fn cpy(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
     return @ptrCast(c.ggml_cpy(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b))));
@@ -797,6 +809,18 @@ pub fn silu(ctx: *Context, a: *Tensor) *Tensor {
     return @ptrCast(c.ggml_silu(@ptrCast(ctx), @ptrCast(@alignCast(a))));
 }
 
+
+/// Sigmoid 激活函数
+pub fn sigmoid(ctx: *Context, a: *Tensor) *Tensor {
+    return @ptrCast(c.ggml_sigmoid(@ptrCast(ctx), @ptrCast(@alignCast(a))));
+}
+
+
+/// Softplus 激活函数
+pub fn softplus(ctx: *Context, a: *Tensor) *Tensor {
+    return @ptrCast(c.ggml_softplus(@ptrCast(ctx), @ptrCast(@alignCast(a))));
+}
+
 /// 转置张量
 pub fn transpose(ctx: *Context, a: *Tensor) *Tensor {
     return @ptrCast(c.ggml_transpose(@ptrCast(ctx), @ptrCast(@alignCast(a))));
@@ -818,6 +842,12 @@ pub fn conv1d(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, p0: i32, d0: i32) 
 /// 返回: [d_inner, n_t, n_s] — 3D 输出
 pub fn ssmConv(ctx: *Context, sx: *Tensor, kernel: *Tensor) *Tensor {
     return @ptrCast(c.ggml_ssm_conv(@ptrCast(ctx), @ptrCast(@alignCast(sx)), @ptrCast(@alignCast(kernel))));
+}
+
+
+/// SSM Scan 操作
+pub fn ssmScan(ctx: *Context, sx: *Tensor, B: *Tensor, C: *Tensor, dt: *Tensor, A: *Tensor, state: *Tensor) *Tensor {
+    return @ptrCast(c.ggml_ssm_scan(@ptrCast(ctx), @ptrCast(@alignCast(sx)), @ptrCast(@alignCast(B)), @ptrCast(@alignCast(C)), @ptrCast(@alignCast(dt)), @ptrCast(@alignCast(A)), @ptrCast(@alignCast(state))));
 }
 
 /// 沿指定轴拼接两个张量
