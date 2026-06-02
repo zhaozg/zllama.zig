@@ -27,22 +27,40 @@
    - 分配类操作（如 `ggml_new_tensor`）必须返回 `!*T` 错误联合，纯计算操作返回 `*T`。
    - 使用 `opaque {}` 类型包装不透明指针（`ggml_context`、`ggml_tensor` 等）。
 
-3. **Qwen 3.5 混合架构实现要求**
+3. **Zig 0.16.0 I/O 接口化约束**
+   - **所有**阻塞 I/O 操作必须通过 Io 实例完成，函数签名应显式传递 Io 参数（类似 Allocator 模式）。
+   - 使用 **Juicy Main** 获取预初始化的 Io 实例：`pub fn main(init: std.process.Init) !void { const io = init.io; ... }`。
+   - 不再使用 `std.fs.cwd()` 等旧 API，改用 `std.Io.Dir.cwd().openFile(io, ...)` 模式。
+   - 如需自定义 Io 实现，使用 `std.Io.Threaded`（稳定、功能完整），`std.Io.Evented` 仍处于实验阶段。
+
+4. **Qwen 3.5 混合架构实现要求**
    - 必须从 GGUF 元数据读取 **`layer_type` 数组**，区分 `full_attention` 与 `linear_attention` 层。
    - 线性注意力层需实现 **1D 因果卷积**（调用 `ggml_conv_1d`）。
    - 正确处理 **`attn_output_gate`**（门控机制）：在残差连接前乘以 gate 张量。
    - 支持 **GQA**（`n_kv_heads` 可能不等于 `n_heads`）。
 
-4. **GGUF v3 兼容**
+5. **时间测量约束（Zig 0.16.0 破坏性变更）**
+   - **`std.time.Timer` 已被移除**，`std.time.nanoTimestamp()` 不再是推荐方式。
+   - 新 API：使用 `std.Io.Clock.now(.awake, io)` 获取时间戳。
+     ```zig
+     const start = std.Io.Clock.now(.awake, io);
+     // ... computation ...
+     const end = std.Io.Clock.now(.awake, io);
+     const elapsed_ns = start.durationTo(end).toNanoseconds();
+     ```
+   - 时钟类型：`.awake`（单调时间，适用于性能测量）、`.real`（挂钟时间，受 NTP 调整影响）、`.cpu_process` / `.cpu_thread`（CPU 耗时）。
+   - `duration` 方法：`.toNanoseconds()`、`.toMilliseconds()`、`.toSeconds()`、`.toMinutes()` 等。
+
+6. **GGUF v3 兼容**
    - v3 使用 64 位字段（`tensor_count`、`metadata_kv_count`），无填充，**张量数据 32 字节对齐**。
    - 解析器需根据 `version` 字段动态选择读取路径，并对齐分配缓冲区。
 
-5. **内存与性能**
+7. **内存与性能**
    - 使用 **`mmap`**（通过 ggml 后端文件加载）避免模型数据全量驻留物理内存。
    - KV Cache 预分配固定大小张量（`[max_seq_len, n_kv_heads, head_dim]`），增量写入通过 `ggml_view_*` 切片，**禁止每 token 复制历史缓存**。
    - 默认启用 `ggml_graph_plan` + 线程池（物理核心数的 2/3 ~ 3/4）。
 
-6. **测试与可调试性**
+8. **测试与可调试性**
    - 提供与 `llama.cpp` 或 HuggingFace 输出对比的测试用例（短 prompt）。
    - 调试模式下可打印张量形状及部分值，Release 模式下完全移除。
 
@@ -56,7 +74,7 @@ qwen-engine/
 ├── TECHNICAL_CHALLENGES.md      # 技术难重点分析
 ├── build.zig                    # Zig 构建脚本
 ├── src/
-│   ├── main.zig                 # 入口、CLI、I/O 初始化
+│   ├── main.zig                 # 入口（Juicy Main 签名：pub fn main(init: std.process.Init) !void）
 │   ├── ggml.zig                 # C 绑定 + 安全封装
 │   ├── gguf.zig                 # GGUF 解析器（v2/v3）
 │   ├── model.zig                # 模型加载、层构建
@@ -104,10 +122,4 @@ qwen-engine/
 
 ---
 
-zig 0.16.0 的版本较新，你不一定掌握最新的知识。所以每次修改保持微调，逐步完善功能，避免一次性大改动导致错误难以定位。
-- 使用 std.Io.Timestamp 获取时间。
-- 使用 ArrayList(u8).init 进行ArrayList
-
 **AI 助手应始终以“安全、可维护、高性能”为原则，优先遵循本文档约束。如有歧义，请在对话中提问澄清。**
-
----

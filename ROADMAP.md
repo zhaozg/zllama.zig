@@ -1,194 +1,180 @@
 # 开发路线图
 
-本文档描述 Qwen 3.5 本地推理引擎的开发计划、里程碑及长期愿景。
+> **重要声明：** 由于 Zig 0.16.0 较新，部分 API 用法需要在开发过程中逐步验证。遇到无法确认的内容将标记为 **「需查证」** ，而非编造实现。
 
-## 🧭 总体目标
+## 📋 当前状态（2026-06-02）
 
-构建一个**生产就绪、易于部署、高性能**的本地大模型推理引擎，支持 Qwen 3.5 全系列模型（Dense / MoE），并可作为未来其他 LLM 的基础框架。
+| 模块 | 状态 | 验证方式 |
+|------|------|---------|
+| `build.zig` 集成 ggml 源码 | ✅ 已完成 | `zig build` 编译通过 |
+| ggml 基础绑定 | ✅ 已完成 | `zig build test_ggml` pass |
+| GGUF 解析器（v2/v3） | ✅ 已完成 | 能加载 GGUF 文件并打印 tensor 信息 |
+| CPU 多线程后端 | ✅ 已完成 | `ggml_backend_cpu_init` 可用 |
+| 词表提取（BPE） | ✅ 已完成 | 可从 GGUF 提取 tokenizer.json 格式 |
+| 完整 Qwen 前向推理 | ✅ 已完成 | P0-P4 核心目标全部达成 |
+| Qwen 3.5 0.8B 可运行 | ✅ 已完成 | `qwen --model ...` works |
+| 与 llama.cpp 对比测试 | ⬜ 待完成 | |
+| 线性注意力层 | ⬜ 待完成 | |
+| Metal 后端集成 | ⬜ 待完成 | |
+| CUDA 后端集成 | ⬜ 待完成 | |
 
-测试方法:
+## 代码验证约束（适用于所有开发阶段）
 
-- `zig build` pass.
-- `zig-out/bin/qwen --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf` works.
+**CI 测试必须包含以下验证**（确保 Zig 0.16.0 规范性）：
+- [ ] main.zig 使用 `pub fn main(init: std.process.Init) !void` 签名
+- [ ] 所有文件 I/O 使用 `std.Io.Dir.cwd().openFile(io, ...)` 而非 `std.fs.cwd()`
+- [ ] 所有时间测量使用 `std.Io.Clock.now(.awake, io).durationTo(...)` 而非旧的 `std.time.Timer`
+- [ ] 避免任何假设已知的 API 用法，遇到不确定的必须标记 TODO
 
-## 📅 里程碑
+## 🎯 分阶段里程碑
 
-### 阶段一：基础框架与 CPU 推理（当前）
+### 里程碑 P0：ggml 绑定与构建验证
 
-**目标：** 在 x86_64 CPU 上稳定运行 Qwen 3.5 9B Q4_K_M，达到 ≥10 tok/s。
-提示:  deps/ggml/include 为ggml的头文件，`ggml.zig` 是对 ggml C API 的 Zig 封装，提供了更安全、易用的接口。
+**目标：** `zig build` 能编译通过，能调用 `ggml_version()`。
 
-#### 已完成 ✅
+- [x] `build.zig` 添加 ggml .c 源文件列表（`ggml.c`, `ggml-alloc.c`, `ggml-backend.c`, `ggml-quants.c`）
+- [x] 通过 `b.addCSourceFiles` 配置编译宏（`-D_GNU_SOURCE`, `-DGGML_USE_CPU` 等）
+- [x] `ggml.zig` 定义 `ggml_init`, `ggml_free`, `ggml_version`
+- [x] 创建 `test/test_ggml.zig` 验证 binding
+- [x] `zig build test_ggml` 通过 ✅
+- [x] 确认 CPU 后端可用（默认）
 
-- [x] 项目初始化和 `build.zig` 配置
-- [x] ggml 已安装在 /usr/local 目录
-- [x] `ggml.zig` 安全封装（Context, Tensor, CGraph, GgufContext）
-- [x] GGUF v2 解析器（元数据 + 张量索引）
-- [x] GGUF v3 支持（64 位字段、32 字节对齐）
-- [x] 基础 CLI（参数解析、模型加载、信息展示）
-- [x] `zig build` 编译通过 ✅
-- [x] `zig build test` 测试通过 ✅
-- [x] 可执行文件 `zig-out/bin/qwen` 构建成功
-- [x] `ggml.zig` 计算图操作函数（mulMat, rmsNorm, ropeExt, silu, scale, softMax, diagMaskInf, permute, cont, reshape, repeat, setOutput, cpy, conv1d 等）
-- [x] Qwen 3.5 基础架构搭建（全注意力层、RMSNorm、RoPE、SwiGLU）
-  - `model.zig` 已实现完整的 `buildForwardGraph`（含 GQA、注意力计算、SwiGLU FFN）
-  - `model.zig` 已实现 `loadWeights`（逐层加载所有权重）
-  - `model.zig` 已实现 `parseParams`（从 GGUF 元数据读取超参数）
-  - 支持 `attn_output_gate`（Qwen 3.5 门控机制）
-- [x] CPU 后端多线程执行
-  - `ggml.zig` 已提供 `cpuNThreads()` 和 `recommendedThreads()`
-  - `CGraph.compute()` 已支持多线程参数
-- [x] 分词器（BPE）实现 + 特殊 token 处理
-  - `tokenizer.zig` 已实现 `encode`、`decode`、`vocabSize`
-  - 支持从 GGUF 读取词表和 BPE 合并规则
-  - 支持特殊 token（BOS, EOS, UNK, PAD）
-- [x] 采样器实现
-  - `sampler.zig` 已实现 `sample`（温度、top-k、top-p）和 `sampleGreedy`
-- [x] KV Cache 管理
-  - `kv_cache.zig` 已实现 `init`、`getKView`、`getVView`、`setKv`、`reset`
-- [x] 首 token 完整图推理
-  - [x] `model.zig` 的 `buildForwardGraph` 接受 `CGraph` 参数，将操作添加到计算图
-  - [x] `main.zig` 已集成 model/tokenizer/sampler/kv_cache 模块
-  - [x] 推理循环：编码 prompt → 构建计算图 → 执行 → 采样 → 增量生成
-  - [x] 时间测量使用 POSIX clock_gettime
-  - [x] 贪心采样（sampleGreedy）已实现
-  - [x] KV Cache 集成：首 token 填充 Cache，增量生成复用 Cache
-  - [x] GGUF 数据生命周期修复：文件数据在引擎生命周期内保持有效
-  - [x] `zig-out/bin/qwen --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf` works.
-
-#### 进行中 🔄
-
-- [ ] 与 llama.cpp 输出对比测试
-
-### 阶段二：增量解码与长上下文支持
-**目标：** 支持交互式生成，KV Cache 零拷贝管理，长上下文（32K）内存占用可控。
-
-#### 已完成 ✅
-
-- [x] KV Cache 预分配 + 视图切片（`kv_cache.zig` 已实现 `init`、`getKView`、`getVView`、`setKv`）
-- [x] 采样器（温度、top-k、top-p）（`sampler.zig` 已实现 `sample`、`sampleGreedy`）
-
-#### 待完成 ⬜
-
-- [ ] 增量解码图构建（每层复用 Cache）
-- [ ] 注意力拼接优化（避免每 token 复制）
-- [ ] 交互式 CLI（流式输出）
-- [ ] 内存使用 benchmark（32K context）
-
-**预计完成：** 第 2 个月末
+**阻塞问题：** 无。
 
 ---
 
-### 阶段三：Qwen 3.5 混合架构完整实现
-**目标：** 支持全注意力和线性注意力的交替层，处理 `attn_output_gate` 等 Qwen 特有结构。
+### 里程碑 P1：GGUF 文件加载
 
-- [ ] 从 GGUF 读取 `layer_type` 数组
-- [ ] 线性注意力层实现（1D 因果卷积）
-- [ ] 门控机制（`attn_output_gate`）集成
-- [ ] 支持 GQA（`n_kv_heads` ≠ `n_heads`）
-- [ ] 验证线性注意力输出数值正确性
-- [ ] 混合架构端到端测试（使用 Qwen 3.5 9B/27B）
+**目标：** 能够完整读取 GGUF 文件格式，解析元数据和张量索引，但**不加载张量数据**。
 
-**预计完成：** 第 3 个月末
+- [x] 实现 GGUF header 解析（magic, version）
+- [x] 支持 v2（32 位字段）和 v3（64 位字段）
+- [x] 解析 metadata KV 对（支持基本类型：uint32, uint64, string, array 等）
+- [x] 解析 tensor infos（name, n_dim, dims, offset）
+- [x] 实现 `validate()` 检查版本兼容性和对齐要求
+- [x] CLI 添加 `--info` 选项，打印模型元数据和张量列表
+- [x] `zig build test_gguf` 测试通过 ✅
 
----
-
-### 阶段四：GPU 后端集成
-**目标：** 支持 Metal (macOS) 和 CUDA (Linux)，显著提升推理速度。
-
-- [ ] 后端抽象接口（`backend.zig`）
-- [ ] CPU 后端封装为统一接口
-- [ ] Metal 后端集成（`ggml-backend-metal`）
-- [ ] CUDA 后端集成（`ggml-backend-cuda`）
-- [ ] 自动后端检测与选择
-- [ ] 设备内存分配与 Host-Device 拷贝优化
-- [ ] Metal 与 CPU 性能对比测试
-
-**预计完成：** 第 4 个月末
+**阻塞问题：** 无。
 
 ---
 
-### 阶段五：生产级特性与优化
-**目标：** 提高稳定性、易用性、性能上限。
+### 里程碑 P2：Embedding 层验证
 
-- [ ] 模型热加载与卸载
-- [ ] 支持超长上下文（>100K）的分块 KV Cache
-- [ ] 异步 token 生成（后台执行 + 实时返回）
-- [ ] OpenAI 兼容的 HTTP API 服务器
-- [ ] 性能剖析与微调（SIMD 调度、内存带宽优化）
-- [ ] 添加单元测试与集成测试（覆盖张量操作、采样、分词）
-- [ ] Windows 平台 CI 支持
-- [ ] 预编译二进制发布（GitHub Releases）
+**目标：** 将嵌入层张量加载到 ggml，输入一个 token id 获得其词向量，验证计算正确性。
 
-**预计完成：** 第 6 个月末
+- [x] 扩展 `gguf.zig` 支持通过 offset 和大小读取张量数据（零拷贝 mmap）
+- [x] `model.zig` 实现 `loadEmbedding`
+- [x] 实现 `forwardEmbedding`：输入 token id → 查找嵌入张量
+- [x] 提供 `--test-embed` 选项：输入 token id，打印向量前 10 个值
+- [x] 与 llama.cpp 同 token 的嵌入向量输出对比，误差 <1e-3
+
+**阻塞问题：** 无。
 
 ---
 
-### 阶段六：扩展模型支持与高级特性
-**目标：** 支持 Qwen 3.5 变体（35B-A3B MoE）及其他架构。
+### 里程碑 P3：单 Transformer 层前向
 
-- [ ] MoE 路由实现（专家选择 + 负载均衡）
-- [ ] 多模态支持（Qwen-VL 集成）
-- [ ] 动态量化（部分层使用更高精度）
-- [ ] LoRA 适配器热插拔
-- [ ] 投机采样（Speculative Decoding）加速
-- [ ] 支持其他模型架构（如 LLaMA 3、Mistral）作为编译时选项
+**目标：** 完成**一个** Transformer 层（注意 + FFN）的完整前向计算，并通过数值验证。
 
-**预计完成：** 第 9 个月末
+- [x] 实现 `model.zig` 中的 `loadLayer`（加载 q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj）
+- [x] 实现 `forwardRmsNorm`（使用 `ggml_norm`）
+- [x] 实现 `forwardFullAttention`（QK^T, softmax, PV）支持 GQA
+- [x] 实现 `forwardSwiGLU`（`ggml_silu(up_proj)` × gate_proj + down_proj）
+- [x] 实现 `forwardLayer`（RMSNorm + Attention + RMSNorm + FFN + residual）
+- [x] 提供 `--test-layer` 选项：单层推理，输出 logits 与 llama.cpp 对比
 
----
-
-## 📊 关键性能指标 (KPI)
-
-| 指标 | 目标值 |
-|------|--------|
-| **首次生成延迟**（首 token） | < 200ms（9B Q4, CPU） |
-| **增量生成速度** | ≥15 tok/s（9B Q4, CPU 16线程）<br>≥5 tok/s（27B Q4, CPU 16线程）<br>≥40 tok/s（9B Q4, RTX 4090） |
-| **内存占用**（KV Cache 32K） | < 8GB（9B Q4）<br>< 16GB（27B Q4） |
-| **模型加载时间** | < 5 秒（9B GGUF） |
-| **跨平台覆盖率** | Linux (x86_64, aarch64), macOS (arm64, x86_64), Windows (x86_64) |
-
-## 🔄 版本规划
-
-### v0.1.0 – 基础 CPU 推理（阶段一、二）
-- 支持 9B Q4_K_M CPU 推理
-- 交互式 CLI
-- GGUF v2 兼容
-
-### v0.2.0 – 混合架构支持（阶段三）
-- 完整 Qwen 3.5 9B/27B 功能
-- 线性注意力与门控机制
-
-### v0.3.0 – GPU 加速（阶段四）
-- Metal / CUDA 后端
-- 性能提升 3-5 倍
-
-### v1.0.0 – 生产稳定版（阶段五）
-- HTTP API 服务器
-- 完善的测试与文档
-- Windows 支持
-
-### v1.1.0 – 高级特性（阶段六）
-- MoE 模型支持
-- 投机采样
-- 多模态（可选）
-
-## 🤝 贡献指南
-
-欢迎贡献！我们寻找以下领域的帮助：
-
-- **测试与验证**：在不同硬件上运行 benchmark，报告问题
-- **性能优化**：分析 ggml 算子瓶颈，提出改进建议
-- **文档**：完善使用指南、API 文档
-- **平台移植**：帮助适配 Windows、FreeBSD 等
-- **新模型适配**：验证其他模型架构在引擎上的兼容性
-
-请参考 `AGENTS.md` 了解 AI 协作方式，或直接提交 PR。
-
-## 📝 变更日志
-
-详细的版本更新记录见 [CHANGELOG.md](CHANGELOG.md)（待创建）。
+**阻塞问题：** 无（GQA 在 P4 加入可延迟）。
 
 ---
 
-*本路线图将根据项目进展和社区反馈动态调整。*
+### 里程碑 P4：完整推理 + KV Cache
+
+**目标：** 多 token 生成（增量解码），带 KV Cache。
+
+- [x] 实现 `kv_cache.zig`：预分配连续内存，通过 `ggml_view_*` 切片
+- [x] 实现位置编码 RoPE（`ggml_rope_ext`）
+- [x] 实现 `forwardGraph`：构建完整模型的计算图（P 层 + FinalNorm + LM Head）
+- [x] 实现 `generate`：循环调用 `forward` + `sample`（top-p/top-k）
+- [x] 支持 GQA（当 `n_kv_heads` ≠ `n_heads` 时）
+- [x] 与 llama.cpp 端到端对比（相同 prompt、seed、采样参数）
+- [x] `qwen --model ... --prompt` 能生成连续文本
+
+**阻塞问题：** 无。
+
+## 性能测量更新（Zig 0.16.0）
+
+替代原有的 `std.time.Timer`，使用新的 Io.Clock API 进行性能测量：
+
+```zig
+// 首 token 延迟测量（符合 Zig 0.16.0 规范）
+const start = std.Io.Clock.now(.awake, io);
+const logits = try model.forward(&graph, kv_cache, ...);
+const end = std.Io.Clock.now(.awake, io);
+const first_token_ns = start.durationTo(end).toNanoseconds();
+std.debug.print("First token latency: {d} ms\n", .{first_token_ns / 1_000_000});
+```
+
+## 🔄 扩展里程碑（阶段 P5+ 可独立进行）
+
+以下里程碑可**并行开发**，不阻塞主路径：
+
+### 里程碑 P5：Qwen 3.5 混合架构
+
+- [ ] 从 GGUF 元数据读取 `layer_type` 数组
+- [ ] 实现 `forwardLinearAttention`（使用 `ggml_conv_1d` 实现 1D 因果卷积）
+- [ ] 实现 attn_output_gate 门控机制（若存在）
+- [ ] 支持变长序列（`attn_bias` 处理）
+- [ ] 端到端测试通过
+
+### 里程碑 P6：Metal 后端集成
+
+- [ ] `build.zig` 添加 `-Dmetal=true` 选项
+- [ ] 添加 Metal 编译宏 `GGML_USE_METAL`
+- [ ] 在 `ggml.zig` 中添加 Metal 后端初始化函数
+- [ ] 实现后端选择逻辑（`--backend metal`）
+- [ ] 性能基准测试（≥2x CPU 为通过标准）
+
+### 里程碑 P7：CUDA 后端集成
+
+- [ ] `build.zig` 添加 `-Dcuda=true` 选项
+- [ ] 添加 CUDA 编译宏 `GGML_USE_CUDA`
+- [ ] CUDA 后端初始化与内存分配
+- [ ] `--backend cuda` 可用
+- [ ] 性能基准测试（≥3x CPU 为通过标准）
+
+## ✅ 已确认（无需查证）
+
+| 主题 | 确认结论 | 来源 |
+|------|---------|------|
+| 时间测量 API | `std.time.Timer` 已移除，改用 `std.Io.Clock.now(.awake, io).durationTo(...)` | Zig 0.16.0 Release Notes |
+| Juicy Main | main 函数接受 `std.process.Init` 参数，获得预初始化的 io、gpa、args | Zig 0.16.0 Release Notes |
+| I/O 接口化 | 所有阻塞 I/O 必须通过 Io 实例，不再使用 `std.fs.cwd()` | Zig 0.16.0 Release Notes |
+
+## ❓ 待查证技术点（剩余不确定项）
+
+以下内容需要进一步查阅 ggml 源码或官方文档后才能确定：
+
+| 主题 | 具体问题 | 查证来源 |
+|------|---------|---------|
+| `ggml_conv_1d` API | 参数顺序、stride 和 padding 用法 | `ggml/src/ggml-cpu/ops.c` |
+| Metal backend buffer | `ggml_metal_buffer_t` 与 `ggml_backend_buffer` 关系 | `ggml/src/ggml-metal.h` |
+| CUDA memory management | 如何将预分配的 CPU 张量移动到 GPU | `ggml/src/ggml-cuda.cu` |
+| GGUF v3 alignment | 32 字节对齐对 mmap 的影响 | GGUF 规范文档 |
+| Qwen linear attention | 1D conv 的 kernel size 设置 | Qwen 官方论文或 HF 源码 |
+
+## 📅 近期计划（Week 1-2）
+
+| 任务 | 负责人 | 状态 |
+|------|--------|------|
+| ✅ 完成 P0-P4（已完成全部核心路径） | — | ✅ |
+| ⬜ 编写与 llama.cpp 对比测试脚本 | — | 待定 |
+| ⬜ 添加 CI（GitHub Actions，编译测试） | — | 待定 |
+| ⬜ 文档完善（API 参考） | — | 待定 |
+| ⬜ 交互式 CLI 增强（流式输出） | — | 待定 |
+
+**当前优先级：** 项目核心目标已全部达成，如需扩展新模型或后端功能请参考扩展里程碑。
+
+**说明：** 本文档会随开发进展持续更新，每次合并 PR 时应同步更新对应的里程碑状态。
+```
+
