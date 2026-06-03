@@ -34,6 +34,7 @@ pub const std_options: std.Options = .{
         .{ .scope = .sampler, .level = .info },
     },
 };
+
 const logger = std.log.scoped(.main);
 
 var runtime_log_level: std.log.Level = .info;
@@ -63,6 +64,7 @@ fn currentTimeMs() i64 {
     }
     return @as(i64, ts.sec) * 1000 + @as(i64, @divTrunc(ts.nsec, 1000000));
 }
+
 
 const CliArgs = struct {
     model_path: [:0]const u8 = "",
@@ -237,6 +239,12 @@ const InferenceEngine = struct {
     pub fn generate(self: *InferenceEngine, prompt: []const u8, max_tokens: u32) !void {
         // 编码 prompt，不自动添加 BOS（由模型内部处理）
         var input_tokens = try self.tok.encode(prompt, false);
+        // 调试：打印编码后的 token IDs
+        logger.debug("Encoded tokens ({d}):", .{input_tokens.items.len});
+        for (input_tokens.items, 0..) |t, i| {
+            if (i < 20) logger.debug("  [{d}] = {d}", .{ i, t });
+        }
+
         defer input_tokens.deinit(self.allocator);
 
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
@@ -380,7 +388,6 @@ pub fn main(init: std.process.Init) !void {
         CliArgs.printHelp();
         return;
     }
-
     if (args.debug) {
         setLogLevel(.debug);
     } else if (args.verbose) {
@@ -388,7 +395,6 @@ pub fn main(init: std.process.Init) !void {
     } else {
         setLogLevel(.warn);
     }
-
     logger.info("zllama.zig v0.1.0 (ggml {s})", .{ggml.version()});
 
     if (args.model_path.len == 0) {
