@@ -19,7 +19,7 @@
 //! 1. 将输入文本按 UTF-8 字节序列分解为初始 token 列表（每个字节一个 token）
 //! 2. 反复查找并合并最优先的相邻 token 对（依据 merges 表）
 //! 3. 合并直到无法继续
-//! 4. 添加 BOS token（可选）
+//! 4. 添加 BOS token（可选，由调用方决定）
 //!
 //! 编码优化：使用 Trie（前缀树）实现贪婪最长匹配，替代 O(n*m) 线性扫描。
 
@@ -293,11 +293,15 @@ pub const Tokenizer = struct {
     }
 
     /// 编码：将文本转换为 token ID 列表
+    /// add_bos: 是否在开头添加 BOS token
     /// 阶段 1：Trie 贪婪最长匹配
     /// 阶段 2：BPE 合并规则
-    pub fn encode(self: *const Tokenizer, text: []const u8) !std.ArrayListUnmanaged(u32) {
+    pub fn encode(self: *const Tokenizer, text: []const u8, add_bos: bool) !std.ArrayListUnmanaged(u32) {
         var tokens: std.ArrayListUnmanaged(u32) = .empty;
-        try tokens.append(self.allocator, self.special.bos);
+
+        if (add_bos) {
+            try tokens.append(self.allocator, self.special.bos);
+        }
 
         if (self.vocab.items.len == 0) {
             for (text) |byte| try tokens.append(self.allocator, self.byteToTokenId(byte));
@@ -397,7 +401,11 @@ pub const Tokenizer = struct {
         if (token_id >= self.vocab.items.len) return null;
         switch (self.vocab.items[token_id]) {
             .normal => |s| return s,
-            .byte => return null,
+            .byte => |bv| {
+                // 返回单字节的切片，用于 BPE 合并
+                // 注意：返回的切片生命周期有限，仅用于 BPE 合并阶段的临时比较
+                return @as(*const [1]u8, @ptrCast(&bv));
+            },
         }
     }
 
@@ -413,7 +421,8 @@ pub const Tokenizer = struct {
                         if (self.model == .tiktoken) {
                             try self.decodeTiktokenToken(ts, &result, allocator);
                         } else {
-                            try result.appendSlice(allocator, ts);
+                            // LLaMA/GPT2: 将 ▁ (U+2581) 替换为空格
+                            try self.decodeNormalToken(ts, &result, allocator);
                         }
                     },
                 }
@@ -429,6 +438,36 @@ pub const Tokenizer = struct {
             token_id == self.special.mask) return true;
         if (token_id < self.token_types.items.len and self.token_types.items[token_id] == .control) return true;
         return false;
+    }
+
+    /// 解码普通 token，将 LLaMA/GPT2 的空格标记替换为实际空格（U+0020）
+    /// LLaMA (SentencePiece): ▁ (U+2581, UTF-8: E2 96 81)
+    /// GPT-2: Ġ (U+0120, UTF-8: C4 A0)
+    fn decodeNormalToken(self: *const Tokenizer, token_str: []const u8, result: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+        _ = self;
+        var i: usize = 0;
+        while (i < token_str.len) {
+            // 检查是否是 U+2581 (▁) 的 UTF-8 序列 (LLaMA/SentencePiece)
+            if (i + 2 < token_str.len and
+                token_str[i] == 0xE2 and
+                token_str[i + 1] == 0x96 and
+                token_str[i + 2] == 0x81)
+            {
+                try result.append(allocator, ' '); // 替换为普通空格
+                i += 3;
+            }
+            // 检查是否是 U+0120 (Ġ) 的 UTF-8 序列 (GPT-2)
+            else if (i + 1 < token_str.len and
+                token_str[i] == 0xC4 and
+                token_str[i + 1] == 0xA0)
+            {
+                try result.append(allocator, ' '); // 替换为普通空格
+                i += 2;
+            } else {
+                try result.append(allocator, token_str[i]);
+                i += 1;
+            }
+        }
     }
 
     fn decodeTiktokenToken(self: *const Tokenizer, token_str: []const u8, result: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
@@ -460,7 +499,8 @@ pub const Tokenizer = struct {
 
     fn byteToTokenId(self: *const Tokenizer, byte: u8) u32 {
         if (self.byte_to_token_id[byte]) |tid| return tid;
-        return @as(u32, byte) + 3;
+        // 回退：返回 UNK token
+        return self.special.unk;
     }
 
     pub fn vocabSize(self: *const Tokenizer) usize {
@@ -653,6 +693,88 @@ test "tiktoken byte token decode flow" {
     try testing.expectEqualSlices(u8, "Hello 中国!", result);
 }
 
+test "decode handles llama space tokens correctly" {
+    var mv: std.ArrayListUnmanaged(VocabEntry) = .empty;
+    defer mv.deinit(testing.allocator);
+    // LLaMA token 包含 ▁ (U+2581) 前缀
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "\xE2\x96\x81Hello") });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "\xE2\x96\x81World") });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "!") });
+    var tok = Tokenizer{ .allocator = testing.allocator, .vocab = mv, .model = .llama };
+    defer {
+        for (tok.vocab.items) |e| {
+            if (e == .normal) testing.allocator.free(e.normal);
+        }
+        tok.vocab.deinit(testing.allocator);
+    }
+    const ids = [_]u32{ 0, 1, 2 };
+    const result = try tok.decode(&ids, testing.allocator);
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u8, " Hello World!", result);
+}
+
+test "decode handles mixed llama and byte tokens" {
+    var mv: std.ArrayListUnmanaged(VocabEntry) = .empty;
+    defer mv.deinit(testing.allocator);
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "\xE2\x96\x81Hello") });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xE4 });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xB8 });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0x96 });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "\xE2\x96\x81World") });
+    var tok = Tokenizer{ .allocator = testing.allocator, .vocab = mv, .model = .llama };
+    defer {
+        for (tok.vocab.items) |e| {
+            if (e == .normal) testing.allocator.free(e.normal);
+        }
+        tok.vocab.deinit(testing.allocator);
+    }
+    const ids = [_]u32{ 0, 1, 2, 3, 4 };
+    const result = try tok.decode(&ids, testing.allocator);
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u8, " Hello世界 World", result);
+}
+
+test "decode handles gpt2 space tokens correctly" {
+    var mv: std.ArrayListUnmanaged(VocabEntry) = .empty;
+    defer mv.deinit(testing.allocator);
+    // GPT-2 token 包含 Ġ (U+0120) 前缀
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "\xC4\xA0Hello") });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "\xC4\xA0World") });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "!") });
+    var tok = Tokenizer{ .allocator = testing.allocator, .vocab = mv, .model = .gpt2 };
+    defer {
+        for (tok.vocab.items) |e| {
+            if (e == .normal) testing.allocator.free(e.normal);
+        }
+        tok.vocab.deinit(testing.allocator);
+    }
+    const ids = [_]u32{ 0, 1, 2 };
+    const result = try tok.decode(&ids, testing.allocator);
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u8, " Hello World!", result);
+}
+
+test "decode handles mixed gpt2 and byte tokens" {
+    var mv: std.ArrayListUnmanaged(VocabEntry) = .empty;
+    defer mv.deinit(testing.allocator);
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "\xC4\xA0Hello") });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xE4 });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xB8 });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0x96 });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "\xC4\xA0World") });
+    var tok = Tokenizer{ .allocator = testing.allocator, .vocab = mv, .model = .gpt2 };
+    defer {
+        for (tok.vocab.items) |e| {
+            if (e == .normal) testing.allocator.free(e.normal);
+        }
+        tok.vocab.deinit(testing.allocator);
+    }
+    const ids = [_]u32{ 0, 1, 2, 3, 4 };
+    const result = try tok.decode(&ids, testing.allocator);
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u8, " Hello世界 World", result);
+}
+
 // ============================================================================
 // 辅助函数：创建模拟 Tokenizer
 // ============================================================================
@@ -701,7 +823,7 @@ test "encode-decode roundtrip basic" {
     defer destroyMockTokenizer(&tok);
     const texts = &[_][]const u8{ "Hello", "World", "Hello World", "Hello, World!", "Special chars: @#$%^&*()" };
     for (texts) |text| {
-        var ids = try tok.encode(text);
+        var ids = try tok.encode(text, false);
         defer ids.deinit(testing.allocator);
         const decoded = try tok.decode(ids.items, testing.allocator);
         defer testing.allocator.free(decoded);
@@ -714,7 +836,7 @@ test "encode-decode roundtrip byte-level" {
     defer destroyMockTokenizer(&tok);
     for (0..256) |b| {
         const input = [_]u8{@intCast(b)};
-        var ids = try tok.encode(&input);
+        var ids = try tok.encode(&input, false);
         defer ids.deinit(testing.allocator);
         const decoded = try tok.decode(ids.items, testing.allocator);
         defer testing.allocator.free(decoded);
@@ -772,7 +894,18 @@ test "Trie longest match" {
 test "encode with Trie" {
     var tok = try createMockTokenizer();
     defer destroyMockTokenizer(&tok);
-    var ids = try tok.encode("Hello World");
+    var ids = try tok.encode("Hello World", false);
+    defer ids.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), ids.items.len);
+    try testing.expectEqual(@as(u32, 0), ids.items[0]);
+    try testing.expectEqual(@as(u32, 1), ids.items[1]);
+    try testing.expectEqual(@as(u32, 2), ids.items[2]);
+}
+
+test "encode with BOS" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    var ids = try tok.encode("Hello World", true);
     defer ids.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 4), ids.items.len);
     try testing.expectEqual(tok.special.bos, ids.items[0]);
@@ -789,7 +922,7 @@ test "encode-decode roundtrip with BPE merges" {
     try tok.merges.put(testing.allocator, mk1, 0);
     const mk2 = try testing.allocator.dupe(u8, "Hello World");
     try tok.merges.put(testing.allocator, mk2, 1);
-    var ids = try tok.encode("Hello World");
+    var ids = try tok.encode("Hello World", false);
     defer ids.deinit(testing.allocator);
     const decoded = try tok.decode(ids.items, testing.allocator);
     defer testing.allocator.free(decoded);

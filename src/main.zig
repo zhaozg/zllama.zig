@@ -6,7 +6,7 @@
 //! 实现首 token 完整图推理 + 增量解码
 //!
 //! 解码流程：
-//! 1. 编码 prompt -> token IDs
+//! 1. 编码 prompt -> token IDs（不自动添加 BOS，由模型内部处理）
 //! 2. 检测模型架构（从 GGUF 元数据）
 //! 3. 首 token 完整前向计算（填充 KV Cache）
 //! 4. 增量生成后续 tokens（每次 1 个 token）
@@ -109,9 +109,9 @@ const CliArgs = struct {
 
     pub fn printHelp() void {
         std.debug.print(
-            \\Qwen 3.5 本地推理引擎
+            \\zllama.zig - 多模型本地推理引擎
             \\
-            \\用法: qwen [选项]
+            \\用法: zllama [选项]
             \\
             \\选项:
             \\  -h, --help            显示此帮助信息
@@ -235,7 +235,8 @@ const InferenceEngine = struct {
     }
 
     pub fn generate(self: *InferenceEngine, prompt: []const u8, max_tokens: u32) !void {
-        var input_tokens = try self.tok.encode(prompt);
+        // 编码 prompt，不自动添加 BOS（由模型内部处理）
+        var input_tokens = try self.tok.encode(prompt, false);
         defer input_tokens.deinit(self.allocator);
 
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
@@ -296,7 +297,6 @@ const InferenceEngine = struct {
             self.ctx_graph.setNoAlloc(false);
             const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
             self.ctx_graph.setNoAlloc(true);
-            self.ctx_graph.setNoAlloc(true);
 
             // 重新构建增量图
             var inc_graph = try ggml.CGraph.init(self.ctx_graph);
@@ -355,8 +355,6 @@ const InferenceEngine = struct {
         }
 
         std.debug.print("{s}\n", .{decoded_text});
-        logger.info("decoded text length: {d}", .{decoded_text.len});
-        logger.info("decoded text: '{s}'", .{decoded_text});
 
         const total_tokens = output_tokens.items.len + @as(usize, @intCast(n_prompt_tokens));
         logger.info("Generated {d} tokens (total {d})", .{ output_tokens.items.len, total_tokens });
