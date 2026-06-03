@@ -220,17 +220,17 @@ pub const Tokenizer = struct {
         }
 
         // 读取 BPE 合并规则
+        // 必须复制 key 字符串，因为 GGUF arena 在 init 返回后会被释放
         if (gguf_file.metadata.get("tokenizer.ggml.merges")) |val| {
             if (val.value_type == .array) {
+                log.info("Tokenizer: {d} BPE merge rules", .{val.array_val.len});
                 for (val.array_val, 0..) |item, i| {
                     if (item.value_type == .string) {
                         const s = item.string_val;
-                        if (std.mem.indexOfScalar(u8, s, ' ')) |space_pos| {
-                            const left = s[0..space_pos];
-                            const right = s[space_pos + 1 ..];
-                            const key = try std.fmt.allocPrint(allocator, "{s}|{s}", .{ left, right });
-                            try tok.merges.put(allocator, key, @intCast(i));
-                        }
+                        // 复制字符串，所有权转移到分词器
+                        const key = try allocator.dupe(u8, s);
+                        errdefer allocator.free(key);
+                        try tok.merges.put(allocator, key, @intCast(i));
                     }
                 }
             }
@@ -274,8 +274,13 @@ pub const Tokenizer = struct {
             if (entry == .normal) self.allocator.free(entry.normal);
         }
         self.vocab.deinit(self.allocator);
-        var it = self.merges.iterator();
-        while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
+        // merges 的 key 是通过 allocator.dupe 分配的，需要释放
+        {
+            var it = self.merges.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+        }
         self.merges.deinit(self.allocator);
     }
 
@@ -343,8 +348,9 @@ pub const Tokenizer = struct {
                     i += 1;
                     continue;
                 };
+                // 使用空格分隔的格式查找合并规则（与 merges 中的 key 格式一致）
                 var kb: [1024]u8 = undefined;
-                const key = std.fmt.bufPrint(&kb, "{s}|{s}", .{ ls, rs }) catch {
+                const key = std.fmt.bufPrint(&kb, "{s} {s}", .{ ls, rs }) catch {
                     i += 1;
                     continue;
                 };
@@ -669,6 +675,14 @@ fn destroyMockTokenizer(tok: *Tokenizer) void {
     tok.trie_root.deinit(testing.allocator);
     tok.token_types.deinit(testing.allocator);
     tok.byte_decoder.deinit(testing.allocator);
+    // 释放 merges 的 key
+    {
+        var it = tok.merges.iterator();
+        while (it.next()) |entry| {
+            testing.allocator.free(entry.key_ptr.*);
+        }
+    }
+    tok.merges.deinit(testing.allocator);
 }
 
 test "encode-decode roundtrip basic" {
@@ -759,17 +773,16 @@ test "encode with Trie" {
 test "encode-decode roundtrip with BPE merges" {
     var tok = try createMockTokenizer();
     defer destroyMockTokenizer(&tok);
-    const mk1 = try std.fmt.allocPrint(testing.allocator, "Hello| ", .{});
+    // 使用空格分隔的格式
+    const mk1 = try testing.allocator.dupe(u8, "Hello ");
     try tok.merges.put(testing.allocator, mk1, 0);
-    const mk2 = try std.fmt.allocPrint(testing.allocator, "Hello |World", .{});
+    const mk2 = try testing.allocator.dupe(u8, "Hello World");
     try tok.merges.put(testing.allocator, mk2, 1);
     var ids = try tok.encode("Hello World");
     defer ids.deinit(testing.allocator);
     const decoded = try tok.decode(ids.items, testing.allocator);
     defer testing.allocator.free(decoded);
     try testing.expectEqualStrings("Hello World", decoded);
-    testing.allocator.free(mk1);
-    testing.allocator.free(mk2);
 }
 
 test "isSpecialToken detection" {

@@ -73,7 +73,9 @@ pub const LlamaModel = struct {
         _ = io;
         self.llm_params = try parseParams(gguf_file, allocator);
 
-        const mem_size_estimate = 1024 * 1024 * 1024; // 1GB
+        // 根据模型参数动态估计所需内存
+        // 对于 Q4_K_M 量化，每个参数约 0.5 字节，加上元数据开销
+        const mem_size_estimate = estimateMemSize(&self.llm_params);
         self.ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
 
         self.llm_weights = try loadWeights(gguf_file, self.ctx_weights, &self.llm_params, allocator);
@@ -375,6 +377,57 @@ fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name:
         return tensor;
     }
     return error.TensorNotFound;
+}
+
+/// 估计模型权重所需的内存大小
+/// 对于 Q4_K_M 量化，每个参数约 0.5 字节，加上 ggml 元数据开销
+/// 对于 f32 张量，每个参数 4 字节
+fn estimateMemSize(params: *const LlamaParams) usize {
+    const n_vocab = params.base.n_vocab;
+    const n_embd = params.base.n_embd;
+    _ = params.base.n_head;
+    const n_kv_head = params.base.n_kv_head;
+    const n_layer = params.base.n_layer;
+    const n_ff = params.base.n_ff;
+    const head_dim = params.base.n_head_dim;
+
+    // 对于量化模型，每个元素平均约 0.5 字节（Q4_K_M）
+    // 对于 f32 张量（如 norm），每个元素 4 字节
+    const bytes_per_elem_quant: f64 = 0.6; // 略高于 0.5 以留余量
+    const bytes_per_elem_f32: u64 = 4;
+
+    // token_embd: [n_embd, n_vocab]
+    var total: u64 = @intFromFloat(@as(f64, @floatFromInt(n_embd * n_vocab)) * bytes_per_elem_quant);
+
+    // output.weight: [n_embd, n_vocab]（如果存在）
+    total += @intFromFloat(@as(f64, @floatFromInt(n_embd * n_vocab)) * bytes_per_elem_quant);
+
+    // output_norm.weight: [n_embd] f32
+    total += n_embd * bytes_per_elem_f32;
+
+    // 每层权重
+    const kv_dim = n_kv_head * head_dim;
+    const per_layer_quant: u64 = @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_embd)) * bytes_per_elem_quant)) + // attn_q
+        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * kv_dim)) * bytes_per_elem_quant)) + // attn_k
+        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * kv_dim)) * bytes_per_elem_quant)) + // attn_v
+        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_embd)) * bytes_per_elem_quant)) + // attn_output
+        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_ff)) * bytes_per_elem_quant)) + // ffn_gate
+        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_ff)) * bytes_per_elem_quant)) + // ffn_up
+        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_ff * n_embd)) * bytes_per_elem_quant)); // ffn_down
+    const per_layer_f32: u64 = 2 * n_embd * bytes_per_elem_f32; // attn_norm + ffn_norm
+
+    total += (per_layer_quant + per_layer_f32) * n_layer;
+
+    // 加上 ggml 元数据开销（每个张量约 200 字节）
+    const n_tensors: u64 = 3 + n_layer * 9; // 3 个全局 + 每层 9 个
+    total += n_tensors * 256;
+
+    // 额外预留 20% 空间
+    total = @intFromFloat(@as(f64, @floatFromInt(total)) * 1.2);
+
+    log.info("Estimated weights memory: {d} MB", .{total / (1024 * 1024)});
+
+    return total;
 }
 
 // ============================================================================

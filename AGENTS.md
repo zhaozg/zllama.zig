@@ -114,6 +114,9 @@ zllama.zig/
 5. **提交前验证**：
    - 运行 `zig build test`（如果存在测试）。
    - 确保未引入未定义行为（如数组越界、空指针解引用）。
+   - `zig-out/bin/zllama --model ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -n 5` works
+   - `zig-out/bin/zllama --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf -n 5` works
+   - `zig-out/bin/zllama --model ~/.cache/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf -n 5` works
 6. **文档同步**：修改架构或绑定设计后，需同步更新对应的 `*.md` 文件。
 
 ## 🔒 禁止事项

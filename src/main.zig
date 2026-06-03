@@ -289,10 +289,13 @@ const InferenceEngine = struct {
         const gen_start_time = currentTimeMs();
 
         while (gen_token_count < max_tokens - 1) {
+            // 每次迭代创建新的 graph，不调用 reset（ggml_new_graph 创建的图不支持 reset）
             self.ctx_graph.setNoAlloc(false);
             const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
             self.ctx_graph.setNoAlloc(true);
+            self.ctx_graph.setNoAlloc(true);
 
+            // 重新构建增量图
             var inc_graph = try ggml.CGraph.init(self.ctx_graph);
             const inc_logits = try registry.forwardModel(self.model_ptr, self.arch, self.ctx_graph, inc_graph, single_input, 1, &self.kv_cache_mgr, pos);
 
@@ -319,10 +322,6 @@ const InferenceEngine = struct {
             current_token = next_token_u32;
             pos += 1;
             gen_token_count += 1;
-
-            self.ctx_graph.deinit();
-            self.ctx_graph = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
-            self.ctx_graph.setNoAlloc(true);
         }
 
         const gen_end_time = currentTimeMs();

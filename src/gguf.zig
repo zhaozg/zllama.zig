@@ -131,19 +131,19 @@ pub const TensorDataType = enum(u32) {
             .i8 => 1,
             .i16 => 2,
             .i32 => 4,
-            .q4_0 => 18,  // sizeof(block_q4_0) = sizeof(ggml_half) + QK4_0/2 = 2 + 16
-            .q4_1 => 20,  // sizeof(block_q4_1) = 2*sizeof(ggml_half) + QK4_1/2 = 4 + 16
-            .q5_0 => 22,  // sizeof(block_q5_0) = sizeof(ggml_half) + sizeof(uint32_t) + QK5_0/2 = 2 + 4 + 16
-            .q5_1 => 24,  // sizeof(block_q5_1) = 2*sizeof(ggml_half) + sizeof(uint32_t) + QK5_1/2 = 4 + 4 + 16
-            .q8_0 => 34,  // sizeof(block_q8_0) = sizeof(ggml_half) + QK8_0 = 2 + 32
-            .q8_1 => 36,  // sizeof(block_q8_1) = 2*sizeof(ggml_half) + QK8_1 = 4 + 32
-            .q2_k => 74,  // sizeof(block_q2_K)
+            .q4_0 => 18, // sizeof(block_q4_0) = sizeof(ggml_half) + QK4_0/2 = 2 + 16
+            .q4_1 => 20, // sizeof(block_q4_1) = 2*sizeof(ggml_half) + QK4_1/2 = 4 + 16
+            .q5_0 => 22, // sizeof(block_q5_0) = sizeof(ggml_half) + sizeof(uint32_t) + QK5_0/2 = 2 + 4 + 16
+            .q5_1 => 24, // sizeof(block_q5_1) = 2*sizeof(ggml_half) + sizeof(uint32_t) + QK5_1/2 = 4 + 4 + 16
+            .q8_0 => 34, // sizeof(block_q8_0) = sizeof(ggml_half) + QK8_0 = 2 + 32
+            .q8_1 => 36, // sizeof(block_q8_1) = 2*sizeof(ggml_half) + QK8_1 = 4 + 32
+            .q2_k => 74, // sizeof(block_q2_K)
             .q3_k => 106, // sizeof(block_q3_K)
             .q4_k => 144, // sizeof(block_q4_K) = 2*sizeof(ggml_half) + K_SCALE_SIZE + QK_K/2 = 4 + 12 + 128
             .q5_k => 176, // sizeof(block_q5_K)
             .q6_k => 210, // sizeof(block_q6_K)
             .q8_k => 292, // sizeof(block_q8_K)
-            else => 4,  // 默认返回 f32 大小
+            else => 4, // 默认返回 f32 大小
         };
     }
 
@@ -157,7 +157,6 @@ pub const TensorDataType = enum(u32) {
         };
     }
 };
-
 
 /// GGUF 张量描述符
 pub const TensorInfo = struct {
