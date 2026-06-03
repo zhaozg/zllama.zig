@@ -178,24 +178,27 @@ const InferenceEngine = struct {
         }
 
         var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
+        errdefer tok.deinit();
         logger.info("Tokenizer: {d} tokens", .{tok.vocabSize()});
 
         const n_threads = if (cli_args.n_threads > 0) cli_args.n_threads else ggml.recommendedThreads();
         const mem_size_estimate = 2 * 1024 * 1024 * 1024;
         logger.info("Estimated memory: {d} MB", .{mem_size_estimate / (1024 * 1024)});
-
         const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
+        errdefer ctx_weights.deinit();
         const ctx_kv_cache = try ggml.Context.initNoAlloc(mem_size_estimate);
+        errdefer ctx_kv_cache.deinit();
         const max_seq_len = @min(params.max_seq_len, 2048);
-        const kv_cache_mgr = try kv_cache.KVCache.init(ctx_kv_cache, params.n_layer, params.n_kv_head, params.n_head_dim, max_seq_len, allocator);
+        var kv_cache_mgr = try kv_cache.KVCache.init(ctx_kv_cache, params.n_layer, params.n_kv_head, params.n_head_dim, max_seq_len, allocator);
+        errdefer kv_cache_mgr.deinit(allocator);
         const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
-
-        logger.info("Allocating memory via backend...", .{});
+        errdefer ctx_graph.deinit();
         {
             const buft = ggml.backendCpuBufferType();
-            try ggml.backendAllocCtxTensorsFromBuft(ctx_weights, buft);
+            // ctx_weights 中的张量已在 findOrCreateTensor 中通过 setNoAlloc(false) 分配了内存
+            // ctx_graph 中的张量在 generate 中动态创建，使用 Gallocr 分配
+            // 只有 ctx_kv_cache 需要后端分配（KV Cache 张量在 no_alloc 模式下创建）
             try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, buft);
-            try ggml.backendAllocCtxTensorsFromBuft(ctx_graph, buft);
         }
 
         const sampler_state = sampler.Sampler.init(.{

@@ -57,6 +57,11 @@
    - 提供与 `llama.cpp` 或 HuggingFace 输出对比的测试用例（短 prompt）。
    - 调试模式下可打印张量形状及部分值，Release 模式下完全移除。
 
+9. 默化化设计原则
+  - **安全、可维护、高性能**，优先考虑代码清晰和正确性，必要时牺牲微小性能提升。
+  - 单文件模块应保持清晰的接口和实现分离，避免过度复杂化。
+  - 避免文件过大，不能超过 600 行，合理拆分功能模块（如算子、模型实现、核心引擎等）。
+
 ## 📁 项目结构（AI 应遵循）
 
 ```
@@ -114,9 +119,9 @@ zllama.zig/
 5. **提交前验证**：
    - 运行 `zig build test`（如果存在测试）。
    - 确保未引入未定义行为（如数组越界、空指针解引用）。
-   - `zig-out/bin/zllama --model ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -n 5` works
-   - `zig-out/bin/zllama --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf -n 5` works
-   - `zig-out/bin/zllama --model ~/.cache/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf -n 5` works
+   - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf` works
+   - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf` works
+   - `zig-out/bin/zllama -n 5 --model ~/.cache/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf` works
 6. **文档同步**：修改架构或绑定设计后，需同步更新对应的 `*.md` 文件。
 
 ## 🔒 禁止事项

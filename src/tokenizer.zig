@@ -129,7 +129,10 @@ const MatchResult = struct {
 
 pub const Tokenizer = struct {
     vocab: std.ArrayListUnmanaged(VocabEntry) = .empty,
+    /// vocab_reverse 的 key 与 vocab 中 normal 字符串共享所有权，
+    /// 释放时只通过 vocab 释放，vocab_reverse 不负责释放 key
     vocab_reverse: std.StringHashMapUnmanaged(u32) = .{},
+    /// merges 的 key 通过 allocator.dupe 分配，deinit 中负责释放
     merges: std.StringHashMapUnmanaged(u32) = .{},
     special: SpecialTokens = .{},
     model: TokenizerModel = .unknown,
@@ -197,7 +200,9 @@ pub const Tokenizer = struct {
                         if (tt == .byte) {
                             const byte_val = extractByteFromToken(s, tok.model) catch blk: {
                                 if (s.len == 1) break :blk s[0];
+                                // 无法提取字节，作为 normal token 处理
                                 const owned = try allocator.dupe(u8, s);
+                                errdefer allocator.free(owned);
                                 try tok.vocab.append(allocator, VocabEntry{ .normal = owned });
                                 try tok.vocab_reverse.put(allocator, owned, @intCast(i));
                                 try tok.addToTrie(owned, @intCast(i));
@@ -207,12 +212,14 @@ pub const Tokenizer = struct {
                             tok.byte_to_token_id[byte_val] = @intCast(i);
                         } else {
                             const owned = try allocator.dupe(u8, s);
+                            errdefer allocator.free(owned);
                             try tok.vocab.append(allocator, VocabEntry{ .normal = owned });
                             try tok.vocab_reverse.put(allocator, owned, @intCast(i));
                             try tok.addToTrie(owned, @intCast(i));
                         }
                     } else {
                         const placeholder = try std.fmt.allocPrint(allocator, "[token_{d}]", .{i});
+                        errdefer allocator.free(placeholder);
                         try tok.vocab.append(allocator, VocabEntry{ .normal = placeholder });
                     }
                 }
@@ -220,14 +227,12 @@ pub const Tokenizer = struct {
         }
 
         // 读取 BPE 合并规则
-        // 必须复制 key 字符串，因为 GGUF arena 在 init 返回后会被释放
         if (gguf_file.metadata.get("tokenizer.ggml.merges")) |val| {
             if (val.value_type == .array) {
                 log.info("Tokenizer: {d} BPE merge rules", .{val.array_val.len});
                 for (val.array_val, 0..) |item, i| {
                     if (item.value_type == .string) {
                         const s = item.string_val;
-                        // 复制字符串，所有权转移到分词器
                         const key = try allocator.dupe(u8, s);
                         errdefer allocator.free(key);
                         try tok.merges.put(allocator, key, @intCast(i));
@@ -266,10 +271,13 @@ pub const Tokenizer = struct {
     }
 
     pub fn deinit(self: *Tokenizer) void {
+        // 注意：vocab_reverse 的 key 与 vocab 中 normal 字符串共享所有权，
+        // 所以这里只释放 HashMap 本身，不释放 key（由 vocab 的 normal 字符串释放）
         self.vocab_reverse.deinit(self.allocator);
         self.byte_decoder.deinit(self.allocator);
         self.trie_root.deinit(self.allocator);
         self.token_types.deinit(self.allocator);
+        // 释放 vocab 中的 normal 字符串（这是所有权的真正持有者）
         for (self.vocab.items) |entry| {
             if (entry == .normal) self.allocator.free(entry.normal);
         }
@@ -667,14 +675,17 @@ fn createMockTokenizer() !Tokenizer {
 }
 
 fn destroyMockTokenizer(tok: *Tokenizer) void {
-    for (tok.vocab.items) |e| {
-        if (e == .normal) testing.allocator.free(e.normal);
-    }
-    tok.vocab.deinit(testing.allocator);
+    // 注意：vocab_reverse 的 key 与 vocab 中 normal 字符串共享所有权，
+    // 所以这里只释放 HashMap 本身，不释放 key
     tok.vocab_reverse.deinit(testing.allocator);
     tok.trie_root.deinit(testing.allocator);
     tok.token_types.deinit(testing.allocator);
     tok.byte_decoder.deinit(testing.allocator);
+    // 释放 vocab 中的 normal 字符串（这是所有权的真正持有者）
+    for (tok.vocab.items) |e| {
+        if (e == .normal) testing.allocator.free(e.normal);
+    }
+    tok.vocab.deinit(testing.allocator);
     // 释放 merges 的 key
     {
         var it = tok.merges.iterator();

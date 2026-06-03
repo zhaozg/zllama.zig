@@ -80,7 +80,7 @@ pub const KVCache = struct {
     }
 
     /// 释放 KV Cache
-    pub fn deinit(self: *KVCache, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *const KVCache, allocator: std.mem.Allocator) void {
         allocator.free(self.layers);
     }
 
