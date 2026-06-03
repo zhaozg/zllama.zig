@@ -80,6 +80,7 @@ pub const SpecialTokens = struct {
             .pad = gguf_file.getU32("tokenizer.ggml.padding_token_id") orelse 0,
             .sep = gguf_file.getU32("tokenizer.ggml.sep_token_id") orelse 2,
             .cls = gguf_file.getU32("tokenizer.ggml.cls_token_id") orelse 1,
+
             .mask = gguf_file.getU32("tokenizer.ggml.mask_token_id") orelse 0,
         };
     }
@@ -114,6 +115,11 @@ pub const Tokenizer = struct {
     /// 分词器模型类型（决定字节 token 格式）
     model: TokenizerModel = .unknown,
     /// 分配器
+    /// tiktoken byte_decoder 映射：Unicode 码点 → 原始字节
+    /// 用于将 tiktoken 编码的 token 字符串还原为原始字节序列
+    byte_decoder: std.AutoHashMapUnmanaged(u32, u8) = .{},
+
+
     allocator: std.mem.Allocator,
 
     /// 从 GGUF 元数据初始化分词器
@@ -158,6 +164,24 @@ pub const Tokenizer = struct {
         }
 
         // 读取 token 类型数组（tokenizer.ggml.token_type）
+        // ============================================================
+        // 第 1.5 步：构建 byte_decoder 映射（tiktoken 字节解码）
+        // ============================================================
+        // 对于 tiktoken 模型，构建 byte_decoder 映射用于解码
+        // 即使不是 tiktoken 模型，也构建映射以备不时之需
+        {
+            // 生成 bytes_to_unicode 映射（字节 → Unicode 码点）
+            const bytes_to_unicode = try generateBytesToUnicode(allocator);
+            defer allocator.free(bytes_to_unicode);
+
+            // 反转得到 byte_decoder（Unicode 码点 → 字节）
+            for (bytes_to_unicode, 0..) |codepoint, byte| {
+                try tok.byte_decoder.put(allocator, codepoint, @intCast(byte));
+            }
+            log.info("Tokenizer: built byte_decoder with {d} entries", .{tok.byte_decoder.count()});
+        }
+
+
         // 这是识别字节 token 的关键：token_type == 6 (LLAMA_TOKEN_TYPE_BYTE)
         var token_types: std.ArrayListUnmanaged(u32) = .empty;
         defer token_types.deinit(allocator);
@@ -322,6 +346,10 @@ pub const Tokenizer = struct {
     pub fn deinit(self: *Tokenizer) void {
         // 释放 vocab_reverse 哈希表（它的 key 只是 vocab 中 normal 字符串的引用）
         self.vocab_reverse.deinit(self.allocator);
+        // 释放 byte_decoder 哈希表
+        self.byte_decoder.deinit(self.allocator);
+
+
 
         // 释放 vocab 中每个 normal 条目的字符串内存
         for (self.vocab.items) |entry| {
@@ -397,7 +425,6 @@ pub const Tokenizer = struct {
     /// - 所有 token 一次性解码，确保 UTF-8 字节序列正确组合
     pub fn decode(self: *const Tokenizer, token_ids: []const u32, allocator: std.mem.Allocator) ![]u8 {
         var result = std.ArrayList(u8).empty;
-        
 
         for (token_ids) |token_id| {
             // 跳过特殊 token
@@ -416,7 +443,15 @@ pub const Tokenizer = struct {
                         try result.append(allocator, byte_val);
                     },
                     .normal => |token_str| {
-                        try result.appendSlice(allocator, token_str);
+                        if (self.model == .tiktoken) {
+                            // tiktoken 模型：token 字符串中的每个 Unicode 码点
+                            // 都是经过 bytes_to_unicode() 映射后的值
+                            // 需要通过 byte_decoder 反向映射还原为原始字节
+                            try self.decodeTiktokenToken(token_str, &result, allocator);
+                        } else {
+                            // 其他模型：直接输出 token 字符串
+                            try result.appendSlice(allocator, token_str);
+                        }
                     },
                 }
             } else {
@@ -427,6 +462,59 @@ pub const Tokenizer = struct {
 
         return result.toOwnedSlice(allocator);
     }
+
+    /// 解码 tiktoken 格式的 token 字符串
+    ///
+    /// tiktoken 使用 bytes_to_unicode() 将每个字节（0x00-0xFF）映射到
+    /// 一个 Unicode 码点。可打印 ASCII（33-126）映射到自身，其他字节
+    /// 映射到 256+ 的区域。解码时需要将每个 Unicode 码点通过
+    /// byte_decoder 反向映射还原为原始字节。
+    fn decodeTiktokenToken(
+        self: *const Tokenizer,
+        token_str: []const u8,
+        result: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+    ) !void {
+        // 逐个解析 token_str 中的 Unicode 码点并转换
+        var remaining = token_str;
+        while (remaining.len > 0) {
+            // 解码一个 Unicode 码点
+            const codepoint_len = std.unicode.utf8ByteSequenceLength(remaining[0]) catch {
+                log.debug("decodeTiktokenToken: invalid UTF-8 lead byte 0x{x:0>2}, skipping", .{remaining[0]});
+                try result.append(allocator, remaining[0]);
+                remaining = remaining[1..];
+                continue;
+            };
+
+            if (remaining.len < codepoint_len) {
+                log.debug("decodeTiktokenToken: truncated UTF-8 sequence, skipping", .{});
+                try result.append(allocator, remaining[0]);
+                remaining = remaining[1..];
+                continue;
+            }
+
+            const codepoint = std.unicode.utf8Decode(remaining[0..codepoint_len]) catch {
+                log.debug("decodeTiktokenToken: invalid UTF-8 sequence, skipping byte", .{});
+                try result.append(allocator, remaining[0]);
+                remaining = remaining[1..];
+                continue;
+            };
+
+            // 查找 byte_decoder 映射
+            if (self.byte_decoder.get(codepoint)) |byte_val| {
+                try result.append(allocator, byte_val);
+            } else {
+                // 如果映射中没有，直接输出该码点的 UTF-8 字节（极少情况）
+                log.debug("decodeTiktokenToken: codepoint U+{x:0>4} not in byte_decoder, outputting as-is", .{codepoint});
+                try result.appendSlice(allocator, remaining[0..codepoint_len]);
+            }
+
+            // 跳过已处理的码点
+            remaining = remaining[codepoint_len..];
+        }
+    }
+
+
 
     /// 将字节映射到 token ID（简化实现）
     fn byteToTokenId(self: *const Tokenizer, byte: u8) u32 {
@@ -445,6 +533,49 @@ pub const Tokenizer = struct {
 // ============================================================================
 // 模块级工具函数
 // ============================================================================
+
+
+/// 生成 tiktoken 的 bytes_to_unicode 映射表
+///
+/// 这是 OpenAI tiktoken 的标准映射方案：
+/// - 可打印 ASCII（33-126）→ 映射到自身码点
+/// - 其他字节（0-32, 127-255）→ 映射到 256 + 偏移
+///
+/// 返回一个长度为 256 的数组，index 为原始字节值，value 为对应的 Unicode 码点。
+pub fn generateBytesToUnicode(allocator: std.mem.Allocator) ![]u32 {
+    var list = try std.ArrayList(u32).initCapacity(allocator, 256);
+    defer list.deinit(allocator);
+
+    // 第一步：标记所有映射到自身的字节
+    // 可打印 ASCII: 33-126
+    // 扩展 ASCII 可打印: 161-172 (¡-¬), 174-255 (®-ÿ)
+    var bs: [256]bool = .{false} ** 256;
+    for (33..127) |b| {
+        bs[b] = true;
+    }
+    for (161..173) |b| {
+        bs[b] = true;
+    }
+    for (174..256) |b| {
+        bs[b] = true;
+    }
+
+    // 第二步：生成映射
+    var n: u32 = 0;
+    for (0..256) |b| {
+        if (bs[b]) {
+            // 映射到自身
+            try list.append(allocator, @intCast(b));
+        } else {
+            // 其他字节映射到 256 + 偏移
+            try list.append(allocator, 256 + n);
+            n += 1;
+        }
+    }
+
+    return list.toOwnedSlice(allocator);
+}
+
 
 /// 从 token 字符串中提取字节值
 /// 支持多种格式，根据 model 类型选择解析策略：

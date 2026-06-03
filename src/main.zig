@@ -21,7 +21,12 @@ const kv_cache = @import("kv_cache.zig");
 
 // 在 main.zig 或其他根文件中
 pub const std_options: std.Options = .{
-    .log_level = .info, // 确保所有级别的日志都能进入你的自定义 logFn
+    .log_level = .debug, // 确保所有级别的日志都能进入你的自定义 logFn
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .tokenizer, .level = .debug },
+        .{ .scope = .ggml, .level = .info},
+        .{ .scope = .model, .level = .info},
+    },
     // .logFn 会在下一步被定义
 };
 

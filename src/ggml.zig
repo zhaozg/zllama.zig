@@ -783,14 +783,14 @@ pub fn cont(ctx: *Context, a: *Tensor) *Tensor {
 /// 重塑为 2D
 pub fn reshape2d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64) *Tensor {
     const s = a.shape();
-    std.log.debug("reshape2d: [{d},{d},{d},{d}] -> [{d},{d}] nelem={d} expected={d}", .{ s[0], s[1], s[2], s[3], ne0, ne1, a.nelements(), ne0 * ne1 });
+    log.debug("reshape2d: [{d},{d},{d},{d}] -> [{d},{d}] nelem={d} expected={d}", .{ s[0], s[1], s[2], s[3], ne0, ne1, a.nelements(), ne0 * ne1 });
     return @ptrCast(c.ggml_reshape_2d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1));
 }
 
 /// 重塑为 3D
 pub fn reshape3d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, ne2: i64) *Tensor {
     const s = a.shape();
-    std.log.debug("reshape3d: [{d},{d},{d},{d}] -> [{d},{d},{d}] nelem={d} expected={d}", .{ s[0], s[1], s[2], s[3], ne0, ne1, ne2, a.nelements(), ne0 * ne1 * ne2 });
+    log.debug("reshape3d: [{d},{d},{d},{d}] -> [{d},{d},{d}] nelem={d} expected={d}", .{ s[0], s[1], s[2], s[3], ne0, ne1, ne2, a.nelements(), ne0 * ne1 * ne2 });
     return @ptrCast(c.ggml_reshape_3d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, ne2));
 }
 
