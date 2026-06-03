@@ -351,13 +351,30 @@ const InferenceEngine = struct {
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
         logger.info("Prompt: {d} tokens", .{n_prompt_tokens});
 
-        if (self.verbose) {
-            logger.debug("Input tokens: ", .{});
-            for (input_tokens.items[0..@min(@as(usize, 10), input_tokens.items.len)]) |t| {
-                logger.debug("{d} ", .{t});
+        // 输出 prompt 的 token 编码结果
+        {
+            var token_ids_buf = std.ArrayList(u8).empty;
+            defer token_ids_buf.deinit(self.allocator);
+            for (input_tokens.items, 0..) |token, i| {
+                if (i > 0) try token_ids_buf.append(self.allocator, ' ');
+                var num_buf: [16]u8 = undefined;
+                const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{token}) catch "?";
+                try token_ids_buf.appendSlice(self.allocator, num_str);
             }
-            if (input_tokens.items.len > 10) logger.debug("...", .{});
+            logger.info("Prompt token IDs: [{s}]", .{token_ids_buf.items});
         }
+
+        // 解码还原 prompt，验证编码-解码一致性
+        {
+            const decoded_prompt = try self.tok.decode(input_tokens.items, self.allocator);
+            defer self.allocator.free(decoded_prompt);
+            logger.info("Prompt decoded: '{s}'", .{decoded_prompt});
+            if (!std.mem.eql(u8, prompt, decoded_prompt)) {
+                logger.warn("Prompt encode-decode mismatch! original='{s}' decoded='{s}'", .{ prompt, decoded_prompt });
+            }
+        }
+
+        // 2. 构建输入张量（在 ctx_graph 中创建，no_alloc=true，由 gallocr 分配内存）
 
         // 2. 构建输入张量（在 ctx_graph 中创建，no_alloc=true，由 gallocr 分配内存）
         self.ctx_graph.setNoAlloc(false);

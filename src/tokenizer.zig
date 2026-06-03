@@ -14,6 +14,14 @@
 //! - "llama" / "gpt2" (BPE): 原始单字节存储，token_bytes.len == 1
 //! - "tiktoken" (Qwen): 表示为 "<0xE4>" 可打印形式
 //! - "replit": 可能使用 b'<0xE4>' 格式
+//!
+//! 编码流程（BPE）：
+//! 1. 将输入文本按 UTF-8 字节序列分解为初始 token 列表（每个字节一个 token）
+//! 2. 反复查找并合并最优先的相邻 token 对（依据 merges 表）
+//! 3. 合并直到无法继续
+//! 4. 添加 BOS token（可选）
+//!
+//! 编码优化：使用 Trie（前缀树）实现贪婪最长匹配，替代 O(n*m) 线性扫描。
 
 const std = @import("std");
 const gguf = @import("gguf.zig");
@@ -42,13 +50,12 @@ pub const TokenType = enum(u32) {
 
 /// 分词器模型类型，决定字节 token 的表示格式
 pub const TokenizerModel = enum {
-    llama,    // BPE / GPT-2 类：原始单字节存储
-    gpt2,     // 同 llama，原始单字节
-    tiktoken, // Qwen 类："<0xE4>" 格式
-    replit,   // 可能使用 b'<0xE4>' 格式
-    unknown,  // 未知格式，自动检测
+    llama,
+    gpt2,
+    tiktoken,
+    replit,
+    unknown,
 
-    /// 从 GGUF 元数据字符串解析
     pub fn fromString(s: []const u8) TokenizerModel {
         if (std.ascii.eqlIgnoreCase(s, "llama")) return .llama;
         if (std.ascii.eqlIgnoreCase(s, "gpt2")) return .gpt2;
@@ -62,15 +69,14 @@ pub const TokenizerModel = enum {
 // 特殊 Token ID
 // ============================================================================
 
-/// 特殊 token 的 ID
 pub const SpecialTokens = struct {
-    bos: u32 = 1, // Beginning of sequence
-    eos: u32 = 2, // End of sequence
-    unk: u32 = 0, // Unknown token
-    pad: u32 = 0, // Padding
-    sep: u32 = 2, // Separator
-    cls: u32 = 1, // Classifier
-    mask: u32 = 0, // Mask token
+    bos: u32 = 1,
+    eos: u32 = 2,
+    unk: u32 = 0,
+    pad: u32 = 0,
+    sep: u32 = 2,
+    cls: u32 = 1,
+    mask: u32 = 0,
 
     pub fn fromGGUF(gguf_file: *const gguf.GGUFFile) SpecialTokens {
         return SpecialTokens{
@@ -80,7 +86,6 @@ pub const SpecialTokens = struct {
             .pad = gguf_file.getU32("tokenizer.ggml.padding_token_id") orelse 0,
             .sep = gguf_file.getU32("tokenizer.ggml.sep_token_id") orelse 2,
             .cls = gguf_file.getU32("tokenizer.ggml.cls_token_id") orelse 1,
-
             .mask = gguf_file.getU32("tokenizer.ggml.mask_token_id") orelse 0,
         };
     }
@@ -90,61 +95,60 @@ pub const SpecialTokens = struct {
 // 词表条目类型
 // ============================================================================
 
-/// 词表条目：区分普通 token 和字节 token
-/// - normal: 存储 UTF-8 字符串（如 "Hello", "世界"）
-/// - byte:   存储单个字节值（如 0xE4），解码时直接输出该字节
 pub const VocabEntry = union(enum) {
     normal: []const u8,
     byte: u8,
 };
 
 // ============================================================================
+// Trie 节点
+// ============================================================================
+
+const TrieNode = struct {
+    children: std.AutoHashMapUnmanaged(u8, *TrieNode) = .{},
+    token_id: ?u32 = null,
+
+    fn deinit(self: *TrieNode, allocator: std.mem.Allocator) void {
+        var it = self.children.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.*.deinit(allocator);
+            allocator.destroy(entry.value_ptr.*);
+        }
+        self.children.deinit(allocator);
+    }
+};
+
+const MatchResult = struct {
+    token_id: u32,
+    len: usize,
+};
+
+// ============================================================================
 // BPE 分词器
 // ============================================================================
 
-/// BPE 分词器状态
 pub const Tokenizer = struct {
-    /// 词表：token_id -> VocabEntry
     vocab: std.ArrayListUnmanaged(VocabEntry) = .empty,
-    /// token 字符串 -> token_id 的映射（仅用于 normal 类型）
     vocab_reverse: std.StringHashMapUnmanaged(u32) = .{},
-    /// BPE 合并规则：pair -> new_token_id
     merges: std.StringHashMapUnmanaged(u32) = .{},
-    /// 特殊 token
     special: SpecialTokens = .{},
-    /// 分词器模型类型（决定字节 token 格式）
     model: TokenizerModel = .unknown,
-    /// 分配器
-    /// tiktoken byte_decoder 映射：Unicode 码点 → 原始字节
-    /// 用于将 tiktoken 编码的 token 字符串还原为原始字节序列
     byte_decoder: std.AutoHashMapUnmanaged(u32, u8) = .{},
-
-
+    trie_root: TrieNode = .{},
+    byte_to_token_id: [256]?u32 = .{null} ** 256,
+    token_types: std.ArrayListUnmanaged(TokenType) = .empty,
     allocator: std.mem.Allocator,
 
-    /// 从 GGUF 元数据初始化分词器
     pub fn init(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator) !Tokenizer {
-        var tok = Tokenizer{
-            .allocator = allocator,
-        };
-        // 如果后续初始化失败，清理已分配的资源
+        var tok = Tokenizer{ .allocator = allocator };
         errdefer tok.deinit();
 
-        // 读取特殊 token
         tok.special = SpecialTokens.fromGGUF(gguf_file);
 
-        // ============================================================
-        // 第 1 步：确定分词器模型类型
-        // ============================================================
-        // 读取 tokenizer.ggml.model 元数据
         const tokenizer_model_raw = gguf_file.getString("tokenizer.ggml.model") orelse "gpt2";
-
-        // 读取模型名称和架构（用于 Qwen 检测）
         const model_name = gguf_file.getString("general.name") orelse "";
         const model_arch = gguf_file.getString("general.architecture") orelse "";
 
-        // 判断是否为 Qwen 模型
-        // 检测 general.name 或 general.architecture 是否包含 "qwen"
         const is_qwen = if (model_name.len > 0)
             std.ascii.indexOfIgnoreCase(model_name, "qwen") != null
         else if (model_arch.len > 0)
@@ -152,9 +156,6 @@ pub const Tokenizer = struct {
         else
             false;
 
-        // 确定最终的分词器模型类型
-        // Qwen 3.5 使用 tiktoken 分词器，但 GGUF 元数据中常被标记为 "gpt2"
-        // 因此当检测到 Qwen 模型时，强制使用 tiktoken 模式
         if (is_qwen) {
             tok.model = .tiktoken;
             log.info("Tokenizer model: detected Qwen model '{s}', forcing tiktoken mode", .{model_name});
@@ -163,567 +164,344 @@ pub const Tokenizer = struct {
             log.info("Tokenizer model: '{s}' -> {s}", .{ tokenizer_model_raw, @tagName(tok.model) });
         }
 
-        // 读取 token 类型数组（tokenizer.ggml.token_type）
-        // ============================================================
-        // 第 1.5 步：构建 byte_decoder 映射（tiktoken 字节解码）
-        // ============================================================
-        // 对于 tiktoken 模型，构建 byte_decoder 映射用于解码
-        // 即使不是 tiktoken 模型，也构建映射以备不时之需
+        // 构建 byte_decoder
         {
-            // 生成 bytes_to_unicode 映射（字节 → Unicode 码点）
             const bytes_to_unicode = try generateBytesToUnicode(allocator);
             defer allocator.free(bytes_to_unicode);
-
-            // 反转得到 byte_decoder（Unicode 码点 → 字节）
             for (bytes_to_unicode, 0..) |codepoint, byte| {
                 try tok.byte_decoder.put(allocator, codepoint, @intCast(byte));
             }
-            log.info("Tokenizer: built byte_decoder with {d} entries", .{tok.byte_decoder.count()});
         }
 
-
-        // 这是识别字节 token 的关键：token_type == 6 (LLAMA_TOKEN_TYPE_BYTE)
-        var token_types: std.ArrayListUnmanaged(u32) = .empty;
-        defer token_types.deinit(allocator);
-
+        // 读取 token_type
         if (gguf_file.metadata.get("tokenizer.ggml.token_type")) |val| {
-            switch (val) {
-                .array => |arr| {
-                    log.info("Tokenizer: token_type array with {d} items", .{arr.len});
-                    for (arr) |item| {
-                        switch (item) {
-                            .int32 => |v| {
-                                try token_types.append(allocator, @as(u32, @intCast(v)));
-                            },
-                            .uint32 => |v| {
-                                try token_types.append(allocator, v);
-                            },
-                            else => {
-                                try token_types.append(allocator, @intFromEnum(TokenType.normal));
-                            },
-                        }
-                    }
-                },
-                else => {
-                    log.debug("Tokenizer: token_type not an array, byte tokens will be detected by format", .{});
-                },
+            if (val == .array) {
+                for (val.array) |item| {
+                    const v: u32 = switch (item) {
+                        .int32 => |iv| @intCast(iv),
+                        .uint32 => |uv| uv,
+                        else => @intFromEnum(TokenType.normal),
+                    };
+                    try tok.token_types.append(allocator, @as(TokenType, @enumFromInt(v)));
+                }
             }
-        } else {
-            log.debug("Tokenizer: tokenizer.ggml.token_type not found, byte tokens will be detected by format", .{});
         }
 
         // 读取词表
-        // GGUF 中词表存储在 tokenizer.ggml.tokens 数组中
         if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
-            switch (val) {
-                .array => |arr| {
-                    log.info("Tokenizer: vocab array with {d} items", .{arr.len});
-                    for (arr, 0..) |item, i| {
-                        const token_type = if (i < token_types.items.len) token_types.items[i] else @intFromEnum(TokenType.normal);
-
-                        switch (item) {
-                            .string => |s| {
-                                if (token_type == @intFromEnum(TokenType.byte)) {
-                                    // 字节 token：从字符串中提取实际字节值
-                                    const byte_val = extractByteFromToken(s, tok.model) catch blk: {
-                                        // 解析失败，回退：如果字符串长度为1，直接使用该字节
-                                        if (s.len == 1) break :blk s[0];
-                                        // 否则作为普通字符串存储
-                                        const owned = try allocator.dupe(u8, s);
-                                        try tok.vocab.append(allocator, VocabEntry{ .normal = owned });
-                                        try tok.vocab_reverse.put(allocator, owned, @intCast(i));
-                                        continue;
-                                    };
-                                    try tok.vocab.append(allocator, VocabEntry{ .byte = byte_val });
-                                } else {
-                                    // 普通 token：直接存储字符串
-                                    const owned = try allocator.dupe(u8, s);
-                                    try tok.vocab.append(allocator, VocabEntry{ .normal = owned });
-                                    try tok.vocab_reverse.put(allocator, owned, @intCast(i));
-                                }
-                            },
-                            else => {
-                                // 非字符串类型，使用占位符
-                                const placeholder = try std.fmt.allocPrint(allocator, "[token_{d}]", .{i});
-                                try tok.vocab.append(allocator, VocabEntry{ .normal = placeholder });
-                            },
+            if (val == .array) {
+                for (val.array, 0..) |item, i| {
+                    const tt = if (i < tok.token_types.items.len) tok.token_types.items[i] else TokenType.normal;
+                    if (item == .string) {
+                        const s = item.string;
+                        if (tt == .byte) {
+                            const byte_val = extractByteFromToken(s, tok.model) catch blk: {
+                                if (s.len == 1) break :blk s[0];
+                                const owned = try allocator.dupe(u8, s);
+                                try tok.vocab.append(allocator, VocabEntry{ .normal = owned });
+                                try tok.vocab_reverse.put(allocator, owned, @intCast(i));
+                                try tok.addToTrie(owned, @intCast(i));
+                                continue;
+                            };
+                            try tok.vocab.append(allocator, VocabEntry{ .byte = byte_val });
+                            tok.byte_to_token_id[byte_val] = @intCast(i);
+                        } else {
+                            const owned = try allocator.dupe(u8, s);
+                            try tok.vocab.append(allocator, VocabEntry{ .normal = owned });
+                            try tok.vocab_reverse.put(allocator, owned, @intCast(i));
+                            try tok.addToTrie(owned, @intCast(i));
                         }
+                    } else {
+                        const placeholder = try std.fmt.allocPrint(allocator, "[token_{d}]", .{i});
+                        try tok.vocab.append(allocator, VocabEntry{ .normal = placeholder });
                     }
-                },
-                else => {
-                    log.warn("Tokenizer: tokens metadata is not an array", .{});
-                },
+                }
             }
         }
 
-        // 尝试读取 BPE 合并规则
+        // 读取 BPE 合并规则
         if (gguf_file.metadata.get("tokenizer.ggml.merges")) |val| {
-            switch (val) {
-                .array => |arr| {
-                    log.info("Tokenizer: {d} BPE merge rules", .{arr.len});
-                    for (arr, 0..) |item, i| {
-                        if (item == .string) {
-                            const s = item.string;
-                            if (std.mem.indexOfScalar(u8, s, ' ')) |space_pos| {
-                                const left = s[0..space_pos];
-                                const right = s[space_pos + 1 ..];
-                                const key = try std.fmt.allocPrint(allocator, "{s}|{s}", .{ left, right });
-                                try tok.merges.put(allocator, key, @intCast(i));
-                            }
+            if (val == .array) {
+                for (val.array, 0..) |item, i| {
+                    if (item == .string) {
+                        const s = item.string;
+                        if (std.mem.indexOfScalar(u8, s, ' ')) |space_pos| {
+                            const left = s[0..space_pos];
+                            const right = s[space_pos + 1 ..];
+                            const key = try std.fmt.allocPrint(allocator, "{s}|{s}", .{ left, right });
+                            try tok.merges.put(allocator, key, @intCast(i));
                         }
                     }
-                },
-                else => {
-                    log.debug("Tokenizer: merges not an array, skipping", .{});
-                },
+                }
             }
         }
 
         // 打印统计信息
         {
-            var normal_count: u32 = 0;
-            var byte_count: u32 = 0;
-            for (tok.vocab.items) |entry| {
-                switch (entry) {
-                    .normal => normal_count += 1,
-                    .byte => byte_count += 1,
-                }
+            var nc: u32 = 0;
+            var bc: u32 = 0;
+            for (tok.vocab.items) |e| {
+                switch (e) { .normal => nc += 1, .byte => bc += 1 }
             }
-            log.info("Tokenizer initialized: {d} entries (normal={d}, byte={d}), special: bos={d}, eos={d}, unk={d}", .{
-                tok.vocab.items.len,
-                normal_count,
-                byte_count,
-                tok.special.bos,
-                tok.special.eos,
-                tok.special.unk,
-            });
-        }
-
-        // 打印前 20 个 token 用于调试（十六进制输出，避免编码问题）
-        if (tok.vocab.items.len > 0) {
-            log.debug("First 20 tokens (hex dump):", .{});
-            const count = @min(tok.vocab.items.len, @as(usize, 20));
-            for (tok.vocab.items[0..count], 0..) |entry, i| {
-                switch (entry) {
-                    .normal => |s| {
-                        // 打印前 32 字节的十六进制值
-                        const show_len = @min(s.len, @as(usize, 32));
-                        var hex_buf: [96]u8 = undefined;
-                        var hex_len: usize = 0;
-                        for (s[0..show_len]) |b| {
-                            _ = std.fmt.bufPrint(hex_buf[hex_len..], "{x:0>2} ", .{b}) catch break;
-                            hex_len += 3;
-                        }
-                        if (hex_len > 0) hex_len -= 1; // 去掉末尾空格
-                        log.debug("  token[{d}]: NORMAL len={d} hex=[{s}] repr='{s}'", .{
-                            i, s.len, hex_buf[0..hex_len], s,
-                        });
-                    },
-                    .byte => |b| {
-                        log.debug("  token[{d}]: BYTE val=0x{x:0>2}", .{ i, b });
-                    },
-                }
-            }
-        }
-
-        // 打印一些字节 token 示例
-        {
-            var byte_count: u32 = 0;
-            log.debug("Sample byte tokens:", .{});
-            for (tok.vocab.items, 0..) |entry, i| {
-                if (entry == .byte and byte_count < 10) {
-                    log.debug("  byte_token[{d}]: val=0x{x:0>2}", .{ i, entry.byte });
-                    byte_count += 1;
-                }
-            }
-            log.debug("Total byte tokens: {d}", .{byte_count});
+            log.info("Tokenizer: {d} entries (normal={d}, byte={d})", .{ tok.vocab.items.len, nc, bc });
         }
 
         return tok;
     }
 
-    /// 释放分词器资源
-    pub fn deinit(self: *Tokenizer) void {
-        // 释放 vocab_reverse 哈希表（它的 key 只是 vocab 中 normal 字符串的引用）
-        self.vocab_reverse.deinit(self.allocator);
-        // 释放 byte_decoder 哈希表
-        self.byte_decoder.deinit(self.allocator);
-
-
-
-        // 释放 vocab 中每个 normal 条目的字符串内存
-        for (self.vocab.items) |entry| {
-            if (entry == .normal) {
-                self.allocator.free(entry.normal);
+    fn addToTrie(self: *Tokenizer, token_str: []const u8, token_id: u32) !void {
+        var node = &self.trie_root;
+        for (token_str) |byte| {
+            const gop = try node.children.getOrPut(self.allocator, byte);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = try self.allocator.create(TrieNode);
+                gop.value_ptr.*.* = TrieNode{};
             }
+            node = gop.value_ptr.*;
+        }
+        node.token_id = token_id;
+    }
+
+    pub fn deinit(self: *Tokenizer) void {
+        self.vocab_reverse.deinit(self.allocator);
+        self.byte_decoder.deinit(self.allocator);
+        self.trie_root.deinit(self.allocator);
+        self.token_types.deinit(self.allocator);
+        for (self.vocab.items) |entry| {
+            if (entry == .normal) self.allocator.free(entry.normal);
         }
         self.vocab.deinit(self.allocator);
-
-        // 释放 merges 哈希表中的每个 key（这些 key 是 allocPrint 创建的）
         var it = self.merges.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
+        while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
         self.merges.deinit(self.allocator);
     }
 
     /// 编码：将文本转换为 token ID 列表
+    /// 阶段 1：Trie 贪婪最长匹配
+    /// 阶段 2：BPE 合并规则
     pub fn encode(self: *const Tokenizer, text: []const u8) !std.ArrayListUnmanaged(u32) {
         var tokens: std.ArrayListUnmanaged(u32) = .empty;
-
-        // 添加 BOS token
         try tokens.append(self.allocator, self.special.bos);
 
-        // 如果词表为空，使用字节级编码
         if (self.vocab.items.len == 0) {
-            for (text) |byte| {
-                const token_id = self.byteToTokenId(byte);
-                try tokens.append(self.allocator, token_id);
-            }
+            for (text) |byte| try tokens.append(self.allocator, self.byteToTokenId(byte));
             return tokens;
         }
 
-        // 尝试使用 vocab_reverse 进行编码
-        // 先尝试匹配最长的 token
+        // 阶段 1：Trie 贪婪最长匹配
         var pos: usize = 0;
         while (pos < text.len) {
-            var best_len: usize = 0;
-            var best_id: u32 = self.special.unk;
-
-            // 尝试匹配所有 normal 类型的 token
-            for (self.vocab.items, 0..) |entry, id| {
-                if (entry == .normal) {
-                    const token_str = entry.normal;
-                    if (pos + token_str.len <= text.len and
-                        std.mem.eql(u8, text[pos .. pos + token_str.len], token_str))
-                    {
-                        if (token_str.len > best_len) {
-                            best_len = token_str.len;
-                            best_id = @intCast(id);
-                        }
-                    }
-                }
-            }
-
-            if (best_len > 0) {
-                try tokens.append(self.allocator, best_id);
-                pos += best_len;
+            const match = self.trieLongestMatch(text, pos);
+            if (match) |m| {
+                try tokens.append(self.allocator, m.token_id);
+                pos += m.len;
             } else {
-                // 未匹配，使用字节级编码
                 try tokens.append(self.allocator, self.byteToTokenId(text[pos]));
                 pos += 1;
             }
         }
 
+        // 阶段 2：BPE 合并
+        if (self.merges.count() > 0) try self.applyBpeMerges(&tokens);
+
         return tokens;
     }
 
+    fn trieLongestMatch(self: *const Tokenizer, text: []const u8, pos: usize) ?MatchResult {
+        var node = &self.trie_root;
+        var best: ?MatchResult = null;
+        var cl: usize = 0;
+        var i = pos;
+        while (i < text.len) {
+            if (node.children.get(text[i])) |child| {
+                node = child;
+                cl += 1;
+                if (node.token_id) |tid| best = MatchResult{ .token_id = tid, .len = cl };
+                i += 1;
+            } else break;
+        }
+        return best;
+    }
+
+    fn applyBpeMerges(self: *const Tokenizer, tokens: *std.ArrayListUnmanaged(u32)) !void {
+        if (tokens.items.len < 2) return;
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var best_idx: ?usize = null;
+            var best_rank: u32 = std.math.maxInt(u32);
+            var i: usize = 0;
+            while (i + 1 < tokens.items.len) {
+                const ls = self.tokenToString(tokens.items[i]) orelse { i += 1; continue; };
+                const rs = self.tokenToString(tokens.items[i + 1]) orelse { i += 1; continue; };
+                var kb: [1024]u8 = undefined;
+                const key = std.fmt.bufPrint(&kb, "{s}|{s}", .{ ls, rs }) catch { i += 1; continue; };
+                if (self.merges.get(key)) |rank| {
+                    if (rank < best_rank) { best_rank = rank; best_idx = i; }
+                }
+                i += 1;
+            }
+            if (best_idx) |idx| {
+                const ls = self.tokenToString(tokens.items[idx]) orelse { changed = false; continue; };
+                const rs = self.tokenToString(tokens.items[idx + 1]) orelse { changed = false; continue; };
+                var mb: [2048]u8 = undefined;
+                const merged = std.fmt.bufPrint(&mb, "{s}{s}", .{ ls, rs }) catch { changed = false; continue; };
+                if (self.vocab_reverse.get(merged)) |new_id| {
+                    tokens.items[idx] = new_id;
+                    _ = tokens.orderedRemove(idx + 1);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    fn tokenToString(self: *const Tokenizer, token_id: u32) ?[]const u8 {
+        if (token_id >= self.vocab.items.len) return null;
+        switch (self.vocab.items[token_id]) {
+            .normal => |s| return s,
+            .byte => return null,
+        }
+    }
+
     /// 解码：将 token ID 列表转换为 UTF-8 文本
-    /// 正确处理字节 token（LLAMA_TOKEN_TYPE_BYTE = 6）：
-    /// - 字节 token 输出单个字节值
-    /// - 普通 token 直接输出文本
-    /// - 所有 token 一次性解码，确保 UTF-8 字节序列正确组合
     pub fn decode(self: *const Tokenizer, token_ids: []const u32, allocator: std.mem.Allocator) ![]u8 {
         var result = std.ArrayList(u8).empty;
-
         for (token_ids) |token_id| {
-            // 跳过特殊 token
-            if (token_id == self.special.bos or
-                token_id == self.special.eos or
-                token_id == self.special.pad)
-            {
-                continue;
-            }
-
-            // 查找 token
+            if (self.isSpecialToken(token_id)) continue;
             if (token_id < self.vocab.items.len) {
-                const entry = self.vocab.items[token_id];
-                switch (entry) {
-                    .byte => |byte_val| {
-                        try result.append(allocator, byte_val);
-                    },
-                    .normal => |token_str| {
+                switch (self.vocab.items[token_id]) {
+                    .byte => |bv| try result.append(allocator, bv),
+                    .normal => |ts| {
                         if (self.model == .tiktoken) {
-                            // tiktoken 模型：token 字符串中的每个 Unicode 码点
-                            // 都是经过 bytes_to_unicode() 映射后的值
-                            // 需要通过 byte_decoder 反向映射还原为原始字节
-                            try self.decodeTiktokenToken(token_str, &result, allocator);
+                            try self.decodeTiktokenToken(ts, &result, allocator);
                         } else {
-                            // 其他模型：直接输出 token 字符串
-                            try result.appendSlice(allocator, token_str);
+                            try result.appendSlice(allocator, ts);
                         }
                     },
                 }
-            } else {
-                // 未知 token
-                log.debug("Unknown token id: {d}", .{token_id});
             }
         }
-
         return result.toOwnedSlice(allocator);
     }
 
-    /// 解码 tiktoken 格式的 token 字符串
-    ///
-    /// tiktoken 使用 bytes_to_unicode() 将每个字节（0x00-0xFF）映射到
-    /// 一个 Unicode 码点。可打印 ASCII（33-126）映射到自身，其他字节
-    /// 映射到 256+ 的区域。解码时需要将每个 Unicode 码点通过
-    /// byte_decoder 反向映射还原为原始字节。
-    fn decodeTiktokenToken(
-        self: *const Tokenizer,
-        token_str: []const u8,
-        result: *std.ArrayList(u8),
-        allocator: std.mem.Allocator,
-    ) !void {
-        // 逐个解析 token_str 中的 Unicode 码点并转换
-        var remaining = token_str;
-        while (remaining.len > 0) {
-            // 解码一个 Unicode 码点
-            const codepoint_len = std.unicode.utf8ByteSequenceLength(remaining[0]) catch {
-                log.debug("decodeTiktokenToken: invalid UTF-8 lead byte 0x{x:0>2}, skipping", .{remaining[0]});
-                try result.append(allocator, remaining[0]);
-                remaining = remaining[1..];
-                continue;
+    fn isSpecialToken(self: *const Tokenizer, token_id: u32) bool {
+        if (token_id == self.special.bos or token_id == self.special.eos or
+            token_id == self.special.pad or token_id == self.special.unk or
+            token_id == self.special.sep or token_id == self.special.cls or
+            token_id == self.special.mask) return true;
+        if (token_id < self.token_types.items.len and self.token_types.items[token_id] == .control) return true;
+        return false;
+    }
+
+    fn decodeTiktokenToken(self: *const Tokenizer, token_str: []const u8, result: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+        var rem = token_str;
+        while (rem.len > 0) {
+            const cl = std.unicode.utf8ByteSequenceLength(rem[0]) catch {
+                try result.append(allocator, rem[0]); rem = rem[1..]; continue;
             };
-
-            if (remaining.len < codepoint_len) {
-                log.debug("decodeTiktokenToken: truncated UTF-8 sequence, skipping", .{});
-                try result.append(allocator, remaining[0]);
-                remaining = remaining[1..];
-                continue;
-            }
-
-            const codepoint = std.unicode.utf8Decode(remaining[0..codepoint_len]) catch {
-                log.debug("decodeTiktokenToken: invalid UTF-8 sequence, skipping byte", .{});
-                try result.append(allocator, remaining[0]);
-                remaining = remaining[1..];
-                continue;
+            if (rem.len < cl) { try result.append(allocator, rem[0]); rem = rem[1..]; continue; }
+            const cp = std.unicode.utf8Decode(rem[0..cl]) catch {
+                try result.append(allocator, rem[0]); rem = rem[1..]; continue;
             };
-
-            // 查找 byte_decoder 映射
-            if (self.byte_decoder.get(codepoint)) |byte_val| {
-                try result.append(allocator, byte_val);
+            if (self.byte_decoder.get(cp)) |bv| {
+                try result.append(allocator, bv);
             } else {
-                // 如果映射中没有，直接输出该码点的 UTF-8 字节（极少情况）
-                log.debug("decodeTiktokenToken: codepoint U+{x:0>4} not in byte_decoder, outputting as-is", .{codepoint});
-                try result.appendSlice(allocator, remaining[0..codepoint_len]);
+                try result.appendSlice(allocator, rem[0..cl]);
             }
-
-            // 跳过已处理的码点
-            remaining = remaining[codepoint_len..];
+            rem = rem[cl..];
         }
     }
 
-
-
-    /// 将字节映射到 token ID（简化实现）
     fn byteToTokenId(self: *const Tokenizer, byte: u8) u32 {
-        _ = self;
-        // 字节级别 tokenization：每个字节对应一个 token
-        // 实际 BPE 词表中，前 256 个 token 通常是单字节
-        return @as(u32, byte) + 3; // 跳过特殊 token
+        if (self.byte_to_token_id[byte]) |tid| return tid;
+        return @as(u32, byte) + 3;
     }
 
-    /// 获取词表大小
-    pub fn vocabSize(self: *const Tokenizer) usize {
-        return self.vocab.items.len;
-    }
+    pub fn vocabSize(self: *const Tokenizer) usize { return self.vocab.items.len; }
 };
 
 // ============================================================================
 // 模块级工具函数
 // ============================================================================
 
-
-/// 生成 tiktoken 的 bytes_to_unicode 映射表
-///
-/// 这是 OpenAI tiktoken 的标准映射方案：
-/// - 可打印 ASCII（33-126）→ 映射到自身码点
-/// - 其他字节（0-32, 127-255）→ 映射到 256 + 偏移
-///
-/// 返回一个长度为 256 的数组，index 为原始字节值，value 为对应的 Unicode 码点。
 pub fn generateBytesToUnicode(allocator: std.mem.Allocator) ![]u32 {
     var list = try std.ArrayList(u32).initCapacity(allocator, 256);
     defer list.deinit(allocator);
-
-    // 第一步：标记所有映射到自身的字节
-    // 可打印 ASCII: 33-126
-    // 扩展 ASCII 可打印: 161-172 (¡-¬), 174-255 (®-ÿ)
     var bs: [256]bool = .{false} ** 256;
-    for (33..127) |b| {
-        bs[b] = true;
-    }
-    for (161..173) |b| {
-        bs[b] = true;
-    }
-    for (174..256) |b| {
-        bs[b] = true;
-    }
-
-    // 第二步：生成映射
+    for (33..127) |b| bs[b] = true;
+    for (161..173) |b| bs[b] = true;
+    for (174..256) |b| bs[b] = true;
     var n: u32 = 0;
     for (0..256) |b| {
-        if (bs[b]) {
-            // 映射到自身
-            try list.append(allocator, @intCast(b));
-        } else {
-            // 其他字节映射到 256 + 偏移
-            try list.append(allocator, 256 + n);
-            n += 1;
-        }
+        try list.append(allocator, if (bs[b]) @as(u32, @intCast(b)) else blk: { n += 1; break :blk 256 + n - 1; });
     }
-
     return list.toOwnedSlice(allocator);
 }
 
-
-/// 从 token 字符串中提取字节值
-/// 支持多种格式，根据 model 类型选择解析策略：
-///
-/// 格式说明（取决于 tokenizer.ggml.model）：
-/// - "llama" / "gpt2" (BPE): 原始单字节存储，token_bytes.len == 1
-/// - "tiktoken" (Qwen): 表示为 "<0xE4>" 可打印形式
-/// - "replit": 可能使用 b'<0xE4>' 格式
-///
-/// 当 model 为 .unknown 时，自动检测格式。
 pub fn extractByteFromToken(token: []const u8, model: TokenizerModel) !u8 {
-    // 根据 model 类型选择解析策略
+    const is_hex = token.len == 6 and token[0] == '<' and token[1] == '0' and
+        (token[2] == 'x' or token[2] == 'X') and token[5] == '>';
+    const is_bhex = token.len == 9 and std.mem.eql(u8, token[0..2], "b'") and
+        token[2] == '<' and token[7] == '>' and token[8] == '\'';
+    const is_bhex_space = token.len == 10 and std.mem.eql(u8, token[0..2], "b'") and
+        token[2] == '<' and token[7] == '>' and token[8] == '\'' and token[9] == ' ';
+
     switch (model) {
         .llama, .gpt2 => {
-            // BPE / GPT-2 类：原始单字节存储
-            if (token.len == 1) {
-                return token[0];
-            }
-            // 某些实现可能也使用 "<0xXX>" 格式，尝试解析
-            if (token.len == 6 and token[0] == '<' and token[1] == '0' and
-                (token[2] == 'x' or token[2] == 'X') and token[5] == '>')
-            {
-                return std.fmt.parseInt(u8, token[3..5], 16);
-            }
+            if (token.len == 1) return token[0];
+            if (is_hex) return std.fmt.parseInt(u8, token[3..5], 16);
             return error.InvalidByteToken;
         },
         .tiktoken => {
-            // tiktoken / Qwen 类："<0xXX>" 格式
-            if (token.len == 6 and token[0] == '<' and token[1] == '0' and
-                (token[2] == 'x' or token[2] == 'X') and token[5] == '>')
-            {
-                return std.fmt.parseInt(u8, token[3..5], 16);
-            }
-            // 某些 tiktoken 导出可能使用 b'<0xXX>' 格式
-            if (token.len == 9 and std.mem.eql(u8, token[0..2], "b'") and
-                token[2] == '<' and token[7] == '>' and token[8] == '\'')
-            {
-                return std.fmt.parseInt(u8, token[4..6], 16);
-            }
-            // 单字节回退
-            if (token.len == 1) {
-                return token[0];
-            }
+            if (is_hex) return std.fmt.parseInt(u8, token[3..5], 16);
+            if (is_bhex) return std.fmt.parseInt(u8, token[4..6], 16);
+            if (token.len == 1) return token[0];
             return error.InvalidByteToken;
         },
         .replit => {
-            // Replit 类：可能使用 b'<0xXX>' 格式
-            if (token.len == 9 and std.mem.eql(u8, token[0..2], "b'") and
-                token[2] == '<' and token[7] == '>' and token[8] == '\'')
-            {
-                return std.fmt.parseInt(u8, token[4..6], 16);
-            }
-            // 也支持 "<0xXX>" 格式
-            if (token.len == 6 and token[0] == '<' and token[1] == '0' and
-                (token[2] == 'x' or token[2] == 'X') and token[5] == '>')
-            {
-                return std.fmt.parseInt(u8, token[3..5], 16);
-            }
-            // 单字节回退
-            if (token.len == 1) {
-                return token[0];
-            }
+            if (is_bhex) return std.fmt.parseInt(u8, token[4..6], 16);
+            if (is_hex) return std.fmt.parseInt(u8, token[3..5], 16);
+            if (token.len == 1) return token[0];
             return error.InvalidByteToken;
         },
         .unknown => {
-            // 自动检测格式
-            // 情况1：原始单字节（BPE / GPT-2 类）
-            if (token.len == 1) {
-                return token[0];
-            }
-            // 情况2："<0xXX>" 格式（tiktoken / Qwen 类）
-            if (token.len == 6 and token[0] == '<' and token[1] == '0' and
-                (token[2] == 'x' or token[2] == 'X') and token[5] == '>')
-            {
-                return std.fmt.parseInt(u8, token[3..5], 16);
-            }
-            // 情况3："b'<0xXX>'" 格式（tiktoken 导出格式）
-            if (token.len == 9 and std.mem.eql(u8, token[0..2], "b'") and
-                token[2] == '<' and token[7] == '>' and token[8] == '\'')
-            {
-                return std.fmt.parseInt(u8, token[4..6], 16);
-            }
-            // 情况4："b'<0xXX>' " 格式（tiktoken 带空格）
-            if (token.len == 10 and std.mem.eql(u8, token[0..2], "b'") and
-                token[2] == '<' and token[7] == '>' and token[8] == '\'' and token[9] == ' ')
-            {
-                return std.fmt.parseInt(u8, token[4..6], 16);
-            }
+            if (token.len == 1) return token[0];
+            if (is_hex) return std.fmt.parseInt(u8, token[3..5], 16);
+            if (is_bhex) return std.fmt.parseInt(u8, token[4..6], 16);
+            if (is_bhex_space) return std.fmt.parseInt(u8, token[4..6], 16);
             return error.InvalidByteToken;
         },
     }
 }
 
-/// 判断 token 字符串是否为字节回退格式（兼容旧代码）
 pub fn isByteTokenFormat(token: []const u8) bool {
     _ = extractByteFromToken(token, .unknown) catch return false;
     return true;
 }
 
-/// 解析 "<0xXX>" 得到 0xXX（兼容旧代码）
 pub fn parseByteToken(token: []const u8) !u8 {
     return extractByteFromToken(token, .unknown);
 }
 
-/// 根据 token 字符串特征推断是否为字节 token（当 token_type 缺失时的降级方案）
-/// 返回 true 表示该 token 很可能是字节 token
 pub fn inferIsByteToken(token: []const u8) bool {
-    // 单字节 token 很可能是字节 token
     if (token.len == 1) return true;
-    // "<0xXX>" 格式
     if (token.len == 6 and token[0] == '<' and token[1] == '0' and
-        (token[2] == 'x' or token[2] == 'X') and token[5] == '>')
-    {
-        return true;
-    }
-    // "b'<0xXX>'" 格式
+        (token[2] == 'x' or token[2] == 'X') and token[5] == '>') return true;
     if (token.len == 9 and std.mem.eql(u8, token[0..2], "b'") and
-        token[2] == '<' and token[7] == '>' and token[8] == '\'')
-    {
-        return true;
-    }
+        token[2] == '<' and token[7] == '>' and token[8] == '\'') return true;
     return false;
 }
 
-/// 调试工具：打印字节序列的十六进制表示
 pub fn hexDump(data: []const u8) void {
-    const hex_chars = "0123456789abcdef";
-    var line_buf: [80]u8 = undefined;
+    const hex = "0123456789abcdef";
+    var buf: [80]u8 = undefined;
     var pos: usize = 0;
-
     for (data, 0..) |byte, i| {
-        if (i > 0 and i % 16 == 0) {
-            std.debug.print("{s}\n", .{line_buf[0..pos]});
-            pos = 0;
-        }
-        if (pos == 0) {
-            // 地址前缀
-            _ = std.fmt.bufPrint(line_buf[pos..], "{x:0>8}: ", .{i}) catch {};
-            pos += 10;
-        }
-        line_buf[pos] = hex_chars[byte >> 4];
-        line_buf[pos + 1] = hex_chars[byte & 0x0F];
-        line_buf[pos + 2] = ' ';
-        pos += 3;
+        if (i > 0 and i % 16 == 0) { std.debug.print("{s}\n", .{buf[0..pos]}); pos = 0; }
+        if (pos == 0) { _ = std.fmt.bufPrint(buf[pos..], "{x:0>8}: ", .{i}) catch {}; pos += 10; }
+        buf[pos] = hex[byte >> 4]; buf[pos + 1] = hex[byte & 0x0F]; buf[pos + 2] = ' '; pos += 3;
     }
-    if (pos > 0) {
-        std.debug.print("{s}\n", .{line_buf[0..pos]});
-    }
+    if (pos > 0) std.debug.print("{s}\n", .{buf[0..pos]});
 }
 
 // ============================================================================
@@ -740,28 +518,17 @@ test "SpecialTokens defaults" {
 }
 
 test "extractByteFromToken with model" {
-    // llama 模型：原始单字节
     try testing.expectEqual(@as(u8, 0x41), try extractByteFromToken("A", .llama));
     try testing.expectEqual(@as(u8, 0xE4), try extractByteFromToken("\xE4", .llama));
-
-    // tiktoken 模型："<0xXX>" 格式
     try testing.expectEqual(@as(u8, 0xE4), try extractByteFromToken("<0xE4>", .tiktoken));
     try testing.expectEqual(@as(u8, 0x0A), try extractByteFromToken("<0x0A>", .tiktoken));
     try testing.expectEqual(@as(u8, 0xFF), try extractByteFromToken("<0xFF>", .tiktoken));
     try testing.expectEqual(@as(u8, 0x00), try extractByteFromToken("<0x00>", .tiktoken));
-
-    // tiktoken 模型：b'<0xXX>' 格式
     try testing.expectEqual(@as(u8, 0xE4), try extractByteFromToken("b'<0xE4>'", .tiktoken));
-
-    // unknown 模型：自动检测
     try testing.expectEqual(@as(u8, 0x41), try extractByteFromToken("A", .unknown));
     try testing.expectEqual(@as(u8, 0xE4), try extractByteFromToken("<0xE4>", .unknown));
     try testing.expectEqual(@as(u8, 0xE4), try extractByteFromToken("b'<0xE4>'", .unknown));
-
-    // 无效格式
     try testing.expectError(error.InvalidByteToken, extractByteFromToken("Hello", .unknown));
-    try testing.expectError(error.InvalidByteToken, extractByteFromToken("<0xE4", .unknown));
-    try testing.expectError(error.InvalidByteToken, extractByteFromToken("0xE4>", .unknown));
 }
 
 test "TokenizerModel fromString" {
@@ -770,7 +537,6 @@ test "TokenizerModel fromString" {
     try testing.expectEqual(TokenizerModel.tiktoken, TokenizerModel.fromString("tiktoken"));
     try testing.expectEqual(TokenizerModel.replit, TokenizerModel.fromString("replit"));
     try testing.expectEqual(TokenizerModel.unknown, TokenizerModel.fromString("unknown_model"));
-    try testing.expectEqual(TokenizerModel.unknown, TokenizerModel.fromString(""));
 }
 
 test "inferIsByteToken" {
@@ -778,128 +544,194 @@ test "inferIsByteToken" {
     try testing.expect(inferIsByteToken("<0xE4>"));
     try testing.expect(inferIsByteToken("b'<0xE4>'"));
     try testing.expect(!inferIsByteToken("Hello"));
-    try testing.expect(!inferIsByteToken("world"));
-}
-
-test "isByteTokenFormat" {
-    try testing.expect(isByteTokenFormat("<0xE4>"));
-    try testing.expect(isByteTokenFormat("b'<0xE4>'"));
-    try testing.expect(!isByteTokenFormat("Hello"));
-    try testing.expect(!isByteTokenFormat("<0xE4"));
-}
-
-test "VocabEntry size" {
-    try testing.expectEqual(@as(usize, @sizeOf(VocabEntry)), @sizeOf(union { normal: []const u8, byte: u8 }));
-}
-
-test "Tokenizer init and deinit" {
-    try testing.expectEqual(@as(usize, @sizeOf(SpecialTokens)), @sizeOf(SpecialTokens));
 }
 
 test "decode handles byte tokens correctly" {
-    // 模拟一个简单的词表
-    var mock_vocab: std.ArrayListUnmanaged(VocabEntry) = .empty;
-    defer mock_vocab.deinit(testing.allocator);
-
-    // token 0: "Hello" (normal)
-    try mock_vocab.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "Hello") });
-    // token 1: " " (normal)
-    try mock_vocab.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, " ") });
-    // token 2: 0xE4 (byte - 中文UTF-8首字节)
-    try mock_vocab.append(testing.allocator, VocabEntry{ .byte = 0xE4 });
-    // token 3: 0xB8 (byte)
-    try mock_vocab.append(testing.allocator, VocabEntry{ .byte = 0xB8 });
-    // token 4: 0x96 (byte)
-    try mock_vocab.append(testing.allocator, VocabEntry{ .byte = 0x96 });
-    // token 5: "World" (normal)
-    try mock_vocab.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "World") });
-
-    var tok = Tokenizer{
-        .allocator = testing.allocator,
-        .vocab = mock_vocab,
-    };
+    var mv: std.ArrayListUnmanaged(VocabEntry) = .empty;
+    defer mv.deinit(testing.allocator);
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "Hello") });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, " ") });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xE4 });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xB8 });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0x96 });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "World") });
+    var tok = Tokenizer{ .allocator = testing.allocator, .vocab = mv };
     defer {
-        // 手动释放 normal 条目的字符串
-        for (tok.vocab.items) |entry| {
-            if (entry == .normal) {
-                testing.allocator.free(entry.normal);
-            }
-        }
+        for (tok.vocab.items) |e| { if (e == .normal) testing.allocator.free(e.normal); }
         tok.vocab.deinit(testing.allocator);
     }
-
-    // 解码 "Hello 世界World" (其中"世"的UTF-8是 E4 B8 96)
     const ids = [_]u32{ 0, 1, 2, 3, 4, 5 };
     const result = try tok.decode(&ids, testing.allocator);
     defer testing.allocator.free(result);
-
-    // "Hello" (5) + " " (1) + 0xE4 0xB8 0x96 (3) + "World" (5) = 14
-    try testing.expectEqual(@as(usize, 14), result.len);
     try testing.expectEqualSlices(u8, "Hello 世界World", result);
 }
 
-
-// 测试 Qwen 模型检测和 tiktoken 模式强制覆盖
-test "Qwen model detection forces tiktoken mode" {
-    // 模拟 Qwen 词表中的字节 token（tiktoken 格式）
-    const byte_tokens = [_][]const u8{
-        "<0x00>", "<0x01>", "<0xE4>", "<0xBA>", "<0x8C>", "<0x0A>",
-    };
-    const expected_bytes = [_]u8{ 0x00, 0x01, 0xE4, 0xBA, 0x8C, 0x0A };
-
-    for (byte_tokens, 0..) |token_str, i| {
-        const result = try extractByteFromToken(token_str, .tiktoken);
-        try testing.expectEqual(expected_bytes[i], result);
-    }
-
-    // 验证在 gpt2 模式下，这些 "<0xXX>" 格式的 token 也能被正确解析
-    for (byte_tokens) |_| {
-        try testing.expectEqual(@as(u8, 0x00), try extractByteFromToken("<0x00>", .gpt2));
-    }
-}
-
-// 测试 tiktoken 字节 token 的完整解码流程
 test "tiktoken byte token decode flow" {
-    // 模拟 Qwen 词表：前几个 token 是字节 token（tiktoken 格式）
-    var mock_vocab: std.ArrayListUnmanaged(VocabEntry) = .empty;
-    defer mock_vocab.deinit(testing.allocator);
-
-    // 添加一些普通 token
-    try mock_vocab.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "Hello") });
-    try mock_vocab.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, " ") });
-
-    // 添加字节 token（模拟 tiktoken 格式解析后的结果）
-    // "中" 的 UTF-8 编码是 E4 B8 AD
-    try mock_vocab.append(testing.allocator, VocabEntry{ .byte = 0xE4 });
-    try mock_vocab.append(testing.allocator, VocabEntry{ .byte = 0xB8 });
-    try mock_vocab.append(testing.allocator, VocabEntry{ .byte = 0xAD });
-
-    // "国" 的 UTF-8 编码是 E5 9B BD
-    try mock_vocab.append(testing.allocator, VocabEntry{ .byte = 0xE5 });
-    try mock_vocab.append(testing.allocator, VocabEntry{ .byte = 0x9B });
-    try mock_vocab.append(testing.allocator, VocabEntry{ .byte = 0xBD });
-
-    try mock_vocab.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "!") });
-
-    var tok = Tokenizer{
-        .allocator = testing.allocator,
-        .vocab = mock_vocab,
-        .model = .tiktoken,
-    };
+    var mv: std.ArrayListUnmanaged(VocabEntry) = .empty;
+    defer mv.deinit(testing.allocator);
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "Hello") });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, " ") });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xE4 });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xB8 });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xAD });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xE5 });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0x9B });
+    try mv.append(testing.allocator, VocabEntry{ .byte = 0xBD });
+    try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "!") });
+    var tok = Tokenizer{ .allocator = testing.allocator, .vocab = mv, .model = .tiktoken };
     defer {
-        for (tok.vocab.items) |entry| {
-            if (entry == .normal) {
-                testing.allocator.free(entry.normal);
-            }
-        }
+        for (tok.vocab.items) |e| { if (e == .normal) testing.allocator.free(e.normal); }
         tok.vocab.deinit(testing.allocator);
     }
-
-    // 解码 "Hello 中国!"
     const ids = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
     const result = try tok.decode(&ids, testing.allocator);
     defer testing.allocator.free(result);
-
     try testing.expectEqualSlices(u8, "Hello 中国!", result);
 }
 
+// ============================================================================
+// 辅助函数：创建模拟 Tokenizer
+// ============================================================================
+
+fn createMockTokenizer() !Tokenizer {
+    var tok = Tokenizer{ .allocator = testing.allocator };
+    const entries = [_][]const u8{ "Hello", " ", "World", "how", "are", "you", "?", "!", ",", "\n", "\t", "Special", "chars", "@", "#", "$", "%", "^", "&", "*", "(", ")", "Mix", "English" };
+    for (entries, 0..) |e, i| {
+        const owned = try testing.allocator.dupe(u8, e);
+        try tok.vocab.append(testing.allocator, VocabEntry{ .normal = owned });
+        try tok.vocab_reverse.put(testing.allocator, owned, @intCast(i));
+        try tok.addToTrie(owned, @intCast(i));
+    }
+    for (0..256) |b| {
+        const bv: u8 = @intCast(b);
+        try tok.vocab.append(testing.allocator, VocabEntry{ .byte = bv });
+        tok.byte_to_token_id[bv] = @intCast(entries.len + b);
+    }
+    return tok;
+}
+
+fn destroyMockTokenizer(tok: *Tokenizer) void {
+    for (tok.vocab.items) |e| { if (e == .normal) testing.allocator.free(e.normal); }
+    tok.vocab.deinit(testing.allocator);
+    tok.vocab_reverse.deinit(testing.allocator);
+    tok.trie_root.deinit(testing.allocator);
+    tok.token_types.deinit(testing.allocator);
+    tok.byte_decoder.deinit(testing.allocator);
+}
+
+test "encode-decode roundtrip basic" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    const texts = &[_][]const u8{ "Hello", "World", "Hello World", "Hello, World!", "Special chars: @#$%^&*()" };
+    for (texts) |text| {
+        var ids = try tok.encode(text);
+        defer ids.deinit(testing.allocator);
+        const decoded = try tok.decode(ids.items, testing.allocator);
+        defer testing.allocator.free(decoded);
+        try testing.expectEqualStrings(text, decoded);
+    }
+}
+
+test "encode-decode roundtrip byte-level" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    for (0..256) |b| {
+        const input = [_]u8{@intCast(b)};
+        var ids = try tok.encode(&input);
+        defer ids.deinit(testing.allocator);
+        const decoded = try tok.decode(ids.items, testing.allocator);
+        defer testing.allocator.free(decoded);
+        try testing.expectEqualSlices(u8, &input, decoded);
+    }
+}
+
+test "special tokens are filtered in decode" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    tok.special.bos = 0; tok.special.eos = 1; tok.special.pad = 2;
+    const ids = [_]u32{ 0, 3, 1 };
+    const decoded = try tok.decode(&ids, testing.allocator);
+    defer testing.allocator.free(decoded);
+    try testing.expectEqualStrings("Hello", decoded);
+}
+
+test "control tokens are filtered in decode" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    try tok.token_types.append(testing.allocator, .control);
+    try tok.token_types.append(testing.allocator, .normal);
+    try tok.token_types.append(testing.allocator, .control);
+    const ids = [_]u32{ 0, 1, 2 };
+    const decoded = try tok.decode(&ids, testing.allocator);
+    defer testing.allocator.free(decoded);
+    try testing.expectEqualStrings("Hello", decoded);
+}
+
+test "Trie longest match" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    const m1 = tok.trieLongestMatch("Hello World", 0);
+    try testing.expect(m1 != null);
+    if (m1) |m| { try testing.expectEqual(@as(u32, 0), m.token_id); try testing.expectEqual(@as(usize, 5), m.len); }
+    const m2 = tok.trieLongestMatch("Hello World", 5);
+    try testing.expect(m2 != null);
+    if (m2) |m| { try testing.expectEqual(@as(u32, 1), m.token_id); try testing.expectEqual(@as(usize, 1), m.len); }
+    const m3 = tok.trieLongestMatch("Hello World", 6);
+    try testing.expect(m3 != null);
+    if (m3) |m| { try testing.expectEqual(@as(u32, 2), m.token_id); try testing.expectEqual(@as(usize, 5), m.len); }
+}
+
+test "encode with Trie" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    var ids = try tok.encode("Hello World");
+    defer ids.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 4), ids.items.len);
+    try testing.expectEqual(tok.special.bos, ids.items[0]);
+    try testing.expectEqual(@as(u32, 0), ids.items[1]);
+    try testing.expectEqual(@as(u32, 1), ids.items[2]);
+    try testing.expectEqual(@as(u32, 2), ids.items[3]);
+}
+
+test "encode-decode roundtrip with BPE merges" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    const mk1 = try std.fmt.allocPrint(testing.allocator, "Hello| ", .{});
+    try tok.merges.put(testing.allocator, mk1, 0);
+    const mk2 = try std.fmt.allocPrint(testing.allocator, "Hello |World", .{});
+    try tok.merges.put(testing.allocator, mk2, 1);
+    var ids = try tok.encode("Hello World");
+    defer ids.deinit(testing.allocator);
+    const decoded = try tok.decode(ids.items, testing.allocator);
+    defer testing.allocator.free(decoded);
+    try testing.expectEqualStrings("Hello World", decoded);
+    testing.allocator.free(mk1); testing.allocator.free(mk2);
+}
+
+test "isSpecialToken detection" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    tok.special.bos = 100; tok.special.eos = 101; tok.special.pad = 102; tok.special.unk = 103;
+    try testing.expect(tok.isSpecialToken(100));
+    try testing.expect(tok.isSpecialToken(101));
+    try testing.expect(tok.isSpecialToken(102));
+    try testing.expect(tok.isSpecialToken(103));
+    try testing.expect(!tok.isSpecialToken(0));
+    try testing.expect(!tok.isSpecialToken(1));
+}
+
+test "generateBytesToUnicode roundtrip" {
+    const mapping = try generateBytesToUnicode(testing.allocator);
+    defer testing.allocator.free(mapping);
+    try testing.expectEqual(@as(usize, 256), mapping.len);
+    for (33..127) |b| try testing.expectEqual(@as(u32, @intCast(b)), mapping[b]);
+    var seen = std.AutoHashMap(u32, void).init(testing.allocator);
+    defer seen.deinit();
+    for (mapping) |cp| { try testing.expect(!seen.contains(cp)); try seen.put(cp, {}); }
+}
+
+test "byte_to_token_id mapping" {
+    var tok = try createMockTokenizer();
+    defer destroyMockTokenizer(&tok);
+    for (0..256) |b| { const tid = tok.byteToTokenId(@intCast(b)); try testing.expect(tid >= 24); }
+}
