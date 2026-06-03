@@ -1,4 +1,4 @@
-# Qwen Engine - 多模型本地推理引擎
+# zllama.zig - 多模型本地推理引擎
 
 > 纯 Zig 实现的高性能本地推理引擎，基于 ggml，支持多模型架构（Qwen / LLaMA 等）。
 
@@ -30,31 +30,31 @@
 ### 构建
 
 ```bash
-git clone https://github.com/your-repo/qwen-engine.git
-cd qwen-engine
+git clone https://github.com/your-repo/zllama.zig.git
+cd zllama.zig
 git submodule update --init --recursive
 zig build -Doptimize=ReleaseFast
 ```
 
-构建产物位于 `zig-out/bin/qwen`。
+构建产物位于 `zig-out/bin/zllama`。
 
 ### 运行推理
 
 ```bash
 # 交互模式（自动检测模型架构）
-./zig-out/bin/qwen -m /path/to/model.gguf
+./zig-out/bin/zllama -m /path/to/model.gguf
 
 # 单次生成
-./zig-out/bin/qwen -m model.gguf -p "人工智能的未来是" -n 200
+./zig-out/bin/zllama -m model.gguf -p "人工智能的未来是" -n 200
 
 # 指定线程数
-./zig-out/bin/qwen -m model.gguf --threads 6
+./zig-out/bin/zllama -m model.gguf --threads 6
 ```
 
 ## 📦 项目结构
 
 ```
-qwen-engine/
+zllama.zig/
 ├── src/
 │   ├── main.zig           # CLI 入口（Juicy Main）
 │   ├── ggml.zig           # ggml C API 安全封装

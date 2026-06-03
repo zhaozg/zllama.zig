@@ -1,6 +1,6 @@
 # 架构设计文档
 
-> **说明：** 本文档描述的是**当前实现所采用的架构**，支持多模型架构（Qwen / LLaMA 等）。
+> **说明：** 本文档描述的是 **zllama.zig** 当前实现所采用的架构，支持多模型架构（Qwen / LLaMA 等）。
 
 ## 🧭 架构概览
 
@@ -105,8 +105,8 @@ main(init)
 | 测试 | 说明 |
 |------|------|
 | `zig build test` | 运行所有测试 |
-| `./qwen --model model.gguf` | 交互式推理 |
-| `./qwen --model model.gguf -p "Hello" -n 10` | 单次生成 |
+| `./zllama --model model.gguf` | 交互式推理 |
+| `./zllama --model model.gguf -p "Hello" -n 10` | 单次生成 |
 
 ## 扩展新模型
 

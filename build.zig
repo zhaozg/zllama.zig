@@ -39,7 +39,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("ggml", .{});
 
     const exe = b.addExecutable(.{
-        .name = "qwen",
+        .name = "zllama",
         .root_module = exe_mod,
     });
 
@@ -81,6 +81,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
-    const run_step = b.step("run", "Run qwen engine");
+    const run_step = b.step("run", "Run zllama.zig engine");
     run_step.dependOn(&run_cmd.step);
 }

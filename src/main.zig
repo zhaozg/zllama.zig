@@ -1,6 +1,6 @@
-//! qwen-engine 入口
+//! zllama.zig 入口
 //!
-//! Qwen 3.5 本地推理引擎 - 主入口点
+//! zllama.zig - 多模型本地推理引擎 - 主入口点
 //! 处理 CLI 参数、初始化、推理循环
 //! 支持多模型架构（Qwen / LLaMA 等）
 //! 实现首 token 完整图推理 + 增量解码
@@ -389,7 +389,7 @@ pub fn main(init: std.process.Init) !void {
         setLogLevel(.warn);
     }
 
-    logger.info("Qwen Engine v0.1.0 (ggml {s})", .{ggml.version()});
+    logger.info("zllama.zig v0.1.0 (ggml {s})", .{ggml.version()});
 
     if (args.model_path.len == 0) {
         logger.err("no model specified. Use --model <path>", .{});

@@ -1,4 +1,4 @@
-# ggml.zig AI 编程入口
+# zllama.zig AI 编程入口
 
 > 本文档用于指导 AI 助手（如 GitHub Copilot、Cursor、Claude）理解并辅助开发 **多模型本地推理引擎**（Zig + ggml）。
 > 请严格遵循以下目标、约束及设计决策。
@@ -60,7 +60,7 @@
 ## 📁 项目结构（AI 应遵循）
 
 ```
-qwen-engine/
+zllama.zig/
 ├── AGENTS.md                    # 本文件
 ├── ARCHITECTURE.md              # 系统架构设计
 ├── GGML_BINDING.md              # ggml.zig 绑定设计

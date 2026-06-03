@@ -1,5 +1,7 @@
 # 开发路线图
 
+> **项目名称：** zllama.zig — 纯 Zig 实现的多模型本地推理引擎
+>
 > **重要声明：** 由于 Zig 0.16.0 较新，部分 API 用法需要在开发过程中逐步验证。遇到无法确认的内容将标记为 **「需查证」** ，而非编造实现。
 
 ## 📋 当前状态（2026-06-03）
@@ -7,12 +9,12 @@
 | 模块 | 状态 | 验证方式 |
 |------|------|---------|
 | `build.zig` 集成 ggml 源码 | ✅ 已完成 | `zig build` 编译通过 |
-| ggml 基础绑定 | ✅ 已完成 | `zig build test_ggml` pass |
+| ggml 基础绑定 | ✅ 已完成 | `zig build test` pass |
 | GGUF 解析器（v2/v3） | ✅ 已完成 | 能加载 GGUF 文件并打印 tensor 信息 |
 | CPU 多线程后端 | ✅ 已完成 | `ggml_backend_cpu_init` 可用 |
 | 词表提取（BPE） | ✅ 已完成 | 可从 GGUF 提取 tokenizer.json 格式 |
 | 完整 Qwen 前向推理 | ✅ 已完成 | P0-P4 核心目标全部达成 |
-| Qwen 3.5 0.8B 可运行 | ✅ 已完成 | `qwen --model ...` works |
+| Qwen 3.5 0.8B 可运行 | ✅ 已完成 | `zllama --model ...` works |
 | **多模型架构重构** | ✅ **已完成** | 新增 `models/`、`layers/` 目录结构 |
 | **模型抽象接口** | ✅ **已完成** | `model.zig` 定义 Architecture 枚举和接口 |
 | **模型注册表** | ✅ **已完成** | `registry.zig` 工厂函数 |
@@ -41,8 +43,8 @@
 - [x] `build.zig` 添加 ggml .c 源文件列表
 - [x] 通过 `b.addCSourceFiles` 配置编译宏
 - [x] `ggml.zig` 定义 `ggml_init`, `ggml_free`, `ggml_version`
-- [x] 创建 `test/test_ggml.zig` 验证 binding
-- [x] `zig build test_ggml` 通过 ✅
+- [x] 创建测试验证 binding
+- [x] `zig build test` 通过 ✅
 
 ### 里程碑 P1：GGUF 文件加载 ✅
 
@@ -82,7 +84,7 @@
 - [x] 实现 `forwardGraph`
 - [x] 实现 `generate`
 - [x] 支持 GQA
-- [x] `qwen --model ... --prompt` 能生成连续文本
+- [x] `zllama --model ... --prompt` 能生成连续文本
 
 ### 里程碑 P5：多模型架构重构 ✅
 
@@ -119,6 +121,20 @@
 - [ ] CUDA 后端初始化与内存分配
 - [ ] `--backend cuda` 可用
 
+### 里程碑 P9：性能优化与基准测试
+
+- [ ] 实现 `ggml_graph_plan` + 线程池优化
+- [ ] 添加 `--benchmark` 模式，输出 tok/s、内存占用等指标
+- [ ] 与 llama.cpp 同模型同硬件对比测试
+- [ ] 支持更多量化格式（Q5_K_M, Q6_K, Q8_0）
+
+### 里程碑 P10：生态与工具链
+
+- [ ] 交互式 CLI 增强（流式输出、对话模式、多轮记忆）
+- [ ] 添加 CI（GitHub Actions，编译 + 测试）
+- [ ] 文档完善（API 参考、模型兼容性列表）
+- [ ] 提供预编译二进制发布
+
 ## ✅ 已确认（无需查证）
 
 | 主题 | 确认结论 | 来源 |
@@ -132,11 +148,12 @@
 | 任务 | 状态 |
 |------|------|
 | ✅ 完成 P0-P5（核心路径 + 多模型重构） | ✅ |
-| ⬜ 编写与 llama.cpp 对比测试脚本 | 待定 |
-| ⬜ 添加 CI（GitHub Actions，编译测试） | 待定 |
-| ⬜ 文档完善（API 参考） | 待定 |
-| ⬜ 交互式 CLI 增强（流式输出） | 待定 |
+| ⬜ 里程碑 P6：Qwen 3.5 混合架构完整实现 | 待定 |
+| ⬜ 里程碑 P7：Metal 后端集成 | 待定 |
+| ⬜ 里程碑 P8：CUDA 后端集成 | 待定 |
+| ⬜ 里程碑 P9：性能优化与基准测试 | 待定 |
+| ⬜ 里程碑 P10：生态与工具链 | 待定 |
 
-**当前优先级：** 多模型架构重构已完成，下一步可扩展新模型或后端功能。
+**当前优先级：** 多模型架构重构已完成，下一步可推进 P6（混合架构完整实现）或 P7/P8（GPU 后端）。
 
 **说明：** 本文档会随开发进展持续更新，每次合并 PR 时应同步更新对应的里程碑状态。
