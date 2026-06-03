@@ -701,7 +701,6 @@ pub fn add(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
     return @ptrCast(c.ggml_add(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b))));
 }
 
-
 /// 取负
 pub fn neg(ctx: *Context, a: *Tensor) *Tensor {
     return @ptrCast(c.ggml_neg(@ptrCast(ctx), @ptrCast(@alignCast(a))));
@@ -711,7 +710,6 @@ pub fn neg(ctx: *Context, a: *Tensor) *Tensor {
 pub fn exp(ctx: *Context, a: *Tensor) *Tensor {
     return @ptrCast(c.ggml_exp(@ptrCast(ctx), @ptrCast(@alignCast(a))));
 }
-
 
 /// 张量拷贝
 pub fn cpy(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
@@ -809,12 +807,10 @@ pub fn silu(ctx: *Context, a: *Tensor) *Tensor {
     return @ptrCast(c.ggml_silu(@ptrCast(ctx), @ptrCast(@alignCast(a))));
 }
 
-
 /// Sigmoid 激活函数
 pub fn sigmoid(ctx: *Context, a: *Tensor) *Tensor {
     return @ptrCast(c.ggml_sigmoid(@ptrCast(ctx), @ptrCast(@alignCast(a))));
 }
-
 
 /// Softplus 激活函数
 pub fn softplus(ctx: *Context, a: *Tensor) *Tensor {
@@ -843,7 +839,6 @@ pub fn conv1d(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, p0: i32, d0: i32) 
 pub fn ssmConv(ctx: *Context, sx: *Tensor, kernel: *Tensor) *Tensor {
     return @ptrCast(c.ggml_ssm_conv(@ptrCast(ctx), @ptrCast(@alignCast(sx)), @ptrCast(@alignCast(kernel))));
 }
-
 
 /// SSM Scan 操作
 pub fn ssmScan(ctx: *Context, sx: *Tensor, B: *Tensor, C: *Tensor, dt: *Tensor, A: *Tensor, state: *Tensor) *Tensor {

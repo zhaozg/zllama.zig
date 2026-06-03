@@ -97,8 +97,17 @@ pub const KVCache = struct {
         const len: i64 = @intCast(layer.current_len);
         const n_kv_head: i64 = @intCast(self.n_kv_head);
         const head_dim: i64 = @intCast(self.head_dim);
+        const max_seq_len: i64 = @intCast(self.max_seq_len);
 
-        return ctx.view3d(layer.k, len, n_kv_head, head_dim, @intCast(n_kv_head * head_dim * @sizeOf(f32)), @intCast(head_dim * @sizeOf(f32)), 0);
+        // K Cache 形状: [max_seq_len, n_kv_head, head_dim]
+        // 维度 0 (ne0) = max_seq_len, stride = sizeof(f32)
+        // 维度 1 (ne1) = n_kv_head, stride = max_seq_len * sizeof(f32)
+        // 维度 2 (ne2) = head_dim, stride = max_seq_len * n_kv_head * sizeof(f32)
+        // View: [len, n_kv_head, head_dim]
+        return ctx.view3d(layer.k, len, n_kv_head, head_dim,
+            @intCast(max_seq_len * @sizeOf(f32)),  // nb1: stride of dim 1 in source
+            @intCast(max_seq_len * n_kv_head * @sizeOf(f32)),  // nb2: stride of dim 2 in source
+            0);
     }
 
     /// 获取指定层的 V Cache 视图 [current_len, n_kv_head, head_dim]
@@ -107,8 +116,12 @@ pub const KVCache = struct {
         const len: i64 = @intCast(layer.current_len);
         const n_kv_head: i64 = @intCast(self.n_kv_head);
         const head_dim: i64 = @intCast(self.head_dim);
+        const max_seq_len: i64 = @intCast(self.max_seq_len);
 
-        return ctx.view3d(layer.v, len, n_kv_head, head_dim, @intCast(n_kv_head * head_dim * @sizeOf(f32)), @intCast(head_dim * @sizeOf(f32)), 0);
+        return ctx.view3d(layer.v, len, n_kv_head, head_dim,
+            @intCast(max_seq_len * @sizeOf(f32)),  // nb1: stride of dim 1 in source
+            @intCast(max_seq_len * n_kv_head * @sizeOf(f32)),  // nb2: stride of dim 2 in source
+            0);
     }
 
     /// 将新的 K, V 写入 Cache
@@ -127,17 +140,24 @@ pub const KVCache = struct {
         const layer = &self.layers[layer_idx];
         const offset = layer.current_len;
 
-        // 使用 ggml_cpy 将新 K/V 拷贝到 Cache 的对应位置
-        // 通过 view 获取目标位置
         const n_kv_head: i64 = @intCast(self.n_kv_head);
         const head_dim: i64 = @intCast(self.head_dim);
-        const token_size = n_kv_head * head_dim * @sizeOf(f32);
+        const max_seq_len: i64 = @intCast(self.max_seq_len);
 
-        const k_dst = ctx.view3d(layer.k, @intCast(n_tokens), n_kv_head, head_dim, @intCast(n_kv_head * head_dim * @sizeOf(f32)), @intCast(head_dim * @sizeOf(f32)), @intCast(offset * token_size));
+        // K Cache 形状: [max_seq_len, n_kv_head, head_dim]
+        // K Cache 形状: [max_seq_len, n_kv_head, head_dim]
+        // 在 max_seq_len 维度上偏移 offset 个元素
+        const k_dst = ctx.view3d(layer.k, @intCast(n_tokens), n_kv_head, head_dim,
+            @intCast(max_seq_len * @sizeOf(f32)),  // nb1
+            @intCast(max_seq_len * n_kv_head * @sizeOf(f32)),  // nb2
+            @intCast(offset * @sizeOf(f32)));  // offset in bytes along dim 0
         const k_cpy = ggml.cpy(ctx, new_k, k_dst);
         graph.buildForwardExpand(k_cpy);
 
-        const v_dst = ctx.view3d(layer.v, @intCast(n_tokens), n_kv_head, head_dim, @intCast(n_kv_head * head_dim * @sizeOf(f32)), @intCast(head_dim * @sizeOf(f32)), @intCast(offset * token_size));
+        const v_dst = ctx.view3d(layer.v, @intCast(n_tokens), n_kv_head, head_dim,
+            @intCast(max_seq_len * @sizeOf(f32)),  // nb1
+            @intCast(max_seq_len * n_kv_head * @sizeOf(f32)),  // nb2
+            @intCast(offset * @sizeOf(f32)));  // offset in bytes along dim 0
         const v_cpy = ggml.cpy(ctx, new_v, v_dst);
         graph.buildForwardExpand(v_cpy);
 

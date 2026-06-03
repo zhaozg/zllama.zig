@@ -47,11 +47,13 @@ pub const Sampler = struct {
     pub fn sampleGreedy(logits: *ggml.Tensor) i32 {
         const data = logits.dataBytes();
         const ne = logits.ne();
+        log.debug("sampleGreedy: ne[0]={d}, ne[1]={d}, ne[2]={d}", .{ ne[0], ne[1], ne[2] });
         // logits 形状为 [n_vocab, n_tokens]，取最后一个 token
         const n_vocab = @as(usize, @intCast(ne[0]));
         const n_tokens = @max(@as(usize, @intCast(ne[1])), 1);
         const stride = n_vocab;
         const scores = @as([*]f32, @ptrCast(@alignCast(data.ptr)))[(n_tokens - 1) * stride .. (n_tokens - 1) * stride + n_vocab];
+        log.debug("sampleGreedy: first 5 scores: {d} {d} {d} {d} {d}", .{ scores[0], scores[1], scores[2], scores[3], scores[4] });
 
         var best_idx: i32 = 0;
         var best_val: f32 = scores[0];

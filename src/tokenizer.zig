@@ -175,11 +175,11 @@ pub const Tokenizer = struct {
 
         // 读取 token_type
         if (gguf_file.metadata.get("tokenizer.ggml.token_type")) |val| {
-            if (val == .array) {
-                for (val.array) |item| {
-                    const v: u32 = switch (item) {
-                        .int32 => |iv| @intCast(iv),
-                        .uint32 => |uv| uv,
+            if (val.value_type == .array) {
+                for (val.array_val) |item| {
+                    const v: u32 = switch (item.value_type) {
+                        .int32 => @as(u32, @intCast(item.int32_val)),
+                        .uint32 => item.uint32_val,
                         else => @intFromEnum(TokenType.normal),
                     };
                     try tok.token_types.append(allocator, @as(TokenType, @enumFromInt(v)));
@@ -189,11 +189,11 @@ pub const Tokenizer = struct {
 
         // 读取词表
         if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
-            if (val == .array) {
-                for (val.array, 0..) |item, i| {
+            if (val.value_type == .array) {
+                for (val.array_val, 0..) |item, i| {
                     const tt = if (i < tok.token_types.items.len) tok.token_types.items[i] else TokenType.normal;
-                    if (item == .string) {
-                        const s = item.string;
+                    if (item.value_type == .string) {
+                        const s = item.string_val;
                         if (tt == .byte) {
                             const byte_val = extractByteFromToken(s, tok.model) catch blk: {
                                 if (s.len == 1) break :blk s[0];
@@ -221,10 +221,10 @@ pub const Tokenizer = struct {
 
         // 读取 BPE 合并规则
         if (gguf_file.metadata.get("tokenizer.ggml.merges")) |val| {
-            if (val == .array) {
-                for (val.array, 0..) |item, i| {
-                    if (item == .string) {
-                        const s = item.string;
+            if (val.value_type == .array) {
+                for (val.array_val, 0..) |item, i| {
+                    if (item.value_type == .string) {
+                        const s = item.string_val;
                         if (std.mem.indexOfScalar(u8, s, ' ')) |space_pos| {
                             const left = s[0..space_pos];
                             const right = s[space_pos + 1 ..];
@@ -241,7 +241,10 @@ pub const Tokenizer = struct {
             var nc: u32 = 0;
             var bc: u32 = 0;
             for (tok.vocab.items) |e| {
-                switch (e) { .normal => nc += 1, .byte => bc += 1 }
+                switch (e) {
+                    .normal => nc += 1,
+                    .byte => bc += 1,
+                }
             }
             log.info("Tokenizer: {d} entries (normal={d}, byte={d})", .{ tok.vocab.items.len, nc, bc });
         }
@@ -332,20 +335,41 @@ pub const Tokenizer = struct {
             var best_rank: u32 = std.math.maxInt(u32);
             var i: usize = 0;
             while (i + 1 < tokens.items.len) {
-                const ls = self.tokenToString(tokens.items[i]) orelse { i += 1; continue; };
-                const rs = self.tokenToString(tokens.items[i + 1]) orelse { i += 1; continue; };
+                const ls = self.tokenToString(tokens.items[i]) orelse {
+                    i += 1;
+                    continue;
+                };
+                const rs = self.tokenToString(tokens.items[i + 1]) orelse {
+                    i += 1;
+                    continue;
+                };
                 var kb: [1024]u8 = undefined;
-                const key = std.fmt.bufPrint(&kb, "{s}|{s}", .{ ls, rs }) catch { i += 1; continue; };
+                const key = std.fmt.bufPrint(&kb, "{s}|{s}", .{ ls, rs }) catch {
+                    i += 1;
+                    continue;
+                };
                 if (self.merges.get(key)) |rank| {
-                    if (rank < best_rank) { best_rank = rank; best_idx = i; }
+                    if (rank < best_rank) {
+                        best_rank = rank;
+                        best_idx = i;
+                    }
                 }
                 i += 1;
             }
             if (best_idx) |idx| {
-                const ls = self.tokenToString(tokens.items[idx]) orelse { changed = false; continue; };
-                const rs = self.tokenToString(tokens.items[idx + 1]) orelse { changed = false; continue; };
+                const ls = self.tokenToString(tokens.items[idx]) orelse {
+                    changed = false;
+                    continue;
+                };
+                const rs = self.tokenToString(tokens.items[idx + 1]) orelse {
+                    changed = false;
+                    continue;
+                };
                 var mb: [2048]u8 = undefined;
-                const merged = std.fmt.bufPrint(&mb, "{s}{s}", .{ ls, rs }) catch { changed = false; continue; };
+                const merged = std.fmt.bufPrint(&mb, "{s}{s}", .{ ls, rs }) catch {
+                    changed = false;
+                    continue;
+                };
                 if (self.vocab_reverse.get(merged)) |new_id| {
                     tokens.items[idx] = new_id;
                     _ = tokens.orderedRemove(idx + 1);
@@ -397,11 +421,19 @@ pub const Tokenizer = struct {
         var rem = token_str;
         while (rem.len > 0) {
             const cl = std.unicode.utf8ByteSequenceLength(rem[0]) catch {
-                try result.append(allocator, rem[0]); rem = rem[1..]; continue;
+                try result.append(allocator, rem[0]);
+                rem = rem[1..];
+                continue;
             };
-            if (rem.len < cl) { try result.append(allocator, rem[0]); rem = rem[1..]; continue; }
+            if (rem.len < cl) {
+                try result.append(allocator, rem[0]);
+                rem = rem[1..];
+                continue;
+            }
             const cp = std.unicode.utf8Decode(rem[0..cl]) catch {
-                try result.append(allocator, rem[0]); rem = rem[1..]; continue;
+                try result.append(allocator, rem[0]);
+                rem = rem[1..];
+                continue;
             };
             if (self.byte_decoder.get(cp)) |bv| {
                 try result.append(allocator, bv);
@@ -417,7 +449,9 @@ pub const Tokenizer = struct {
         return @as(u32, byte) + 3;
     }
 
-    pub fn vocabSize(self: *const Tokenizer) usize { return self.vocab.items.len; }
+    pub fn vocabSize(self: *const Tokenizer) usize {
+        return self.vocab.items.len;
+    }
 };
 
 // ============================================================================
@@ -433,7 +467,10 @@ pub fn generateBytesToUnicode(allocator: std.mem.Allocator) ![]u32 {
     for (174..256) |b| bs[b] = true;
     var n: u32 = 0;
     for (0..256) |b| {
-        try list.append(allocator, if (bs[b]) @as(u32, @intCast(b)) else blk: { n += 1; break :blk 256 + n - 1; });
+        try list.append(allocator, if (bs[b]) @as(u32, @intCast(b)) else blk: {
+            n += 1;
+            break :blk 256 + n - 1;
+        });
     }
     return list.toOwnedSlice(allocator);
 }
@@ -497,9 +534,18 @@ pub fn hexDump(data: []const u8) void {
     var buf: [80]u8 = undefined;
     var pos: usize = 0;
     for (data, 0..) |byte, i| {
-        if (i > 0 and i % 16 == 0) { std.debug.print("{s}\n", .{buf[0..pos]}); pos = 0; }
-        if (pos == 0) { _ = std.fmt.bufPrint(buf[pos..], "{x:0>8}: ", .{i}) catch {}; pos += 10; }
-        buf[pos] = hex[byte >> 4]; buf[pos + 1] = hex[byte & 0x0F]; buf[pos + 2] = ' '; pos += 3;
+        if (i > 0 and i % 16 == 0) {
+            std.debug.print("{s}\n", .{buf[0..pos]});
+            pos = 0;
+        }
+        if (pos == 0) {
+            _ = std.fmt.bufPrint(buf[pos..], "{x:0>8}: ", .{i}) catch {};
+            pos += 10;
+        }
+        buf[pos] = hex[byte >> 4];
+        buf[pos + 1] = hex[byte & 0x0F];
+        buf[pos + 2] = ' ';
+        pos += 3;
     }
     if (pos > 0) std.debug.print("{s}\n", .{buf[0..pos]});
 }
@@ -557,7 +603,9 @@ test "decode handles byte tokens correctly" {
     try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "World") });
     var tok = Tokenizer{ .allocator = testing.allocator, .vocab = mv };
     defer {
-        for (tok.vocab.items) |e| { if (e == .normal) testing.allocator.free(e.normal); }
+        for (tok.vocab.items) |e| {
+            if (e == .normal) testing.allocator.free(e.normal);
+        }
         tok.vocab.deinit(testing.allocator);
     }
     const ids = [_]u32{ 0, 1, 2, 3, 4, 5 };
@@ -580,7 +628,9 @@ test "tiktoken byte token decode flow" {
     try mv.append(testing.allocator, VocabEntry{ .normal = try testing.allocator.dupe(u8, "!") });
     var tok = Tokenizer{ .allocator = testing.allocator, .vocab = mv, .model = .tiktoken };
     defer {
-        for (tok.vocab.items) |e| { if (e == .normal) testing.allocator.free(e.normal); }
+        for (tok.vocab.items) |e| {
+            if (e == .normal) testing.allocator.free(e.normal);
+        }
         tok.vocab.deinit(testing.allocator);
     }
     const ids = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
@@ -611,7 +661,9 @@ fn createMockTokenizer() !Tokenizer {
 }
 
 fn destroyMockTokenizer(tok: *Tokenizer) void {
-    for (tok.vocab.items) |e| { if (e == .normal) testing.allocator.free(e.normal); }
+    for (tok.vocab.items) |e| {
+        if (e == .normal) testing.allocator.free(e.normal);
+    }
     tok.vocab.deinit(testing.allocator);
     tok.vocab_reverse.deinit(testing.allocator);
     tok.trie_root.deinit(testing.allocator);
@@ -648,7 +700,9 @@ test "encode-decode roundtrip byte-level" {
 test "special tokens are filtered in decode" {
     var tok = try createMockTokenizer();
     defer destroyMockTokenizer(&tok);
-    tok.special.bos = 0; tok.special.eos = 1; tok.special.pad = 2;
+    tok.special.bos = 0;
+    tok.special.eos = 1;
+    tok.special.pad = 2;
     const ids = [_]u32{ 0, 3, 1 };
     const decoded = try tok.decode(&ids, testing.allocator);
     defer testing.allocator.free(decoded);
@@ -672,13 +726,22 @@ test "Trie longest match" {
     defer destroyMockTokenizer(&tok);
     const m1 = tok.trieLongestMatch("Hello World", 0);
     try testing.expect(m1 != null);
-    if (m1) |m| { try testing.expectEqual(@as(u32, 0), m.token_id); try testing.expectEqual(@as(usize, 5), m.len); }
+    if (m1) |m| {
+        try testing.expectEqual(@as(u32, 0), m.token_id);
+        try testing.expectEqual(@as(usize, 5), m.len);
+    }
     const m2 = tok.trieLongestMatch("Hello World", 5);
     try testing.expect(m2 != null);
-    if (m2) |m| { try testing.expectEqual(@as(u32, 1), m.token_id); try testing.expectEqual(@as(usize, 1), m.len); }
+    if (m2) |m| {
+        try testing.expectEqual(@as(u32, 1), m.token_id);
+        try testing.expectEqual(@as(usize, 1), m.len);
+    }
     const m3 = tok.trieLongestMatch("Hello World", 6);
     try testing.expect(m3 != null);
-    if (m3) |m| { try testing.expectEqual(@as(u32, 2), m.token_id); try testing.expectEqual(@as(usize, 5), m.len); }
+    if (m3) |m| {
+        try testing.expectEqual(@as(u32, 2), m.token_id);
+        try testing.expectEqual(@as(usize, 5), m.len);
+    }
 }
 
 test "encode with Trie" {
@@ -705,13 +768,17 @@ test "encode-decode roundtrip with BPE merges" {
     const decoded = try tok.decode(ids.items, testing.allocator);
     defer testing.allocator.free(decoded);
     try testing.expectEqualStrings("Hello World", decoded);
-    testing.allocator.free(mk1); testing.allocator.free(mk2);
+    testing.allocator.free(mk1);
+    testing.allocator.free(mk2);
 }
 
 test "isSpecialToken detection" {
     var tok = try createMockTokenizer();
     defer destroyMockTokenizer(&tok);
-    tok.special.bos = 100; tok.special.eos = 101; tok.special.pad = 102; tok.special.unk = 103;
+    tok.special.bos = 100;
+    tok.special.eos = 101;
+    tok.special.pad = 102;
+    tok.special.unk = 103;
     try testing.expect(tok.isSpecialToken(100));
     try testing.expect(tok.isSpecialToken(101));
     try testing.expect(tok.isSpecialToken(102));
@@ -727,11 +794,17 @@ test "generateBytesToUnicode roundtrip" {
     for (33..127) |b| try testing.expectEqual(@as(u32, @intCast(b)), mapping[b]);
     var seen = std.AutoHashMap(u32, void).init(testing.allocator);
     defer seen.deinit();
-    for (mapping) |cp| { try testing.expect(!seen.contains(cp)); try seen.put(cp, {}); }
+    for (mapping) |cp| {
+        try testing.expect(!seen.contains(cp));
+        try seen.put(cp, {});
+    }
 }
 
 test "byte_to_token_id mapping" {
     var tok = try createMockTokenizer();
     defer destroyMockTokenizer(&tok);
-    for (0..256) |b| { const tid = tok.byteToTokenId(@intCast(b)); try testing.expect(tid >= 24); }
+    for (0..256) |b| {
+        const tid = tok.byteToTokenId(@intCast(b));
+        try testing.expect(tid >= 24);
+    }
 }

@@ -1,153 +1,118 @@
 # 架构设计文档
 
-> **说明：** 本文档描述的是**当前实现所采用的架构**，而非最终完美设计。架构会随阶段推进而逐步复杂化。每个阶段都会更新本文档。
+> **说明：** 本文档描述的是**当前实现所采用的架构**，支持多模型架构（Qwen / LLaMA 等）。
 
-## 🧭 架构演进路线（阶段式，非终极设计）
-
-### 阶段 P0：最小绑定层
+## 🧭 架构概览
 
 ```
-┌─────────────────────────────────────────┐
-│              build.zig                  │
-│  - 添加 ggml .c 源文件                  │
-│  - 链接 libc                            │
-│  - 可选 Metal / CUDA 标志               │
-└─────────────────────────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────┐
-│              ggml.zig                    │
-│  仅实现：                                │
-│  - ggml_init_params / ggml_init          │
-│  - ggml_free                             │
-│  - ggml_version                          │
-│  注意：ggml 自身不依赖 Zig Io，可直接调用│
-│  系统 mmap 进行文件加载（绕过 Io 接口化）│
-└──────────────────────────────────────── ─┘
-                     │
-                     ▼
-┌───────────────────────────────────────────┐
-│           main.zig (Juicy Main)           │
-│  pub fn main(init: std.process.Init) !void│
-│  - const io = init.io                     │
-│  - 使用 std.Io.Dir.cwd().openFile(io, ...)│
-│  - 时间测量：std.Io.Clock.now(.awake, io) │
-└───────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                      main.zig (Juicy Main)                  │
+│  1. 解析 CLI 参数                                            │
+│  2. 读取 GGUF 文件                                           │
+│  3. 检测模型架构 (registry.detectArchitecture)               │
+│  4. 创建模型实例 (registry.createModel)                      │
+│  5. 推理循环 (generate)                                      │
+└─────────────────────────────────────────────────────────────┘
+                              │
+          ┌───────────────────┼───────────────────┐
+          ▼                   ▼                   ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│   models/       │  │   layers/       │  │   core/         │
+│   qwen.zig      │  │   rms_norm.zig  │  │   (可选)        │
+│   llama.zig     │  │   rope.zig      │  │                 │
+│   registry.zig  │  │   swiglu.zig    │  │                 │
+│                 │  │   attention.zig │  │                 │
+│                 │  │   linear.zig    │  │                 │
+│                 │  │   embed.zig     │  │                 │
+└─────────────────┘  └─────────────────┘  └─────────────────┘
+                              │
+          ┌───────────────────┼───────────────────┐
+          ▼                   ▼                   ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│   ggml.zig      │  │   gguf.zig      │  │   kv_cache.zig  │
+│   (C 绑定)      │  │   (GGUF 解析)   │  │   (KV Cache)    │
+└─────────────────┘  └─────────────────┘  └─────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │   ggml (C 库)   │
+                    │   CPU/Metal/    │
+                    │   CUDA 后端     │
+                    └─────────────────┘
 ```
 
-### 阶段 P1：GGUF 解析器
+## 🧱 多模型架构设计
 
-```
-┌─────────────────────────────────────────┐
-│              gguf.zig                   │
-│  - readHeader()：解析 magic, version    │
-│  - readMetadata()：解析 KV 元数据       │
-│  - readTensorInfos()：解析张量索引      │
-│  - validate()：检查 version 兼容性      │
-│  不加载实际张量数据（仅索引）           │
-└─────────────────────────────────────────┘
-```
+### 模型抽象接口
 
-GGUF 文件布局（参考 llama.cpp/gguf-py）：
-```
-[Header: magic, version, tensor_count, metadata_kv_count]
-[Metadata: key-value pairs]
-[Tensor Infos: name, n_dim, dims, offset]
-[Tensor Data: 32-byte aligned]
-```
+`src/model.zig` 定义了模型抽象接口：
 
-v2/v3 差异：v3 的 `tensor_count`、`metadata_kv_count` 为 64 位，且张量数据必须 32 字节对齐。
+- **`Architecture` 枚举**：支持的模型架构（qwen2, llama）
+- **`ModelParams` 基类**：所有模型共享的通用参数
+- **`ModelWeights` 基类**：通用权重结构
+- **`ModelFactory` 类型**：工厂函数类型，支持运行时多态
 
-### 阶段 P2-P3：单层计算图构建
+### 模型注册与工厂
 
-```
-┌─────────────────────────────────────────┐
-│              model.zig                  │
-│  GraphBuilder 结构：                    │
-│  - ctx: *ggml_context                   │
-│  - cgraph: ggml_cgraph                  │
-│  - add_tensor(t: *ggml_tensor)          │
-│  - add_op(op, inputs...)                │
-│                                         │
-│  每层提供：                             │
-│  - forward_full_attn()                  │
-│  - forward_rms_norm()                   │
-│  - forward_rope()                       │
-│  - forward_ffn_swiglu()                 │
-└─────────────────────────────────────────┘
-```
+`src/models/registry.zig` 提供：
 
-**计算图构建模式（ggml 推荐）：**
-1. 创建上下文 `ggml_init(params)`
-2. 为模型权重创建张量 `ggml_new_tensor_*()`
-3. 构建算子图 `ggml_mul_mat()`, `ggml_add()`, `ggml_norm()`...
-4. 设置输出 `ggml_set_output()`
-5. 调用 `ggml_graph_compute_with_ctx()` 执行
+- **`detectArchitecture()`**：从 GGUF 元数据检测模型架构
+- **`createModel()`**：根据架构创建模型实例（返回 `*anyopaque`）
+- **`forwardModel()`**：执行前向计算（switch 分发）
+- **`deinitModel()`**：释放模型资源
 
-### 阶段 P4：KV Cache 与增量解码
+### 共享算子库
 
-```
-┌─────────────────────────────────────────┐
-│            kv_cache.zig                  │
-│  KVCache 结构：                          │
-│  - k: *ggml_tensor (预分配)              │
-│  - v: *ggml_tensor                       │
-│  - head_dim: usize                       │
-│  - seq_len: usize                        │
-│                                          │
-│  get_k_view(pos: usize) -> *ggml_tensor  │
-│    → ggml_view_2d(k, ...)                │
-│  get_v_view(pos: usize) -> *ggml_tensor  │
-│  set_kv(pos, k_tensor, v_tensor)         │
-└─────────────────────────────────────────┘
-```
+`src/layers/` 下的每个文件导出纯粹的**算子函数**，接受 `ggml.Tensor` 并返回新的张量：
 
-**关键约束：** `ggml_view_*` 不复制数据，必须在缓存预分配时保证内存连续。
+- `rms_norm.zig`：RMSNorm 归一化
+- `rope.zig`：RoPE 位置编码
+- `swiglu.zig`：SwiGLU 前馈网络
+- `attention.zig`：缩放点积注意力（含 GQA）
+- `linear.zig`：线性投影
+- `embed.zig`：Token 嵌入
 
-### 阶段 P5-P6：混合架构与多后端
+### 具体模型实现
 
-Qwen 3.5 架构需从 GGUF 元数据获取：
-- `layer_type` 数组：`"full_attention"` 或 `"linear_attention"`
-- `attn_output_gate`：是否存在门控张量（Qwen 3.5 特有）
-- `n_kv_heads`：GQA 时的 KV head 数量
+每个模型实现文件（如 `qwen.zig`、`llama.zig`）包含：
 
-线性注意力需要 `ggml_conv_1d` 算子。
+- 该模型的超参数结构体（从 GGUF 读取）
+- 权重张量的持有
+- `init`、`deinit`、`forward` 方法
+- 使用 `layers/` 中的共享算子构建计算图
 
 ## 数据流与内存管理
 
-Io 实例（来自 Juicy Main 的 init.io）必须贯穿整个推理链路：
 ```
 main(init)
   ├── 获得 io = init.io
-  ├── 传递给 GGUF 文件加载：std.Io.Dir.cwd().openFile(io, path, .{})
-  ├── 传递给 Tokenizer（如需从文件读取词表）
-  └── 传递给所有需要 I/O 的调用链
+  ├── 读取 GGUF 文件
+  ├── 解析 GGUF 元数据
+  ├── 检测架构 → 创建模型
+  ├── 初始化 KV Cache
+  ├── 编码 prompt
+  ├── 构建计算图 → 执行 → 采样
+  └── 增量生成 → 输出文本
 
-文件 mmap (ggml_backend_file，此操作不受 Io 影响，直接使用系统 mmap)
-      │
-      ▼
-gguf.zig → 解析元数据，获取权重张量 offset
-      │
-      ▼
-model.zig → 创建 ggml_context，通过 offset 映射张量（零拷贝）
-      │
-      ▼
-ggml 计算图 → CPU / Metal / CUDA 执行
-      │
-      ▼
-输出采样 → 下一 token id
+内存管理：
+  - 权重：通过 setDataPtr 指向 GGUF 文件数据（零拷贝）
+  - KV Cache：预分配连续内存，通过 ggml_view_* 切片
+  - 计算图：使用 gallocr 分配中间张量内存
 ```
 
 ## 可验证测试模式
 
-每个里程碑需提供对应的测试：
-
-| 阶段 | 测试 |
+| 测试 | 说明 |
 |------|------|
-| P0 | `zig build test_ggml` 调用 `ggml_version()` |
-| P1 | `./qwen --model model.gguf --info` |
-| P2 | `./qwen --model model.gguf --test-embed` |
-| P3 | `./qwen --model model.gguf --test-layer 1` |
-| P4 | `./qwen --model model.gguf --prompt "Hello" -n 1` |
-```
+| `zig build test` | 运行所有测试 |
+| `./qwen --model model.gguf` | 交互式推理 |
+| `./qwen --model model.gguf -p "Hello" -n 10` | 单次生成 |
 
+## 扩展新模型
+
+新增模型只需：
+
+1. 在 `src/models/` 下创建新文件（如 `mistral.zig`）
+2. 实现 `init`、`deinit`、`forward`、`params`、`weights` 方法
+3. 在 `model.zig` 的 `Architecture` 枚举中添加新类型
+4. 在 `registry.zig` 的 `fromString`、`createModel`、`forwardModel`、`deinitModel` 中添加对应 case

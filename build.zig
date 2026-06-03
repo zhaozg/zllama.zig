@@ -46,84 +46,32 @@ pub fn build(b: *std.Build) void {
     // --- 测试 ---
     const test_step = b.step("test", "Run all tests");
 
-    // ggml.zig 测试
-    const ggml_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ggml.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    ggml_test_mod.addIncludePath(include_path);
-    ggml_test_mod.linkSystemLibrary("ggml-base", .{});
-    ggml_test_mod.linkSystemLibrary("ggml", .{});
-    if (target.result.os.tag == .macos) {
-        ggml_test_mod.linkFramework("Metal", .{});
-        ggml_test_mod.linkFramework("Foundation", .{});
-        ggml_test_mod.linkFramework("Accelerate", .{});
-        ggml_test_mod.addCMacro("GGML_USE_METAL", "1");
-        ggml_test_mod.addCMacro("GGML_USE_ACCELERATE", "1");
-    }
-
-    const ggml_test = b.addTest(.{
-        .name = "ggml-test",
-        .root_module = ggml_test_mod,
-    });
-    test_step.dependOn(&ggml_test.step);
-
-    // gguf.zig 测试
-    const gguf_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/gguf.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    gguf_test_mod.addImport("ggml", ggml_mod);
-    gguf_test_mod.addIncludePath(include_path);
-    gguf_test_mod.linkSystemLibrary("ggml-base", .{});
-    gguf_test_mod.linkSystemLibrary("ggml", .{});
-
-    const gguf_test = b.addTest(.{
-        .name = "gguf-test",
-        .root_module = gguf_test_mod,
-    });
-    test_step.dependOn(&gguf_test.step);
-
-    // tokenizer.zig 测试
-    const tokenizer_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/tokenizer.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    tokenizer_test_mod.addImport("ggml", ggml_mod);
-    tokenizer_test_mod.addImport("gguf", gguf_test_mod);
-    tokenizer_test_mod.addIncludePath(include_path);
-    tokenizer_test_mod.linkSystemLibrary("ggml-base", .{});
-    tokenizer_test_mod.linkSystemLibrary("ggml", .{});
-
-    const tokenizer_test = b.addTest(.{
-        .name = "tokenizer-test",
-        .root_module = tokenizer_test_mod,
-    });
-    test_step.dependOn(&tokenizer_test.step);
-
-    // main.zig 测试
-    const main_test_mod = b.createModule(.{
+    // 创建一个根模块用于测试，包含整个 src/ 目录
+    // 这样子目录中的文件可以使用相对路径导入
+    const test_root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    main_test_mod.addImport("ggml", ggml_mod);
-    main_test_mod.addIncludePath(include_path);
-    main_test_mod.linkSystemLibrary("ggml-base", .{});
-    main_test_mod.linkSystemLibrary("ggml", .{});
+    test_root_mod.addImport("ggml", ggml_mod);
+    test_root_mod.addIncludePath(include_path);
+    test_root_mod.linkSystemLibrary("ggml-base", .{});
+    test_root_mod.linkSystemLibrary("ggml", .{});
+    if (target.result.os.tag == .macos) {
+        test_root_mod.linkFramework("Metal", .{});
+        test_root_mod.linkFramework("Foundation", .{});
+        test_root_mod.linkFramework("Accelerate", .{});
+        test_root_mod.addCMacro("GGML_USE_METAL", "1");
+        test_root_mod.addCMacro("GGML_USE_ACCELERATE", "1");
+    }
 
-    const main_test = b.addTest(.{
-        .name = "main-test",
-        .root_module = main_test_mod,
+    // 使用根模块运行所有测试
+    const test_unit = b.addTest(.{
+        .name = "all-tests",
+        .root_module = test_root_mod,
     });
-    test_step.dependOn(&main_test.step);
+    test_step.dependOn(&test_unit.step);
 
     // --- 安装与运行 ---
     b.installArtifact(exe);

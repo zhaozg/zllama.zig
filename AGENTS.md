@@ -1,11 +1,11 @@
 # ggml.zig AI 编程入口
 
-> 本文档用于指导 AI 助手（如 GitHub Copilot、Cursor、Claude）理解并辅助开发 **Qwen 3.5 本地推理引擎**（Zig + ggml）。
+> 本文档用于指导 AI 助手（如 GitHub Copilot、Cursor、Claude）理解并辅助开发 **多模型本地推理引擎**（Zig + ggml）。
 > 请严格遵循以下目标、约束及设计决策。
 
 ## 🎯 项目目标
 
-实现一个**生产级、高性能、跨平台**的本地推理引擎，支持 **Qwen 3.5 9B / 27B**（及未来 35B-A3B MoE）模型，满足以下要求：
+实现一个**生产级、高性能、跨平台**的本地推理引擎，支持 **Qwen 3.5 / LLaMA 3** 等多模型架构，满足以下要求：
 
 - 完全基于 **Zig 0.16.0** 与 **ggml**（C 库），单二进制原生运行，无 Python / C++ 运行时依赖。
 - 支持 **GGUF v2 / v3** 格式，能够解析混合架构（全注意力 + 线性注意力层）及量化张量。
@@ -13,6 +13,7 @@
 - 支持 **多后端**：CPU（默认）、Metal (macOS)、CUDA (Linux)。GPU 后端可选，但不强制。
 - 达到**可用推理速度**：9B Q4_K_M ≥15 tok/s，27B Q4_K_M ≥5 tok/s（CPU + 多线程）。
 - 提供**最小 BPE 分词器**（从 GGUF 提取词表），无需外部 tokenizer 库。
+- **多模型架构**：通过 GGUF 元数据中的 `general.architecture` 字段自动检测模型类型。
 
 ## ⚠️ 核心约束
 
@@ -33,23 +34,15 @@
    - 不再使用 `std.fs.cwd()` 等旧 API，改用 `std.Io.Dir.cwd().openFile(io, ...)` 模式。
    - 如需自定义 Io 实现，使用 `std.Io.Threaded`（稳定、功能完整），`std.Io.Evented` 仍处于实验阶段。
 
-4. **Qwen 3.5 混合架构实现要求**
-   - 必须从 GGUF 元数据读取 **`layer_type` 数组**，区分 `full_attention` 与 `linear_attention` 层。
-   - 线性注意力层需实现 **1D 因果卷积**（调用 `ggml_conv_1d`）。
-   - 正确处理 **`attn_output_gate`**（门控机制）：在残差连接前乘以 gate 张量。
-   - 支持 **GQA**（`n_kv_heads` 可能不等于 `n_heads`）。
+4. **多模型架构实现要求**
+   - 必须从 GGUF 元数据读取 **`general.architecture` 字段**，区分模型类型。
+   - 模型实现放在 `src/models/` 目录，共享算子放在 `src/layers/` 目录。
+   - 新增模型只需在 `registry.zig` 增加枚举值和对应 case。
+   - 使用 Zig 的 `switch` 实现零成本运行时多态分发。
 
 5. **时间测量约束（Zig 0.16.0 破坏性变更）**
    - **`std.time.Timer` 已被移除**，`std.time.nanoTimestamp()` 不再是推荐方式。
    - 新 API：使用 `std.Io.Clock.now(.awake, io)` 获取时间戳。
-     ```zig
-     const start = std.Io.Clock.now(.awake, io);
-     // ... computation ...
-     const end = std.Io.Clock.now(.awake, io);
-     const elapsed_ns = start.durationTo(end).toNanoseconds();
-     ```
-   - 时钟类型：`.awake`（单调时间，适用于性能测量）、`.real`（挂钟时间，受 NTP 调整影响）、`.cpu_process` / `.cpu_thread`（CPU 耗时）。
-   - `duration` 方法：`.toNanoseconds()`、`.toMilliseconds()`、`.toSeconds()`、`.toMinutes()` 等。
 
 6. **GGUF v3 兼容**
    - v3 使用 64 位字段（`tensor_count`、`metadata_kv_count`），无填充，**张量数据 32 字节对齐**。
@@ -72,21 +65,33 @@ qwen-engine/
 ├── ARCHITECTURE.md              # 系统架构设计
 ├── GGML_BINDING.md              # ggml.zig 绑定设计
 ├── TECHNICAL_CHALLENGES.md      # 技术难重点分析
+├── ROADMAP.md                   # 开发路线图
 ├── build.zig                    # Zig 构建脚本
 ├── src/
-│   ├── main.zig                 # 入口（Juicy Main 签名：pub fn main(init: std.process.Init) !void）
+│   ├── main.zig                 # 入口（Juicy Main 签名）
 │   ├── ggml.zig                 # C 绑定 + 安全封装
 │   ├── gguf.zig                 # GGUF 解析器（v2/v3）
-│   ├── model.zig                # 模型加载、层构建
-│   ├── layers/
-│   │   ├── full_attn.zig        # 标准注意力
-│   │   ├── linear_attn.zig      # 线性注意力（1D conv）
-│   │   └── moe.zig              # MoE 路由（可选）
+│   ├── model.zig                # 模型抽象接口定义
 │   ├── kv_cache.zig             # KV Cache 管理
 │   ├── tokenizer.zig            # BPE 分词器
 │   ├── sampler.zig              # Top-p / Top-k 采样
-│   └── backend.zig              # 多后端抽象（CPU/Metal/CUDA）
-├── llama.cpp/                   # llama.cpp 相关代码（可参考实现过程）
+│   ├── backend.zig              # 多后端抽象（CPU/Metal/CUDA）
+│   ├── layers/                  # 通用层实现（算子库）
+│   │   ├── rms_norm.zig         # RMSNorm 归一化
+│   │   ├── rope.zig             # RoPE 位置编码
+│   │   ├── swiglu.zig           # SwiGLU FFN
+│   │   ├── attention.zig        # 注意力（含 GQA）
+│   │   ├── linear.zig           # 线性投影
+│   │   └── embed.zig            # Token 嵌入
+│   ├── models/                  # 具体模型实现
+│   │   ├── registry.zig         # 模型注册与工厂函数
+│   │   ├── qwen.zig             # Qwen 系列（含混合注意力）
+│   │   └── llama.zig            # LLaMA 家族（2/3/3.1）
+│   └── core/                    # 核心引擎（可选）
+│       ├── graph_builder.zig    # 计算图构建辅助
+│       ├── forward.zig          # 前向传播主干
+│       └── context.zig          # 推理上下文
+├── llama.cpp/                   # llama.cpp 相关代码（可参考）
 └── deps/ggml/                   # ggml 源码（submodule 或拷贝）
 ```
 
@@ -96,12 +101,13 @@ qwen-engine/
 2. **代码生成**：
    - 任何涉及 ggml C 调用的代码必须通过 `ggml.zig` 的封装，不可直接 `@cImport` 到业务模块。
    - 新增层或算子时，先在 `ggml.zig` 添加安全封装，再在业务中使用。
+   - 新增模型时，在 `src/models/` 下创建新文件，在 `registry.zig` 注册。
    - 资源释放一律使用 `defer`，分配失败返回错误。
 3. **约束检查**：
    - 确保所有阻塞 I/O 都通过传递的 `*std.Io` 参数执行。
    - 检查张量维度是否匹配（使用 `std.debug.assert`）。
    - 验证 GGUF 版本兼容性。
-4. 问题定位：
+4. **问题定位**：
    - 善于通过 `git diff` 发现改动引入的潜在问题。
    - 必要时在对话中提问澄清约束或设计细节，避免误解导致的实现偏差。
    - 可参考 `llama.cpp` 的实现细节，但必须适配 Zig 0.16.0 的特定要求。
@@ -127,4 +133,4 @@ qwen-engine/
 
 ---
 
-**AI 助手应始终以“安全、可维护、高性能”为原则，优先遵循本文档约束。如有歧义，请在对话中提问澄清。**
+**AI 助手应始终以"安全、可维护、高性能"为原则，优先遵循本文档约束。如有歧义，请在对话中提问澄清。**
