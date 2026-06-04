@@ -101,6 +101,18 @@ pub fn modelParams(model_ptr: *anyopaque, arch: model.Architecture) *const model
     };
 }
 
+/// 重置模型的 SSM 状态（在 ctx_graph.reset() 后调用）
+pub fn resetModelSSMStates(model_ptr: *anyopaque, arch: model.Architecture) void {
+    switch (arch) {
+        .qwen2 => {},
+        .qwen35 => {
+            const m = @as(*qwen35.QwenModel, @ptrCast(@alignCast(model_ptr)));
+            m.resetSSMStates();
+        },
+        .llama => {},
+    }
+}
+
 /// 从 GGUF 元数据检测架构
 pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model.Architecture {
     const arch_names = [_][]const u8{

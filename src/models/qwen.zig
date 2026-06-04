@@ -1,19 +1,19 @@
-//! Qwen 系列模型实现
+//! Qwen35 混合架构模型实现（全注意力 + SSM/GDN 线性注意力交替）
 //!
-//! 支持 Qwen 2 / 2.5 / 3.5 混合架构（全注意力 + SSM 线性注意力交替）。
+//! 参考: deps/llama.cpp/src/models/qwen35.cpp, deps/llama.cpp/src/models/delta-net-base.cpp
 
 const std = @import("std");
-const ggml = @import("..//ggml.zig");
-const gguf = @import("..//gguf.zig");
-const kv_cache = @import("..//kv_cache.zig");
-const model = @import("..//model.zig");
-const rms_norm = @import("..//layers/rms_norm.zig");
-const rope = @import("..//layers/rope.zig");
-const swiglu = @import("..//layers/swiglu.zig");
-const attention = @import("..//layers/attention.zig");
-const embed = @import("..//layers/embed.zig");
+const gguf = @import("../gguf.zig");
+const ggml = @import("../ggml.zig");
+const kv_cache = @import("../kv_cache.zig");
+const model = @import("../model.zig");
+const rms_norm = @import("../layers/rms_norm.zig");
+const rope = @import("../layers/rope.zig");
+const swiglu = @import("../layers/swiglu.zig");
+const attention = @import("../layers/attention.zig");
+const embed = @import("../layers/embed.zig");
 
-const log = std.log.scoped(.qwen);
+const log = std.log.scoped(.qwen35);
 
 pub const QwenParams = struct {
     base: model.ModelParams = .{},
@@ -69,21 +69,40 @@ pub const QwenWeights = struct {
     }
 };
 
+/// 每层的 SSM 状态（conv_state 和 ssm_state）
+const LayerSSMState = struct {
+    conv_state: ?*ggml.Tensor, // [d_conv-1, conv_dim]
+    ssm_state: ?*ggml.Tensor,  // [S_v*S_v*H, 1, n_seqs]
+};
+
 pub const QwenModel = struct {
     qwen_params: QwenParams,
     qwen_weights: QwenWeights,
     ctx_weights: *ggml.Context,
+    ssm_states: []LayerSSMState, // 每层的 SSM 状态
 
     pub fn init(self: *QwenModel, allocator: std.mem.Allocator, gguf_file: *gguf.GGUFFile, io: std.Io) !void {
         _ = io;
         self.qwen_params = try parseParams(gguf_file, allocator);
         self.ctx_weights = try ggml.Context.initNoAlloc(estimateMemSize(&self.qwen_params));
         self.qwen_weights = try loadWeights(gguf_file, self.ctx_weights, &self.qwen_params, allocator);
+
+        // 初始化 SSM 状态（在推理上下文中分配）
+        const n_layer = self.qwen_params.base.n_layer;
+        self.ssm_states = try allocator.alloc(LayerSSMState, n_layer);
+        // 初始化为空，在 forward 中按需创建
+        for (0..n_layer) |i| {
+            self.ssm_states[i] = .{
+                .conv_state = null,
+                .ssm_state = null,
+            };
+        }
     }
 
     pub fn deinit(self: *QwenModel, allocator: std.mem.Allocator) void {
         self.qwen_weights.deinit(allocator);
         self.ctx_weights.deinit();
+        allocator.free(self.ssm_states);
     }
 
     pub fn getParams(self: *const QwenModel) *const model.ModelParams {
@@ -92,6 +111,14 @@ pub const QwenModel = struct {
     pub fn getWeights(self: *const QwenModel) *const model.ModelWeights {
         return &self.qwen_weights.base;
     }
+    pub fn resetSSMStates(self: *QwenModel) void {
+        for (self.ssm_states) |*state| {
+            state.conv_state = null;
+            state.ssm_state = null;
+        }
+    }
+
+
 
     pub fn forward(self: *QwenModel, ctx: *ggml.Context, graph: *ggml.CGraph, input_tokens: *ggml.Tensor, n_tokens: i32, kv_cache_mgr: ?*kv_cache.KVCache, start_pos: i32) !*ggml.Tensor {
         const p = &self.qwen_params;
@@ -110,6 +137,7 @@ pub const QwenModel = struct {
             const is_full_attn = isFullAttentionLayer(layer_idx, p.full_attention_interval);
             var name_buf: [128]u8 = undefined;
 
+            // Pre-attention norm
             var attn_input = rms_norm.rmsNorm(ctx, cur, layer.attn_norm_weight, p.base.norm_eps);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_norm", .{i}) catch unreachable;
@@ -121,10 +149,11 @@ pub const QwenModel = struct {
                 const attn_out = try self.forwardFullAttention(ctx, graph, layer, attn_input, n_tokens_i64, n_head, n_kv_head, head_dim, rope_dim, kv_cache_mgr, start_pos, i, &name_buf);
                 cur = ggml.add(ctx, cur, attn_out);
             } else {
-                const ssm_out = try self.forwardSSM(ctx, layer, attn_input, n_tokens_i64);
+                const ssm_out = try self.forwardSSM(ctx, graph, layer, attn_input, n_tokens_i64, i);
                 cur = ggml.add(ctx, cur, ssm_out);
             }
 
+            // Post-attention norm (Qwen35 uses this instead of ffn_norm)
             var post_attn = rms_norm.rmsNorm(ctx, cur, layer.post_attention_norm_weight, p.base.norm_eps);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.post_attn_norm", .{i}) catch unreachable;
@@ -132,6 +161,7 @@ pub const QwenModel = struct {
                 post_attn.setName(name_buf[0..name.len :0]);
             }
 
+            // SwiGLU FFN
             const ffn_out = swiglu.swiGLU(ctx, post_attn, layer.ffn_gate_weight, layer.ffn_up_weight, layer.ffn_down_weight);
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_out", .{i}) catch unreachable;
@@ -141,12 +171,12 @@ pub const QwenModel = struct {
             cur = ggml.add(ctx, cur, ffn_out);
         }
 
+        // Output norm & projection
         cur = rms_norm.rmsNorm(ctx, cur, w.base.output_norm_weight, p.base.norm_eps);
         cur.setName("output_norm");
         const out_w = w.base.output_weight orelse w.base.token_embd;
         var logits_tensor = ggml.mulMat(ctx, out_w, cur);
         logits_tensor.setName("logits");
-        // graph output determined by buildForwardExpand
         graph.buildForwardExpand(logits_tensor);
         return logits_tensor;
     }
@@ -158,10 +188,12 @@ pub const QwenModel = struct {
         const v_w = layer.attn_v_weight orelse return error.MissingWeight;
         const o_w = layer.attn_output_weight orelse return error.MissingWeight;
 
+        // Q projection outputs [Q, gate] combined
         var q_full = ggml.mulMat(ctx, q_w, attn_input);
         var k = ggml.mulMat(ctx, k_w, attn_input);
         var v = ggml.mulMat(ctx, v_w, attn_input);
 
+        // Q norm
         if (layer.attn_q_norm_weight) |q_norm_raw| {
             q_full = ggml.rmsNorm(ctx, q_full, p.base.norm_eps);
             const q_norm_2d = ggml.reshape2d(ctx, q_norm_raw, head_dim, 1);
@@ -169,6 +201,8 @@ pub const QwenModel = struct {
             const q_norm_rep = ggml.repeat(ctx, q_norm_2d, q_norm_target);
             q_full = ggml.mul(ctx, q_full, q_norm_rep);
         }
+
+        // K norm
         if (layer.attn_k_norm_weight) |k_norm_raw| {
             k = ggml.rmsNorm(ctx, k, p.base.norm_eps);
             const k_norm_2d = ggml.reshape2d(ctx, k_norm_raw, head_dim, 1);
@@ -177,26 +211,29 @@ pub const QwenModel = struct {
             k = ggml.mul(ctx, k, k_norm_rep);
         }
 
+        // Split Q into [Q, gate]
         const q_attn_size: i64 = n_head * head_dim;
         var q = ctx.view2d(q_full, q_attn_size, n_tokens_i64, q_full.strides()[1], 0);
         const q_gate = ctx.view2d(q_full, q_attn_size, n_tokens_i64, q_full.strides()[1], @intCast(q_attn_size * @sizeOf(f32)));
 
-        // ggml_rope_multi expects [head_dim, n_head, n_tokens]
+        // Reshape for MRoPE: [head_dim, n_head, n_tokens]
         q = ggml.reshape3d(ctx, ggml.cont(ctx, q), head_dim, n_head, n_tokens_i64);
         k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
         v = ggml.reshape3d(ctx, v, head_dim, n_kv_head, n_tokens_i64);
 
+        // MRoPE (Multi-dimensional RoPE)
         const pos_tensor = rope.buildMultiPositionTensor(ctx, @intCast(n_tokens_i64), start_pos);
         const rope_sections = [4]i32{ 11, 11, 10, 0 };
         const rope_type: i32 = 40; // GGML_ROPE_TYPE_IMROPE for Qwen 3.5
         q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
         k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
 
-        // Transpose back to [head_dim, n_tokens, n_head] for attention
+        // Transpose to [head_dim, n_tokens, n_head] for attention
         q = ggml.cont(ctx, ggml.permute(ctx, q, 0, 2, 1, 3));
         k = ggml.cont(ctx, ggml.permute(ctx, k, 0, 2, 1, 3));
         v = ggml.cont(ctx, ggml.permute(ctx, v, 0, 2, 1, 3));
 
+        // KV Cache
         if (kv_cache_mgr) |cache| {
             cache.setKv(ctx, graph, layer_idx, k, v, @intCast(n_tokens_i64));
             k = cache.getKView(ctx, layer_idx);
@@ -205,6 +242,7 @@ pub const QwenModel = struct {
 
         const cache_len: i64 = if (kv_cache_mgr) |cache| @as(i64, @intCast(cache.currentLen())) else n_tokens_i64;
 
+        // Scaled dot-product attention
         var attn_out = attention.scaledDotProductAttention(ctx, q, k, v, .{
             .n_head = n_head,
             .n_kv_head = n_kv_head,
@@ -215,6 +253,7 @@ pub const QwenModel = struct {
             .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
         });
 
+        // Gate: sigmoid(gate) * attn_out
         const gate_sigmoid = ggml.sigmoid(ctx, q_gate);
         attn_out = ggml.mul(ctx, attn_out, gate_sigmoid);
         {
@@ -223,6 +262,7 @@ pub const QwenModel = struct {
             attn_out.setName(name_buf[0..name.len :0]);
         }
 
+        // Output projection
         var result = ggml.mulMat(ctx, o_w, attn_out);
         {
             const name = std.fmt.bufPrint(name_buf, "blk.{d}.attn_out", .{layer_idx}) catch unreachable;
@@ -232,7 +272,7 @@ pub const QwenModel = struct {
         return result;
     }
 
-    fn forwardSSM(self: *QwenModel, ctx: *ggml.Context, layer: *const LayerWeights, attn_input: *ggml.Tensor, n_tokens_i64: i64) !*ggml.Tensor {
+    fn forwardSSM(self: *QwenModel, ctx: *ggml.Context, graph: *ggml.CGraph, layer: *const LayerWeights, attn_input: *ggml.Tensor, n_tokens_i64: i64, layer_idx: usize) !*ggml.Tensor {
         const p = &self.qwen_params;
         const d_inner: i64 = @intCast(p.ssm_inner_size);
         const d_state: i64 = @intCast(p.ssm_state_size);
@@ -249,16 +289,19 @@ pub const QwenModel = struct {
         const value_dim = head_v_dim * num_v_heads;
         const conv_dim = key_dim * 2 + value_dim;
 
+        // === Step 1: Input projections (QKV mixed + Z gate) ===
         const qkv_mixed = ggml.mulMat(ctx, layer.attn_qkv_weight.?, attn_input);
         qkv_mixed.setName("ssm_qkv_mixed");
         const z = ggml.mulMat(ctx, layer.attn_gate_weight.?, attn_input);
         z.setName("ssm_z");
 
+        // === Step 2: Beta (sigmoid) ===
         var beta = ggml.mulMat(ctx, layer.ssm_beta_weight.?, attn_input);
         beta = ggml.reshape4d(ctx, beta, 1, num_v_heads, n_tokens_i64, n_seqs);
         beta = ggml.sigmoid(ctx, beta);
         beta.setName("ssm_beta");
 
+        // === Step 3: Alpha -> gate (softplus(alpha + dt_bias) * A) ===
         var alpha = ggml.mulMat(ctx, layer.ssm_alpha_weight.?, attn_input);
         alpha = ggml.reshape3d(ctx, alpha, num_v_heads, n_tokens_i64, n_seqs);
         alpha.setName("ssm_alpha");
@@ -271,58 +314,137 @@ pub const QwenModel = struct {
         gate = ggml.reshape4d(ctx, gate, 1, num_v_heads, n_tokens_i64, n_seqs);
         gate.setName("ssm_gate");
 
+        // === Step 4: Conv1d processing ===
+        // Build conv input: [conv_state | qkv_mixed]
+        // ggml_ssm_conv expects sx: 3D [d_conv-1+n_t, d_inner, n_s]
         const qkv_2d = ggml.reshape2d(ctx, qkv_mixed, conv_dim, n_tokens_i64);
         const qkv_transposed = ggml.cont(ctx, ggml.permute(ctx, qkv_2d, 1, 0, 2, 3));
-        ctx.setNoAlloc(false);
-        const conv_state = try ctx.newTensor2d(.f32, d_conv - 1, conv_dim);
-        ctx.setNoAlloc(true);
-        conv_state.setZero();
+
+        // Get or create conv state for this layer
+        if (self.ssm_states[layer_idx].conv_state == null) {
+            ctx.setNoAlloc(false);
+            self.ssm_states[layer_idx].conv_state = try ctx.newTensor2d(.f32, d_conv - 1, conv_dim);
+            ctx.setNoAlloc(true);
+            self.ssm_states[layer_idx].conv_state.?.setZero();
+            {
+                var buf: [64]u8 = undefined;
+                const slice = try std.fmt.bufPrint(&buf, "ssm_conv_state.{d}", .{layer_idx});
+                buf[slice.len] = 0;
+                self.ssm_states[layer_idx].conv_state.?.setName(buf[0..slice.len :0]);
+            }
+        }
+
+        const conv_state = self.ssm_states[layer_idx].conv_state.?;
+
+        // Concat conv_state and qkv_mixed along dim 0
         const concat_result = ggml.concat(ctx, conv_state, qkv_transposed, 0);
         const concat_cont = ggml.cont(ctx, concat_result);
-        const sx_3d = ctx.view3d(concat_cont, d_conv - 1 + n_tokens_i64, conv_dim, 1, @as(usize, @intCast((d_conv - 1 + n_tokens_i64) * @sizeOf(f32))), @as(usize, @intCast((d_conv - 1 + n_tokens_i64) * @sizeOf(f32) * conv_dim)), 0);
+
+        // View as 3D for ggml_ssm_conv: [d_conv-1+n_t, conv_dim, 1]
+        const sx_3d = ctx.view3d(concat_cont, d_conv - 1 + n_tokens_i64, conv_dim, 1,
+            @as(usize, @intCast((d_conv - 1 + n_tokens_i64) * @sizeOf(f32))),
+            @as(usize, @intCast((d_conv - 1 + n_tokens_i64) * @sizeOf(f32) * conv_dim)),
+            0);
         sx_3d.setName("ssm_conv_sx");
+
+        // Apply conv1d
         var conv_output = ggml.ssmConv(ctx, sx_3d, layer.ssm_conv1d_weight.?);
         conv_output.setName("ssm_conv_output");
         var conv_silu = ggml.silu(ctx, conv_output);
         conv_silu.setName("ssm_conv_silu");
+        // Update conv state: extract last (d_conv-1) rows from concat for next iteration
+        // concat_cont: [d_conv-1+n_tokens, conv_dim], last d_conv-1 rows become new conv_state
+        const row_stride = @as(usize, @intCast(@as(usize, @intCast(d_conv - 1 + n_tokens_i64)) * @sizeOf(f32)));
+        const conv_state_update = ctx.view2d(concat_cont, d_conv - 1, conv_dim,
+            row_stride,
+            @as(usize, @intCast(@as(usize, @intCast(n_tokens_i64)) * @sizeOf(f32))));
+        const conv_state_cpy = ggml.cpy(ctx, conv_state_update, conv_state);
+        graph.buildForwardExpand(conv_state_cpy);
 
+        // === Step 5: Extract Q, K, V from conv output ===
+        // conv_silu: [conv_dim, n_tokens, n_seqs] (after ggml_ssm_conv)
+        // Layout: [Q | K | V] along dim 0
         const qkv_stride = conv_silu.strides()[1];
         var q_conv = ctx.view2d(conv_silu, head_k_dim * num_k_heads, n_tokens_i64, qkv_stride, 0);
-        var k_conv = ctx.view2d(conv_silu, head_k_dim * num_k_heads, n_tokens_i64, qkv_stride, @intCast(head_k_dim * num_k_heads * @sizeOf(f32)));
-        var v_conv = ctx.view2d(conv_silu, head_v_dim * num_v_heads, n_tokens_i64, qkv_stride, @intCast(2 * head_k_dim * num_k_heads * @sizeOf(f32)));
-
+        var k_conv = ctx.view2d(conv_silu, head_k_dim * num_k_heads, n_tokens_i64, qkv_stride,
+            @intCast(head_k_dim * num_k_heads * @sizeOf(f32)));
+        var v_conv = ctx.view2d(conv_silu, head_v_dim * num_v_heads, n_tokens_i64, qkv_stride,
+            @intCast(2 * head_k_dim * num_k_heads * @sizeOf(f32)));
+        // Reshape to 4D: [head_dim, n_heads, n_tokens, n_seqs]
+        // Need contiguous for reshape
+        q_conv = ggml.cont(ctx, q_conv);
+        k_conv = ggml.cont(ctx, k_conv);
+        v_conv = ggml.cont(ctx, v_conv);
         q_conv = ggml.reshape4d(ctx, q_conv, head_k_dim, num_k_heads, n_tokens_i64, n_seqs);
         k_conv = ggml.reshape4d(ctx, k_conv, head_k_dim, num_k_heads, n_tokens_i64, n_seqs);
         v_conv = ggml.reshape4d(ctx, v_conv, head_v_dim, num_v_heads, n_tokens_i64, n_seqs);
 
+        // L2 normalize Q and K
         q_conv = ggml.l2Norm(ctx, q_conv, p.base.norm_eps);
         k_conv = ggml.l2Norm(ctx, k_conv, p.base.norm_eps);
         q_conv.setName("ssm_q_norm");
         k_conv.setName("ssm_k_norm");
 
+        // Repeat heads if num_k_heads != num_v_heads
         if (num_k_heads != num_v_heads) {
             q_conv = ggml.repeat4d(ctx, q_conv, head_k_dim, num_v_heads, n_tokens_i64, n_seqs);
             k_conv = ggml.repeat4d(ctx, k_conv, head_k_dim, num_v_heads, n_tokens_i64, n_seqs);
         }
 
-        ctx.setNoAlloc(false);
-        const state_size = head_v_dim * head_v_dim * num_v_heads;
-        const ssm_state = try ctx.newTensor3d(.f32, state_size, 1, n_seqs);
-        ctx.setNoAlloc(true);
-        ssm_state.setZero();
+        // === Step 6: Gated Delta Net ===
+        // Get or create SSM state for this layer
+        if (self.ssm_states[layer_idx].ssm_state == null) {
+            ctx.setNoAlloc(false);
+            // state: [S_v*S_v*H, K, n_seqs] where K=1 for autoregressive
+            const state_size = head_v_dim * head_v_dim * num_v_heads;
+            self.ssm_states[layer_idx].ssm_state = try ctx.newTensor3d(.f32, state_size, 1, n_seqs);
+            ctx.setNoAlloc(true);
+            self.ssm_states[layer_idx].ssm_state.?.setZero();
+            {
+                var buf: [64]u8 = undefined;
+                const slice = try std.fmt.bufPrint(&buf, "ssm_state.{d}", .{layer_idx});
+                buf[slice.len] = 0;
+                self.ssm_states[layer_idx].ssm_state.?.setName(buf[0..slice.len :0]);
+            }
+        }
 
+        const ssm_state = self.ssm_states[layer_idx].ssm_state.?;
+
+        // ggml_gatedDeltaNet expects state: [S_v*S_v*H, K, n_seqs]
+        // Output: [S_v*H, n_tokens*n_seqs + state_rows, 1, 1]
+        // where state_rows = K * S_v * n_seqs
         const gdn_output = ggml.gatedDeltaNet(ctx, q_conv, k_conv, v_conv, gate, beta, ssm_state);
         gdn_output.setName("ssm_gdn_output");
 
-        const attn_output = ctx.view4d(gdn_output, head_v_dim, num_v_heads, n_tokens_i64, n_seqs, @as(usize, @intCast(head_v_dim * @sizeOf(f32))), @as(usize, @intCast(head_v_dim * num_v_heads * @sizeOf(f32))), @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * @sizeOf(f32))), 0);
+        // Extract attention output from gdn_output
+        // gdn_output layout: [S_v*H, n_tokens*n_seqs + state_rows, 1, 1]
+        // First S_v*H*n_tokens*n_seqs elements are the attention output
+        const attn_output = ctx.view4d(gdn_output,
+            head_v_dim, num_v_heads, n_tokens_i64, n_seqs,
+            @as(usize, @intCast(head_v_dim * @sizeOf(f32))),
+            @as(usize, @intCast(head_v_dim * num_v_heads * @sizeOf(f32))),
+            @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * @sizeOf(f32))),
+            0);
         attn_output.setName("ssm_attn_output");
 
+        // Extract new state from gdn_output and copy to persistent state
+        _ = 1 * head_v_dim * n_seqs; // K * S_v * n_seqs (unused for now)
+        const new_state = ctx.view3d(gdn_output,
+            head_v_dim * head_v_dim * num_v_heads, 1, n_seqs,
+            @as(usize, @intCast(head_v_dim * head_v_dim * num_v_heads * @sizeOf(f32))),
+            @as(usize, @intCast(head_v_dim * head_v_dim * num_v_heads * @sizeOf(f32))),
+            @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * @sizeOf(f32))));
+        const state_cpy = ggml.cpy(ctx, new_state, ssm_state);
+        graph.buildForwardExpand(state_cpy);
+
+        // === Step 7: Gated normalization (norm(attn_out, z) ===
         const z_4d = ggml.reshape4d(ctx, z, head_v_dim, num_v_heads, n_tokens_i64, n_seqs);
         const attn_out_norm = ggml.rmsNorm(ctx, attn_output, p.base.norm_eps);
         const z_silu = ggml.silu(ctx, z_4d);
         const gated = ggml.mul(ctx, attn_out_norm, z_silu);
         gated.setName("ssm_gated_norm");
 
+        // === Step 8: Output projection ===
         const final_output = ggml.reshape3d(ctx, gated, head_v_dim * num_v_heads, n_tokens_i64, n_seqs);
         var result = ggml.mulMat(ctx, layer.ssm_out_weight.?, final_output);
         result.setName("ssm_out");
@@ -353,7 +475,6 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !QwenP
     p.base.n_expert_used = gguf_file.getU32("llama.expert_used_count") orelse 0;
     p.attn_key_length = gguf_file.getU32("qwen35.attention.key_length") orelse gguf_file.getU32("llama.attention.key_length") orelse 0;
     p.attn_value_length = gguf_file.getU32("qwen35.attention.value_length") orelse gguf_file.getU32("llama.attention.value_length") orelse 0;
-    if (p.attn_key_length > 0) p.base.n_head_dim = p.attn_key_length;
     if (p.attn_key_length > 0) {
         p.base.n_head_dim = p.attn_key_length;
     } else if (p.base.n_head > 0 and p.base.n_embd > 0) {
@@ -374,7 +495,7 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !QwenP
         log.err("Missing required model parameters", .{});
         return error.InvalidModelParams;
     }
-    log.info("Qwen: vocab={d}, embd={d}, heads={d}, kv_heads={d}, layers={d}, ff={d}", .{ p.base.n_vocab, p.base.n_embd, p.base.n_head, p.base.n_kv_head, p.base.n_layer, p.base.n_ff });
+    log.info("Qwen35: vocab={d}, embd={d}, heads={d}, kv_heads={d}, layers={d}, ff={d}", .{ p.base.n_vocab, p.base.n_embd, p.base.n_head, p.base.n_kv_head, p.base.n_layer, p.base.n_ff });
     return p;
 }
 
@@ -385,16 +506,16 @@ fn estimateMemSize(params: *const QwenParams) usize {
 
 pub fn loadWeights(gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, params: *const QwenParams, allocator: std.mem.Allocator) !QwenWeights {
     const n_layer: usize = @intCast(params.base.n_layer);
-    log.info("Loading Qwen weights...", .{});
+    log.info("Loading Qwen35 weights...", .{});
     const token_embd = findOrCreateTensor(ctx, gguf_file, "token_embd.weight") catch |err| {
-        log.err("Failed to load token_embd.weight: {}", .{err});
+        log.err("Failed to load token_embd.weight: {}\n", .{err});
         return error.MissingWeight;
     };
     token_embd.setName("token_embd.weight");
     const output_weight = findOrCreateTensor(ctx, gguf_file, "output.weight") catch null;
     if (output_weight) |ow| ow.setName("output.weight");
     const output_norm_weight = findOrCreateTensor(ctx, gguf_file, "output_norm.weight") catch |err| {
-        log.err("Failed to load output_norm.weight: {}", .{err});
+        log.err("Failed to load output_norm.weight: {}\n", .{err});
         return error.MissingWeight;
     };
     output_norm_weight.setName("output_norm.weight");
@@ -406,88 +527,88 @@ pub fn loadWeights(gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, params: 
             .prefix = prefix,
             .layer_type = if (is_full_attn) .full_attention else .ssm,
             .attn_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_norm.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load attn_norm.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             },
             .post_attention_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "post_attention_norm.weight") catch |err| {
-                log.err("Layer {d}: failed to load post_attention_norm.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load post_attention_norm.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             },
             .ffn_norm_weight = undefined,
             .ffn_gate_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_gate.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ffn_gate.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             },
             .ffn_up_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_up.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ffn_up.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             },
             .ffn_down_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_down.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ffn_down.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             },
         };
         lw.ffn_norm_weight = lw.post_attention_norm_weight;
         if (is_full_attn) {
             lw.attn_q_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_q.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load attn_q.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.attn_k_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_k.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load attn_k.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.attn_v_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_v.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load attn_v.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.attn_output_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_output.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load attn_output.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.attn_q_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_q_norm.weight") catch null;
             lw.attn_k_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_k_norm.weight") catch null;
         } else {
             lw.attn_qkv_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_qkv.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_qkv.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load attn_qkv.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.attn_gate_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_gate.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_gate.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load attn_gate.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.ssm_conv1d_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_conv1d.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_conv1d.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ssm_conv1d.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.ssm_a = loadLayerWeight(ctx, gguf_file, prefix, "ssm_a") catch |err| {
-                log.err("Layer {d}: failed to load ssm_a: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ssm_a: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.ssm_dt_bias = loadLayerWeight(ctx, gguf_file, prefix, "ssm_dt.bias") catch |err| {
-                log.err("Layer {d}: failed to load ssm_dt.bias: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ssm_dt.bias: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.ssm_alpha_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_alpha.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_alpha.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ssm_alpha.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.ssm_beta_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_beta.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_beta.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ssm_beta.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.ssm_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_norm.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_norm.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ssm_norm.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
             lw.ssm_out_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_out.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_out.weight: {}", .{ i, err });
+                log.err("Layer {d}: failed to load ssm_out.weight: {}\n", .{ i, err });
                 return error.MissingWeight;
             };
         }
         layers[i] = lw;
     }
-    log.info("All Qwen weights loaded ({d} layers)", .{n_layer});
+    log.info("All Qwen35 weights loaded ({d} layers)\n", .{n_layer});
     return QwenWeights{
         .base = .{ .params = params.base, .token_embd = token_embd, .output_weight = output_weight, .output_norm_weight = output_norm_weight },
         .layers = layers,

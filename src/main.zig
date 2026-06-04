@@ -305,6 +305,8 @@ const InferenceEngine = struct {
         while (gen_token_count < max_tokens - 1) {
             // 重置 context（释放所有张量，重用内存池），避免线性分配器耗尽
             self.ctx_graph.reset();
+            // 重置 SSM 状态（Qwen35 等混合架构需要），避免指向已释放内存
+            registry.resetModelSSMStates(self.model_ptr, self.arch);
             self.ctx_graph.setNoAlloc(false);
             const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
             self.ctx_graph.setNoAlloc(true);

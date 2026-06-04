@@ -202,6 +202,7 @@ const SimpleEngine = struct {
             try self.decodeAndPrintToken(@intCast(new_token_id), wFn);
 
             self.ctx_graph.reset();
+            registry.resetModelSSMStates(self.model_ptr, self.arch);
             self.ctx_graph.setNoAlloc(false);
             const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
             self.ctx_graph.setNoAlloc(true);

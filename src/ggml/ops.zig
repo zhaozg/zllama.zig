@@ -125,7 +125,7 @@ pub fn transpose(ctx: *Context, a: *Tensor) *Tensor {
 }
 
 pub fn concat(ctx: *Context, a: *Tensor, b: *Tensor, axis: i32) *Tensor {
-    return @as(*Tensor, @ptrCast(c.ggml_concat(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), axis)));
+    return @as(*Tensor, @ptrCast(c.ggml_concat(@ptrCast(ctx), @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(a))), @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(b))), axis)));
 }
 
 pub fn getRows(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
