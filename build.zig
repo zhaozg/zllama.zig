@@ -43,6 +43,23 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
+    // --- zllama-tokenize 可执行文件 ---
+    const tokenize_mod = b.createModule(.{
+        .root_source_file = b.path("src/tokenize_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    tokenize_mod.addImport("ggml", ggml_mod);
+    tokenize_mod.addIncludePath(include_path);
+    tokenize_mod.linkSystemLibrary("ggml-base", .{});
+    tokenize_mod.linkSystemLibrary("ggml", .{});
+
+    const tokenize_exe = b.addExecutable(.{
+        .name = "zllama-tokenize",
+        .root_module = tokenize_mod,
+    });
+
     // --- 测试 ---
     const test_step = b.step("test", "Run all tests");
 
@@ -75,6 +92,7 @@ pub fn build(b: *std.Build) void {
 
     // --- 安装与运行 ---
     b.installArtifact(exe);
+    b.installArtifact(tokenize_exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -83,4 +101,13 @@ pub fn build(b: *std.Build) void {
     }
     const run_step = b.step("run", "Run zllama.zig engine");
     run_step.dependOn(&run_cmd.step);
+
+    // --- tokenize 运行步骤 ---
+    const tokenize_run_cmd = b.addRunArtifact(tokenize_exe);
+    tokenize_run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        tokenize_run_cmd.addArgs(args);
+    }
+    const tokenize_run_step = b.step("tokenize", "Run zllama-tokenize tool");
+    tokenize_run_step.dependOn(&tokenize_run_cmd.step);
 }
