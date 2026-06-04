@@ -132,10 +132,10 @@ pub const LlamaModel = struct {
             var k = ggml.mulMat(ctx, layer.attn_k_weight, attn_input);
             var v = ggml.mulMat(ctx, layer.attn_v_weight, attn_input);
 
-            // 重塑为 [head_dim, n_tokens, n_head/kv_head]
-            q = ggml.reshape3d(ctx, q, head_dim, n_tokens_i64, n_head);
-            k = ggml.reshape3d(ctx, k, head_dim, n_tokens_i64, n_kv_head);
-            v = ggml.reshape3d(ctx, v, head_dim, n_tokens_i64, n_kv_head);
+            // 重塑为 [head_dim, n_head/kv_head, n_tokens]（与 llama.cpp 布局一致）
+            q = ggml.reshape3d(ctx, q, head_dim, n_head, n_tokens_i64);
+            k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
+            v = ggml.reshape3d(ctx, v, head_dim, n_kv_head, n_tokens_i64);
 
             // RoPE 位置编码
             const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens_i64), start_pos);

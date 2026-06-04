@@ -2,9 +2,16 @@
 //!
 //! 实现旋转位置编码（Rotary Position Embedding）。
 //! 支持 Qwen 3.5 的扩展 RoPE 参数。
+//!
+//! 输入布局（与 llama.cpp 一致）:
+//!   q: [head_dim, n_head, n_tokens]
+//!   k: [head_dim, n_kv_head, n_tokens]
+//!
+//! ggml_rope_ext 直接在 [head_dim, n_head, n_tokens] 布局上操作，
+//! 与 llama.cpp 的调用方式一致。
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
+const ggml = @import("..//ggml.zig");
 
 /// RoPE 配置参数
 pub const RopeParams = struct {
@@ -16,8 +23,8 @@ pub const RopeParams = struct {
 };
 
 /// 对 Q 和 K 张量应用 RoPE 位置编码
-/// q: [head_dim, n_tokens, n_head] 查询张量
-/// k: [head_dim, n_tokens, n_kv_head] 键张量
+/// q: [head_dim, n_head, n_tokens] 查询张量
+/// k: [head_dim, n_kv_head, n_tokens] 键张量
 /// pos_tensor: [n_tokens] 位置索引
 /// params: RoPE 配置参数
 /// 返回: { q_rope, k_rope }
@@ -32,19 +39,10 @@ pub fn applyRope(
     const rope_theta = params.rope_theta;
     const freq_scale = params.rope_scaling_factor;
 
-    // Q: permute(0, 2, 1, 3) -> [n_tokens, head_dim, n_head]
-    var q_rope = ggml.permute(ctx, q, 0, 2, 1, 3);
-    q_rope = ggml.cont(ctx, q_rope);
-    q_rope = ggml.ropeExt(ctx, q_rope, pos_tensor, 0, @intCast(rope_dim), 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
-    q_rope = ggml.permute(ctx, q_rope, 0, 2, 1, 3);
-    q_rope = ggml.cont(ctx, q_rope);
-
-    // K: permute(0, 2, 1, 3) -> [n_tokens, head_dim, n_kv_head]
-    var k_rope = ggml.permute(ctx, k, 0, 2, 1, 3);
-    k_rope = ggml.cont(ctx, k_rope);
-    k_rope = ggml.ropeExt(ctx, k_rope, pos_tensor, 0, @intCast(rope_dim), 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
-    k_rope = ggml.permute(ctx, k_rope, 0, 2, 1, 3);
-    k_rope = ggml.cont(ctx, k_rope);
+    // 直接在 [head_dim, n_head, n_tokens] 布局上调用 ggml_rope_ext
+    // 与 llama.cpp 的调用方式一致
+    const q_rope = ggml.ropeExt(ctx, q, pos_tensor, 0, @intCast(rope_dim), 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
+    const k_rope = ggml.ropeExt(ctx, k, pos_tensor, 0, @intCast(rope_dim), 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
 
     return .{ .q = q_rope, .k = k_rope };
 }

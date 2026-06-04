@@ -4,11 +4,11 @@
 //! 避免每 token 复制历史缓存。
 //!
 //! KV Cache 布局（与 llama.cpp 一致）:
-//!   K: [head_dim, max_seq_len, n_kv_head]
-//!   V: [head_dim, max_seq_len, n_kv_head]
+//!   K: [head_dim, n_kv_head, max_seq_len]
+//!   V: [head_dim, n_kv_head, max_seq_len]
 //!
-//! 新 K/V 张量布局（经过 RoPE + permute 后）:
-//!   [head_dim, n_tokens, n_kv_head]
+//! 新 K/V 张量布局（经过 RoPE 后）:
+//!   [head_dim, n_kv_head, n_tokens]
 
 const std = @import("std");
 const ggml = @import("ggml.zig");
@@ -21,8 +21,8 @@ const log = std.log.scoped(.kv_cache);
 
 /// 单层的 KV Cache
 pub const LayerCache = struct {
-    k: *ggml.Tensor, // [head_dim, max_seq_len, n_kv_head]
-    v: *ggml.Tensor, // [head_dim, max_seq_len, n_kv_head]
+    k: *ggml.Tensor, // [head_dim, n_kv_head, max_seq_len]
+    v: *ggml.Tensor, // [head_dim, n_kv_head, max_seq_len]
     current_len: u32, // 当前已使用的长度
 };
 
@@ -34,7 +34,7 @@ pub const KVCache = struct {
     head_dim: u32,
 
     /// 初始化 KV Cache
-    /// K/V 形状: [head_dim, max_seq_len, n_kv_head] (匹配 RoPE 后的 K/V 布局)
+    /// K/V 形状: [head_dim, n_kv_head, max_seq_len] (与 llama.cpp 一致)
     pub fn init(
         ctx: *ggml.Context,
         n_layer: u32,
@@ -46,8 +46,8 @@ pub const KVCache = struct {
         var layers = try allocator.alloc(LayerCache, n_layer);
 
         for (0..n_layer) |i| {
-            // K Cache: [head_dim, max_seq_len, n_kv_head]
-            const k = try ctx.newTensor3d(.f32, @intCast(head_dim), @intCast(max_seq_len), @intCast(n_kv_head));
+            // K Cache: [head_dim, n_kv_head, max_seq_len]
+            const k = try ctx.newTensor3d(.f32, @intCast(head_dim), @intCast(n_kv_head), @intCast(max_seq_len));
             {
                 var buf: [64]u8 = undefined;
                 const slice = try std.fmt.bufPrint(&buf, "cache.k.{d}", .{i});
@@ -55,8 +55,8 @@ pub const KVCache = struct {
                 k.setName(buf[0..slice.len :0]);
             }
 
-            // V Cache: [head_dim, max_seq_len, n_kv_head]
-            const v = try ctx.newTensor3d(.f32, @intCast(head_dim), @intCast(max_seq_len), @intCast(n_kv_head));
+            // V Cache: [head_dim, n_kv_head, max_seq_len]
+            const v = try ctx.newTensor3d(.f32, @intCast(head_dim), @intCast(n_kv_head), @intCast(max_seq_len));
             {
                 var buf: [64]u8 = undefined;
                 const slice = try std.fmt.bufPrint(&buf, "cache.v.{d}", .{i});
@@ -71,7 +71,7 @@ pub const KVCache = struct {
             };
         }
 
-        log.info("KV Cache initialized: {d} layers, [{d}, {d}, {d}] per layer", .{ n_layer, head_dim, max_seq_len, n_kv_head });
+        log.info("KV Cache initialized: {d} layers, [{d}, {d}, {d}] per layer", .{ n_layer, head_dim, n_kv_head, max_seq_len });
 
         return KVCache{
             .layers = layers,
@@ -93,8 +93,7 @@ pub const KVCache = struct {
         }
     }
 
-    /// 获取指定层的 K Cache 视图 [head_dim, current_len, n_kv_head]
-    /// 注意: 返回的张量形状与 RoPE+permute 后的 K 一致
+    /// 获取指定层的 K Cache 视图 [head_dim, n_kv_head, current_len]
     pub fn getKView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
         const len: i64 = @intCast(layer.current_len);
@@ -102,17 +101,17 @@ pub const KVCache = struct {
         const nkv: i64 = @intCast(self.n_kv_head);
         const max_len: i64 = @intCast(self.max_seq_len);
 
-        // layer.k: [head_dim, max_seq_len, n_kv_head]
-        // View:   [head_dim, len, n_kv_head]
-        // nb1 = max_seq_len * sizeof(f32) (stride along seq dim in source)
-        // nb2 = max_seq_len * n_kv_head * sizeof(f32) (stride along head dim in source)
-        return ctx.view3d(layer.k, hdim, len, nkv,
+        // layer.k: [head_dim, n_kv_head, max_seq_len]
+        // View:   [head_dim, n_kv_head, len]
+        // nb1 = n_kv_head * sizeof(f32) (stride along n_kv_head dim)
+        // nb2 = max_seq_len * sizeof(f32) (stride along seq dim in source)
+        return ctx.view3d(layer.k, hdim, nkv, len,
+            @intCast(nkv * @sizeOf(f32)),
             @intCast(max_len * @sizeOf(f32)),
-            @intCast(max_len * nkv * @sizeOf(f32)),
             0);
     }
 
-    /// 获取指定层的 V Cache 视图 [head_dim, current_len, n_kv_head]
+    /// 获取指定层的 V Cache 视图 [head_dim, n_kv_head, current_len]
     pub fn getVView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
         const len: i64 = @intCast(layer.current_len);
@@ -120,15 +119,15 @@ pub const KVCache = struct {
         const nkv: i64 = @intCast(self.n_kv_head);
         const max_len: i64 = @intCast(self.max_seq_len);
 
-        return ctx.view3d(layer.v, hdim, len, nkv,
+        return ctx.view3d(layer.v, hdim, nkv, len,
+            @intCast(nkv * @sizeOf(f32)),
             @intCast(max_len * @sizeOf(f32)),
-            @intCast(max_len * nkv * @sizeOf(f32)),
             0);
     }
 
     /// 将新的 K, V 写入 Cache
-    /// new_k: [head_dim, n_tokens, n_kv_head] (RoPE + permute 后的形状)
-    /// new_v: [head_dim, n_tokens, n_kv_head]
+    /// new_k: [head_dim, n_kv_head, n_tokens] (RoPE 后的形状)
+    /// new_v: [head_dim, n_kv_head, n_tokens]
     pub fn setKv(
         self: *KVCache,
         ctx: *ggml.Context,
@@ -145,21 +144,22 @@ pub const KVCache = struct {
         const nkv: i64 = @intCast(self.n_kv_head);
         const max_len: i64 = @intCast(self.max_seq_len);
 
-        // layer.k: [head_dim, max_seq_len, n_kv_head]
-        // View into cache at offset: [head_dim, n_tokens, n_kv_head]
-        // nb1 = max_seq_len * sizeof(f32)
-        // nb2 = max_seq_len * n_kv_head * sizeof(f32)
-        // offset in bytes = offset * sizeof(f32) along the seq dim (ne1)
-        const k_dst = ctx.view3d(layer.k, hdim, @intCast(n_tokens), nkv,
+        // layer.k: [head_dim, n_kv_head, max_seq_len]
+        // View into cache at offset along seq dim (ne[2]):
+        // [head_dim, n_kv_head, n_tokens]
+        // nb1 = n_kv_head * sizeof(f32)
+        // nb2 = max_seq_len * sizeof(f32)
+        // offset in bytes = offset * sizeof(f32) along the seq dim (ne[2])
+        const k_dst = ctx.view3d(layer.k, hdim, nkv, @intCast(n_tokens),
+            @intCast(nkv * @sizeOf(f32)),
             @intCast(max_len * @sizeOf(f32)),
-            @intCast(max_len * nkv * @sizeOf(f32)),
             @intCast(offset * @sizeOf(f32)));
         const k_cpy = ggml.cpy(ctx, new_k, k_dst);
         graph.buildForwardExpand(k_cpy);
 
-        const v_dst = ctx.view3d(layer.v, hdim, @intCast(n_tokens), nkv,
+        const v_dst = ctx.view3d(layer.v, hdim, nkv, @intCast(n_tokens),
+            @intCast(nkv * @sizeOf(f32)),
             @intCast(max_len * @sizeOf(f32)),
-            @intCast(max_len * nkv * @sizeOf(f32)),
             @intCast(offset * @sizeOf(f32)));
         const v_cpy = ggml.cpy(ctx, new_v, v_dst);
         graph.buildForwardExpand(v_cpy);
