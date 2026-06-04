@@ -1,0 +1,245 @@
+const std = @import("std");
+const ggml = @import("ggml.zig");
+const gguf = @import("gguf.zig");
+const model_if = @import("model.zig");
+const registry = @import("models/registry.zig");
+const tokenizer = @import("tokenizer.zig");
+const sampler = @import("sampler.zig");
+const kv_cache = @import("kv_cache.zig");
+
+const logger = std.log.scoped(.simple);
+var runtime_log_level: std.log.Level = .warn;
+
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .tokenizer, .level = .warn },
+        .{ .scope = .simple, .level = .debug },
+        .{ .scope = .ggml, .level = .warn },
+        .{ .scope = .qwen, .level = .warn },
+        .{ .scope = .llama, .level = .warn },
+        .{ .scope = .model, .level = .warn },
+        .{ .scope = .registry, .level = .warn },
+        .{ .scope = .kv_cache, .level = .warn },
+    },
+    .logFn = log,
+};
+
+pub fn log(comptime level: std.log.Level, comptime scope: @TypeOf(.EnumLiteral), comptime format: []const u8, args: anytype) void {
+    if (@intFromEnum(level) > @intFromEnum(runtime_log_level)) return;
+    std.log.defaultLog(level, scope, format, args);
+}
+
+pub fn setLogLevel(level: std.log.Level) void { runtime_log_level = level; }
+pub fn getLogLevel() std.log.Level { return runtime_log_level; }
+
+fn currentTimeUs() i64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(i64, ts.sec) * 1000000 + @as(i64, @divTrunc(ts.nsec, 1000));
+}
+
+fn printUsage(argv0: []const u8) void {
+    std.debug.print(
+        \\usage: {s} [options] [prompt]
+        \\
+        \\The simple program generates text using a given model.
+        \\It needs a model file and a prompt, and optionally other flags
+        \\to control the generation process.
+        \\
+        \\    The possible options are:
+        \\
+        \\    -h, --help                           print this help and exit
+        \\    -m MODEL_PATH, --model MODEL_PATH    path to model.
+        \\    -n N, --max-tokens N                 maximum number of tokens to generate (default: 32)
+        \\    -t F, --temperature F                temperature for sampling (default: 0.7)
+        \\    -k N, --top-k N                     top-k sampling (default: 40)
+        \\    -tp F, --top-p F                    top-p sampling (default: 0.9)
+        \\    -th N, --threads N                  number of threads (default: auto)
+        \\    -v, --verbose                        verbose output
+        \\    -d, --debug                          debug output
+        \\
+    , .{argv0});
+}
+
+const CliArgs = struct {
+    model_path: []const u8 = "",
+    prompt: []const u8 = "",
+    max_tokens: u32 = 32,
+    temperature: f32 = 0.7,
+    top_k: u32 = 40,
+    top_p: f32 = 0.9,
+    n_threads: i32 = 0,
+    verbose: bool = false,
+    debug: bool = false,
+    help: bool = false,
+
+    pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
+        var result = CliArgs{};
+        const argv0 = args_it.next() orelse "zllama-simple";
+        while (args_it.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) { result.help = true; }
+            else if (std.mem.eql(u8, arg, "--model") or std.mem.eql(u8, arg, "-m")) { result.model_path = args_it.next() orelse return error.InvalidArgs; }
+            else if (std.mem.eql(u8, arg, "--max-tokens") or std.mem.eql(u8, arg, "-n")) { result.max_tokens = std.fmt.parseUnsigned(u32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs; }
+            else if (std.mem.eql(u8, arg, "--temperature") or std.mem.eql(u8, arg, "-t")) { result.temperature = std.fmt.parseFloat(f32, args_it.next() orelse return error.InvalidArgs) catch return error.InvalidArgs; }
+            else if (std.mem.eql(u8, arg, "--top-k") or std.mem.eql(u8, arg, "-k")) { result.top_k = std.fmt.parseUnsigned(u32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs; }
+            else if (std.mem.eql(u8, arg, "--top-p") or std.mem.eql(u8, arg, "-tp")) { result.top_p = std.fmt.parseFloat(f32, args_it.next() orelse return error.InvalidArgs) catch return error.InvalidArgs; }
+            else if (std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "-th")) { result.n_threads = std.fmt.parseInt(i32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs; }
+            else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) { result.verbose = true; }
+            else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) { result.debug = true; }
+            else if (std.mem.startsWith(u8, arg, "-")) { logger.warn("unknown argument '{s}'", .{arg}); }
+            else { result.prompt = arg; }
+        }
+        if (result.help) printUsage(argv0);
+        return result;
+    }
+};
+
+const SimpleEngine = struct {
+    allocator: std.mem.Allocator,
+    ctx_weights: *ggml.Context,
+    ctx_graph: *ggml.Context,
+    ctx_kv_cache: *ggml.Context,
+    arch: model_if.Architecture,
+    model_ptr: *anyopaque,
+    params: model_if.ModelParams,
+    tok: tokenizer.Tokenizer,
+    kv_cache_mgr: kv_cache.KVCache,
+    n_threads: i32,
+    gguf_data: []u8,
+
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: []const u8, cli_args: *const CliArgs) !SimpleEngine {
+        const cwd = std.Io.Dir.cwd();
+        const file = try cwd.openFile(io, model_path, .{ .mode = .read_only });
+        defer file.close(io);
+        const stat = try file.stat(io);
+        const file_size = @as(usize, @intCast(stat.size));
+        const gguf_data = try allocator.alloc(u8, file_size);
+        errdefer allocator.free(gguf_data);
+        const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
+        if (bytes_read != file_size) { allocator.free(gguf_data); return error.FileReadError; }
+        var gguf_file = try gguf.parse(gguf_data, allocator);
+        defer gguf_file.deinit();
+        const arch = registry.detectArchitecture(&gguf_file) orelse return error.UnsupportedArchitecture;
+        logger.info("Detected architecture: {s}", .{@tagName(arch)});
+        const model_ptr = try registry.createModel(allocator, &gguf_file, arch, io);
+        errdefer registry.deinitModel(model_ptr, arch, allocator);
+        const params = registry.modelParams(model_ptr, arch).*;
+        var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
+        errdefer tok.deinit();
+        const n_threads = if (cli_args.n_threads > 0) cli_args.n_threads else ggml.recommendedThreads();
+        const mem_size_estimate = 2 * 1024 * 1024 * 1024;
+        const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
+        errdefer ctx_weights.deinit();
+        const ctx_kv_cache = try ggml.Context.initNoAlloc(mem_size_estimate);
+        errdefer ctx_kv_cache.deinit();
+        const max_seq_len = @min(params.max_seq_len, 2048);
+        var kv_cache_mgr = try kv_cache.KVCache.init(ctx_kv_cache, params.n_layer, params.n_kv_head, params.n_head_dim, max_seq_len, allocator);
+        errdefer kv_cache_mgr.deinit(allocator);
+        const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
+        errdefer ctx_graph.deinit();
+        { const b = ggml.backendCpuBufferType(); try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, b); }
+        return SimpleEngine{ .allocator = allocator, .ctx_weights = ctx_weights, .ctx_graph = ctx_graph, .ctx_kv_cache = ctx_kv_cache, .arch = arch, .model_ptr = model_ptr, .params = params, .tok = tok, .kv_cache_mgr = kv_cache_mgr, .n_threads = n_threads, .gguf_data = gguf_data };
+    }
+
+    pub fn deinit(self: *SimpleEngine) void {
+        self.kv_cache_mgr.deinit(self.allocator);
+        self.tok.deinit();
+        self.ctx_graph.deinit();
+        self.ctx_kv_cache.deinit();
+        self.ctx_weights.deinit();
+        registry.deinitModel(self.model_ptr, self.arch, self.allocator);
+        self.allocator.free(self.gguf_data);
+    }
+
+    fn decodeAndPrintToken(self: *SimpleEngine, token_id: u32, writeFn: anytype) !void {
+        var buf: [128]u8 = undefined;
+        const n = try self.tok.decodeSingle(token_id, &buf);
+        if (n > 0) try writeFn(buf[0..n]);
+    }
+
+    pub fn generate(self: *SimpleEngine, prompt: []const u8, max_tokens: u32) !void {
+        const wFn = struct { fn w(d: []const u8) !void { std.debug.print("{s}", .{d}); } }.w;
+        const eFn = struct { fn e(comptime f: []const u8, a: anytype) !void { var b: [1024]u8 = undefined; try wFn(try std.fmt.bufPrint(b[0..], f, a)); } }.e;
+
+        var input_tokens = try self.tok.encode(prompt, true);
+        defer input_tokens.deinit(self.allocator);
+        const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
+
+        self.ctx_graph.setNoAlloc(false);
+        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
+        self.ctx_graph.setNoAlloc(true);
+
+        var graph = try ggml.CGraph.init(self.ctx_graph);
+        const logits = try registry.forwardModel(self.model_ptr, self.arch, self.ctx_graph, graph, input_tensor, n_prompt_tokens, &self.kv_cache_mgr, 0);
+
+        const buft = ggml.backendCpuBufferType();
+        var galloc = try ggml.Gallocr.init(buft);
+        defer galloc.free();
+        if (!galloc.allocGraph(graph)) { try eFn("Error: graph alloc failed\n", .{}); return error.GraphAllocFailed; }
+
+        {
+            const data = input_tensor.dataBytes();
+            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
+            for (input_tokens.items, 0..) |token, j| slice[j] = @as(i32, @intCast(token));
+        }
+
+        const t_main_start = currentTimeUs();
+        try graph.compute(self.n_threads);
+        const first_token = sampler.Sampler.sampleGreedy(logits);
+
+        for (input_tokens.items) |token_id| try self.decodeAndPrintToken(@intCast(token_id), wFn);
+
+        var n_decode: i32 = 0;
+        var new_token_id: i32 = first_token;
+        var pos: i32 = n_prompt_tokens;
+
+        while (n_decode < max_tokens) {
+            if (self.tok.isSpecialToken(@intCast(new_token_id))) {
+                if (new_token_id == self.tok.special.eos or new_token_id == self.tok.special.bos or new_token_id == self.tok.special.pad or new_token_id == self.tok.special.unk) break;
+                if (@as(usize, @intCast(new_token_id)) < self.tok.token_types.items.len and self.tok.token_types.items[@as(usize, @intCast(new_token_id))] == .control) break;
+            }
+            try self.decodeAndPrintToken(@intCast(new_token_id), wFn);
+
+            self.ctx_graph.reset();
+            self.ctx_graph.setNoAlloc(false);
+            const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
+            self.ctx_graph.setNoAlloc(true);
+            var inc_graph = try ggml.CGraph.init(self.ctx_graph);
+            const inc_logits = try registry.forwardModel(self.model_ptr, self.arch, self.ctx_graph, inc_graph, single_input, 1, &self.kv_cache_mgr, pos);
+            var inc_galloc = try ggml.Gallocr.init(buft);
+            defer inc_galloc.free();
+            if (!inc_galloc.allocGraph(inc_graph)) { try eFn("Error: inc graph alloc failed\n", .{}); return error.GraphAllocFailed; }
+            { const data = single_input.dataBytes(); const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1]; slice[0] = new_token_id; }
+            try inc_graph.compute(self.n_threads);
+            new_token_id = sampler.Sampler.sampleGreedy(inc_logits);
+            pos += 1;
+            n_decode += 1;
+        }
+
+        try wFn("\n");
+        const t_main_end = currentTimeUs();
+        const elapsed_s = @as(f64, @floatFromInt(t_main_end - t_main_start)) / 1000000.0;
+        try eFn("{s}: decoded {d} tokens in {d:.2} s, speed: {d:.2} t/s\n", .{ "main", n_decode, elapsed_s, @as(f64, @floatFromInt(n_decode)) / elapsed_s });
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    defer args_iter.deinit();
+    const args = CliArgs.parse(&args_iter) catch |err| { if (err == error.InvalidArgs) return; return err; };
+    if (args.help) return;
+    if (args.debug) { setLogLevel(.debug); }
+    if (args.verbose) { setLogLevel(.info); }
+    if (args.model_path.len == 0) { std.debug.print("Error: no model specified. Use --model <path>\n", .{}); return; }
+    logger.info("Loading model: {s}", .{args.model_path});
+    var engine = SimpleEngine.init(io, allocator, args.model_path, &args) catch |err| { std.debug.print("Error: failed to initialize engine: {}\n", .{err}); return; };
+    defer engine.deinit();
+    logger.info("Model loaded successfully.", .{});
+    const prompt = if (args.prompt.len > 0) args.prompt else "Hello my name is";
+    logger.info("Prompt: \"{s}\"", .{prompt});
+    logger.info("Max tokens: {d}", .{args.max_tokens});
+    engine.generate(prompt, args.max_tokens) catch |err| { std.debug.print("Error: generation failed: {}\n", .{err}); return; };
+}

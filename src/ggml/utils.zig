@@ -84,8 +84,64 @@ pub fn recommendedThreads() i32 {
 }
 
 // ============================================================================
+// 日志系统
+pub const LogLevel = enum(c_uint) {
+    none = 0,
+    debug = 1,
+    info = 2,
+    warn = 3,
+    err = 4,
+    cont = 5,
+
+    pub fn name(self: LogLevel) []const u8 {
+        return switch (self) {
+            .none => "NONE",
+            .debug => "DEBUG",
+            .info => "INFO",
+            .warn => "WARN",
+            .err => "ERROR",
+            .cont => "CONT",
+        };
+    }
+};
+
+
+
+fn defaultLogCallback(level: c_uint, text: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
+    _ = user_data;
+    const log_level: LogLevel = @enumFromInt(level);
+    const msg = std.mem.sliceTo(text, 0);
+    // 使用 std.debug.print 输出，它内部使用 Io 实例
+    std.debug.print("[ggml] [{s}] {s}", .{ log_level.name(), msg });
+}
+
+/// 设置 ggml 日志回调
+pub fn logSet() void {
+    c.ggml_log_set(defaultLogCallback, null);
+}
+
+/// 设置自定义 ggml 日志回调
+pub fn logSetCallback(callback: *const fn (level: c_uint, text: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void, user_data: ?*anyopaque) void {
+    c.ggml_log_set(callback, user_data);
+}
+
+// ============================================================================
 // 测试
 // ============================================================================
+
+// ============================================================================
+// 跨平台 I/O 工具
+// ============================================================================
+
+/// 跨平台 write 函数，写入到文件描述符
+/// 在 macOS 上使用系统调用，在 Linux 上使用系统调用
+pub fn writeToFd(fd: i32, data: []const u8) usize {
+    // 使用 @cImport 直接调用 POSIX write
+    // 但为了避免在业务代码中 @cImport，我们在 ggml 封装层中提供此功能
+    return c.write(fd, data.ptr, data.len);
+}
+
+
 
 const testing = std.testing;
 
@@ -104,4 +160,10 @@ test "CpuFeatures" {
 test "recommendedThreads" {
     const n = recommendedThreads();
     try testing.expect(n >= 1);
+}
+
+test "LogLevel enum" {
+    try testing.expectEqual(LogLevel.none, @as(LogLevel, @enumFromInt(0)));
+    try testing.expectEqual(LogLevel.info, @as(LogLevel, @enumFromInt(2)));
+    try testing.expectEqualStrings("INFO", LogLevel.info.name());
 }

@@ -373,11 +373,14 @@ const InferenceEngine = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
+    // 设置 ggml 日志回调
+    ggml.logSet();
     const io = init.io;
     const allocator = init.gpa;
 
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     defer args_iter.deinit();
+
 
     const args = CliArgs.parse(&args_iter) catch |err| {
         if (err == error.InvalidArgs) {

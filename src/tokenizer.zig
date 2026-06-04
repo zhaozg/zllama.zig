@@ -291,6 +291,115 @@ pub const Tokenizer = struct {
         return self.special.unk;
     }
 
+    /// 解码单个 token 到缓冲区（对齐 llama-simple 的 token_to_piece 行为）
+    /// 返回写入的字节数
+    pub fn decodeSingle(self: *const Tokenizer, token_id: u32, buf: []u8) !usize {
+        if (token_id >= self.vocab.items.len) return 0;
+
+        // 跳过特殊 token
+        if (self.isSpecialToken(token_id)) return 0;
+
+        var written: usize = 0;
+
+        switch (self.vocab.items[token_id]) {
+            .byte => |bv| {
+                if (written < buf.len) {
+                    buf[written] = bv;
+                    written += 1;
+                }
+            },
+            .normal => |ts| {
+                if (self.config.model == .tiktoken) {
+                    // tiktoken 风格：<0xXX> 格式
+                    var rem = ts;
+                    while (rem.len > 0 and written < buf.len) {
+                        if (rem.len >= 4 and rem[0] == '<' and rem[1] == '0' and rem[2] == 'x') {
+                            const end = std.mem.indexOfScalar(u8, rem[1..], '>') orelse {
+                                buf[written] = rem[0];
+                                written += 1;
+                                rem = rem[1..];
+                                continue;
+                            };
+                            const hex_str = rem[2 .. 2 + end - 1];
+                            if (hex_str.len == 2) {
+                                const byte = std.fmt.parseInt(u8, hex_str, 16) catch {
+                                    const copy_len = @min(end + 1, buf.len - written);
+                                    @memcpy(buf[written..written+copy_len], rem[0..copy_len]);
+                                    written += copy_len;
+                                    rem = rem[end + 1 ..];
+                                    continue;
+                                };
+                                buf[written] = byte;
+                                written += 1;
+                                rem = rem[end + 1 ..];
+                                continue;
+                            }
+                        }
+                        buf[written] = rem[0];
+                        written += 1;
+                        rem = rem[1..];
+                    }
+                } else if (!self.config.escape_whitespaces and self.unicode_to_byte.count() > 0) {
+                    // GPT-2 风格：字节编码
+                    var i: usize = 0;
+                    while (i < ts.len and written < buf.len) {
+                        const byte = ts[i];
+                        const cp_len = std.unicode.utf8ByteSequenceLength(byte) catch {
+                            i += 1;
+                            continue;
+                        };
+                        if (i + cp_len > ts.len) {
+                            i += 1;
+                            continue;
+                        }
+                        const cp_slice = ts[i..i+cp_len];
+                        if (cp_len == 1 and byte < 0x80) {
+                            buf[written] = byte;
+                            written += 1;
+                            i += 1;
+                            continue;
+                        }
+                        if (self.unicode_to_byte.get(cp_slice)) |b| {
+                            buf[written] = b;
+                            written += 1;
+                            i += cp_len;
+                            continue;
+                        }
+                        const copy_len = @min(cp_len, buf.len - written);
+                        @memcpy(buf[written..written+copy_len], cp_slice[0..copy_len]);
+                        written += copy_len;
+                        i += cp_len;
+                    }
+                } else {
+                    // SPM 风格：替换 ▁ 或 Ġ 为空格
+                    var i: usize = 0;
+                    while (i < ts.len and written < buf.len) {
+                        // U+2581 (▁) UTF-8: E2 96 81
+                        if (i + 2 < ts.len and ts[i] == 0xE2 and ts[i+1] == 0x96 and ts[i+2] == 0x81) {
+                            buf[written] = ' ';
+                            written += 1;
+                            i += 3;
+                            continue;
+                        }
+                        // U+0120 (Ġ) UTF-8: C4 A0
+                        if (i + 1 < ts.len and ts[i] == 0xC4 and ts[i+1] == 0xA0) {
+                            buf[written] = ' ';
+                            written += 1;
+                            i += 2;
+                            continue;
+                        }
+                        buf[written] = ts[i];
+                        written += 1;
+                        i += 1;
+                    }
+                }
+            },
+        }
+
+        return written;
+    }
+
+
     /// 将 token ID 转换为字符串表示（用于 BPE 合并）
     fn tokenToString(self: *Tokenizer, token_id: u32) ?[]const u8 {
         if (token_id >= self.vocab.items.len) return null;

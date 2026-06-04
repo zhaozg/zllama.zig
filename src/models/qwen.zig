@@ -146,7 +146,7 @@ pub const QwenModel = struct {
         const out_w = w.base.output_weight orelse w.base.token_embd;
         var logits_tensor = ggml.mulMat(ctx, out_w, cur);
         logits_tensor.setName("logits");
-        ggml.setOutput(logits_tensor);
+        // graph output determined by buildForwardExpand
         graph.buildForwardExpand(logits_tensor);
         return logits_tensor;
     }
@@ -186,11 +186,11 @@ pub const QwenModel = struct {
         k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
         v = ggml.reshape3d(ctx, v, head_dim, n_kv_head, n_tokens_i64);
 
-        const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens_i64), start_pos);
+        const pos_tensor = rope.buildMultiPositionTensor(ctx, @intCast(n_tokens_i64), start_pos);
         const rope_sections = [4]i32{ 11, 11, 10, 0 };
-        const rope_mode: i32 = 0;
-        q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, rope_mode, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-        k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, rope_mode, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+        const rope_type: i32 = 40; // GGML_ROPE_TYPE_IMROPE for Qwen 3.5
+        q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+        k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
 
         // Transpose back to [head_dim, n_tokens, n_head] for attention
         q = ggml.cont(ctx, ggml.permute(ctx, q, 0, 2, 1, 3));

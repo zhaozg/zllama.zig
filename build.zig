@@ -60,6 +60,23 @@ pub fn build(b: *std.Build) void {
         .root_module = tokenize_mod,
     });
 
+    // --- zllama-simple 可执行文件 ---
+    const simple_mod = b.createModule(.{
+        .root_source_file = b.path("src/simple_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    simple_mod.addImport("ggml", ggml_mod);
+    simple_mod.addIncludePath(include_path);
+    simple_mod.linkSystemLibrary("ggml-base", .{});
+    simple_mod.linkSystemLibrary("ggml", .{});
+
+    const simple_exe = b.addExecutable(.{
+        .name = "zllama-simple",
+        .root_module = simple_mod,
+    });
+
     // --- 测试 ---
     const test_step = b.step("test", "Run all tests");
 
@@ -93,6 +110,7 @@ pub fn build(b: *std.Build) void {
     // --- 安装与运行 ---
     b.installArtifact(exe);
     b.installArtifact(tokenize_exe);
+    b.installArtifact(simple_exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -110,4 +128,13 @@ pub fn build(b: *std.Build) void {
     }
     const tokenize_run_step = b.step("tokenize", "Run zllama-tokenize tool");
     tokenize_run_step.dependOn(&tokenize_run_cmd.step);
+
+    // --- simple 运行步骤 ---
+    const simple_run_cmd = b.addRunArtifact(simple_exe);
+    simple_run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        simple_run_cmd.addArgs(args);
+    }
+    const simple_run_step = b.step("simple", "Run zllama-simple tool");
+    simple_run_step.dependOn(&simple_run_cmd.step);
 }

@@ -207,7 +207,7 @@ pub const LlamaModel = struct {
         var logits_tensor = ggml.mulMat(ctx, out_w, cur);
         logits_tensor.setName("logits");
 
-        ggml.setOutput(logits_tensor);
+        // graph output determined by buildForwardExpand
         graph.buildForwardExpand(logits_tensor);
 
         return logits_tensor;

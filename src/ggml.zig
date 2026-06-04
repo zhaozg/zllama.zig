@@ -79,6 +79,9 @@ pub const version = @import("ggml/utils.zig").version;
 pub const cpuNThreads = @import("ggml/utils.zig").cpuNThreads;
 pub const CpuFeatures = @import("ggml/utils.zig").CpuFeatures;
 pub const recommendedThreads = @import("ggml/utils.zig").recommendedThreads;
+pub const LogLevel = @import("ggml/utils.zig").LogLevel;
+pub const logSet = @import("ggml/utils.zig").logSet;
+pub const logSetCallback = @import("ggml/utils.zig").logSetCallback;
 
 // ============================================================================
 // 测试（集成测试，需要 ggml context）

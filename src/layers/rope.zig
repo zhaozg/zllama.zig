@@ -61,6 +61,25 @@ pub fn buildPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i32) *g
     }
     return pos_tensor;
 }
+/// 构建多位置张量用于 rope_multi (MRoPE/IMRoPE)
+/// 返回 [n_tokens * 4] 形状，每 token 4 个位置值 [pos, pos, pos, pos]
+pub fn buildMultiPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i32) *ggml.Tensor {
+    const n_total: i32 = n_tokens * 4;
+    ctx.setNoAlloc(false);
+    const pos_tensor = ctx.newTensor1d(.i32, n_total) catch unreachable;
+    ctx.setNoAlloc(true);
+    const data = pos_tensor.dataBytes();
+    const pos_slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total))];
+    for (0..@as(usize, @intCast(n_tokens))) |i| {
+        const pos: i32 = @as(i32, @intCast(i)) + start_pos;
+        const base: usize = i * 4;
+        pos_slice[base] = pos;
+        pos_slice[base + 1] = pos;
+        pos_slice[base + 2] = pos;
+        pos_slice[base + 3] = pos;
+    }
+    return pos_tensor;
+}
 
 const testing = std.testing;
 
