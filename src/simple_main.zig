@@ -30,8 +30,12 @@ pub fn log(comptime level: std.log.Level, comptime scope: @TypeOf(.EnumLiteral),
     std.log.defaultLog(level, scope, format, args);
 }
 
-pub fn setLogLevel(level: std.log.Level) void { runtime_log_level = level; }
-pub fn getLogLevel() std.log.Level { return runtime_log_level; }
+pub fn setLogLevel(level: std.log.Level) void {
+    runtime_log_level = level;
+}
+pub fn getLogLevel() std.log.Level {
+    return runtime_log_level;
+}
 
 fn currentTimeUs() i64 {
     var ts: std.c.timespec = undefined;
@@ -78,17 +82,29 @@ const CliArgs = struct {
         var result = CliArgs{};
         const argv0 = args_it.next() orelse "zllama-simple";
         while (args_it.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) { result.help = true; }
-            else if (std.mem.eql(u8, arg, "--model") or std.mem.eql(u8, arg, "-m")) { result.model_path = args_it.next() orelse return error.InvalidArgs; }
-            else if (std.mem.eql(u8, arg, "--max-tokens") or std.mem.eql(u8, arg, "-n")) { result.max_tokens = std.fmt.parseUnsigned(u32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs; }
-            else if (std.mem.eql(u8, arg, "--temperature") or std.mem.eql(u8, arg, "-t")) { result.temperature = std.fmt.parseFloat(f32, args_it.next() orelse return error.InvalidArgs) catch return error.InvalidArgs; }
-            else if (std.mem.eql(u8, arg, "--top-k") or std.mem.eql(u8, arg, "-k")) { result.top_k = std.fmt.parseUnsigned(u32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs; }
-            else if (std.mem.eql(u8, arg, "--top-p") or std.mem.eql(u8, arg, "-tp")) { result.top_p = std.fmt.parseFloat(f32, args_it.next() orelse return error.InvalidArgs) catch return error.InvalidArgs; }
-            else if (std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "-th")) { result.n_threads = std.fmt.parseInt(i32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs; }
-            else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) { result.verbose = true; }
-            else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) { result.debug = true; }
-            else if (std.mem.startsWith(u8, arg, "-")) { logger.warn("unknown argument '{s}'", .{arg}); }
-            else { result.prompt = arg; }
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                result.help = true;
+            } else if (std.mem.eql(u8, arg, "--model") or std.mem.eql(u8, arg, "-m")) {
+                result.model_path = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--max-tokens") or std.mem.eql(u8, arg, "-n")) {
+                result.max_tokens = std.fmt.parseUnsigned(u32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--temperature") or std.mem.eql(u8, arg, "-t")) {
+                result.temperature = std.fmt.parseFloat(f32, args_it.next() orelse return error.InvalidArgs) catch return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--top-k") or std.mem.eql(u8, arg, "-k")) {
+                result.top_k = std.fmt.parseUnsigned(u32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--top-p") or std.mem.eql(u8, arg, "-tp")) {
+                result.top_p = std.fmt.parseFloat(f32, args_it.next() orelse return error.InvalidArgs) catch return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "-th")) {
+                result.n_threads = std.fmt.parseInt(i32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+                result.verbose = true;
+            } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
+                result.debug = true;
+            } else if (std.mem.startsWith(u8, arg, "-")) {
+                logger.warn("unknown argument '{s}'", .{arg});
+            } else {
+                result.prompt = arg;
+            }
         }
         if (result.help) printUsage(argv0);
         return result;
@@ -117,7 +133,10 @@ const SimpleEngine = struct {
         const gguf_data = try allocator.alloc(u8, file_size);
         errdefer allocator.free(gguf_data);
         const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
-        if (bytes_read != file_size) { allocator.free(gguf_data); return error.FileReadError; }
+        if (bytes_read != file_size) {
+            allocator.free(gguf_data);
+            return error.FileReadError;
+        }
         var gguf_file = try gguf.parse(gguf_data, allocator);
         defer gguf_file.deinit();
         const arch = registry.detectArchitecture(&gguf_file) orelse return error.UnsupportedArchitecture;
@@ -138,7 +157,10 @@ const SimpleEngine = struct {
         errdefer kv_cache_mgr.deinit(allocator);
         const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
         errdefer ctx_graph.deinit();
-        { const b = ggml.backendCpuBufferType(); try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, b); }
+        {
+            const b = ggml.backendCpuBufferType();
+            try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, b);
+        }
         return SimpleEngine{ .allocator = allocator, .ctx_weights = ctx_weights, .ctx_graph = ctx_graph, .ctx_kv_cache = ctx_kv_cache, .arch = arch, .model_ptr = model_ptr, .params = params, .tok = tok, .kv_cache_mgr = kv_cache_mgr, .n_threads = n_threads, .gguf_data = gguf_data };
     }
 
@@ -152,16 +174,18 @@ const SimpleEngine = struct {
         self.allocator.free(self.gguf_data);
     }
 
-    fn decodeAndPrintToken(self: *SimpleEngine, token_id: u32, writeFn: anytype) !void {
+    /// 解码单个 token 并写入 stdout（对齐 llama-simple 的 token_to_piece + printf 行为）
+    fn decodeAndPrintToken(self: *SimpleEngine, io: std.Io, token_id: u32) !void {
         var buf: [128]u8 = undefined;
         const n = try self.tok.decodeSingle(token_id, &buf);
-        if (n > 0) try writeFn(buf[0..n]);
+        if (n > 0) {
+            // 写入 stdout（与 llama-simple 的 printf("%s", s.c_str()) 对齐）
+            const stdout_file = std.Io.File.stdout();
+            try stdout_file.writeStreamingAll(io, buf[0..n]);
+        }
     }
 
-    pub fn generate(self: *SimpleEngine, prompt: []const u8, max_tokens: u32) !void {
-        const wFn = struct { fn w(d: []const u8) !void { std.debug.print("{s}", .{d}); } }.w;
-        const eFn = struct { fn e(comptime f: []const u8, a: anytype) !void { var b: [1024]u8 = undefined; try wFn(try std.fmt.bufPrint(b[0..], f, a)); } }.e;
-
+    pub fn generate(self: *SimpleEngine, io: std.Io, prompt: []const u8, max_tokens: u32) !void {
         var input_tokens = try self.tok.encode(prompt, true);
         defer input_tokens.deinit(self.allocator);
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
@@ -176,7 +200,10 @@ const SimpleEngine = struct {
         const buft = ggml.backendCpuBufferType();
         var galloc = try ggml.Gallocr.init(buft);
         defer galloc.free();
-        if (!galloc.allocGraph(graph)) { try eFn("Error: graph alloc failed\n", .{}); return error.GraphAllocFailed; }
+        if (!galloc.allocGraph(graph)) {
+            std.debug.print("Error: graph alloc failed\n", .{});
+            return error.GraphAllocFailed;
+        }
 
         {
             const data = input_tensor.dataBytes();
@@ -188,19 +215,30 @@ const SimpleEngine = struct {
         try graph.compute(self.n_threads);
         const first_token = sampler.Sampler.sampleGreedy(logits);
 
-        for (input_tokens.items) |token_id| try self.decodeAndPrintToken(@intCast(token_id), wFn);
+        // 打印 prompt token-by-token（与 llama-simple 对齐）
+        for (input_tokens.items) |token_id| {
+            try self.decodeAndPrintToken(io, @intCast(token_id));
+        }
 
         var n_decode: i32 = 0;
         var new_token_id: i32 = first_token;
         var pos: i32 = n_prompt_tokens;
 
         while (n_decode < max_tokens) {
+            // 检查是否为 EOG token（与 llama-simple 的 llama_vocab_is_eog 对齐）
             if (self.tok.isSpecialToken(@intCast(new_token_id))) {
-                if (new_token_id == self.tok.special.eos or new_token_id == self.tok.special.bos or new_token_id == self.tok.special.pad or new_token_id == self.tok.special.unk) break;
-                if (@as(usize, @intCast(new_token_id)) < self.tok.token_types.items.len and self.tok.token_types.items[@as(usize, @intCast(new_token_id))] == .control) break;
+                if (new_token_id == self.tok.special.eos or
+                    new_token_id == self.tok.special.bos or
+                    new_token_id == self.tok.special.pad or
+                    new_token_id == self.tok.special.unk) break;
+                if (@as(usize, @intCast(new_token_id)) < self.tok.token_types.items.len and
+                    self.tok.token_types.items[@as(usize, @intCast(new_token_id))] == .control) break;
             }
-            try self.decodeAndPrintToken(@intCast(new_token_id), wFn);
 
+            // 解码并打印新 token（与 llama-simple 的 printf("%s", s.c_str()); fflush(stdout) 对齐）
+            try self.decodeAndPrintToken(io, @intCast(new_token_id));
+
+            // 准备下一个 batch
             self.ctx_graph.reset();
             registry.resetModelSSMStates(self.model_ptr, self.arch);
             self.ctx_graph.setNoAlloc(false);
@@ -210,18 +248,35 @@ const SimpleEngine = struct {
             const inc_logits = try registry.forwardModel(self.model_ptr, self.arch, self.ctx_graph, inc_graph, single_input, 1, &self.kv_cache_mgr, pos);
             var inc_galloc = try ggml.Gallocr.init(buft);
             defer inc_galloc.free();
-            if (!inc_galloc.allocGraph(inc_graph)) { try eFn("Error: inc graph alloc failed\n", .{}); return error.GraphAllocFailed; }
-            { const data = single_input.dataBytes(); const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1]; slice[0] = new_token_id; }
+            if (!inc_galloc.allocGraph(inc_graph)) {
+                std.debug.print("Error: inc graph alloc failed\n", .{});
+                return error.GraphAllocFailed;
+            }
+            {
+                const data = single_input.dataBytes();
+                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1];
+                slice[0] = new_token_id;
+            }
             try inc_graph.compute(self.n_threads);
             new_token_id = sampler.Sampler.sampleGreedy(inc_logits);
             pos += 1;
             n_decode += 1;
         }
 
-        try wFn("\n");
+        // 打印换行（与 llama-simple 的 printf("\n") 对齐）
+        {
+            const stdout_file = std.Io.File.stdout();
+            try stdout_file.writeStreamingAll(io, "\n");
+        }
+
+        // 性能统计输出到 stderr（与 llama-simple 的 fprintf(stderr, ...) 对齐）
         const t_main_end = currentTimeUs();
         const elapsed_s = @as(f64, @floatFromInt(t_main_end - t_main_start)) / 1000000.0;
-        try eFn("{s}: decoded {d} tokens in {d:.2} s, speed: {d:.2} t/s\n", .{ "main", n_decode, elapsed_s, @as(f64, @floatFromInt(n_decode)) / elapsed_s });
+        const speed = if (elapsed_s > 0.0)
+            @as(f64, @floatFromInt(n_decode)) / elapsed_s
+        else
+            0.0;
+        std.debug.print("main: decoded {d} tokens in {d:.2} s, speed: {d:.2} t/s\n", .{ n_decode, elapsed_s, speed });
     }
 };
 
@@ -230,17 +285,33 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     defer args_iter.deinit();
-    const args = CliArgs.parse(&args_iter) catch |err| { if (err == error.InvalidArgs) return; return err; };
+    const args = CliArgs.parse(&args_iter) catch |err| {
+        if (err == error.InvalidArgs) return;
+        return err;
+    };
     if (args.help) return;
-    if (args.debug) { setLogLevel(.debug); }
-    if (args.verbose) { setLogLevel(.info); }
-    if (args.model_path.len == 0) { std.debug.print("Error: no model specified. Use --model <path>\n", .{}); return; }
+    if (args.debug) {
+        setLogLevel(.debug);
+    }
+    if (args.verbose) {
+        setLogLevel(.info);
+    }
+    if (args.model_path.len == 0) {
+        std.debug.print("Error: no model specified. Use --model <path>\n", .{});
+        return;
+    }
     logger.info("Loading model: {s}", .{args.model_path});
-    var engine = SimpleEngine.init(io, allocator, args.model_path, &args) catch |err| { std.debug.print("Error: failed to initialize engine: {}\n", .{err}); return; };
+    var engine = SimpleEngine.init(io, allocator, args.model_path, &args) catch |err| {
+        std.debug.print("Error: failed to initialize engine: {}\n", .{err});
+        return;
+    };
     defer engine.deinit();
     logger.info("Model loaded successfully.", .{});
     const prompt = if (args.prompt.len > 0) args.prompt else "Hello my name is";
     logger.info("Prompt: \"{s}\"", .{prompt});
     logger.info("Max tokens: {d}", .{args.max_tokens});
-    engine.generate(prompt, args.max_tokens) catch |err| { std.debug.print("Error: generation failed: {}\n", .{err}); return; };
+    engine.generate(io, prompt, args.max_tokens) catch |err| {
+        std.debug.print("Error: generation failed: {}\n", .{err});
+        return;
+    };
 }
