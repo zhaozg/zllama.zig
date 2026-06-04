@@ -100,6 +100,21 @@ pub const MetadataValue = struct {
             else => null,
         };
     }
+    pub fn asI32(self: *const MetadataValue) ?i32 {
+        return switch (self.value_type) {
+            .int32 => self.int32_val,
+            .uint32 => @as(i32, @bitCast(self.uint32_val)),
+            .int16 => @as(i32, self.int16_val),
+            .uint16 => @as(i32, self.uint16_val),
+            .int8 => @as(i32, self.int8_val),
+            .uint8 => @as(i32, self.uint8_val),
+            .int64 => @as(i32, @truncate(self.int64_val)),
+            .uint64 => @as(i32, @truncate(@as(i64, @bitCast(self.uint64_val)))),
+            else => null,
+        };
+    }
+
+
 };
 
 /// GGUF 张量数据类型
@@ -197,6 +212,8 @@ pub const GGUFFile = struct {
     /// 键值元数据映射
     metadata: std.StringHashMapUnmanaged(MetadataValue),
     /// 张量描述符列表
+    /// 元数据键的原始顺序（与 metadata 中的键一一对应）
+    metadata_keys: []const []const u8,
     tensors: std.ArrayList(TensorInfo),
     /// 张量数据在文件中的起始偏移
     tensor_data_offset: u64,
@@ -483,14 +500,15 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
         pos += 4;
         break :blk @as(u64, mc);
     };
-
-    // 解析元数据
     var metadata = std.StringHashMapUnmanaged(MetadataValue){};
     try metadata.ensureTotalCapacity(arena_allocator, @as(u32, @intCast(metadata_kv_count)));
 
-    for (0..@as(usize, @intCast(metadata_kv_count))) |_| {
+    const metadata_keys = try arena_allocator.alloc([]const u8, @as(usize, @intCast(metadata_kv_count)));
+
+    for (0..@as(usize, @intCast(metadata_kv_count))) |i| {
         const key = try readString(data, &pos, version, &arena);
         const val = try readMetadataValue(data, &pos, version, &arena);
+        metadata_keys[i] = key;
         metadata.putAssumeCapacity(key, val);
     }
 
@@ -552,12 +570,12 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
     }
 
     const tensor_data_offset = pos;
-
     return GGUFFile{
         .version = version,
         .tensor_count = tensor_count,
         .metadata = metadata,
         .tensors = tensors,
+        .metadata_keys = metadata_keys,
         .tensor_data_offset = tensor_data_offset,
         .data = data,
         .allocator = allocator,
