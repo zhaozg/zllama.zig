@@ -8,7 +8,8 @@ const ggml = @import("../ggml.zig");
 const gguf = @import("../gguf.zig");
 const kv_cache = @import("../kv_cache.zig");
 const model = @import("../model.zig");
-const qwen = @import("qwen.zig");
+const qwen2 = @import("qwen2.zig");
+const qwen35 = @import("qwen.zig");
 const llama = @import("llama.zig");
 
 const log = std.log.scoped(.registry);
@@ -22,8 +23,14 @@ pub fn createModel(
     io: std.Io,
 ) !*anyopaque {
     return switch (arch) {
-        .qwen2, .qwen35 => {
-            var m = try allocator.create(qwen.QwenModel);
+        .qwen2 => {
+            var m = try allocator.create(qwen2.Qwen2Model);
+            errdefer allocator.destroy(m);
+            try m.init(allocator, gguf_file, io);
+            return @as(*anyopaque, @ptrCast(m));
+        },
+        .qwen35 => {
+            var m = try allocator.create(qwen35.QwenModel);
             errdefer allocator.destroy(m);
             try m.init(allocator, gguf_file, io);
             return @as(*anyopaque, @ptrCast(m));
@@ -40,8 +47,13 @@ pub fn createModel(
 /// 释放模型实例
 pub fn deinitModel(model_ptr: *anyopaque, arch: model.Architecture, allocator: std.mem.Allocator) void {
     switch (arch) {
-        .qwen2, .qwen35 => {
-            var m = @as(*qwen.QwenModel, @ptrCast(@alignCast(model_ptr)));
+        .qwen2 => {
+            var m = @as(*qwen2.Qwen2Model, @ptrCast(@alignCast(model_ptr)));
+            m.deinit(allocator);
+            allocator.destroy(m);
+        },
+        .qwen35 => {
+            var m = @as(*qwen35.QwenModel, @ptrCast(@alignCast(model_ptr)));
             m.deinit(allocator);
             allocator.destroy(m);
         },
@@ -65,8 +77,12 @@ pub fn forwardModel(
     start_pos: i32,
 ) !*ggml.Tensor {
     return switch (arch) {
-        .qwen2, .qwen35 => {
-            const m = @as(*qwen.QwenModel, @ptrCast(@alignCast(model_ptr)));
+        .qwen2 => {
+            const m = @as(*qwen2.Qwen2Model, @ptrCast(@alignCast(model_ptr)));
+            return try m.forward(ctx, graph, input_tokens, n_tokens, kv_cache_mgr, start_pos);
+        },
+        .qwen35 => {
+            const m = @as(*qwen35.QwenModel, @ptrCast(@alignCast(model_ptr)));
             return try m.forward(ctx, graph, input_tokens, n_tokens, kv_cache_mgr, start_pos);
         },
         .llama => {
@@ -79,14 +95,14 @@ pub fn forwardModel(
 /// 获取模型参数
 pub fn modelParams(model_ptr: *anyopaque, arch: model.Architecture) *const model.ModelParams {
     return switch (arch) {
-        .qwen2, .qwen35 => @as(*qwen.QwenModel, @ptrCast(@alignCast(model_ptr))).getParams(),
+        .qwen2 => @as(*qwen2.Qwen2Model, @ptrCast(@alignCast(model_ptr))).getParams(),
+        .qwen35 => @as(*qwen35.QwenModel, @ptrCast(@alignCast(model_ptr))).getParams(),
         .llama => @as(*llama.LlamaModel, @ptrCast(@alignCast(model_ptr))).getParams(),
     };
 }
 
 /// 从 GGUF 元数据检测架构
 pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model.Architecture {
-    // 尝试多个可能的 key
     const arch_names = [_][]const u8{
         "general.architecture",
         "llama.architecture",
@@ -104,7 +120,7 @@ pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model.Architecture {
         }
     }
 
-    // 回退：通过检查特定张量名称来推断
+    // Fallback: detect by tensor names
     if (gguf_file.findTensor("blk.0.ssm_conv1d.weight") != null) {
         log.info("Fallback: detected qwen35 architecture (found ssm_conv1d.weight)", .{});
         return .qwen35;
