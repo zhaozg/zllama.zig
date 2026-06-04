@@ -300,8 +300,11 @@ const InferenceEngine = struct {
         var gen_token_count: u32 = 0;
         const gen_start_time = currentTimeMs();
 
+        // 增量解码循环：复用 self.ctx_graph，每次迭代重置 context 以重用内存池
+        // 避免每次创建/销毁大内存的 ggml.Context（性能关键）
         while (gen_token_count < max_tokens - 1) {
-            // 每次迭代创建新的 graph，不调用 reset（ggml_new_graph 创建的图不支持 reset）
+            // 重置 context（释放所有张量，重用内存池），避免线性分配器耗尽
+            self.ctx_graph.reset();
             self.ctx_graph.setNoAlloc(false);
             const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
             self.ctx_graph.setNoAlloc(true);

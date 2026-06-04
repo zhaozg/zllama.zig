@@ -44,6 +44,12 @@ pub const Context = opaque {
         c.ggml_free(@ptrCast(self));
     }
 
+
+    /// 重置 ggml context（释放所有张量，重用内存池）
+    pub fn reset(self: *Context) void {
+        c.ggml_reset(@ptrCast(self));
+    }
+
     /// 设置 no_alloc 模式
     pub fn setNoAlloc(self: *Context, no_alloc: bool) void {
         c.ggml_set_no_alloc(@ptrCast(self), no_alloc);
