@@ -27,6 +27,8 @@ pub const DecodeConfig = struct {
     vocab: std.ArrayListUnmanaged(types.VocabEntry),
     clean_spaces: bool,
     escape_whitespaces: bool,
+    /// GPT-2 字节解码映射：unicode codepoint (UTF-8) -> byte
+    unicode_to_byte: ?*const std.StringHashMap(u8) = null,
 };
 
 // ============================================================================
@@ -52,7 +54,7 @@ pub fn decode(
                     try decodeTiktokenToken(ts, &result, allocator);
                 } else {
                     // LLaMA/GPT2: 将空格标记替换为实际空格
-                    try decodeNormalToken(ts, config.escape_whitespaces, &result, allocator);
+                    try decodeNormalToken(ts, config, &result, allocator);
                 }
             },
         }
@@ -92,13 +94,13 @@ fn isSpecialToken(token_id: u32, config: *const DecodeConfig) bool {
 /// GPT-2: Ġ (U+0120, UTF-8: C4 A0)
 fn decodeNormalToken(
     token_str: []const u8,
-    escape_whitespaces: bool,
+    config: *const DecodeConfig,
     result: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
 ) !void {
-    if (!escape_whitespaces) {
+    if (!config.escape_whitespaces and config.unicode_to_byte != null) {
         // GPT-2 风格：字节编码，需要解码
-        try decodeGPT2Token(token_str, result, allocator);
+        try decodeGPT2Token(token_str, config.unicode_to_byte.?, result, allocator);
         return;
     }
 
@@ -134,48 +136,49 @@ fn decodeNormalToken(
 
 /// GPT-2 风格的字节解码
 /// GPT-2 使用字节级编码，将字节映射到 Unicode 码点
+/// 解码时，将 token 文本中的每个 Unicode 码点通过逆映射转回原始字节
 fn decodeGPT2Token(
     token_str: []const u8,
+    unicode_to_byte: *const std.StringHashMap(u8),
     result: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
 ) !void {
     var i: usize = 0;
     while (i < token_str.len) {
+        // 解码一个 UTF-8 码点
         const byte = token_str[i];
-        // 检查是否是 UTF-8 编码的字节（码点 0x100-0x1FF）
-        // UTF-8 编码：0xC4 0x80-0xBF (0x100-0x13F)
-        //            0xC5 0x80-0xBF (0x140-0x17F)
-        //            0xC6 0x80-0xBF (0x180-0x1BF)
-        //            0xC7 0x80-0xBF (0x1C0-0x1FF)
-        if (byte >= 0xC4 and byte <= 0xC7 and i + 1 < token_str.len) {
-            const cp: u32 = (@as(u32, byte - 0xC4) << 6) | (@as(u32, token_str[i + 1]) & 0x3F) | 0x100;
-            if (cp <= 0x1FF) {
-                try result.append(allocator, @as(u8, @intCast(cp & 0xFF)));
-                i += 2;
-                continue;
-            }
-        }
-        // 检查是否是 Latin-1 范围的字符（0x80-0xFF），这些直接映射到字节值
-        // 在 GPT-2 字节编码中，0xC2 0x80-0xBF 表示 0x80-0xBF
-        // 0xC3 0x80-0xBF 表示 0xC0-0xFF
-        if (byte == 0xC2 and i + 1 < token_str.len) {
-            try result.append(allocator, token_str[i + 1]);
-            i += 2;
+        const cp_len = std.unicode.utf8ByteSequenceLength(byte) catch {
+            // 无效的 UTF-8 起始字节，跳过
+            i += 1;
+            continue;
+        };
+
+        if (i + cp_len > token_str.len) {
+            // 不完整的 UTF-8 序列，跳过
+            i += 1;
             continue;
         }
-        if (byte == 0xC3 and i + 1 < token_str.len) {
-            try result.append(allocator, 0xC0 + (token_str[i + 1] & 0x3F));
-            i += 2;
-            continue;
-        }
-        // 对于 ASCII 字符（0x00-0x7F），直接输出
-        if (byte < 0x80) {
+
+        const cp_slice = token_str[i..i+cp_len];
+
+        // 检查是否是 ASCII（直接输出）
+        if (cp_len == 1 and byte < 0x80) {
             try result.append(allocator, byte);
             i += 1;
             continue;
         }
-        // 其他情况，跳过
-        i += 1;
+
+        // 通过 unicode_to_byte 映射查找
+        if (unicode_to_byte.get(cp_slice)) |b| {
+            try result.append(allocator, b);
+            i += cp_len;
+            continue;
+        }
+
+        // 如果映射中找不到，直接输出 UTF-8 字节
+        // 这通常不会发生，但作为回退
+        try result.appendSlice(allocator, cp_slice);
+        i += cp_len;
     }
 }
 

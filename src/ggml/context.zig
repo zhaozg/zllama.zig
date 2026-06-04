@@ -138,6 +138,32 @@ pub const Context = opaque {
     pub fn totalMem(self: *Context) usize {
         return @as(usize, @intCast(c.ggml_get_mem_size(@ptrCast(self))));
     }
+    /// 创建 4D 张量的视图
+    pub fn view4d(
+        self: *Context,
+        a: *Tensor,
+        ne0: i64,
+        ne1: i64,
+        ne2: i64,
+        ne3: i64,
+        nb1: usize,
+        nb2: usize,
+        nb3: usize,
+        offset: usize,
+    ) *Tensor {
+        return @as(*Tensor, @ptrCast(c.ggml_view_4d(
+            @ptrCast(self),
+            @ptrCast(@alignCast(a)),
+            ne0,
+            ne1,
+            ne2,
+            ne3,
+            nb1,
+            nb2,
+            nb3,
+            offset,
+        )));
+    }
 };
 
 // ============================================================================

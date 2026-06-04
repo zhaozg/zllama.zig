@@ -131,7 +131,7 @@ zllama.zig/
 - ❌ 硬编码模型超参数（必须从 GGUF 元数据读取）。
 - ❌ 对 KV Cache 进行不必要的物理复制。
 - ❌ 使用不安全的 `@alignCast` 或假设指针对齐。
-- ❌ 禁止运行 llama-cli 。
+- ❌ 禁止运行 llama-cli
 
 ## 📚 参考材料
 

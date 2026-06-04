@@ -56,6 +56,9 @@ pub const Tokenizer = struct {
     /// GPT-2 反向映射：unicode codepoint (UTF-8) -> byte
     unicode_to_byte: std.StringHashMap(u8),
 
+    /// token score 表（用于 SPM 编码）
+    token_scores: std.ArrayListUnmanaged(f32),
+
     // ========================================================================
     // 初始化
     // ========================================================================
@@ -71,6 +74,7 @@ pub const Tokenizer = struct {
             .merges = std.StringHashMap(u32).init(allocator),
             .trie_root = TrieNode.init(allocator),
             .unicode_to_byte = std.StringHashMap(u8).init(allocator),
+            .token_scores = .empty,
         };
 
         log.info("Tokenizer model: '{s}' -> {s}", .{
@@ -86,6 +90,14 @@ pub const Tokenizer = struct {
             for (val.array_val) |v| {
                 const tv = v.asU32() orelse 0;
                 try tok.token_types.append(allocator, @as(TokenType, @enumFromInt(tv)));
+
+                // 读取 token scores（用于 SPM 编码）
+                if (gguf_file.metadata.get("tokenizer.ggml.scores")) |scores_val| {
+                    for (scores_val.array_val) |sv| {
+                        const score = sv.asF32() orelse 0.0;
+                        try tok.token_scores.append(allocator, score);
+                    }
+                }
             }
         }
 
@@ -125,7 +137,9 @@ pub const Tokenizer = struct {
             try tok.merges.ensureTotalCapacity(@intCast(val.array_val.len));
             for (val.array_val, 0..) |v, rank| {
                 const merge_str = v.asString() orelse continue;
-                try tok.merges.put(merge_str, @intCast(rank));
+                // 必须复制字符串，因为 GGUF 文件在 Tokenizer.init 返回后会被释放
+                const owned_key = try allocator.dupe(u8, merge_str);
+                tok.merges.putAssumeCapacity(owned_key, @intCast(rank));
             }
             log.info("Tokenizer: {d} BPE merge rules", .{val.array_val.len});
         }
@@ -196,6 +210,13 @@ pub const Tokenizer = struct {
         }
         self.vocab.deinit(self.allocator);
         self.token_types.deinit(self.allocator);
+        self.token_scores.deinit(self.allocator);
+
+        // 释放 merges 中复制的 key 字符串
+        var key_iter = self.merges.keyIterator();
+        while (key_iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
         self.merges.deinit();
         self.trie_root.deinit(self.allocator);
         for (&self.bytes_to_unicode) |mapped| {
@@ -221,9 +242,10 @@ pub const Tokenizer = struct {
             .merges = self.merges,
             .trie_root = &self.trie_root,
             .tokenToStringFn = tokenToStringWrapper,
+            .textToTokenFn = textToTokenWrapper,
+            .unicodeToByte = &self.unicode_to_byte,
             .byteToTokenIdFn = byteToTokenIdWrapper,
             .bytesToUnicodeFn = bytesToUnicodeWrapper,
-            .unicodeToByte = &self.unicode_to_byte,
             .ctx = @ptrCast(self),
         };
 
@@ -242,8 +264,8 @@ pub const Tokenizer = struct {
             .vocab = self.vocab,
             .clean_spaces = self.config.clean_spaces,
             .escape_whitespaces = self.config.escape_whitespaces,
+            .unicode_to_byte = &self.unicode_to_byte,
         };
-
         return decode_mod.decode(token_ids, &dec_config, allocator);
     }
 
@@ -285,6 +307,39 @@ pub const Tokenizer = struct {
     fn bytesToUnicode(self: *const Tokenizer, byte: u8) []const u8 {
         return self.bytes_to_unicode[byte];
     }
+
+    /// 将 token 字符串转换为 token ID
+    fn textToToken(self: *const Tokenizer, text: []const u8) ?u32 {
+        // 先在 Trie 中查找
+        const match = trie.longestMatch(&self.trie_root, text, 0);
+        if (match) |m| {
+            if (m.len == text.len) return m.token_id;
+        }
+        // 再在词表中线性查找（作为回退）
+        for (self.vocab.items, 0..) |entry, i| {
+            if (entry == .normal and std.mem.eql(u8, entry.normal, text)) {
+                return @intCast(i);
+            }
+        }
+        return null;
+    }
+
+    /// 查找两个 token 的 BPE 合并 rank
+    fn findBpeRank(self: *const Tokenizer, left: []const u8, right: []const u8) ?u32 {
+        // merges 中的 key 格式为 "left right"
+        // 使用动态分配避免缓冲区溢出
+        const key = std.fmt.allocPrint(self.allocator, "{s} {s}", .{ left, right }) catch return null;
+        defer self.allocator.free(key);
+        return self.merges.get(key);
+    }
+
+    /// 获取 token 的 score
+    fn tokenScore(self: *const Tokenizer, token_id: u32) f32 {
+        if (token_id < self.token_scores.items.len) {
+            return self.token_scores.items[token_id];
+        }
+        return 0.0;
+    }
 };
 
 fn tokenToStringWrapper(token_id: u32, ctx: ?*anyopaque) ?[]const u8 {
@@ -300,6 +355,21 @@ fn byteToTokenIdWrapper(byte: u8, ctx: ?*anyopaque) u32 {
 fn bytesToUnicodeWrapper(byte: u8, ctx: ?*anyopaque) []const u8 {
     const self: *const Tokenizer = @ptrCast(@alignCast(ctx.?));
     return self.bytesToUnicode(byte);
+}
+
+fn textToTokenWrapper(text: []const u8, ctx: ?*anyopaque) ?u32 {
+    const self: *const Tokenizer = @ptrCast(@alignCast(ctx.?));
+    return self.textToToken(text);
+}
+
+fn findBpeRankWrapper(left: []const u8, right: []const u8, ctx: ?*anyopaque) ?u32 {
+    const self: *const Tokenizer = @ptrCast(@alignCast(ctx.?));
+    return self.findBpeRank(left, right);
+}
+
+fn tokenScoreWrapper(token_id: u32, ctx: ?*anyopaque) f32 {
+    const self: *const Tokenizer = @ptrCast(@alignCast(ctx.?));
+    return self.tokenScore(token_id);
 }
 
 // ============================================================================

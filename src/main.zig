@@ -65,7 +65,6 @@ fn currentTimeMs() i64 {
     return @as(i64, ts.sec) * 1000 + @as(i64, @divTrunc(ts.nsec, 1000000));
 }
 
-
 const CliArgs = struct {
     model_path: [:0]const u8 = "",
     prompt: []const u8 = "Hello, how are you?",
@@ -237,8 +236,8 @@ const InferenceEngine = struct {
     }
 
     pub fn generate(self: *InferenceEngine, prompt: []const u8, max_tokens: u32) !void {
-        // 编码 prompt，不自动添加 BOS（由模型内部处理）
-        var input_tokens = try self.tok.encode(prompt, false);
+        // 编码 prompt，添加特殊 token（BOS/EOS）
+        var input_tokens = try self.tok.encode(prompt, true);
         // 调试：打印编码后的 token IDs
         logger.debug("Encoded tokens ({d}):", .{input_tokens.items.len});
         for (input_tokens.items, 0..) |t, i| {

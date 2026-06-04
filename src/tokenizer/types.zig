@@ -299,7 +299,10 @@ pub const TokenizerConfig = struct {
                         config.add_bos = true;
                     },
                     .qwen2, .qwen35 => {
-                        config.ignore_merges = true;
+                        // Qwen2/Qwen35 使用 GPT-2 BPE，需要 BPE 合并
+                        // 在 llama.cpp 中，Qwen2/Qwen35 的 ignore_merges 为 false（BPE 默认值）
+                        // 且 add_bos 为 false（BPE 默认值）
+                        config.ignore_merges = false;
                         config.add_bos = false;
                     },
                     .deepseek_llm, .deepseek_coder, .deepseek3_llm, .youtu => {

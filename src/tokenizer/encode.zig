@@ -290,7 +290,7 @@ fn encodeWord(
 
     // 阶段 2：BPE 合并（如果不忽略合并规则）
     if (!ignore_merges and config.merges.count() > 0) {
-        try bpe.applyBpeMerges(&tokens, config.merges, config.tokenToStringFn, config.ctx, config.allocator);
+        try bpe.applyBpeMerges(&tokens, config.merges, config.tokenToStringFn, config.textToTokenFn, config.ctx, config.allocator);
     }
 
     return tokens;
@@ -310,6 +310,7 @@ pub const EncodeConfig = struct {
     merges: std.StringHashMap(u32),
     trie_root: *const trie.TrieNode,
     tokenToStringFn: *const fn (token_id: u32, ctx: ?*anyopaque) ?[]const u8,
+    textToTokenFn: *const fn (text: []const u8, ctx: ?*anyopaque) ?u32,
     byteToTokenIdFn: *const fn (byte: u8, ctx: ?*anyopaque) u32,
     bytesToUnicodeFn: ?*const fn (byte: u8, ctx: ?*anyopaque) []const u8 = null,
     unicodeToByte: ?*const std.StringHashMap(u8) = null,
