@@ -18,17 +18,21 @@ pub const RopeScaling = struct {
 /// 支持的模型架构枚举
 pub const Architecture = enum {
     qwen2,
+    qwen35,
     llama,
     // 未来可扩展：qwen3_moe, mixtral, ...
 
     /// 从 GGUF 元数据中的 general.architecture 字段解析
     pub fn fromString(s: []const u8) ?Architecture {
         if (std.mem.eql(u8, s, "qwen2") or
-            std.mem.eql(u8, s, "qwen2.5") or
-            std.mem.eql(u8, s, "qwen3.5") or
-            std.mem.eql(u8, s, "qwen35"))
+            std.mem.eql(u8, s, "qwen2.5"))
         {
             return .qwen2;
+        }
+        if (std.mem.eql(u8, s, "qwen3.5") or
+            std.mem.eql(u8, s, "qwen35"))
+        {
+            return .qwen35;
         }
         if (std.mem.eql(u8, s, "llama") or
             std.mem.eql(u8, s, "llama2") or
@@ -128,7 +132,8 @@ const testing = std.testing;
 
 test "Architecture fromString" {
     try testing.expectEqual(Architecture.qwen2, Architecture.fromString("qwen2").?);
-    try testing.expectEqual(Architecture.qwen2, Architecture.fromString("qwen3.5").?);
+    try testing.expectEqual(Architecture.qwen35, Architecture.fromString("qwen3.5").?);
+    try testing.expectEqual(Architecture.qwen35, Architecture.fromString("qwen35").?);
     try testing.expectEqual(Architecture.llama, Architecture.fromString("llama").?);
     try testing.expectEqual(Architecture.llama, Architecture.fromString("llama3").?);
     try testing.expect(Architecture.fromString("unknown") == null);

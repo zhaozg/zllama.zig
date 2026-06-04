@@ -22,7 +22,7 @@ pub fn createModel(
     io: std.Io,
 ) !*anyopaque {
     return switch (arch) {
-        .qwen2 => {
+        .qwen2, .qwen35 => {
             var m = try allocator.create(qwen.QwenModel);
             errdefer allocator.destroy(m);
             try m.init(allocator, gguf_file, io);
@@ -40,7 +40,7 @@ pub fn createModel(
 /// 释放模型实例
 pub fn deinitModel(model_ptr: *anyopaque, arch: model.Architecture, allocator: std.mem.Allocator) void {
     switch (arch) {
-        .qwen2 => {
+        .qwen2, .qwen35 => {
             var m = @as(*qwen.QwenModel, @ptrCast(@alignCast(model_ptr)));
             m.deinit(allocator);
             allocator.destroy(m);
@@ -65,7 +65,7 @@ pub fn forwardModel(
     start_pos: i32,
 ) !*ggml.Tensor {
     return switch (arch) {
-        .qwen2 => {
+        .qwen2, .qwen35 => {
             const m = @as(*qwen.QwenModel, @ptrCast(@alignCast(model_ptr)));
             return try m.forward(ctx, graph, input_tokens, n_tokens, kv_cache_mgr, start_pos);
         },
@@ -79,7 +79,7 @@ pub fn forwardModel(
 /// 获取模型参数
 pub fn modelParams(model_ptr: *anyopaque, arch: model.Architecture) *const model.ModelParams {
     return switch (arch) {
-        .qwen2 => @as(*qwen.QwenModel, @ptrCast(@alignCast(model_ptr))).getParams(),
+        .qwen2, .qwen35 => @as(*qwen.QwenModel, @ptrCast(@alignCast(model_ptr))).getParams(),
         .llama => @as(*llama.LlamaModel, @ptrCast(@alignCast(model_ptr))).getParams(),
     };
 }
@@ -105,6 +105,10 @@ pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model.Architecture {
     }
 
     // 回退：通过检查特定张量名称来推断
+    if (gguf_file.findTensor("blk.0.ssm_conv1d.weight") != null) {
+        log.info("Fallback: detected qwen35 architecture (found ssm_conv1d.weight)", .{});
+        return .qwen35;
+    }
     if (gguf_file.findTensor("blk.0.attn_q.weight") != null) {
         log.info("Fallback: detected qwen2 architecture (found attn_q.weight)", .{});
         return .qwen2;
@@ -121,7 +125,7 @@ pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model.Architecture {
 const testing = std.testing;
 
 test "detectArchitecture" {
-    // 单元测试只验证枚举
     try testing.expectEqual(model.Architecture.qwen2, model.Architecture.fromString("qwen2").?);
+    try testing.expectEqual(model.Architecture.qwen35, model.Architecture.fromString("qwen35").?);
     try testing.expectEqual(model.Architecture.llama, model.Architecture.fromString("llama3").?);
 }
