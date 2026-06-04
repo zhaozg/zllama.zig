@@ -2,6 +2,12 @@
 //!
 //! 对给定 prompt 进行分词，并输出 token ID 和对应的 token 字符串。
 //! 与 llama.cpp 的 llama-tokenize 工具功能对齐。
+//!
+//! 运行时日志级别控制（通过命令行参数）：
+//!   --log-level <debug|info|warn|err>  设置日志级别
+//!   --verbose, -v                       设置日志级别为 info
+//!   --debug, -d                         设置日志级别为 debug
+//!   --log-disable                       禁用日志（设置级别为 err）
 
 const std = @import("std");
 const gguf = @import("gguf.zig");
@@ -31,6 +37,16 @@ pub fn log(
     std.log.defaultLog(level, scope, format, args);
 }
 
+/// 设置运行时日志级别
+pub fn setLogLevel(level: std.log.Level) void {
+    runtime_log_level = level;
+}
+
+/// 获取当前运行时日志级别
+pub fn getLogLevel() std.log.Level {
+    return runtime_log_level;
+}
+
 // ============================================================================
 // 帮助信息
 // ============================================================================
@@ -57,6 +73,9 @@ fn printUsage(argv0: []const u8) void {
         \\    --no-bos                             do not ever add a BOS token to the prompt, even if normally the model uses a BOS token.
         \\    --no-escape                          do not escape input (such as \n, \t, etc.).
         \\    --log-disable                        disable logs. Makes stderr quiet when loading the model.
+        \\    --log-level <level>                  set log level (debug, info, warn, err). Overrides --log-disable, --verbose, --debug.
+        \\    -v, --verbose                        set log level to info (more verbose).
+        \\    -d, --debug                          set log level to debug (most verbose).
         \\    --show-count                         print the total number of tokens.
         \\
     , .{argv0});
@@ -72,6 +91,9 @@ const CliArgs = struct {
     no_bos: bool = false,
     no_escape: bool = false,
     log_disable: bool = false,
+    log_level: ?std.log.Level = null,
+    verbose: bool = false,
+    debug: bool = false,
     show_token_count: bool = false,
     prompt: ?[]const u8 = null,
     prompt_file: ?[]const u8 = null,
@@ -113,6 +135,16 @@ const CliArgs = struct {
                 stdin_set = true;
             } else if (std.mem.eql(u8, arg, "--log-disable")) {
                 result.log_disable = true;
+            } else if (std.mem.eql(u8, arg, "--log-level")) {
+                const level_str = args_it.next() orelse return error.InvalidArgs;
+                result.log_level = std.meta.stringToEnum(std.log.Level, level_str) orelse {
+                    logger.err("unknown log level: {s}", .{level_str});
+                    return error.InvalidArgs;
+                };
+            } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+                result.verbose = true;
+            } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--debug")) {
+                result.debug = true;
             } else if (std.mem.eql(u8, arg, "--show-count")) {
                 result.show_token_count = true;
             } else {
@@ -126,6 +158,24 @@ const CliArgs = struct {
 
         result.stdin_mode = stdin_set;
         return result;
+    }
+
+    /// 根据命令行参数确定最终的日志级别
+    /// 优先级：--log-level > --debug > --verbose > --log-disable > 默认
+    pub fn resolveLogLevel(self: *const CliArgs) std.log.Level {
+        if (self.log_level) |level| {
+            return level;
+        }
+        if (self.debug) {
+            return .debug;
+        }
+        if (self.verbose) {
+            return .info;
+        }
+        if (self.log_disable) {
+            return .err;
+        }
+        return .info;
     }
 };
 
@@ -224,10 +274,10 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // 禁用日志
-    if (args.log_disable) {
-        runtime_log_level = .err;
-    }
+    // 根据命令行参数设置运行时日志级别
+    const resolved_level = args.resolveLogLevel();
+    setLogLevel(resolved_level);
+    logger.debug("Log level set to {s}", .{@tagName(resolved_level)});
 
     // 读取模型文件
     const cwd = std.Io.Dir.cwd();

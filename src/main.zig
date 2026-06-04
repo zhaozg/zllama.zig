@@ -23,16 +23,17 @@ const sampler = @import("sampler.zig");
 const kv_cache = @import("kv_cache.zig");
 
 pub const std_options: std.Options = .{
-    .log_level = .debug,
+    .log_level = .info,
+    .logFn = log,
     .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .tokenizer, .level = .debug },
+        .{ .scope = .tokenizer, .level = .info},
         .{ .scope = .ggml, .level = .info },
         .{ .scope = .qwen, .level = .info },
         .{ .scope = .llama, .level = .info },
         .{ .scope = .model, .level = .info },
         .{ .scope = .main, .level = .info },
         .{ .scope = .sampler, .level = .info },
-    },
+    }
 };
 
 const logger = std.log.scoped(.main);

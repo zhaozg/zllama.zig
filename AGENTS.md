@@ -122,7 +122,9 @@ zllama.zig/
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf` works
-6. **文档同步**：修改架构或绑定设计后，需同步更新对应的 `*.md` 文件。
+6. 效果参照:
+   - `llama-simple -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好`
+7. **文档同步**：修改架构或绑定设计后，需同步更新对应的 `*.md` 文件。
 
 ## 🔒 禁止事项
 
