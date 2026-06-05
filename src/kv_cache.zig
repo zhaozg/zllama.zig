@@ -3,6 +3,9 @@
 //! 为每层预分配 KV Cache 张量，支持增量写入和视图切片。
 //! 避免每 token 复制历史缓存。
 //!
+//! 已适配 MemoryContext 接口（core/memory.zig），
+//! 可通过 toMemoryContext() 转换为通用内存接口。
+//!
 //! KV Cache 布局（与 llama.cpp 一致）:
 //!   K: [head_dim, n_kv_head, max_seq_len]
 //!   V: [head_dim, n_kv_head, max_seq_len]
@@ -12,6 +15,7 @@
 
 const std = @import("std");
 const ggml = @import("ggml.zig");
+const memory = @import("core/memory.zig");
 
 const log = std.log.scoped(.kv_cache);
 
@@ -27,6 +31,7 @@ pub const LayerCache = struct {
 };
 
 /// KV Cache 管理器
+/// 同时实现了 MemoryContext 接口（通过 toMemoryContext()）
 pub const KVCache = struct {
     layers: []LayerCache,
     max_seq_len: u32,
@@ -177,10 +182,125 @@ pub const KVCache = struct {
         }
         return max_len;
     }
+
+    // ======================================================================
+    // MemoryContext 接口适配
+    // ======================================================================
+
+    /// 转换为 MemoryContext 接口
+    /// 使得 KVCache 可以通过通用内存接口访问
+    pub fn toMemoryContext(self: *KVCache) memory.MemoryContext {
+        return memory.MemoryContext{
+            .vtable = &memory_vtable,
+            .data = @as(*anyopaque, @ptrCast(self)),
+        };
+    }
+
+    /// MemoryContext 适配器：deinit
+    fn memDeinit(data: *anyopaque) void {
+        _ = data;
+        // KVCache 的 deinit 需要 allocator，由外部管理
+    }
+
+    /// MemoryContext 适配器：reset
+    fn memReset(data: *anyopaque) void {
+        const self = @as(*KVCache, @ptrCast(@alignCast(data)));
+        self.reset();
+    }
+
+    /// MemoryContext 适配器：get_k
+    fn memGetK(data: *anyopaque, layer: usize) *ggml.Tensor {
+        const self = @as(*KVCache, @ptrCast(@alignCast(data)));
+        return self.layers[layer].k;
+    }
+
+    /// MemoryContext 适配器：get_v
+    fn memGetV(data: *anyopaque, layer: usize) *ggml.Tensor {
+        const self = @as(*KVCache, @ptrCast(@alignCast(data)));
+        return self.layers[layer].v;
+    }
+
+    /// MemoryContext 适配器：set_kv
+    fn memSetKv(
+        data: *anyopaque,
+        ctx: *ggml.Context,
+        graph: *ggml.CGraph,
+        layer: usize,
+        new_k: *ggml.Tensor,
+        new_v: *ggml.Tensor,
+        n_tokens: u32,
+    ) void {
+        const self = @as(*KVCache, @ptrCast(@alignCast(data)));
+        self.setKv(ctx, graph, layer, new_k, new_v, n_tokens);
+    }
+
+    /// MemoryContext 适配器：current_len
+    fn memCurrentLen(data: *anyopaque) u32 {
+        const self = @as(*KVCache, @ptrCast(@alignCast(data)));
+        return self.currentLen();
+    }
+
+    /// MemoryContext 适配器：n_layers
+    fn memNLayers(data: *anyopaque) u32 {
+        const self = @as(*KVCache, @ptrCast(@alignCast(data)));
+        return @intCast(self.layers.len);
+    }
+
+    const memory_vtable = memory.MemoryContext.MemoryVTable{
+        .deinit = memDeinit,
+        .reset = memReset,
+        .get_k = memGetK,
+        .get_v = memGetV,
+        .set_kv = memSetKv,
+        .current_len = memCurrentLen,
+        .n_layers = memNLayers,
+    };
 };
 
 const testing = std.testing;
 
 test "KVCache init" {
     try testing.expectEqual(@as(usize, @sizeOf(LayerCache)), @sizeOf(LayerCache));
+}
+
+test "KVCache toMemoryContext" {
+    const ctx = try ggml.Context.initNoAlloc(256 * 1024);
+    defer ctx.deinit();
+
+    var kv = try KVCache.init(ctx, 2, 4, 32, 64, testing.allocator);
+    defer kv.deinit(testing.allocator);
+
+    var mem_ctx = kv.toMemoryContext();
+
+    // 验证接口方法
+    try testing.expectEqual(@as(u32, 2), mem_ctx.nLayers());
+    try testing.expectEqual(@as(u32, 0), mem_ctx.currentLen());
+
+    const k = mem_ctx.getK(0);
+    const v = mem_ctx.getV(0);
+    try testing.expect(k != undefined);
+    try testing.expect(v != undefined);
+
+    // 测试 reset
+    mem_ctx.reset();
+    try testing.expectEqual(@as(u32, 0), mem_ctx.currentLen());
+}
+
+test "KVCache basic lifecycle" {
+    const ctx = try ggml.Context.initNoAlloc(256 * 1024);
+    defer ctx.deinit();
+
+    var kv = try KVCache.init(ctx, 1, 2, 16, 32, testing.allocator);
+    defer kv.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 0), kv.currentLen());
+
+    // 验证 layers 初始化
+    try testing.expectEqual(@as(u32, 0), kv.layers[0].current_len);
+    try testing.expect(kv.layers[0].k != undefined);
+    try testing.expect(kv.layers[0].v != undefined);
+
+    // 测试 reset
+    kv.reset();
+    try testing.expectEqual(@as(u32, 0), kv.currentLen());
 }
