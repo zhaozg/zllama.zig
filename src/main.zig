@@ -171,7 +171,7 @@ const InferenceEngine = struct {
         logger.info("Detected architecture: {s}", .{@tagName(arch)});
 
         var model = try registry.createModel(allocator, &gguf_file, arch, io);
-        errdefer model.deinit();
+        errdefer model.deinit(allocator);
 
         const params = model.getParams().*;
 
@@ -230,8 +230,8 @@ const InferenceEngine = struct {
         self.tok.deinit();
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
-        self.ctx_weights.deinit();
-        self.model.deinit();
+        // ctx_weights 由 model.deinit() 释放
+        self.model.deinit(self.allocator);
         self.allocator.free(self.gguf_data);
     }
 

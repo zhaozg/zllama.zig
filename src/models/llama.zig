@@ -239,9 +239,14 @@ pub const LlamaModel = struct {
         .resetSSMStates = resetSSMStatesAdapter,
     };
 
-    fn deinitAdapter(data: *anyopaque) void {
+    fn deinitAdapter(data: *anyopaque, allocator: std.mem.Allocator) void {
         const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
+        // 释放 weights 中的分配内存
+        self.llm_weights.deinit(allocator);
+        // 释放 ctx_weights（ggml 上下文）
         self.ctx_weights.deinit();
+        // 释放 LlamaModel 结构体本身
+        allocator.destroy(self);
     }
 
     fn buildGraphAdapter(

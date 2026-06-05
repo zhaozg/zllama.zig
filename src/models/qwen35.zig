@@ -484,12 +484,16 @@ pub const QwenModel = struct {
         .resetSSMStates = resetSSMStatesAdapter,
     };
 
-    fn deinitAdapter(data: *anyopaque) void {
-        // 注意：allocator 通过其他方式管理
-        // 这里只释放模型内部资源
-        // 注意：allocator 通过其他方式管理，layers 的释放由外部负责
+    fn deinitAdapter(data: *anyopaque, allocator: std.mem.Allocator) void {
         const self = @as(*QwenModel, @ptrCast(@alignCast(data)));
+        // 释放 qwen_weights 中的 prefix 字符串和 layers 数组
+        self.qwen_weights.deinit(allocator);
+        // 释放 ssm_states 数组
+        allocator.free(self.ssm_states);
+        // 释放 ctx_weights（ggml 上下文）
         self.ctx_weights.deinit();
+        // 释放 QwenModel 结构体本身
+        allocator.destroy(self);
     }
 
     fn buildGraphAdapter(

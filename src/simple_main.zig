@@ -181,8 +181,8 @@ const SimpleEngine = struct {
         self.tok.deinit();
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
-        self.ctx_weights.deinit();
-        self.model.deinit();
+        // ctx_weights 由 model.deinit() 释放
+        self.model.deinit(self.allocator);
         self.allocator.free(self.gguf_data);
     }
 

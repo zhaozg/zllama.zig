@@ -195,11 +195,14 @@ pub const Qwen2Model = struct {
         .resetSSMStates = resetSSMStatesAdapter,
     };
 
-    fn deinitAdapter(data: *anyopaque) void {
+    fn deinitAdapter(data: *anyopaque, allocator: std.mem.Allocator) void {
         const self = @as(*Qwen2Model, @ptrCast(@alignCast(data)));
-        // 注意：allocator 通过其他方式管理
-        // 这里只释放模型内部资源
+        // 释放 weights 中的分配内存
+        self.weights.deinit(allocator);
+        // 释放 ctx_weights（ggml 上下文）
         self.ctx_weights.deinit();
+        // 释放 Qwen2Model 结构体本身
+        allocator.destroy(self);
     }
     fn buildGraphAdapter(
         data: *anyopaque,
