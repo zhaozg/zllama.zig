@@ -18,6 +18,8 @@ const ggml = @import("ggml.zig");
 const gguf = @import("gguf.zig");
 const model_if = @import("model.zig");
 const registry = @import("models/registry.zig");
+const graph_builder = @import("core/graph_builder.zig");
+const memory = @import("core/memory.zig");
 const tokenizer = @import("tokenizer.zig");
 const sampler = @import("sampler.zig");
 const kv_cache = @import("kv_cache.zig");
@@ -137,7 +139,7 @@ const InferenceEngine = struct {
     ctx_graph: *ggml.Context,
     ctx_kv_cache: *ggml.Context,
     arch: model_if.Architecture,
-    model_ptr: *anyopaque,
+    model: model_if.ModelInstance,
     params: model_if.ModelParams,
     tok: tokenizer.Tokenizer,
     sampler_state: sampler.Sampler,
@@ -168,10 +170,10 @@ const InferenceEngine = struct {
         const arch = registry.detectArchitecture(&gguf_file) orelse return error.UnsupportedArchitecture;
         logger.info("Detected architecture: {s}", .{@tagName(arch)});
 
-        const model_ptr = try registry.createModel(allocator, &gguf_file, arch, io);
-        errdefer registry.deinitModel(model_ptr, arch, allocator);
+        var model = try registry.createModel(allocator, &gguf_file, arch, io);
+        errdefer model.deinit();
 
-        const params = registry.modelParams(model_ptr, arch).*;
+        const params = model.getParams().*;
 
         if (cli_args.verbose) {
             logger.info("n_vocab={d}, n_embd={d}, n_head={d}, n_kv_head={d}", .{ params.n_vocab, params.n_embd, params.n_head, params.n_kv_head });
@@ -197,9 +199,6 @@ const InferenceEngine = struct {
         errdefer ctx_graph.deinit();
         {
             const buft = ggml.backendCpuBufferType();
-            // ctx_weights 中的张量已在 findOrCreateTensor 中通过 setNoAlloc(false) 分配了内存
-            // ctx_graph 中的张量在 generate 中动态创建，使用 Gallocr 分配
-            // 只有 ctx_kv_cache 需要后端分配（KV Cache 张量在 no_alloc 模式下创建）
             try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, buft);
         }
 
@@ -215,7 +214,7 @@ const InferenceEngine = struct {
             .ctx_graph = ctx_graph,
             .ctx_kv_cache = ctx_kv_cache,
             .arch = arch,
-            .model_ptr = model_ptr,
+            .model = model,
             .params = params,
             .tok = tok,
             .sampler_state = sampler_state,
@@ -232,7 +231,7 @@ const InferenceEngine = struct {
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
         self.ctx_weights.deinit();
-        registry.deinitModel(self.model_ptr, self.arch, self.allocator);
+        self.model.deinit();
         self.allocator.free(self.gguf_data);
     }
 
@@ -255,7 +254,8 @@ const InferenceEngine = struct {
 
         logger.info("Building forward graph for prompt...", .{});
         var graph = try ggml.CGraph.init(self.ctx_graph);
-        const logits = try registry.forwardModel(self.model_ptr, self.arch, self.ctx_graph, graph, input_tensor, n_prompt_tokens, &self.kv_cache_mgr, 0);
+        var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, &self.params, self.allocator);
+        const logits = try self.model.buildGraph(&builder, input_tensor, n_prompt_tokens, null, 0);
 
         logger.info("Allocating graph memory...", .{});
         const buft = ggml.backendCpuBufferType();
@@ -300,20 +300,17 @@ const InferenceEngine = struct {
         var gen_token_count: u32 = 0;
         const gen_start_time = currentTimeMs();
 
-        // 增量解码循环：复用 self.ctx_graph，每次迭代重置 context 以重用内存池
-        // 避免每次创建/销毁大内存的 ggml.Context（性能关键）
+        // 增量解码循环
         while (gen_token_count < max_tokens - 1) {
-            // 重置 context（释放所有张量，重用内存池），避免线性分配器耗尽
             self.ctx_graph.reset();
-            // 重置 SSM 状态（Qwen35 等混合架构需要），避免指向已释放内存
-            registry.resetModelSSMStates(self.model_ptr, self.arch);
+            self.model.resetSSMStates();
             self.ctx_graph.setNoAlloc(false);
             const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
             self.ctx_graph.setNoAlloc(true);
 
-            // 重新构建增量图
             var inc_graph = try ggml.CGraph.init(self.ctx_graph);
-            const inc_logits = try registry.forwardModel(self.model_ptr, self.arch, self.ctx_graph, inc_graph, single_input, 1, &self.kv_cache_mgr, pos);
+            var inc_builder = graph_builder.GraphBuilder.init(self.ctx_graph, inc_graph, &self.params, self.allocator);
+            const inc_logits = try self.model.buildGraph(&inc_builder, single_input, 1, null, pos);
 
             var inc_galloc = try ggml.Gallocr.init(buft);
             defer inc_galloc.free();
@@ -441,3 +438,9 @@ test "ggml version available" {
     const v = ggml.version();
     try testing.expect(v.len > 0);
 }
+// 导入所有测试模块（通过 zig build test 运行）
+
+const test_utils = @import("tests/utils.zig");
+const test_layers = @import("tests/test_layers.zig");
+const test_gguf = @import("tests/test_gguf.zig");
+const test_archs = @import("tests/test_archs.zig");

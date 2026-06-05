@@ -11,6 +11,9 @@ const model = @import("../model.zig");
 const rms_norm = @import("../layers/rms_norm.zig");
 const rope = @import("../layers/rope.zig");
 const swiglu = @import("../layers/swiglu.zig");
+const graph_builder = @import("../core/graph_builder.zig");
+const memory = @import("../core/memory.zig");
+
 const attention = @import("../layers/attention.zig");
 const embed = @import("../layers/embed.zig");
 
@@ -61,9 +64,6 @@ pub const LlamaWeights = struct {
 };
 
 // ============================================================================
-// LLaMA 模型实现
-// ============================================================================
-
 pub const LlamaModel = struct {
     llm_params: LlamaParams,
     llm_weights: LlamaWeights,
@@ -213,6 +213,56 @@ pub const LlamaModel = struct {
         graph.buildForwardExpand(logits_tensor);
 
         return logits_tensor;
+    }
+
+    /// 适配 buildGraph 接口（通过 GraphBuilder 调用）
+    pub fn buildGraph(
+        self: *LlamaModel,
+        builder: *graph_builder.GraphBuilder,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        mem_ctx: ?*memory.MemoryContext,
+        start_pos: i32,
+    ) !*ggml.Tensor {
+        _ = mem_ctx;
+        const ctx = builder.ctx;
+        const graph = builder.gf;
+        return self.forward(ctx, graph, input_tokens, n_tokens, null, start_pos);
+    }
+
+    /// 虚表定义（用于 ModelInstance 运行时多态）
+    pub const vtable = model.ModelVTable{
+        .deinit = deinitAdapter,
+        .buildGraph = buildGraphAdapter,
+        .getParams = getParamsAdapter,
+        .resetSSMStates = resetSSMStatesAdapter,
+    };
+
+    fn deinitAdapter(data: *anyopaque) void {
+        const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
+        self.ctx_weights.deinit();
+    }
+
+    fn buildGraphAdapter(
+        data: *anyopaque,
+        builder: *graph_builder.GraphBuilder,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        mem_ctx: ?*memory.MemoryContext,
+        start_pos: i32,
+    ) anyerror!*ggml.Tensor {
+        const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
+        return self.buildGraph(builder, input_tokens, n_tokens, mem_ctx, start_pos);
+    }
+
+    fn getParamsAdapter(data: *anyopaque) *const model.ModelParams {
+        const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
+        return self.getParams();
+    }
+
+    fn resetSSMStatesAdapter(data: *anyopaque) void {
+        const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
+        _ = self;
     }
 };
 

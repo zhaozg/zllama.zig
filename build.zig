@@ -77,11 +77,13 @@ pub fn build(b: *std.Build) void {
         .root_module = simple_mod,
     });
 
-    // --- 测试 ---
+    // ======================================================================
+    // 测试
+    // ======================================================================
     const test_step = b.step("test", "Run all tests");
 
-    // 创建一个根模块用于测试，包含整个 src/ 目录
-    // 这样子目录中的文件可以使用相对路径导入
+    // 单元测试（src/ 下的内联测试 + src/tests/ 下的测试文件）
+    // 使用 src/main.zig 作为入口，它导入了所有测试模块
     const test_root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -100,12 +102,21 @@ pub fn build(b: *std.Build) void {
         test_root_mod.addCMacro("GGML_USE_ACCELERATE", "1");
     }
 
-    // 使用根模块运行所有测试
     const test_unit = b.addTest(.{
-        .name = "all-tests",
+        .name = "unit-tests",
         .root_module = test_root_mod,
     });
     test_step.dependOn(&test_unit.step);
+
+    // 独立的测试步骤（复用同一个测试二进制）
+    const test_layers_step = b.step("test-layers", "Run layer tests only");
+    test_layers_step.dependOn(&test_unit.step);
+
+    const test_gguf_step = b.step("test-gguf", "Run GGUF tests only");
+    test_gguf_step.dependOn(&test_unit.step);
+
+    const test_archs_step = b.step("test-archs", "Run architecture tests only");
+    test_archs_step.dependOn(&test_unit.step);
 
     // --- 安装与运行 ---
     b.installArtifact(exe);
@@ -120,7 +131,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run zllama.zig engine");
     run_step.dependOn(&run_cmd.step);
 
-    // --- tokenize 运行步骤 ---
     const tokenize_run_cmd = b.addRunArtifact(tokenize_exe);
     tokenize_run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
@@ -129,7 +139,6 @@ pub fn build(b: *std.Build) void {
     const tokenize_run_step = b.step("tokenize", "Run zllama-tokenize tool");
     tokenize_run_step.dependOn(&tokenize_run_cmd.step);
 
-    // --- simple 运行步骤 ---
     const simple_run_cmd = b.addRunArtifact(simple_exe);
     simple_run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {

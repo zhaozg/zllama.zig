@@ -11,6 +11,9 @@ const rms_norm = @import("../layers/rms_norm.zig");
 const rope = @import("../layers/rope.zig");
 const swiglu = @import("../layers/swiglu.zig");
 const attention = @import("../layers/attention.zig");
+const graph_builder = @import("../core/graph_builder.zig");
+const memory = @import("../core/memory.zig");
+
 const embed = @import("../layers/embed.zig");
 
 const log = std.log.scoped(.qwen35);
@@ -452,6 +455,62 @@ pub const QwenModel = struct {
         result.setName("ssm_out");
         result = ggml.reshape2d(ctx, result, p.base.n_embd, n_tokens_i64);
         return result;
+    }
+
+    /// 适配 buildGraph 接口（通过 GraphBuilder 调用）
+    pub fn buildGraph(
+        self: *QwenModel,
+        builder: *graph_builder.GraphBuilder,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        mem_ctx: ?*memory.MemoryContext,
+        start_pos: i32,
+    ) !*ggml.Tensor {
+        _ = mem_ctx;
+        // 从 builder 中提取 ctx 和 graph
+        const ctx = builder.ctx;
+        const graph = builder.gf;
+        // 目前仍使用旧的 forward 逻辑，但通过 builder 传递
+        // TODO: 逐步迁移到使用 builder 的辅助方法
+        return self.forward(ctx, graph, input_tokens, n_tokens, null, start_pos);
+    }
+
+    /// 虚表定义（用于 ModelInstance 运行时多态）
+    pub const vtable = model.ModelVTable{
+        .deinit = deinitAdapter,
+        .buildGraph = buildGraphAdapter,
+        .getParams = getParamsAdapter,
+        .resetSSMStates = resetSSMStatesAdapter,
+    };
+
+    fn deinitAdapter(data: *anyopaque) void {
+        // 注意：allocator 通过其他方式管理
+        // 这里只释放模型内部资源
+        // 注意：allocator 通过其他方式管理，layers 的释放由外部负责
+        const self = @as(*QwenModel, @ptrCast(@alignCast(data)));
+        self.ctx_weights.deinit();
+    }
+
+    fn buildGraphAdapter(
+        data: *anyopaque,
+        builder: *graph_builder.GraphBuilder,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        mem_ctx: ?*memory.MemoryContext,
+        start_pos: i32,
+    ) anyerror!*ggml.Tensor {
+        const self = @as(*QwenModel, @ptrCast(@alignCast(data)));
+        return self.buildGraph(builder, input_tokens, n_tokens, mem_ctx, start_pos);
+    }
+
+    fn getParamsAdapter(data: *anyopaque) *const model.ModelParams {
+        const self = @as(*QwenModel, @ptrCast(@alignCast(data)));
+        return self.getParams();
+    }
+
+    fn resetSSMStatesAdapter(data: *anyopaque) void {
+        const self = @as(*QwenModel, @ptrCast(@alignCast(data)));
+        self.resetSSMStates();
     }
 };
 

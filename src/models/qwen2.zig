@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const ggml = @import("../ggml.zig");
+const graph_builder = @import("../core/graph_builder.zig");
+const memory = @import("../core/memory.zig");
 const gguf = @import("../gguf.zig");
 const kv_cache = @import("../kv_cache.zig");
 const model = @import("../model.zig");
@@ -166,6 +168,59 @@ pub const Qwen2Model = struct {
         logits_tensor.setName("logits");
         graph.buildForwardExpand(logits_tensor);
         return logits_tensor;
+
+    }
+
+    /// 适配 buildGraph 接口（通过 GraphBuilder 调用）
+    pub fn buildGraph(
+        self: *Qwen2Model,
+        builder: *graph_builder.GraphBuilder,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        mem_ctx: ?*memory.MemoryContext,
+        start_pos: i32,
+    ) !*ggml.Tensor {
+        _ = mem_ctx;
+        const ctx = builder.ctx;
+        const graph = builder.gf;
+        return self.forward(ctx, graph, input_tokens, n_tokens, null, start_pos);
+    }
+
+    /// 虚表定义（用于 ModelInstance 运行时多态）
+    pub const vtable = model.ModelVTable{
+        .deinit = deinitAdapter,
+        .buildGraph = buildGraphAdapter,
+        .getParams = getParamsAdapter,
+        .resetSSMStates = resetSSMStatesAdapter,
+    };
+
+    fn deinitAdapter(data: *anyopaque) void {
+        const self = @as(*Qwen2Model, @ptrCast(@alignCast(data)));
+        // 注意：allocator 通过其他方式管理
+        // 这里只释放模型内部资源
+        self.ctx_weights.deinit();
+    }
+
+    fn buildGraphAdapter(
+        data: *anyopaque,
+        builder: *graph_builder.GraphBuilder,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        mem_ctx: ?*memory.MemoryContext,
+        start_pos: i32,
+    ) anyerror!*ggml.Tensor {
+        const self = @as(*Qwen2Model, @ptrCast(@alignCast(data)));
+        return self.buildGraph(builder, input_tokens, n_tokens, mem_ctx, start_pos);
+    }
+
+    fn getParamsAdapter(data: *anyopaque) *const model.ModelParams {
+        const self = @as(*Qwen2Model, @ptrCast(@alignCast(data)));
+        return self.getParams();
+    }
+
+    fn resetSSMStatesAdapter(data: *anyopaque) void {
+        const self = @as(*Qwen2Model, @ptrCast(@alignCast(data)));
+        _ = self;
     }
 };
 

@@ -3,6 +3,8 @@ const ggml = @import("ggml.zig");
 const gguf = @import("gguf.zig");
 const model_if = @import("model.zig");
 const registry = @import("models/registry.zig");
+const graph_builder = @import("core/graph_builder.zig");
+const memory = @import("core/memory.zig");
 const tokenizer = @import("tokenizer.zig");
 const sampler = @import("sampler.zig");
 const kv_cache = @import("kv_cache.zig");
@@ -117,7 +119,7 @@ const SimpleEngine = struct {
     ctx_graph: *ggml.Context,
     ctx_kv_cache: *ggml.Context,
     arch: model_if.Architecture,
-    model_ptr: *anyopaque,
+    model: model_if.ModelInstance,
     params: model_if.ModelParams,
     tok: tokenizer.Tokenizer,
     kv_cache_mgr: kv_cache.KVCache,
@@ -149,10 +151,9 @@ const SimpleEngine = struct {
         const arch = registry.detectArchitecture(&gguf_file) orelse return error.UnsupportedArchitecture;
         logger.info("Detected architecture: {s}", .{@tagName(arch)});
         logger.info("Creating model...", .{});
-        const model_ptr = try registry.createModel(allocator, &gguf_file, arch, io);
-        errdefer registry.deinitModel(model_ptr, arch, allocator);
+        var model = try registry.createModel(allocator, &gguf_file, arch, io);
         logger.info("Model created, getting params...", .{});
-        const params = registry.modelParams(model_ptr, arch).*;
+        const params = model.getParams().*;
         logger.info("Initializing tokenizer...", .{});
         var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
         errdefer tok.deinit();
@@ -172,7 +173,7 @@ const SimpleEngine = struct {
             const b = ggml.backendCpuBufferType();
             try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, b);
         }
-        return SimpleEngine{ .allocator = allocator, .ctx_weights = ctx_weights, .ctx_graph = ctx_graph, .ctx_kv_cache = ctx_kv_cache, .arch = arch, .model_ptr = model_ptr, .params = params, .tok = tok, .kv_cache_mgr = kv_cache_mgr, .n_threads = n_threads, .gguf_data = gguf_data };
+        return SimpleEngine{ .allocator = allocator, .ctx_weights = ctx_weights, .ctx_graph = ctx_graph, .ctx_kv_cache = ctx_kv_cache, .arch = arch, .model = model, .params = params, .tok = tok, .kv_cache_mgr = kv_cache_mgr, .n_threads = n_threads, .gguf_data = gguf_data };
     }
 
     pub fn deinit(self: *SimpleEngine) void {
@@ -181,7 +182,7 @@ const SimpleEngine = struct {
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
         self.ctx_weights.deinit();
-        registry.deinitModel(self.model_ptr, self.arch, self.allocator);
+        self.model.deinit();
         self.allocator.free(self.gguf_data);
     }
 
@@ -190,7 +191,6 @@ const SimpleEngine = struct {
         var buf: [128]u8 = undefined;
         const n = try self.tok.decodeSingle(token_id, &buf);
         if (n > 0) {
-            // 写入 stdout（与 llama-simple 的 printf("%s", s.c_str()) 对齐）
             const stdout_file = std.Io.File.stdout();
             try stdout_file.writeStreamingAll(io, buf[0..n]);
         }
@@ -206,7 +206,8 @@ const SimpleEngine = struct {
         self.ctx_graph.setNoAlloc(true);
 
         var graph = try ggml.CGraph.init(self.ctx_graph);
-        const logits = try registry.forwardModel(self.model_ptr, self.arch, self.ctx_graph, graph, input_tensor, n_prompt_tokens, &self.kv_cache_mgr, 0);
+        var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, &self.params, self.allocator);
+        const logits = try self.model.buildGraph(&builder, input_tensor, n_prompt_tokens, null, 0);
 
         const buft = ggml.backendCpuBufferType();
         var galloc = try ggml.Gallocr.init(buft);
@@ -236,7 +237,7 @@ const SimpleEngine = struct {
         var pos: i32 = n_prompt_tokens;
 
         while (n_decode < max_tokens) {
-            // 检查是否为 EOG token（与 llama-simple 的 llama_vocab_is_eog 对齐）
+            // 检查是否为 EOG token
             if (self.tok.isSpecialToken(@intCast(new_token_id))) {
                 if (new_token_id == self.tok.special.eos or
                     new_token_id == self.tok.special.bos or
@@ -246,17 +247,18 @@ const SimpleEngine = struct {
                     self.tok.token_types.items[@as(usize, @intCast(new_token_id))] == .control) break;
             }
 
-            // 解码并打印新 token（与 llama-simple 的 printf("%s", s.c_str()); fflush(stdout) 对齐）
+            // 解码并打印新 token
             try self.decodeAndPrintToken(io, @intCast(new_token_id));
 
             // 准备下一个 batch
             self.ctx_graph.reset();
-            registry.resetModelSSMStates(self.model_ptr, self.arch);
+            self.model.resetSSMStates();
             self.ctx_graph.setNoAlloc(false);
             const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
             self.ctx_graph.setNoAlloc(true);
             var inc_graph = try ggml.CGraph.init(self.ctx_graph);
-            const inc_logits = try registry.forwardModel(self.model_ptr, self.arch, self.ctx_graph, inc_graph, single_input, 1, &self.kv_cache_mgr, pos);
+            var inc_builder = graph_builder.GraphBuilder.init(self.ctx_graph, inc_graph, &self.params, self.allocator);
+            const inc_logits = try self.model.buildGraph(&inc_builder, single_input, 1, null, pos);
             var inc_galloc = try ggml.Gallocr.init(buft);
             defer inc_galloc.free();
             if (!inc_galloc.allocGraph(inc_graph)) {
@@ -274,13 +276,13 @@ const SimpleEngine = struct {
             n_decode += 1;
         }
 
-        // 打印换行（与 llama-simple 的 printf("\n") 对齐）
+        // 打印换行
         {
             const stdout_file = std.Io.File.stdout();
             try stdout_file.writeStreamingAll(io, "\n");
         }
 
-        // 性能统计输出到 stderr（与 llama-simple 的 fprintf(stderr, ...) 对齐）
+        // 性能统计输出到 stderr
         const t_main_end = currentTimeUs();
         const elapsed_s = @as(f64, @floatFromInt(t_main_end - t_main_start)) / 1000000.0;
         const speed = if (elapsed_s > 0.0)
