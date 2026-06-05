@@ -125,27 +125,38 @@ const SimpleEngine = struct {
     gguf_data: []u8,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: []const u8, cli_args: *const CliArgs) !SimpleEngine {
+        logger.info("Loading model: {s}", .{model_path});
         const cwd = std.Io.Dir.cwd();
+        logger.info("Opening file...", .{});
         const file = try cwd.openFile(io, model_path, .{ .mode = .read_only });
         defer file.close(io);
+        logger.info("File opened, getting stat...", .{});
         const stat = try file.stat(io);
         const file_size = @as(usize, @intCast(stat.size));
+        logger.info("File size: {d} bytes", .{file_size});
         const gguf_data = try allocator.alloc(u8, file_size);
         errdefer allocator.free(gguf_data);
+        logger.info("Reading file...", .{});
         const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
         if (bytes_read != file_size) {
             allocator.free(gguf_data);
             return error.FileReadError;
         }
+        logger.info("Parsing GGUF...", .{});
         var gguf_file = try gguf.parse(gguf_data, allocator);
         defer gguf_file.deinit();
+        logger.info("GGUF parsed, detecting architecture...", .{});
         const arch = registry.detectArchitecture(&gguf_file) orelse return error.UnsupportedArchitecture;
         logger.info("Detected architecture: {s}", .{@tagName(arch)});
+        logger.info("Creating model...", .{});
         const model_ptr = try registry.createModel(allocator, &gguf_file, arch, io);
         errdefer registry.deinitModel(model_ptr, arch, allocator);
+        logger.info("Model created, getting params...", .{});
         const params = registry.modelParams(model_ptr, arch).*;
+        logger.info("Initializing tokenizer...", .{});
         var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
         errdefer tok.deinit();
+        logger.info("Tokenizer initialized.", .{});
         const n_threads = if (cli_args.n_threads > 0) cli_args.n_threads else ggml.recommendedThreads();
         const mem_size_estimate = 2 * 1024 * 1024 * 1024;
         const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);

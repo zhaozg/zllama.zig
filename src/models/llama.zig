@@ -142,9 +142,11 @@ pub const LlamaModel = struct {
             const rope_result = rope.applyRope(ctx, q, k, pos_tensor, .{
                 .rope_dim = rope_dim,
                 .rope_theta = p.base.rope_theta,
+                .mode = 0, // LLAMA_ROPE_TYPE_NORM
             });
             q = rope_result.q;
             k = rope_result.k;
+
 
             // 处理 KV Cache
             if (kv_cache_mgr) |cache| {

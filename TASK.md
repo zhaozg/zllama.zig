@@ -1,27 +1,90 @@
-# zllama-simple 与 zllama-simple 对齐
+# zllama.zig 开发任务
+
+## 目标
+
+实现 `zllama-simple` 与 `llama-simple` 的功能对齐，使 `zllama-simple` 能够正确加载并推理 Qwen3.5、LLaMA 等模型。
 
 ## 参考
 
-- src/main.zig
-- src/tokenize_main.zig
-- deps/llama.cpp/examples/simple/simple.cpp
-- llama-simple.log
-- deps/llama.cpp/src/models/qwen35.cpp
-- deps/llama.cpp/src/models/qwen35moe.cpp
+- `src/simple_main.zig` — zllama-simple 入口
+- `src/main.zig` — zllama 主入口
+- `src/tokenize_main.zig` — 分词工具
+- `deps/llama.cpp/examples/simple/simple.cpp` — llama-simple 参考实现
+- `llama-simple.log` — llama-simple 运行日志（含 Qwen3.5-0.8B 输出）
+- `deps/llama.cpp/src/models/qwen35.cpp` — Qwen3.5 模型参考实现
+- `deps/llama.cpp/src/models/qwen35moe.cpp` — Qwen3.5 MoE 参考实现
 
 ### 使用方式
 
 ```bash
 # llama-simple
 llama-simple -m ~/.cache/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf 你好
+llama-simple -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
+
 # zllama-simple
 zig-out/bin/zllama-simple -m ~/.cache/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf 你好
+zig-out/bin/zllama-simple -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
 ```
 
 ## 验收条件
 
-`zig-out/bin/zllama-simple` 与 `llama-simple` 的推理输出一致（允许细微差异，如采样随机性引起的输出不同，但整体语义和格式应相似）。
+1. **`zig-out/bin/zllama-simple` 与 `llama-simple` 的推理输出一致**（允许细微差异，如采样随机性引起的输出不同，但整体语义和格式应相似）。
+2. **功能对齐**：支持 `-m`、`-n`、`-t`、`-k`、`-tp`、`-th`、`-v`、`-d` 等命令行参数。
+3. **流程对齐**：加载模型 → 分词 → 构建计算图 → 推理 → 采样 → 输出 → 性能统计。
+4. **模块化设计对齐**：不是简单的 C 到 Zig 代码转换，而是利用 Zig 的特性（comptime、switch、错误联合等）进行合理抽象。
+5. **多模型支持**：至少支持 Qwen3.5（含混合注意力/SSM）和 LLaMA 系列模型。
+
+## 当前状态
+
+### 已完成
+
+- ✅ 项目结构搭建（AGENTS.md、ARCHITECTURE.md、GGML_BINDING.md、TECHNICAL_CHALLENGES.md、ROADMAP.md）
+- ✅ ggml.zig 安全封装层（C 绑定、Context、Tensor、CGraph、Backend、Ops）
+- ✅ GGUF v2/v3 解析器
+- ✅ 模型抽象接口（model.zig）
+- ✅ 模型注册与工厂函数（registry.zig）
+- ✅ Qwen2 模型实现
+- ✅ Qwen3.5 模型实现（含混合注意力、SSM 层）
+- ✅ LLaMA 模型实现
+- ✅ KV Cache 管理
+- ✅ BPE 分词器
+- ✅ 采样器（贪心采样）
+- ✅ zllama-simple 入口（simple_main.zig）
+- ✅ 构建脚本（build.zig，含三个可执行文件）
+- ✅ 卷积/SSM 相关算子（conv1d、ssmConv、ssmScan、gatedDeltaNet）
+
+### 待完成/待修复
+
+- ❌ **推理正确性验证**：zllama-simple 的输出与 llama-simple 对比，修复可能的计算图构建错误
+- ❌ **Qwen3.5 混合注意力层正确性**：验证 full attention 层和 linear attention（SSM）层的切换逻辑
+- ❌ **RoPE 位置编码**：验证 Qwen3.5 的分段 RoPE（dimension_sections）实现
+- ❌ **内存管理**：ctx_graph 的 reset/setNoAlloc 模式需要验证正确性
+- ❌ **EOG 检测**：tokenizer 的 isSpecialToken 逻辑需要与 llama_vocab_is_eog 对齐
+- ❌ **性能优化**：当前每 token 重建计算图，应复用图结构
+- ❌ **多 prompt token 支持**：验证 batch 推理（n_prompt_tokens > 1）的正确性
+- ❌ **测试覆盖**：增加与 llama.cpp 输出对比的测试用例
+
+## 调试指南
+
+### 日志级别
+
+```bash
+# 调试模式（显示详细日志）
+zig-out/bin/zllama-simple -d -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
+
+# 详细模式
+zig-out/bin/zllama-simple -v -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
+```
+
+### 常见问题
+
+1. **GraphAllocFailed**：ctx_graph 内存不足，增大 mem_size_estimate
+2. **输出乱码**：tokenizer 的 decodeSingle 实现有问题，检查 BPE 解码逻辑
+3. **输出为空**：采样得到的 token_id 为 0（unk）或 EOS，检查 logits 形状和采样逻辑
+4. **速度慢**：每 token 重建计算图导致，后续应实现图复用
 
 ## 禁止操作
 
-禁止运行其他llama命令行工具。
+- ❌ 禁止运行其他 llama 命令行工具（如 llama-cli、llama-perplexity 等）来干扰测试
+- ❌ 禁止删除功能代码来绕过问题
+- ❌ 禁止在业务代码中直接调用 `@cImport` 或裸 C 函数（必须通过 ggml.zig 封装）

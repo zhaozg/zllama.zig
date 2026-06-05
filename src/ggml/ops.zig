@@ -48,7 +48,7 @@ pub fn l2Norm(ctx: *Context, a: *Tensor, eps: f32) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_l2_norm(@ptrCast(ctx), @ptrCast(@alignCast(a)), eps)));
 }
 
-pub fn ropeExt(ctx: *Context, a: *Tensor, pos: *Tensor, mode: i32, n_dims: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
+pub fn ropeExt(ctx: *Context, a: *Tensor, pos: *Tensor, n_dims: i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_rope_ext(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pos)), null, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)));
 }
 

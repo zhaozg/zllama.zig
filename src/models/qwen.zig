@@ -228,14 +228,12 @@ pub const QwenModel = struct {
         q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
         k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
 
-        // Transpose to [head_dim, n_tokens, n_head] for attention
-        q = ggml.cont(ctx, ggml.permute(ctx, q, 0, 2, 1, 3));
-        k = ggml.cont(ctx, ggml.permute(ctx, k, 0, 2, 1, 3));
-        v = ggml.cont(ctx, ggml.permute(ctx, v, 0, 2, 1, 3));
-
-        // KV Cache
+        // KV Cache - 需要 permute 成 [head_dim, n_tokens, n_head/n_kv_head] 存储
+        // 但 attention.scaledDotProductAttention 期望 [head_dim, n_head/n_kv_head, n_tokens/cache_len]
         if (kv_cache_mgr) |cache| {
-            cache.setKv(ctx, graph, layer_idx, k, v, @intCast(n_tokens_i64));
+            const k_perm = ggml.cont(ctx, ggml.permute(ctx, k, 0, 2, 1, 3));
+            const v_perm = ggml.cont(ctx, ggml.permute(ctx, v, 0, 2, 1, 3));
+            cache.setKv(ctx, graph, layer_idx, k_perm, v_perm, @intCast(n_tokens_i64));
             k = cache.getKView(ctx, layer_idx);
             v = cache.getVView(ctx, layer_idx);
         }
@@ -243,6 +241,10 @@ pub const QwenModel = struct {
         const cache_len: i64 = if (kv_cache_mgr) |cache| @as(i64, @intCast(cache.currentLen())) else n_tokens_i64;
 
         // Scaled dot-product attention
+        // attention.scaledDotProductAttention 期望输入:
+        //   q: [head_dim, n_head, n_tokens]
+        //   k: [head_dim, n_kv_head, cache_len]
+        //   v: [head_dim, n_kv_head, cache_len]
         var attn_out = attention.scaledDotProductAttention(ctx, q, k, v, .{
             .n_head = n_head,
             .n_kv_head = n_kv_head,

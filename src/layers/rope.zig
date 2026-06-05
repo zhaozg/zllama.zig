@@ -9,9 +9,13 @@
 //!
 //! ggml_rope_ext 直接在 [head_dim, n_head, n_tokens] 布局上操作，
 //! 与 llama.cpp 的调用方式一致。
+//!
+//! RoPE mode 说明（与 llama.cpp 的 rope_type 对应）:
+//!   0 = LLAMA_ROPE_TYPE_NORM (默认，GPT-NeoX 之前的风格)
+//!   2 = LLAMA_ROPE_TYPE_NEOX (GPT-NeoX 风格，LLaMA 使用)
 
 const std = @import("std");
-const ggml = @import("..//ggml.zig");
+const ggml = @import("../ggml.zig");
 
 /// RoPE 配置参数
 pub const RopeParams = struct {
@@ -20,6 +24,8 @@ pub const RopeParams = struct {
     rope_scaling_factor: f32 = 1.0,
     rope_scaling_type: []const u8 = "",
     original_max_seq_len: u32 = 32768,
+    /// RoPE mode: 0=NORM, 2=NEOX (LLaMA 使用 NEOX)
+    mode: i32 = 2,
 };
 
 /// 对 Q 和 K 张量应用 RoPE 位置编码
@@ -38,11 +44,13 @@ pub fn applyRope(
     const rope_dim = params.rope_dim;
     const rope_theta = params.rope_theta;
     const freq_scale = params.rope_scaling_factor;
+    const mode = params.mode;
 
+    // ggml_rope_ext(ctx, a, pos, rope_factors, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)
+    const q_rope = ggml.ropeExt(ctx, q, pos_tensor, @intCast(rope_dim), mode, 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
+    const k_rope = ggml.ropeExt(ctx, k, pos_tensor, @intCast(rope_dim), mode, 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
     // 直接在 [head_dim, n_head, n_tokens] 布局上调用 ggml_rope_ext
     // 与 llama.cpp 的调用方式一致
-    const q_rope = ggml.ropeExt(ctx, q, pos_tensor, 0, @intCast(rope_dim), 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
-    const k_rope = ggml.ropeExt(ctx, k, pos_tensor, 0, @intCast(rope_dim), 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
 
     return .{ .q = q_rope, .k = k_rope };
 }

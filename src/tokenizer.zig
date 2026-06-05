@@ -84,23 +84,23 @@ pub const Tokenizer = struct {
 
         // 初始化 GPT-2 字节编码映射
         try tok.initBytesToUnicode();
-
         // 读取 token_type
         if (gguf_file.metadata.get("tokenizer.ggml.token_type")) |val| {
             for (val.array_val) |v| {
                 const tv = v.asU32() orelse 0;
                 try tok.token_types.append(allocator, @as(TokenType, @enumFromInt(tv)));
-
-                // 读取 token scores（用于 SPM 编码）
-                if (gguf_file.metadata.get("tokenizer.ggml.scores")) |scores_val| {
-                    for (scores_val.array_val) |sv| {
-                        const score = sv.asF32() orelse 0.0;
-                        try tok.token_scores.append(allocator, score);
-                    }
-                }
             }
         }
 
+        // 读取 token scores（用于 SPM 编码）
+        if (gguf_file.metadata.get("tokenizer.ggml.scores")) |scores_val| {
+            for (scores_val.array_val) |sv| {
+                const score = sv.asF32() orelse 0.0;
+                try tok.token_scores.append(allocator, score);
+            }
+        }
+
+        // 读取词表
         // 读取词表
         if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
             for (val.array_val, 0..) |v, i| {

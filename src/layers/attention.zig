@@ -12,15 +12,14 @@
 //!
 //! 流程（与 llama.cpp build_attn_mha 一致）:
 //!   1. permute(0,2,1,3): [head_dim, n_tokens/cache_len, n_head/n_kv_head]
-//!   2. GQA: repeat K, V 以匹配 n_head
-//!   3. kq = k @ q  (mul_mat)
-//!   4. scale, soft_max
-//!   5. v = v^T (transpose)
-//!   6. kqv = v @ kq  (mul_mat)
-//!   7. permute(0,2,1,3) + reshape 回 [n_head*head_dim, n_tokens]
+//!   2. kq = k @ q  (mul_mat, ggml 自动处理 GQA 广播)
+//!   3. scale, soft_max
+//!   4. v = v^T (transpose)
+//!   5. kqv = v @ kq  (mul_mat, ggml 自动处理 GQA 广播)
+//!   6. permute(0,2,1,3) + reshape 回 [n_head*head_dim, n_tokens]
 
 const std = @import("std");
-const ggml = @import("..//ggml.zig");
+const ggml = @import("../ggml.zig");
 
 /// 注意力计算参数
 pub const AttentionParams = struct {
@@ -47,7 +46,7 @@ pub fn scaledDotProductAttention(
     params: AttentionParams,
 ) *ggml.Tensor {
     const n_head = params.n_head;
-    const n_kv_head = params.n_kv_head;
+    _ = params.n_kv_head;
     const head_dim = params.head_dim;
     const n_tokens = params.n_tokens;
     const cache_len = params.cache_len;
@@ -67,34 +66,17 @@ pub fn scaledDotProductAttention(
     var v_perm = ggml.permute(ctx, v, 0, 2, 1, 3);
     v_perm = ggml.cont(ctx, v_perm);
 
-    // Step 2: GQA - 扩展 KV 头以匹配 Q 头数
-    if (n_kv_head < n_head) {
-        const n_rep = @divExact(n_head, n_kv_head);
-        if (n_rep > 1) {
-            // K: [head_dim, cache_len, n_kv_head] -> 展平为 [head_dim * cache_len, n_kv_head]
-            const k_2d = ggml.reshape2d(ctx, k_perm, head_dim * cache_len, n_kv_head);
-            const k_target = ctx.newTensor2d(.f32, head_dim * cache_len, n_head) catch unreachable;
-            const k_rep = ggml.cont(ctx, ggml.repeat(ctx, k_2d, k_target));
-            k_perm = ggml.reshape3d(ctx, k_rep, head_dim, cache_len, n_head);
-
-            // V: [head_dim, cache_len, n_kv_head] -> 展平为 [head_dim * cache_len, n_kv_head]
-            const v_2d = ggml.reshape2d(ctx, v_perm, head_dim * cache_len, n_kv_head);
-            const v_target = ctx.newTensor2d(.f32, head_dim * cache_len, n_head) catch unreachable;
-            const v_rep = ggml.cont(ctx, ggml.repeat(ctx, v_2d, v_target));
-            v_perm = ggml.reshape3d(ctx, v_rep, head_dim, cache_len, n_head);
-        }
-    }
-
-    // Step 3: kq = k @ q (mul_mat)
-    // k_perm: [head_dim, cache_len, n_head] (ne[0]=head_dim, ne[1]=cache_len, ne[2]=n_head)
-    // q_perm: [head_dim, n_tokens, n_head] (ne[0]=head_dim, ne[1]=n_tokens, ne[2]=n_head)
+    // Step 2: kq = k @ q (mul_mat)
+    // ggml_mul_mat 自动处理 GQA: 当 k.ne[2] != q.ne[2] 时广播 k
+    // k_perm: [head_dim, cache_len, n_kv_head] (ne[0]=head_dim, ne[1]=cache_len, ne[2]=n_kv_head)
+    // q_perm: [head_dim, n_tokens, n_head]     (ne[0]=head_dim, ne[1]=n_tokens, ne[2]=n_head)
     // 输出: [cache_len, n_tokens, n_head]
     var kq = ggml.mulMat(ctx, k_perm, q_perm);
 
-    // Step 4: 缩放
+    // Step 3: 缩放
     kq = ggml.scale(ctx, kq, scale_factor);
 
-    // Step 5: 因果 mask + softmax
+    // Step 4: 因果 mask + softmax
     // kq: [cache_len, n_tokens, n_head] -> 展平为 [cache_len, n_tokens*n_head]
     kq = ggml.reshape2d(ctx, kq, cache_len, n_tokens * n_head);
     kq = ggml.diagMaskInf(ctx, kq, start_pos);
@@ -102,22 +84,23 @@ pub fn scaledDotProductAttention(
     // 重塑回 3D: [cache_len, n_tokens, n_head]
     kq = ggml.reshape3d(ctx, kq, cache_len, n_tokens, n_head);
 
-    // Step 6: v = v^T (transpose)
-    // v_perm: [head_dim, cache_len, n_head] -> transpose -> [cache_len, head_dim, n_head]
+    // Step 5: v = v^T (transpose)
+    // v_perm: [head_dim, cache_len, n_kv_head] -> transpose -> [cache_len, head_dim, n_kv_head]
     const v_t = ggml.cont(ctx, ggml.transpose(ctx, v_perm));
 
-    // Step 7: kqv = v @ kq (mul_mat)
-    // v_t: [cache_len, head_dim, n_head] (ne[0]=cache_len, ne[1]=head_dim, ne[2]=n_head)
-    // kq:  [cache_len, n_tokens, n_head] (ne[0]=cache_len, ne[1]=n_tokens, ne[2]=n_head)
+    // Step 6: kqv = v @ kq (mul_mat)
+    // v_t: [cache_len, head_dim, n_kv_head] (ne[0]=cache_len, ne[1]=head_dim, ne[2]=n_kv_head)
+    // kq:  [cache_len, n_tokens, n_head]    (ne[0]=cache_len, ne[1]=n_tokens, ne[2]=n_head)
+    // ggml_mul_mat 自动处理 GQA: 当 v_t.ne[2] != kq.ne[2] 时广播 v_t
     // 输出: [head_dim, n_tokens, n_head]
     var kqv = ggml.mulMat(ctx, v_t, kq);
 
-    // Step 8: permute(0,2,1,3) 恢复布局
+    // Step 7: permute(0,2,1,3) 恢复布局
     // kqv: [head_dim, n_tokens, n_head] -> [head_dim, n_head, n_tokens]
     kqv = ggml.permute(ctx, kqv, 0, 2, 1, 3);
     kqv = ggml.cont(ctx, kqv);
 
-    // Step 9: 展平为 [n_head * head_dim, n_tokens]
+    // Step 8: 展平为 [n_head * head_dim, n_tokens]
     kqv = ggml.reshape2d(ctx, kqv, n_head * head_dim, n_tokens);
 
     return kqv;
