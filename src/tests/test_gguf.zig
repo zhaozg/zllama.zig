@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const gguf = @import("../gguf.zig");
+const gguf = @import("gguf");
 
 // ============================================================================
 // 辅助函数：构造 GGUF 二进制数据

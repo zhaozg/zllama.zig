@@ -15,7 +15,7 @@
 //!   2 = LLAMA_ROPE_TYPE_NEOX (GPT-NeoX 风格，LLaMA 使用)
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
+const ggml = @import("ggml");
 
 /// RoPE 配置参数
 pub const RopeParams = struct {

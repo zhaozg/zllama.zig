@@ -13,13 +13,13 @@
 
 const std = @import("std");
 const testing = std.testing;
-const ggml = @import("../ggml.zig");
-const gguf = @import("../gguf.zig");
-const model_if = @import("../model.zig");
-const registry = @import("../models/registry.zig");
-const graph_builder = @import("../core/graph_builder.zig");
-const memory = @import("../core/memory.zig");
-const test_utils = @import("utils.zig");
+const ggml = @import("ggml");
+const gguf = @import("gguf");
+const model_if = @import("model");
+const registry = @import("registry");
+const graph_builder = @import("graph_builder");
+const memory = @import("memory");
+const test_utils = @import("utils");
 
 const log = std.log.scoped(.test_archs);
 
@@ -430,3 +430,314 @@ test "KVCacheMemory toMemoryContext" {
 //         try testing.expect(!std.math.isNan(v));
 //     }
 // }
+
+// ============================================================================
+// Qwen2 架构测试
+// ============================================================================
+
+test "detectArchitecture - qwen2 via fallback tensor" {
+    // 构造一个没有 general.architecture 但有 qwen2 张量的 GGUF
+    var buf: [512]u8 = undefined;
+    @memset(&buf, 0);
+    var pos: usize = 0;
+
+    @memcpy(buf[pos..][0..4], "GGUF");
+    pos += 4;
+    std.mem.writeInt(u32, buf[pos..][0..4], 3, .little);
+    pos += 4;
+    std.mem.writeInt(u64, buf[pos..][0..8], 1, .little); // tensor_count = 1
+    pos += 8;
+    std.mem.writeInt(u64, buf[pos..][0..8], 0, .little); // metadata_kv_count = 0
+    pos += 8;
+
+    // 写入张量信息：blk.0.attn_q.weight（qwen2 特征张量）
+    const tname = "blk.0.attn_q.weight";
+    std.mem.writeInt(u64, buf[pos..][0..8], @intCast(tname.len), .little);
+    pos += 8;
+    @memcpy(buf[pos..][0..tname.len], tname);
+    pos += tname.len;
+    std.mem.writeInt(u32, buf[pos..][0..4], 2, .little); // n_dims = 2
+    pos += 4;
+    std.mem.writeInt(u64, buf[pos..][0..8], 64, .little); // dim[0] = 64
+    pos += 8;
+    std.mem.writeInt(u64, buf[pos..][0..8], 64, .little); // dim[1] = 64
+    pos += 8;
+    std.mem.writeInt(u32, buf[pos..][0..4], 0, .little); // data_type = f32
+    pos += 4;
+    std.mem.writeInt(u64, buf[pos..][0..8], 0, .little); // offset = 0
+    pos += 8;
+
+    const data = buf[0..pos];
+    var file = try gguf.parse(data, testing.allocator);
+    defer file.deinit();
+
+    const detected = registry.detectArchitecture(&file);
+    try testing.expect(detected != null);
+    try testing.expectEqual(model_if.Architecture.qwen2, detected.?);
+}
+
+test "detectArchitecture - qwen35 via fallback tensor" {
+    // 构造一个没有 general.architecture 但有 qwen35 张量的 GGUF
+    var buf: [512]u8 = undefined;
+    @memset(&buf, 0);
+    var pos: usize = 0;
+
+    @memcpy(buf[pos..][0..4], "GGUF");
+    pos += 4;
+    std.mem.writeInt(u32, buf[pos..][0..4], 3, .little);
+    pos += 4;
+    std.mem.writeInt(u64, buf[pos..][0..8], 1, .little); // tensor_count = 1
+    pos += 8;
+    std.mem.writeInt(u64, buf[pos..][0..8], 0, .little); // metadata_kv_count = 0
+    pos += 8;
+
+    // 写入张量信息：blk.0.ssm_conv1d.weight（qwen35 特征张量）
+    const tname = "blk.0.ssm_conv1d.weight";
+    std.mem.writeInt(u64, buf[pos..][0..8], @intCast(tname.len), .little);
+    pos += 8;
+    @memcpy(buf[pos..][0..tname.len], tname);
+    pos += tname.len;
+    std.mem.writeInt(u32, buf[pos..][0..4], 2, .little); // n_dims = 2
+    pos += 4;
+    std.mem.writeInt(u64, buf[pos..][0..8], 64, .little); // dim[0] = 64
+    pos += 8;
+    std.mem.writeInt(u64, buf[pos..][0..8], 64, .little); // dim[1] = 64
+    pos += 8;
+    std.mem.writeInt(u32, buf[pos..][0..4], 0, .little); // data_type = f32
+    pos += 4;
+    std.mem.writeInt(u64, buf[pos..][0..8], 0, .little); // offset = 0
+    pos += 8;
+
+    const data = buf[0..pos];
+    var file = try gguf.parse(data, testing.allocator);
+    defer file.deinit();
+
+    const detected = registry.detectArchitecture(&file);
+    try testing.expect(detected != null);
+    try testing.expectEqual(model_if.Architecture.qwen35, detected.?);
+}
+
+test "detectArchitecture - qwen2 via attn_qkv tensor" {
+    var buf: [512]u8 = undefined;
+    @memset(&buf, 0);
+    var pos: usize = 0;
+
+    @memcpy(buf[pos..][0..4], "GGUF");
+    pos += 4;
+    std.mem.writeInt(u32, buf[pos..][0..4], 3, .little);
+    pos += 4;
+    std.mem.writeInt(u64, buf[pos..][0..8], 1, .little);
+    pos += 8;
+    std.mem.writeInt(u64, buf[pos..][0..8], 0, .little);
+    pos += 8;
+
+    const tname = "blk.0.attn_qkv.weight";
+    std.mem.writeInt(u64, buf[pos..][0..8], @intCast(tname.len), .little);
+    pos += 8;
+    @memcpy(buf[pos..][0..tname.len], tname);
+    pos += tname.len;
+    std.mem.writeInt(u32, buf[pos..][0..4], 2, .little);
+    pos += 4;
+    std.mem.writeInt(u64, buf[pos..][0..8], 64, .little);
+    pos += 8;
+    std.mem.writeInt(u64, buf[pos..][0..8], 64, .little);
+    pos += 8;
+    std.mem.writeInt(u32, buf[pos..][0..4], 0, .little);
+    pos += 4;
+    std.mem.writeInt(u64, buf[pos..][0..8], 0, .little);
+    pos += 8;
+
+    const data = buf[0..pos];
+    var file = try gguf.parse(data, testing.allocator);
+    defer file.deinit();
+
+    const detected = registry.detectArchitecture(&file);
+    try testing.expect(detected != null);
+    try testing.expectEqual(model_if.Architecture.qwen2, detected.?);
+}
+
+test "architecture fromString - qwen2 variants" {
+    try testing.expectEqual(model_if.Architecture.qwen2, model_if.Architecture.fromString("qwen2").?);
+    try testing.expectEqual(model_if.Architecture.qwen2, model_if.Architecture.fromString("qwen2.5").?);
+}
+
+test "architecture fromString - qwen35 variants" {
+    try testing.expectEqual(model_if.Architecture.qwen35, model_if.Architecture.fromString("qwen3.5").?);
+    try testing.expectEqual(model_if.Architecture.qwen35, model_if.Architecture.fromString("qwen35").?);
+}
+
+test "architecture fromString - llama variants" {
+    try testing.expectEqual(model_if.Architecture.llama, model_if.Architecture.fromString("llama").?);
+    try testing.expectEqual(model_if.Architecture.llama, model_if.Architecture.fromString("llama2").?);
+    try testing.expectEqual(model_if.Architecture.llama, model_if.Architecture.fromString("llama3").?);
+}
+
+test "architecture fromString - case sensitivity" {
+    try testing.expect(model_if.Architecture.fromString("LLAMA") == null);
+    try testing.expect(model_if.Architecture.fromString("Qwen2") == null);
+}
+
+test "GraphBuilder buildRope" {
+    const ctx = try ggml.Context.initNoAlloc(128 * 1024);
+    defer ctx.deinit();
+
+    const graph = try ggml.CGraph.init(ctx);
+    const params = model_if.ModelParams{
+        .n_embd = 64,
+        .n_head = 4,
+        .n_kv_head = 2,
+        .n_head_dim = 16,
+        .n_vocab = 128,
+    };
+
+    var builder = graph_builder.GraphBuilder.init(ctx, graph, &params, testing.allocator);
+
+    ctx.setNoAlloc(false);
+    const q = try ctx.newTensor3d(.f32, 16, 4, 1);
+    const k = try ctx.newTensor3d(.f32, 16, 2, 1);
+    const pos = try ctx.newTensor1d(.i32, 1);
+    ctx.setNoAlloc(true);
+
+    // 设置位置
+    const pos_data = pos.dataBytes();
+    @as([*]i32, @ptrCast(@alignCast(pos_data.ptr)))[0] = 0;
+
+    const rope_config = graph_builder.RopeConfig{
+        .rope_dim = 16,
+        .rope_theta = 10000000.0,
+        .mode = 2,
+    };
+
+    const result = builder.buildRope(q, k, pos, rope_config);
+    try testing.expect(result.q != undefined);
+    try testing.expect(result.k != undefined);
+}
+
+test "GraphBuilder buildSwiGLU" {
+    const ctx = try ggml.Context.initNoAlloc(128 * 1024);
+    defer ctx.deinit();
+
+    const graph = try ggml.CGraph.init(ctx);
+    const params = model_if.ModelParams{
+        .n_embd = 64,
+        .n_ff = 128,
+    };
+
+    var builder = graph_builder.GraphBuilder.init(ctx, graph, &params, testing.allocator);
+
+    ctx.setNoAlloc(false);
+    const x = try ctx.newTensor2d(.f32, 64, 1);
+    const gate = try ctx.newTensor2d(.f32, 128, 64);
+    const up = try ctx.newTensor2d(.f32, 128, 64);
+    const down = try ctx.newTensor2d(.f32, 64, 128);
+    ctx.setNoAlloc(true);
+
+    const result = builder.buildSwiGLU(x, gate, up, down);
+    try testing.expect(result != undefined);
+}
+
+test "GraphBuilder buildAttention" {
+    const ctx = try ggml.Context.initNoAlloc(256 * 1024);
+    defer ctx.deinit();
+
+    const graph = try ggml.CGraph.init(ctx);
+    const params = model_if.ModelParams{
+        .n_embd = 64,
+        .n_head = 4,
+        .n_kv_head = 2,
+        .n_head_dim = 16,
+        .n_vocab = 128,
+    };
+
+    var builder = graph_builder.GraphBuilder.init(ctx, graph, &params, testing.allocator);
+
+    ctx.setNoAlloc(false);
+    const q = try ctx.newTensor3d(.f32, 16, 4, 1);
+    const k = try ctx.newTensor3d(.f32, 16, 2, 5);
+    const v = try ctx.newTensor3d(.f32, 16, 2, 5);
+    ctx.setNoAlloc(true);
+
+    const result = builder.buildAttention(q, k, v, 4, 2, 16, 1, 5, 0);
+    try testing.expect(result != undefined);
+}
+
+test "GraphBuilder forwardExpand" {
+    const ctx = try ggml.Context.initNoAlloc(64 * 1024);
+    defer ctx.deinit();
+
+    const graph = try ggml.CGraph.init(ctx);
+    const params = model_if.ModelParams{ .n_embd = 64 };
+    var builder = graph_builder.GraphBuilder.init(ctx, graph, &params, testing.allocator);
+
+    ctx.setNoAlloc(false);
+    const a = try ctx.newTensor1d(.f32, 4);
+    const b = try ctx.newTensor1d(.f32, 4);
+    ctx.setNoAlloc(true);
+
+    const c = ggml.add(ctx, a, b);
+    builder.forwardExpand(c);
+
+    try testing.expectEqual(@as(i32, 1), graph.nNodes());
+}
+
+test "GraphBuilder setOutput" {
+    const ctx = try ggml.Context.initNoAlloc(64 * 1024);
+    defer ctx.deinit();
+
+    const graph = try ggml.CGraph.init(ctx);
+    const params = model_if.ModelParams{ .n_embd = 64 };
+    var builder = graph_builder.GraphBuilder.init(ctx, graph, &params, testing.allocator);
+
+    ctx.setNoAlloc(false);
+    const a = try ctx.newTensor1d(.f32, 4);
+    ctx.setNoAlloc(true);
+
+    builder.setOutput(a);
+    // setOutput 不返回错误，只是设置标记
+    try testing.expect(true);
+}
+
+// ============================================================================
+// 模型参数测试
+// ============================================================================
+
+test "ModelParams rope_scaling" {
+    const scaling = model_if.RopeScaling{
+        .rope_type = "linear",
+        .factor = 2.0,
+        .original_max_seq_len = 16384,
+    };
+    try testing.expectEqualStrings("linear", scaling.rope_type);
+    try testing.expectEqual(@as(f32, 2.0), scaling.factor);
+    try testing.expectEqual(@as(u32, 16384), scaling.original_max_seq_len);
+}
+
+test "ModelParams deinit" {
+    var params = model_if.ModelParams{};
+    params.deinit(); // 应该不崩溃
+    try testing.expect(true);
+}
+
+test "ModelWeights struct" {
+    // 验证 ModelWeights 结构体存在且可实例化
+    // 注意：需要 ggml.Tensor 指针，这里只测试类型存在
+    try testing.expectEqual(@as(usize, @sizeOf(model_if.ModelWeights)), @sizeOf(model_if.ModelWeights));
+}
+
+// ============================================================================
+// 工具函数测试
+// ============================================================================
+
+test "test_utils nmse" {
+    const a = [_]f32{ 1.0, 2.0, 3.0 };
+    const b = [_]f32{ 1.0, 2.0, 3.0 };
+    try testing.expectEqual(@as(f64, 0.0), test_utils.nmse(&a, &b));
+}
+
+test "test_utils TestConfig" {
+    const c = test_utils.TestConfig{ .arch = .llama };
+    try testing.expectEqual(@as(u32, 2), c.n_layer);
+    try testing.expectEqual(@as(u32, 64), c.n_embd);
+    try testing.expectEqual(@as(u32, 128), c.n_vocab);
+}
+

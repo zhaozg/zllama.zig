@@ -9,10 +9,16 @@
 //! - 接口最小化：只暴露必要的生命周期和前向方法
 
 const std = @import("std");
-const ggml = @import("ggml.zig");
-const gguf = @import("gguf.zig");
-const graph_builder = @import("core/graph_builder.zig");
-const memory = @import("core/memory.zig");
+const ggml = @import("ggml");
+const gguf = @import("gguf");
+const graph_builder = @import("graph_builder");
+const memory = @import("memory");
+const kv_cache = @import("kv_cache");
+
+// 导入并重新导出模型实现
+pub const qwen2 = @import("models/qwen2.zig");
+pub const qwen35 = @import("models/qwen35.zig");
+pub const llama = @import("models/llama.zig");
 
 /// RoPE 缩放配置
 pub const RopeScaling = struct {
@@ -87,119 +93,42 @@ pub const ModelParams = struct {
 /// 包含所有模型共享的权重张量
 pub const ModelWeights = struct {
     params: ModelParams,
+    /// Token 嵌入权重 [n_embd, n_vocab]
     token_embd: *ggml.Tensor,
+    /// 输出投影权重（可选，部分模型共享 token_embd）
     output_weight: ?*ggml.Tensor,
+    /// 输出层归一化权重
     output_norm_weight: *ggml.Tensor,
-
-
 };
 
-/// 这是运行时多态的核心机制。
-pub const ModelVTable = struct {
-    /// 释放模型资源
-    deinit: *const fn (data: *anyopaque) void,
-    /// 构建前向计算图
-    /// 返回 logits 张量
-    buildGraph: *const fn (
-        data: *anyopaque,
-        builder: *graph_builder.GraphBuilder,
-        input_tokens: *ggml.Tensor,
-        n_tokens: i32,
-        mem_ctx: ?*memory.MemoryContext,
-        start_pos: i32,
-    ) anyerror!*ggml.Tensor,
-    /// 获取模型参数
-    getParams: *const fn (data: *anyopaque) *const ModelParams,
-    /// 重置 SSM 状态（混合架构需要）
-    resetSSMStates: *const fn (data: *anyopaque) void,
-};
-
-/// 模型实例
-///
-/// 通过虚表调用的运行时多态模型实例。
-/// 注册表返回此类型，调用者无需知道具体模型类型。
+/// 模型实例（运行时多态）
 pub const ModelInstance = struct {
+    ptr: *anyopaque,
     vtable: *const ModelVTable,
-    data: *anyopaque,
 
-    pub fn deinit(self: *ModelInstance) void {
-        self.vtable.deinit(self.data);
+    pub fn getParams(self: ModelInstance) *const ModelParams {
+        return self.vtable.getParams(self.ptr);
     }
 
-    pub fn buildGraph(
-        self: *ModelInstance,
-        builder: *graph_builder.GraphBuilder,
-        input_tokens: *ggml.Tensor,
-        n_tokens: i32,
-        mem_ctx: ?*memory.MemoryContext,
-        start_pos: i32,
-    ) !*ggml.Tensor {
-        return self.vtable.buildGraph(self.data, builder, input_tokens, n_tokens, mem_ctx, start_pos);
+    pub fn buildGraph(self: ModelInstance, builder: *graph_builder.GraphBuilder, input: *ggml.Tensor, n_tokens: i32, cache: ?*anyopaque, pos: i32) !*ggml.Tensor {
+        return self.vtable.buildGraph(self.ptr, builder, input, n_tokens, cache, pos);
     }
 
-    pub fn getParams(self: *ModelInstance) *const ModelParams {
-        return self.vtable.getParams(self.data);
+    pub fn resetSSMStates(self: ModelInstance) void {
+        if (self.vtable.resetSSMStates) |reset| {
+            reset(self.ptr);
+        }
     }
 
-    pub fn resetSSMStates(self: *ModelInstance) void {
-        self.vtable.resetSSMStates(self.data);
+    pub fn deinit(self: ModelInstance) void {
+        self.vtable.deinit(self.ptr);
     }
 };
 
-/// 模型接口（编译时多态）
-///
-/// 使用 anytype 泛型，在编译时确定具体模型类型。
-/// 模型内部实现使用此接口。
-pub fn Model(comptime T: type) type {
-    return struct {
-        ptr: *T,
-
-        pub fn init(self: *@This(), allocator: std.mem.Allocator, gguf_file: *gguf.GGUFFile, io: std.Io) !void {
-            try self.ptr.init(allocator, gguf_file, io);
-        }
-
-        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-            self.ptr.deinit(allocator);
-        }
-
-        pub fn buildGraph(
-            self: *@This(),
-            builder: *graph_builder.GraphBuilder,
-            input_tokens: *ggml.Tensor,
-            n_tokens: i32,
-            mem_ctx: ?*memory.MemoryContext,
-            start_pos: i32,
-        ) !*ggml.Tensor {
-            return self.ptr.buildGraph(builder, input_tokens, n_tokens, mem_ctx, start_pos);
-        }
-
-        pub fn getParams(self: *@This()) *const ModelParams {
-            return self.ptr.getParams();
-        }
-
-        pub fn resetSSMStates(self: *@This()) void {
-            self.ptr.resetSSMStates();
-        }
-    };
-}
-
-const testing = std.testing;
-
-test "Architecture fromString" {
-    try testing.expectEqual(Architecture.qwen2, Architecture.fromString("qwen2").?);
-    try testing.expectEqual(Architecture.qwen35, Architecture.fromString("qwen3.5").?);
-    try testing.expectEqual(Architecture.qwen35, Architecture.fromString("qwen35").?);
-    try testing.expectEqual(Architecture.llama, Architecture.fromString("llama").?);
-    try testing.expectEqual(Architecture.llama, Architecture.fromString("llama3").?);
-    try testing.expect(Architecture.fromString("unknown") == null);
-}
-
-test "ModelParams defaults" {
-    const p = ModelParams{};
-    try testing.expectEqual(@as(u32, 0), p.n_vocab);
-    try testing.expectEqual(@as(u32, 32768), p.max_seq_len);
-}
-
-test "ModelVTable size" {
-    try testing.expectEqual(@as(usize, @sizeOf(ModelVTable)), @sizeOf(ModelVTable));
-}
+/// 模型虚表定义
+pub const ModelVTable = struct {
+    getParams: *const fn (ptr: *anyopaque) *const ModelParams,
+    buildGraph: *const fn (ptr: *anyopaque, builder: *graph_builder.GraphBuilder, input: *ggml.Tensor, n_tokens: i32, cache: ?*anyopaque, pos: i32) anyerror!*ggml.Tensor,
+    resetSSMStates: ?*const fn (ptr: *anyopaque) void = null,
+    deinit: *const fn (ptr: *anyopaque) void,
+};

@@ -3,18 +3,19 @@
 //! 参考: deps/llama.cpp/src/models/qwen35.cpp, deps/llama.cpp/src/models/delta-net-base.cpp
 
 const std = @import("std");
-const gguf = @import("../gguf.zig");
-const ggml = @import("../ggml.zig");
-const kv_cache = @import("../kv_cache.zig");
-const model = @import("../model.zig");
-const rms_norm = @import("../layers/rms_norm.zig");
-const rope = @import("../layers/rope.zig");
-const swiglu = @import("../layers/swiglu.zig");
-const attention = @import("../layers/attention.zig");
-const graph_builder = @import("../core/graph_builder.zig");
-const memory = @import("../core/memory.zig");
+const gguf = @import("gguf");
+const ggml = @import("ggml");
+const kv_cache = @import("kv_cache");
+const rms_norm = @import("rms_norm");
+const rope = @import("rope");
+const swiglu = @import("swiglu");
+const attention = @import("attention");
+const graph_builder = @import("graph_builder");
+const memory = @import("memory");
 
-const embed = @import("../layers/embed.zig");
+const embed = @import("embed");
+
+const model = @import("../model.zig");
 
 const log = std.log.scoped(.qwen35);
 
@@ -463,7 +464,7 @@ pub const QwenModel = struct {
         builder: *graph_builder.GraphBuilder,
         input_tokens: *ggml.Tensor,
         n_tokens: i32,
-        mem_ctx: ?*memory.MemoryContext,
+        mem_ctx: ?*anyopaque,
         start_pos: i32,
     ) !*ggml.Tensor {
         _ = mem_ctx;
@@ -496,7 +497,7 @@ pub const QwenModel = struct {
         builder: *graph_builder.GraphBuilder,
         input_tokens: *ggml.Tensor,
         n_tokens: i32,
-        mem_ctx: ?*memory.MemoryContext,
+        mem_ctx: ?*anyopaque,
         start_pos: i32,
     ) anyerror!*ggml.Tensor {
         const self = @as(*QwenModel, @ptrCast(@alignCast(data)));

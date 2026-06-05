@@ -11,8 +11,8 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
-const gguf = @import("gguf.zig");
-const tokenizer = @import("tokenizer.zig");
+const gguf = @import("gguf");
+const tokenizer = @import("tokenizer");
 const utils = @import("utils.zig");
 const logger = std.log.scoped(.tokenize);
 const c = ggml.c;

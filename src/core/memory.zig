@@ -8,7 +8,7 @@
 //! 参考 llama.cpp 的 llama_memory_context_i 接口设计。
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
+const ggml = @import("ggml");
 
 /// 内存参数
 pub const MemoryParams = struct {

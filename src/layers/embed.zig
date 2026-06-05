@@ -3,7 +3,7 @@
 //! 实现 Token 嵌入查找。
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
+const ggml = @import("ggml");
 
 /// Token 嵌入查找
 /// embedding: [n_embd, n_vocab] 嵌入矩阵

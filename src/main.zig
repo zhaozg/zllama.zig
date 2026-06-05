@@ -14,15 +14,15 @@
 //! 6. 输出完整文本
 
 const std = @import("std");
-const ggml = @import("ggml.zig");
-const gguf = @import("gguf.zig");
-const model_if = @import("model.zig");
-const registry = @import("models/registry.zig");
-const graph_builder = @import("core/graph_builder.zig");
-const memory = @import("core/memory.zig");
-const tokenizer = @import("tokenizer.zig");
-const sampler = @import("sampler.zig");
-const kv_cache = @import("kv_cache.zig");
+const ggml = @import("ggml");
+const gguf = @import("gguf");
+const model_if = @import("model");
+const registry = @import("registry");
+const graph_builder = @import("graph_builder");
+const memory = @import("memory");
+const tokenizer = @import("tokenizer");
+const sampler = @import("sampler");
+const kv_cache = @import("kv_cache");
 
 pub const std_options: std.Options = .{
     .log_level = .info,

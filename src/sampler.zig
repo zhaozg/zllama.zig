@@ -3,7 +3,7 @@
 //! 实现 Top-p / Top-k 采样策略。
 
 const std = @import("std");
-const ggml = @import("ggml.zig");
+const ggml = @import("ggml");
 
 const log = std.log.scoped(.sampler);
 

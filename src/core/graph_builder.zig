@@ -6,9 +6,9 @@
 //! 每个模型通过 GraphBuilder 构建计算图，共享算子通过此上下文调用。
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
-const model_if = @import("../model.zig");
-const memory = @import("memory.zig");
+const ggml = @import("ggml");
+const model_if = @import("model");
+const memory = @import("memory");
 
 /// RoPE 配置
 pub const RopeConfig = struct {

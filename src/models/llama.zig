@@ -4,18 +4,19 @@
 //! 标准 Transformer 架构：RMSNorm + RoPE + GQA + SwiGLU FFN。
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
-const gguf = @import("../gguf.zig");
-const kv_cache = @import("../kv_cache.zig");
-const model = @import("../model.zig");
-const rms_norm = @import("../layers/rms_norm.zig");
-const rope = @import("../layers/rope.zig");
-const swiglu = @import("../layers/swiglu.zig");
-const graph_builder = @import("../core/graph_builder.zig");
-const memory = @import("../core/memory.zig");
+const ggml = @import("ggml");
+const gguf = @import("gguf");
+const kv_cache = @import("kv_cache");
+const rms_norm = @import("rms_norm");
+const rope = @import("rope");
+const swiglu = @import("swiglu");
+const graph_builder = @import("graph_builder");
+const memory = @import("memory");
 
-const attention = @import("../layers/attention.zig");
-const embed = @import("../layers/embed.zig");
+const attention = @import("attention");
+const embed = @import("embed");
+
+const model = @import("../model.zig");
 
 const log = std.log.scoped(.llama);
 
@@ -221,7 +222,7 @@ pub const LlamaModel = struct {
         builder: *graph_builder.GraphBuilder,
         input_tokens: *ggml.Tensor,
         n_tokens: i32,
-        mem_ctx: ?*memory.MemoryContext,
+        mem_ctx: ?*anyopaque,
         start_pos: i32,
     ) !*ggml.Tensor {
         _ = mem_ctx;
@@ -248,7 +249,7 @@ pub const LlamaModel = struct {
         builder: *graph_builder.GraphBuilder,
         input_tokens: *ggml.Tensor,
         n_tokens: i32,
-        mem_ctx: ?*memory.MemoryContext,
+        mem_ctx: ?*anyopaque,
         start_pos: i32,
     ) anyerror!*ggml.Tensor {
         const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));

@@ -19,7 +19,7 @@
 //!   6. permute(0,2,1,3) + reshape 回 [n_head*head_dim, n_tokens]
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
+const ggml = @import("ggml");
 
 /// 注意力计算参数
 pub const AttentionParams = struct {

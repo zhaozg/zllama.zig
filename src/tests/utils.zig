@@ -6,9 +6,9 @@
 //! - 测试配置管理
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
-const gguf = @import("../gguf.zig");
-const model_if = @import("../model.zig");
+const ggml = @import("ggml");
+const gguf = @import("gguf");
+const model_if = @import("model");
 
 /// 测试配置
 pub const TestConfig = struct {

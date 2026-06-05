@@ -3,7 +3,7 @@
 //! 实现 RMS Normalization，支持可学习的缩放权重。
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
+const ggml = @import("ggml");
 
 /// 对输入张量应用 RMSNorm
 /// x: [n_embd, n_tokens] 输入张量

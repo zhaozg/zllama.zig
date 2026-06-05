@@ -3,7 +3,7 @@
 //! 提供线性投影的封装，支持量化权重。
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
+const ggml = @import("ggml");
 
 /// 线性投影：y = x @ W^T
 /// x: [in_features, batch_size] 输入张量

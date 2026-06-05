@@ -5,12 +5,12 @@
 
 const std = @import("std");
 const testing = std.testing;
-const ggml = @import("../ggml.zig");
-const rms_norm = @import("../layers/rms_norm.zig");
-const rope = @import("../layers/rope.zig");
-const attention = @import("../layers/attention.zig");
-const swiglu = @import("../layers/swiglu.zig");
-const test_utils = @import("utils.zig");
+const ggml = @import("ggml");
+const rms_norm = @import("rms_norm");
+const rope = @import("rope");
+const attention = @import("attention");
+const swiglu = @import("swiglu");
+const test_utils = @import("utils");
 
 test "rms_norm structure" {
     // 验证 rms_norm 模块的导出函数存在

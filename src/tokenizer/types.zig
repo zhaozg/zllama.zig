@@ -4,7 +4,7 @@
 //! 参考 llama.cpp 的 llama_vocab.h 和 llama.h。
 
 const std = @import("std");
-const gguf = @import("../gguf.zig");
+const gguf = @import("gguf");
 
 // ============================================================================
 // Token 类型常量（与 llama.cpp 保持一致）

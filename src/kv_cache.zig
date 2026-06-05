@@ -14,8 +14,8 @@
 //!   [head_dim, n_kv_head, n_tokens]
 
 const std = @import("std");
-const ggml = @import("ggml.zig");
-const memory = @import("core/memory.zig");
+const ggml = @import("ggml");
+const memory = @import("memory");
 
 const log = std.log.scoped(.kv_cache);
 

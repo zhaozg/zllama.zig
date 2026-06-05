@@ -6,14 +6,14 @@
 //! 参考 llama.cpp 的 llama_model_mapping 设计。
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
-const gguf = @import("../gguf.zig");
-const model_if = @import("../model.zig");
-const graph_builder = @import("../core/graph_builder.zig");
-const memory = @import("../core/memory.zig");
-const qwen2 = @import("qwen2.zig");
-const qwen35 = @import("qwen35.zig");
-const llama = @import("llama.zig");
+const ggml = @import("ggml");
+const gguf = @import("gguf");
+const model_if = @import("model");
+const graph_builder = @import("graph_builder");
+const memory = @import("memory");
+const qwen2 = @import("model").qwen2;
+const qwen35 = @import("model").qwen35;
+const llama = @import("model").llama;
 
 const log = std.log.scoped(.registry);
 
@@ -32,7 +32,7 @@ pub fn createModel(
             try m.init(allocator, gguf_file, io);
             return model_if.ModelInstance{
                 .vtable = &qwen2.Qwen2Model.vtable,
-                .data = @as(*anyopaque, @ptrCast(m)),
+                .ptr = @as(*anyopaque, @ptrCast(m)),
             };
         },
         .qwen35 => {
@@ -41,7 +41,7 @@ pub fn createModel(
             try m.init(allocator, gguf_file, io);
             return model_if.ModelInstance{
                 .vtable = &qwen35.QwenModel.vtable,
-                .data = @as(*anyopaque, @ptrCast(m)),
+                .ptr = @as(*anyopaque, @ptrCast(m)),
             };
         },
         .llama => {
@@ -50,7 +50,7 @@ pub fn createModel(
             try m.init(allocator, gguf_file, io);
             return model_if.ModelInstance{
                 .vtable = &llama.LlamaModel.vtable,
-                .data = @as(*anyopaque, @ptrCast(m)),
+                .ptr = @as(*anyopaque, @ptrCast(m)),
             };
         },
     };

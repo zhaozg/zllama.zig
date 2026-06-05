@@ -57,10 +57,10 @@
    - 提供与 `llama.cpp` 或 HuggingFace 输出对比的测试用例（短 prompt）。
    - 调试模式下可打印张量形状及部分值，Release 模式下完全移除。
 
-9. 默化化设计原则
-  - **安全、可维护、高性能**，优先考虑代码清晰和正确性，必要时牺牲微小性能提升。
-  - 单文件模块应保持清晰的接口和实现分离，避免过度复杂化。
-  - 避免文件过大，不能超过 600 行，合理拆分功能模块（如算子、模型实现、核心引擎等）。
+9. **默认化设计原则**
+   - **安全、可维护、高性能**，优先考虑代码清晰和正确性，必要时牺牲微小性能提升。
+   - 单文件模块应保持清晰的接口和实现分离，避免过度复杂化。
+   - 避免文件过大，不能超过 600 行，合理拆分功能模块（如算子、模型实现、核心引擎等）。
 
 ## 📁 项目结构（AI 应遵循）
 
@@ -74,13 +74,12 @@ zllama.zig/
 ├── build.zig                    # Zig 构建脚本
 ├── src/
 │   ├── main.zig                 # 入口（Juicy Main 签名）
-│   ├── ggml.zig                 # C 绑定 + 安全封装
+│   ├── ggml.zig                 # C 绑定 + 安全封装（模块入口，重新导出子模块）
 │   ├── gguf.zig                 # GGUF 解析器（v2/v3）
 │   ├── model.zig                # 模型抽象接口定义
 │   ├── kv_cache.zig             # KV Cache 管理
 │   ├── tokenizer.zig            # BPE 分词器
 │   ├── sampler.zig              # Top-p / Top-k 采样
-│   ├── backend.zig              # 多后端抽象（CPU/Metal/CUDA）
 │   ├── layers/                  # 通用层实现（算子库）
 │   │   ├── rms_norm.zig         # RMSNorm 归一化
 │   │   ├── rope.zig             # RoPE 位置编码
@@ -90,15 +89,79 @@ zllama.zig/
 │   │   └── embed.zig            # Token 嵌入
 │   ├── models/                  # 具体模型实现
 │   │   ├── registry.zig         # 模型注册与工厂函数
-│   │   ├── qwen.zig             # Qwen 系列（含混合注意力）
+│   │   ├── qwen2.zig            # Qwen2/Qwen2.5 标准 Transformer
+│   │   ├── qwen35.zig           # Qwen3.5 混合架构（全注意力 + SSM/GDN）
 │   │   └── llama.zig            # LLaMA 家族（2/3/3.1）
-│   └── core/                    # 核心引擎（可选）
-│       ├── graph_builder.zig    # 计算图构建辅助
-│       ├── forward.zig          # 前向传播主干
-│       └── context.zig          # 推理上下文
+│   ├── core/                    # 核心引擎
+│   │   ├── graph_builder.zig    # 计算图构建辅助
+│   │   ├── loader.zig           # 模型加载器
+│   │   └── memory.zig           # 内存抽象接口（MemoryContext）
+│   ├── ggml/                    # ggml 安全封装子模块
+│   │   ├── c.zig                # 原始 C API 导入（唯一 @cImport 位置）
+│   │   ├── context.zig          # ggml_context 封装
+│   │   ├── tensor.zig           # ggml_tensor 封装
+│   │   ├── graph.zig            # ggml_cgraph 封装
+│   │   ├── backend.zig          # Backend 与 Gallocr 封装
+│   │   ├── ops.zig              # 计算图操作函数
+│   │   └── utils.zig            # 工具函数
+│   ├── tokenizer/               # 分词器子模块
+│   │   ├── types.zig            # 类型定义
+│   │   ├── bpe.zig              # BPE 合并逻辑
+│   │   ├── encode.zig           # 编码逻辑
+│   │   ├── decode.zig           # 解码逻辑
+│   │   ├── trie.zig             # Trie 树
+│   │   └── utils.zig            # 工具函数
+│   ├── tests/                   # 测试模块
+│   │   ├── test_gguf.zig        # GGUF 解析测试
+│   │   ├── test_archs.zig       # 架构测试
+│   │   ├── test_kv_cache.zig    # KV Cache 测试
+│   │   ├── test_layers.zig      # 层测试
+│   │   └── utils.zig            # 测试工具
+│   └── tools/                   # 工具可执行文件
+│       ├── compare_logits.zig   # logits 对比工具
+│       ├── dump_graph.zig       # 计算图导出工具
+│       └── generate_reference.zig # 参考输出生成工具
 ├── llama.cpp/                   # llama.cpp 相关代码（可参考）
 └── deps/ggml/                   # ggml 源码（submodule 或拷贝）
 ```
+
+## 📦 Import 规则（仅使用模块名）
+
+本项目所有模块通过 `build.zig` 中的 `createModule` 定义，模块间引用**必须使用模块名**（由 `addImport` 注册）。
+
+### 核心规则
+- **任何文件引用另一个模块的根文件，一律使用模块名**：`@import("模块名")`
+- **禁止使用相对路径导入**（如 `@import("ggml.zig")`、`@import("../model.zig")` 等）
+- **模块内部细节不对外暴露**：子文件通过根文件的 `pub const` 重新导出
+
+### 模块注册表（来自 `build.zig`）
+| 模块名 | 根文件 |
+|--------|--------|
+| `ggml` | `src/ggml.zig` |
+| `gguf` | `src/gguf.zig` |
+| `model` | `src/model.zig` |
+| `graph_builder` | `src/core/graph_builder.zig` |
+| `memory` | `src/core/memory.zig` |
+| `registry` | `src/models/registry.zig` |
+| `tokenizer` | `src/tokenizer.zig` |
+| `sampler` | `src/sampler.zig` |
+| `kv_cache` | `src/kv_cache.zig` |
+
+### 示例（正确 ✅）
+```zig
+// src/model.zig（模块根）
+const ggml = @import("ggml");
+const graph_builder = @import("graph_builder");
+
+// src/main.zig（模块根）
+const model = @import("model");
+const tokenizer = @import("tokenizer");
+```
+
+### 禁止事项 ❌
+- 使用相对路径：`@import("../ggml.zig")`
+- 使用文件名：`@import("ggml.zig")`（应写 `@import("ggml")`）
+- 混合使用模块名与路径导入同一个文件
 
 ## 🤖 AI 工作流程
 
@@ -108,6 +171,7 @@ zllama.zig/
    - 新增层或算子时，先在 `ggml.zig` 添加安全封装，再在业务中使用。
    - 新增模型时，在 `src/models/` 下创建新文件，在 `registry.zig` 注册。
    - 资源释放一律使用 `defer`，分配失败返回错误。
+   - **遵循 Import 策略**：根文件之间使用模块名导入，非根文件使用相对路径导入。
 3. **约束检查**：
    - 确保所有阻塞 I/O 都通过传递的 `*std.Io` 参数执行。
    - 检查张量维度是否匹配（使用 `std.debug.assert`）。
@@ -134,6 +198,8 @@ zllama.zig/
 - ❌ 对 KV Cache 进行不必要的物理复制。
 - ❌ 使用不安全的 `@alignCast` 或假设指针对齐。
 - ❌ 删除功能代码，绕开问题。
+- ❌ 在根文件中使用相对路径导入另一个根文件。
+- ❌ 在业务代码中直接导入 `ggml/` 子目录文件。
 
 ## 📚 参考材料
 

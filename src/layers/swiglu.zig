@@ -4,7 +4,7 @@
 //! FFN(x) = (silu(x @ W_gate) * (x @ W_up)) @ W_down
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
+const ggml = @import("ggml");
 
 /// SwiGLU FFN 前向计算
 /// x: [n_embd, n_tokens] 输入张量

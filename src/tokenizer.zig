@@ -6,7 +6,7 @@
 //! 参考 llama.cpp 的 llama-vocab.cpp 实现。
 
 const std = @import("std");
-const gguf = @import("gguf.zig");
+const gguf = @import("gguf");
 
 pub const types = @import("tokenizer/types.zig");
 pub const trie = @import("tokenizer/trie.zig");
