@@ -67,7 +67,7 @@ zig-out/bin/zllama-simple -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
 - ✅ **RoPE 位置编码**：修复 `buildMultiPositionTensor` 的位置张量布局，从 `[p,p,p,p,...]` 改为 `[t0,t1,...,h0,h1,...,w0,w1,...,e0,e1,...]`，与 llama.cpp 的 MRoPE/IMRoPE 布局对齐。
 - ✅ **EOG 检测**：tokenizer 新增 `isEog()` 方法和 `eog_ids` 集合，与 llama.cpp 的 `llama_vocab_is_eog()` 对齐。通过名称匹配和 GGUF 元数据收集 EOG tokens，`simple_main.zig` 使用 `isEog()` 替代复杂的 `isSpecialToken` 检查。
 - ❌ **性能优化**：当前每 token 重建计算图，应复用图结构
-- ❌ **多 prompt token 支持**：验证 batch 推理（n_prompt_tokens > 1）的正确性
+- ✅ **多 prompt token 支持**：`simple_main.zig` 已支持多 token prompt（`n_prompt_tokens > 1`），`sampleGreedy` 正确取最后一个 token 的 logits。验证通过。
 - ❌ **测试覆盖**：增加与 llama.cpp 输出对比的测试用例
 
 ## 调试指南
