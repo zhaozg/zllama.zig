@@ -409,11 +409,11 @@ jobs:
 
 ### P2：中期（2-4 周）
 
-- [ ] **实现 `tools/dump_graph.zig`**：计算图可视化
-- [ ] **实现 `tools/compare_logits.zig`**：Logits 对比
-- [ ] **生成参考输出**：使用 llama.cpp 为各模型生成参考 logits
-- [ ] **扩展 `test_archs.zig`**：支持 Qwen2、Qwen3.5 架构
-- [ ] **实现 `test_kv_cache.zig`**：KV Cache 功能测试
+- [x] **实现 `tools/dump_graph.zig`**：计算图可视化（已实现，支持 text/dot/json 三种格式输出）
+- [x] **实现 `tools/compare_logits.zig`**：Logits 对比（已实现，支持 NMSE、余弦相似度、PSNR 等指标）
+- [x] **生成参考输出**：使用 llama.cpp 为各模型生成参考 logits（已实现 `tools/generate_reference.zig`，支持 binary/text 格式输出）
+- [x] **扩展 `test_archs.zig`**：支持 Qwen2、Qwen3.5 架构（已实现架构枚举、detectArchitecture、GraphBuilder 等全面测试，共 30+ 测试用例）
+- [x] **实现 `test_kv_cache.zig`**：KV Cache 功能测试（已实现，覆盖 init/deinit、reset、getKView/getVView、setKv、多 token、增量、多层、边界条件、MemoryContext 接口适配等）
 
 ### P3：长期（4-8 周）
 
