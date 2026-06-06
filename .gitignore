@@ -2,3 +2,4 @@
 /zig-out/
 /deps/
 codedb.snapshot
+*.bin

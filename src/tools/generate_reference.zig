@@ -63,12 +63,12 @@ pub const ReferenceGenerator = struct {
         const stat = try file.stat(io);
         const file_size = @as(usize, @intCast(stat.size));
         const gguf_data = try self.allocator.alloc(u8, file_size);
-        errdefer self.allocator.free(gguf_data);
+        defer self.allocator.free(gguf_data);
         const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
         if (bytes_read != file_size) return error.FileReadError;
 
         var gguf_file = try gguf.parse(gguf_data, self.allocator);
-        errdefer gguf_file.deinit();
+        defer gguf_file.deinit();
 
         // 2. 检测架构
         const arch = registry.detectArchitecture(&gguf_file) orelse {
@@ -79,7 +79,7 @@ pub const ReferenceGenerator = struct {
 
         // 3. 创建模型
         var model = try registry.createModel(self.allocator, &gguf_file, arch, io);
-        errdefer model.deinit(self.allocator);
+        defer model.deinit(self.allocator);
 
         const params = model.getParams();
         log.info("Model params: n_vocab={d}, n_embd={d}, n_layer={d}, n_head={d}",
@@ -99,7 +99,7 @@ pub const ReferenceGenerator = struct {
         // 5. 构建推理图并执行
         const n_tokens: i32 = @intCast(input_tokens.len);
 
-        const ctx = try ggml.Context.initNoAlloc(256 * 1024);
+        const ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
         defer ctx.deinit();
 
         ctx.setNoAlloc(false);

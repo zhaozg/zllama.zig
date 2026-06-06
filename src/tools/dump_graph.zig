@@ -66,7 +66,11 @@ pub const GraphDumper = struct {
     ) !void {
         const n_nodes = graph.nNodes();
         try out.appendSlice(allocator, "=== Graph Dump: ");
-        try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{n_nodes}));
+        {
+                var num_buf: [32]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{n_nodes});
+                try out.appendSlice(allocator, num_str);
+            }
         try out.appendSlice(allocator, " nodes ===\n\n");
 
         var i: i32 = 0;
@@ -78,14 +82,22 @@ pub const GraphDumper = struct {
             const ne = node.ne();
 
             try out.appendSlice(allocator, "[");
-            try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
+            {
+                var num_buf: [32]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{i});
+                try out.appendSlice(allocator, num_str);
+            }
             try out.appendSlice(allocator, "] ");
             try out.appendSlice(allocator, op);
             try out.appendSlice(allocator, " (");
             var d: i32 = 0;
             while (d < n_dims) : (d += 1) {
                 if (d > 0) try out.appendSlice(allocator, ", ");
-                try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{ne[@intCast(d)]}));
+                {
+                var num_buf: [32]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{ne[@intCast(d)]});
+                try out.appendSlice(allocator, num_str);
+            }
             }
             try out.appendSlice(allocator, ")");
 
@@ -119,35 +131,42 @@ pub const GraphDumper = struct {
             const n_dims = node.nDims();
             const ne = node.ne();
 
-            // 节点标签
-            var label_buf: [256]u8 = undefined;
-            var label: []const u8 = undefined;
+            // node label - use large buffer to avoid bufPrint aliasing
+            var label_buf: [1024]u8 = undefined;
+            var label_len: usize = 0;
+
             if (name.len > 0) {
-                label = try std.fmt.bufPrint(&label_buf, "{s}\\n{s}\\n({d}", .{ name, op, ne[0] });
+                label_len = (try std.fmt.bufPrint(&label_buf, "{s}\n{s}\n({d}", .{ name, op, ne[0] })).len;
             } else {
-                label = try std.fmt.bufPrint(&label_buf, "{s}\\n({d}", .{ op, ne[0] });
+                label_len = (try std.fmt.bufPrint(&label_buf, "{s}\n({d}", .{ op, ne[0] })).len;
             }
 
-            // 添加维度信息
+            // add dimension info
             var d: i32 = 1;
             while (d < n_dims) : (d += 1) {
-                const new_label = try std.fmt.bufPrint(&label_buf, "{s}, {d}", .{ label, ne[@intCast(d)] });
-                label = new_label;
+                const result = try std.fmt.bufPrint(label_buf[label_len..], ", {d}", .{ne[@intCast(d)]});
+                label_len += result.len;
             }
-            label = try std.fmt.bufPrint(&label_buf, "{s})", .{label});
+            label_buf[label_len..][0] = ')';
+            label_len += 1;
 
             try out.appendSlice(allocator, "  n");
-            try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
+            {
+                var num_buf: [32]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{i});
+                try out.appendSlice(allocator, num_str);
+            }
             try out.appendSlice(allocator, " [label=\"");
-            try out.appendSlice(allocator, label);
+            try out.appendSlice(allocator, label_buf[0..label_len]);
             try out.appendSlice(allocator, "\"];\n");
         }
 
         try out.appendSlice(allocator, "}\n");
-    }
 
+    }
     /// JSON 格式输出
     fn dumpJson(
+
         _: *GraphDumper,
         graph: *ggml.CGraph,
         out: *std.ArrayListUnmanaged(u8),
@@ -156,7 +175,11 @@ pub const GraphDumper = struct {
         const n_nodes = graph.nNodes();
         try out.appendSlice(allocator, "{\n");
         try out.appendSlice(allocator, "  \"n_nodes\": ");
-        try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{n_nodes}));
+        {
+                var num_buf: [32]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{n_nodes});
+                try out.appendSlice(allocator, num_str);
+            }
         try out.appendSlice(allocator, ",\n");
         try out.appendSlice(allocator, "  \"nodes\": [\n");
 
@@ -170,7 +193,11 @@ pub const GraphDumper = struct {
 
             try out.appendSlice(allocator, "    {\n");
             try out.appendSlice(allocator, "      \"index\": ");
-            try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
+            {
+                var num_buf: [32]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{i});
+                try out.appendSlice(allocator, num_str);
+            }
             try out.appendSlice(allocator, ",\n");
             try out.appendSlice(allocator, "      \"op\": \"");
             try out.appendSlice(allocator, op);
@@ -179,13 +206,21 @@ pub const GraphDumper = struct {
             try out.appendSlice(allocator, name);
             try out.appendSlice(allocator, "\",\n");
             try out.appendSlice(allocator, "      \"n_dims\": ");
-            try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{n_dims}));
+            {
+                var num_buf: [32]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{n_dims});
+                try out.appendSlice(allocator, num_str);
+            }
             try out.appendSlice(allocator, ",\n");
             try out.appendSlice(allocator, "      \"shape\": [");
             var d: i32 = 0;
             while (d < n_dims) : (d += 1) {
                 if (d > 0) try out.appendSlice(allocator, ", ");
-                try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{ne[@intCast(d)]}));
+                {
+                var num_buf: [32]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{ne[@intCast(d)]});
+                try out.appendSlice(allocator, num_str);
+            }
             }
             try out.appendSlice(allocator, "]\n");
 
@@ -206,6 +241,20 @@ pub const GraphDumper = struct {
 // ============================================================================
 
 /// 构建模型推理图并返回
+
+/// Estimate the memory size needed for the computation graph
+fn estimateGraphSize(params: *const model_if.ModelParams) usize {
+    // Base: 1MB for overhead
+    var size: usize = 1 * 1024 * 1024;
+    // Per layer: ~50KB for graph nodes
+    size += @as(usize, params.n_layer) * 50 * 1024;
+    // Per embedding dimension: ~1KB for tensor metadata
+    size += @as(usize, params.n_embd) * 1024;
+    // Cap at 256MB
+    if (size > 256 * 1024 * 1024) size = 256 * 1024 * 1024;
+    return size;
+}
+
 pub fn buildInferenceGraph(
     allocator: std.mem.Allocator,
     model: *model_if.ModelInstance,
@@ -214,8 +263,7 @@ pub fn buildInferenceGraph(
 ) !*ggml.CGraph {
     const n_tokens: i32 = @intCast(input_tokens.len);
 
-    // 创建 ggml context
-    const ctx = try ggml.Context.initNoAlloc(256 * 1024); // 256KB
+    const ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024); // 256MB
     errdefer ctx.deinit();
 
     ctx.setNoAlloc(false);
@@ -347,7 +395,7 @@ pub fn main(init: std.process.Init) !void {
 
     // 5. 构建推理图
     const n_tokens: i32 = @intCast(input_tokens.len);
-    const ctx = try ggml.Context.initNoAlloc(256 * 1024);
+    const ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024); // 256MB
     defer ctx.deinit();
 
     ctx.setNoAlloc(false);

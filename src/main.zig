@@ -255,7 +255,7 @@ const InferenceEngine = struct {
         logger.info("Building forward graph for prompt...", .{});
         var graph = try ggml.CGraph.init(self.ctx_graph);
         var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, &self.params, self.allocator);
-        const logits = try self.model.buildGraph(&builder, input_tensor, n_prompt_tokens, null, 0);
+        const logits = try self.model.buildGraph(&builder, input_tensor, n_prompt_tokens, @ptrCast(&self.kv_cache_mgr), 0);
 
         logger.info("Allocating graph memory...", .{});
         const buft = ggml.backendCpuBufferType();
@@ -310,7 +310,7 @@ const InferenceEngine = struct {
 
             var inc_graph = try ggml.CGraph.init(self.ctx_graph);
             var inc_builder = graph_builder.GraphBuilder.init(self.ctx_graph, inc_graph, &self.params, self.allocator);
-            const inc_logits = try self.model.buildGraph(&inc_builder, single_input, 1, null, pos);
+            const inc_logits = try self.model.buildGraph(&inc_builder, single_input, 1, @ptrCast(&self.kv_cache_mgr), pos);
 
             var inc_galloc = try ggml.Gallocr.init(buft);
             defer inc_galloc.free();

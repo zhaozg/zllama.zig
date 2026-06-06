@@ -181,10 +181,10 @@ pub const Qwen2Model = struct {
         mem_ctx: ?*memory.MemoryContext,
         start_pos: i32,
     ) !*ggml.Tensor {
-        _ = mem_ctx;
         const ctx = builder.ctx;
         const graph = builder.gf;
-        return self.forward(ctx, graph, input_tokens, n_tokens, null, start_pos);
+        const kv_cache_mgr: ?*kv_cache.KVCache = if (mem_ctx) |ptr| @ptrCast(@alignCast(ptr)) else null;
+        return self.forward(ctx, graph, input_tokens, n_tokens, kv_cache_mgr, start_pos);
     }
 
     /// 虚表定义（用于 ModelInstance 运行时多态）
@@ -274,47 +274,64 @@ pub fn loadWeights(gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, params: 
     };
     output_norm_weight.setName("output_norm.weight");
     var layers = try allocator.alloc(LayerWeights, n_layer);
+    var layers_loaded: usize = 0;
+    errdefer {
+        for (0..layers_loaded) |j| {
+            allocator.free(layers[j].prefix);
+        }
+        allocator.free(layers);
+    }
     for (0..n_layer) |i| {
         const prefix = try std.fmt.allocPrint(allocator, "blk.{d}", .{i});
         layers[i] = LayerWeights{
             .prefix = prefix,
             .attn_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight") catch |err| {
                 log.err("Layer {d}: failed to load attn_norm.weight: {}\n", .{ i, err });
+                allocator.free(prefix);
                 return error.MissingWeight;
             },
             .ffn_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight") catch |err| {
                 log.err("Layer {d}: failed to load ffn_norm.weight: {}\n", .{ i, err });
+                allocator.free(prefix);
                 return error.MissingWeight;
             },
             .attn_q_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight") catch |err| {
                 log.err("Layer {d}: failed to load attn_q.weight: {}\n", .{ i, err });
+                allocator.free(prefix);
                 return error.MissingWeight;
             },
             .attn_k_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch |err| {
                 log.err("Layer {d}: failed to load attn_k.weight: {}\n", .{ i, err });
+                allocator.free(prefix);
                 return error.MissingWeight;
             },
             .attn_v_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight") catch |err| {
                 log.err("Layer {d}: failed to load attn_v.weight: {}\n", .{ i, err });
+                allocator.free(prefix);
                 return error.MissingWeight;
             },
             .attn_output_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight") catch |err| {
                 log.err("Layer {d}: failed to load attn_output.weight: {}\n", .{ i, err });
+                allocator.free(prefix);
                 return error.MissingWeight;
             },
             .ffn_gate_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight") catch |err| {
                 log.err("Layer {d}: failed to load ffn_gate.weight: {}\n", .{ i, err });
+                allocator.free(prefix);
                 return error.MissingWeight;
             },
             .ffn_up_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight") catch |err| {
                 log.err("Layer {d}: failed to load ffn_up.weight: {}\n", .{ i, err });
+                allocator.free(prefix);
                 return error.MissingWeight;
             },
             .ffn_down_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch |err| {
                 log.err("Layer {d}: failed to load ffn_down.weight: {}\n", .{ i, err });
+                allocator.free(prefix);
                 return error.MissingWeight;
             },
         };
+        layers_loaded = i + 1;
     }
     log.info("All Qwen2 weights loaded ({d} layers)\n", .{n_layer});
     return Qwen2Weights{
