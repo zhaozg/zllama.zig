@@ -19,6 +19,17 @@ pub const Tensor = opaque {
         return std.mem.sliceTo(n, 0);
     }
 
+    /// 获取张量操作名称
+    pub fn getOpName(self: *Tensor) [:0]const u8 {
+        const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        return std.mem.sliceTo(c.ggml_op_name(t.op), 0);
+    }
+
+    /// 获取张量维度数
+    pub fn nDims(self: *Tensor) i32 {
+        return c.ggml_n_dims(@ptrCast(@alignCast(self)));
+    }
+
     /// 设置张量名称
     pub fn setName(self: *Tensor, name_str: [:0]const u8) void {
         _ = c.ggml_set_name(@ptrCast(@alignCast(self)), name_str.ptr);

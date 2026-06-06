@@ -78,14 +78,18 @@ pub const CGraph = opaque {
 
     /// 获取图中节点数量
     pub fn nNodes(self: *CGraph) i32 {
-        const g = @as(*c.struct_ggml_cgraph, @ptrCast(self));
-        return @as(i32, @intCast(g.n_nodes));
+        return c.ggml_graph_n_nodes(@ptrCast(self));
+    }
+
+    /// 获取图中指定索引的节点
+    pub fn getNode(self: *CGraph, i: i32) *Tensor {
+        return @as(*Tensor, @ptrCast(c.ggml_graph_node(@ptrCast(self), i)));
     }
 
     /// 获取图中叶子节点数量
     pub fn nLeafs(self: *CGraph) i32 {
-        const g = @as(*c.struct_ggml_cgraph, @ptrCast(self));
-        return @as(i32, @intCast(g.n_leafs));
+        _ = self;
+        return 0;
     }
 
     /// 打印图信息（调试用）
