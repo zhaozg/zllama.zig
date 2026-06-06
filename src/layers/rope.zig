@@ -76,13 +76,15 @@ pub fn buildMultiPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i3
     ctx.setNoAlloc(true);
     const data = pos_tensor.dataBytes();
     const pos_slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total))];
-    for (0..@as(usize, @intCast(n_tokens))) |i| {
+    // MRoPE/IMRoPE 位置张量布局: [t0, t1, ..., h0, h1, ..., w0, w1, ..., e0, e1, ...]
+    // 对于文本模型，所有维度使用相同的位置值
+    const nt = @as(usize, @intCast(n_tokens));
+    for (0..nt) |i| {
         const pos: i32 = @as(i32, @intCast(i)) + start_pos;
-        const base: usize = i * 4;
-        pos_slice[base] = pos;
-        pos_slice[base + 1] = pos;
-        pos_slice[base + 2] = pos;
-        pos_slice[base + 3] = pos;
+        pos_slice[i] = pos;           // time position
+        pos_slice[nt + i] = pos;      // height position
+        pos_slice[2 * nt + i] = pos;  // width position
+        pos_slice[3 * nt + i] = pos;  // extra position
     }
     return pos_tensor;
 }
