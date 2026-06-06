@@ -59,10 +59,10 @@ zig-out/bin/zllama-simple -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
 - ✅ gdn_output view 修复（使用正确的 stride）
 - ✅ tinyllama 推理正确 ✅
 - ✅ Llama-3.2-3B 推理正确 ✅
+- ✅ **Qwen3.5 SSM 层推理正确性**：修复完成！根本原因是 `simple_main.zig` 和 `main.zig` 中在每 token 增量解码循环中调用了 `model.resetSSMStates()`，导致 SSM 的循环状态（conv_state 和 ssm_state）被重置为零，模型失去记忆能力。修复后 Qwen3.5-0.8B 能生成连贯的中文文本。
 
 ### 待完成/待修复
 
-- ❌ **Qwen3.5 SSM 层推理正确性**：gatedDeltaNet 输出不正确，导致 SSM 层产生 "0" token
 - ❌ **推理正确性验证**：zllama-simple 的输出与 llama-simple 对比，修复可能的计算图构建错误
 - ❌ **RoPE 位置编码**：验证 Qwen3.5 的分段 RoPE（dimension_sections）实现
 - ❌ **EOG 检测**：tokenizer 的 isSpecialToken 逻辑需要与 llama_vocab_is_eog 对齐

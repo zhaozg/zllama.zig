@@ -303,7 +303,9 @@ const InferenceEngine = struct {
         // 增量解码循环
         while (gen_token_count < max_tokens - 1) {
             self.ctx_graph.reset();
-            self.model.resetSSMStates();
+            // SSM 状态（conv_state 和 ssm_state）分配在 ctx_kv_cache 中，
+            // 不受 ctx_graph.reset() 影响，因此不需要重置。
+            // 注意：不要调用 model.resetSSMStates()，否则会丢失 SSM 的循环状态！
             self.ctx_graph.setNoAlloc(false);
             const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
             self.ctx_graph.setNoAlloc(true);

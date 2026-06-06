@@ -138,7 +138,7 @@ Hello World
 |------|------|------|
 | tinyllama-1.1b | ✅ | 推理正确，输出合理文本 |
 | Llama-3.2-3B | ✅ | 推理正确，输出合理文本 |
-| Qwen3.5-0.8B | ❌ | SSM 层（gatedDeltaNet）输出不正确 |
+| Qwen3.5-0.8B | ✅ | 推理正确！修复了 `resetSSMStates()` 在增量解码循环中被错误调用的问题 |
 
 ## 扩展指南
 

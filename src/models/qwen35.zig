@@ -446,22 +446,28 @@ pub const QwenModel = struct {
         // Extract attention output from gdn_output
         // gdn_output layout: [S_v*H, n_tokens*n_seqs + state_rows, 1, 1]
         // First S_v*H*n_tokens*n_seqs elements are the attention output
-        // gdn_output is column-major: ne[0]=S_v*H, ne[1]=n_tokens*n_seqs+state_rows
-        // nb[1] = S_v*H * sizeof(f32) (stride for dim 1)
-        const gdn_nb1 = gdn_output.strides()[1];
-        const gdn_nb2 = gdn_output.strides()[2];
+        // The data is laid out as [S_v, H, n_tokens, n_seqs] in column-major order:
+        //   for each seq: for each token: for each head: S_v values
+        // So the correct strides for a [S_v, H_v, n_tokens, n_seqs] view are:
+        //   nb1 = S_v * sizeof(f32)  (stride between heads)
+        //   nb2 = S_v * H_v * sizeof(f32)  (stride between tokens)
+        //   nb3 = S_v * H_v * n_tokens * sizeof(f32)  (stride between sequences)
         const attn_output = ctx.view4d(gdn_output,
             head_v_dim, num_v_heads, n_tokens_i64, n_seqs,
             @as(usize, @intCast(head_v_dim * @sizeOf(f32))),
-            gdn_nb1,
-            gdn_nb2,
+            @as(usize, @intCast(head_v_dim * num_v_heads * @sizeOf(f32))),
+            @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * @sizeOf(f32))),
             0);
         attn_output.setName("ssm_attn_output");
 
         // Extract new state from gdn_output and copy to persistent state
-        _ = 1 * head_v_dim * n_seqs; // K * S_v * n_seqs (unused for now)
         // new state starts at offset = S_v * H_v * n_tokens * n_seqs * sizeof(f32)
         const state_offset = @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * n_seqs * @sizeOf(f32)));
+        // The state is laid out as [S_v*S_v, H_v, n_seqs] in the output:
+        //   for each seq: for each head: S_v*S_v values
+        // We view it as 3D [S_v*S_v*H_v, 1, n_seqs] to match the persistent state shape.
+        // nb1 = S_v*S_v*H_v * sizeof(f32) (all heads for one seq)
+        // nb2 = S_v*S_v*H_v * sizeof(f32) (same, since ne1=1)
         const new_state = ctx.view3d(gdn_output,
             head_v_dim * head_v_dim * num_v_heads, 1, n_seqs,
             @as(usize, @intCast(head_v_dim * head_v_dim * num_v_heads * @sizeOf(f32))),
