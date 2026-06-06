@@ -19,6 +19,7 @@ const gguf = @import("gguf");
 const model_if = @import("model");
 const registry = @import("registry");
 const graph_builder = @import("graph_builder");
+const graph_context = @import("graph_context");
 const memory = @import("memory");
 const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
@@ -79,6 +80,7 @@ const CliArgs = struct {
     verbose: bool = false,
     debug: bool = false,
     help: bool = false,
+    benchmark: bool = false,
 
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
@@ -104,6 +106,8 @@ const CliArgs = struct {
                 result.verbose = true;
             } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
                 result.debug = true;
+            } else if (std.mem.eql(u8, arg, "--benchmark")) {
+                result.benchmark = true;
             } else {
                 logger.warn("unknown argument '{s}'", .{arg});
             }
@@ -128,6 +132,7 @@ const CliArgs = struct {
             \\  -th, --threads <N>    线程数 (默认: auto)
             \\  -v, --verbose         详细输出
             \\  -d, --debug           输出调试日志
+            \\  --benchmark           benchmark 模式
             \\
         , .{});
     }
@@ -147,6 +152,9 @@ const InferenceEngine = struct {
     n_threads: i32,
     verbose: bool,
     gguf_data: []u8,
+
+    // Graph optimization: gallocr reuse context for incremental decoding
+    inc_ctx: graph_context.IncContext,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
         const cwd = std.Io.Dir.cwd();
@@ -209,6 +217,10 @@ const InferenceEngine = struct {
             .top_p = cli_args.top_p,
         });
 
+        // Create incremental decoding context for gallocr reuse
+        const inc_ctx_size = 512 * 1024 * 1024; // 512MB
+        const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
+
         return InferenceEngine{
             .allocator = allocator,
             .ctx_weights = ctx_weights,
@@ -223,23 +235,25 @@ const InferenceEngine = struct {
             .n_threads = n_threads,
             .verbose = cli_args.verbose,
             .gguf_data = gguf_data,
+            .inc_ctx = inc_ctx,
         };
     }
 
     pub fn deinit(self: *InferenceEngine) void {
+        self.inc_ctx.deinit();
         self.kv_cache_mgr.deinit(self.allocator);
         self.tok.deinit();
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
-        // ctx_weights 由 model.deinit() 释放
+        // ctx_weights freed by model.deinit()
         self.model.deinit(self.allocator);
         self.allocator.free(self.gguf_data);
     }
 
     pub fn generate(self: *InferenceEngine, prompt: []const u8, max_tokens: u32) !void {
-        // 编码 prompt，添加特殊 token（BOS/EOS）
+        // Encode prompt, adding special tokens (BOS/EOS)
         var input_tokens = try self.tok.encode(prompt, true);
-        // 调试：打印编码后的 token IDs
+        // Debug: print encoded token IDs
         logger.debug("Encoded tokens ({d}):", .{input_tokens.items.len});
         for (input_tokens.items, 0..) |t, i| {
             if (i < 20) logger.debug("  [{d}] = {d}", .{ i, t });
@@ -249,6 +263,7 @@ const InferenceEngine = struct {
 
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
 
+        // --- Prompt processing (uses ctx_graph) ---
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
         self.ctx_graph.setNoAlloc(true);
@@ -301,23 +316,23 @@ const InferenceEngine = struct {
         var gen_token_count: u32 = 0;
         const gen_start_time = currentTimeMs();
 
-        // 增量解码循环
+        // --- Incremental decoding (uses inc_ctx with gallocr reuse) ---
         while (gen_token_count < max_tokens - 1) {
-            self.ctx_graph.reset();
-            // SSM 状态（conv_state 和 ssm_state）分配在 ctx_kv_cache 中，
-            // 不受 ctx_graph.reset() 影响，因此不需要重置。
-            // 注意：不要调用 model.resetSSMStates()，否则会丢失 SSM 的循环状态！
-            self.ctx_graph.setNoAlloc(false);
-            const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
-            self.ctx_graph.setNoAlloc(true);
+            // Prepare next batch using IncContext for gallocr reuse
+            const step = try self.inc_ctx.beginStep();
+            const inc_ctx = step.ctx;
+            const inc_galloc = step.galloc;
 
-            var inc_graph = try ggml.CGraph.init(self.ctx_graph);
-            var inc_builder = graph_builder.GraphBuilder.init(self.ctx_graph, inc_graph, &self.params, self.allocator);
+            // Build graph in the incremental context
+            inc_ctx.setNoAlloc(false);
+            const single_input = try inc_ctx.newTensor1d(.i32, 1);
+            inc_ctx.setNoAlloc(true);
+
+            var inc_graph = try ggml.CGraph.init(inc_ctx);
+            var inc_builder = graph_builder.GraphBuilder.init(inc_ctx, inc_graph, &self.params, self.allocator);
             const inc_logits = try self.model.buildGraph(&inc_builder, single_input, 1, @ptrCast(&self.kv_cache_mgr), pos);
 
-            var inc_galloc = try ggml.Gallocr.init(buft);
-            defer inc_galloc.free();
-
+            // Reuse gallocr (avoids expensive graph analysis per token)
             if (!inc_galloc.allocGraph(inc_graph)) {
                 logger.err("Failed to allocate incremental graph memory", .{});
                 return error.GraphAllocFailed;
@@ -375,7 +390,7 @@ const InferenceEngine = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    // 设置 ggml 日志回调
+    // Set ggml log callback
     ggml.logSet();
     const io = init.io;
     const allocator = init.gpa;

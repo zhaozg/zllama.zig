@@ -119,6 +119,17 @@ pub fn build(b: *std.Build) void {
     graph_builder_mod.addImport("model", model_mod);
     graph_builder_mod.addImport("memory", memory_mod);
 
+    const graph_context_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/graph_context.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    graph_context_mod.addImport("ggml", ggml_mod);
+    graph_context_mod.addImport("model", model_mod);
+    graph_context_mod.addImport("graph_builder", graph_builder_mod);
+    graph_context_mod.addImport("memory", memory_mod);
+
     // model_mod 需要 graph_builder_mod，所以 graph_builder_mod 必须在 model_mod 之后定义
     // 但 model_mod 已经创建了，所以可以添加导入
     model_mod.addImport("graph_builder", graph_builder_mod);
@@ -184,8 +195,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("tokenizer", tokenizer_mod);
     exe_mod.addImport("sampler", sampler_mod);
     exe_mod.addImport("kv_cache", kv_cache_mod);
+    exe_mod.addImport("graph_context", graph_context_mod);
     addSystemLibs(exe_mod, target, include_path);
-
     const exe = b.addExecutable(.{
         .name = "zllama",
         .root_module = exe_mod,
@@ -224,6 +235,7 @@ pub fn build(b: *std.Build) void {
     simple_mod.addImport("tokenizer", tokenizer_mod);
     simple_mod.addImport("sampler", sampler_mod);
     simple_mod.addImport("kv_cache", kv_cache_mod);
+    simple_mod.addImport("graph_context", graph_context_mod);
     addSystemLibs(simple_mod, target, include_path);
 
     const simple_exe = b.addExecutable(.{
@@ -251,6 +263,7 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("tokenizer", tokenizer_mod);
     test_root_mod.addImport("sampler", sampler_mod);
     test_root_mod.addImport("kv_cache", kv_cache_mod);
+    test_root_mod.addImport("graph_context", graph_context_mod);
     addSystemLibs(test_root_mod, target, include_path);
 
     const test_unit = b.addTest(.{

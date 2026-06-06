@@ -40,6 +40,8 @@ pub const backendFree = @import("ggml/backend.zig").backendFree;
 pub const loadBackends = @import("ggml/backend.zig").loadBackends;
 pub const setInput = @import("ggml/backend.zig").setInput;
 
+pub const ThreadPool = @import("ggml/threadpool.zig").ThreadPool;
+
 pub const mulMat = @import("ggml/ops.zig").mulMat;
 pub const mul = @import("ggml/ops.zig").mul;
 pub const add = @import("ggml/ops.zig").add;

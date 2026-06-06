@@ -101,6 +101,16 @@ pub const CGraph = opaque {
     pub fn reset(self: *CGraph) void {
         c.ggml_graph_reset(@ptrCast(self));
     }
+
+    /// 复制计算图（浅复制：新图节点引用相同的张量对象）
+    /// 用于图复用场景，避免每 token 重建所有张量
+    pub fn dup(ctx: *Context, cgraph: *CGraph) *CGraph {
+        return @as(*CGraph, @ptrCast(c.ggml_graph_dup(
+            @ptrCast(ctx),
+            @ptrCast(cgraph),
+            false, // force_grads = false
+        )));
+    }
 };
 
 // ============================================================================

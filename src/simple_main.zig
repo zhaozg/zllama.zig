@@ -4,6 +4,7 @@ const gguf = @import("gguf");
 const model_if = @import("model");
 const registry = @import("registry");
 const graph_builder = @import("graph_builder");
+const graph_context = @import("graph_context");
 const memory = @import("memory");
 const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
@@ -64,6 +65,7 @@ fn printUsage(argv0: []const u8) void {
         \\    -th N, --threads N                  number of threads (default: auto)
         \\    -v, --verbose                        verbose output
         \\    -d, --debug                          debug output
+        \\    --benchmark                          benchmark mode (only show speed stats)
         \\
     , .{argv0});
 }
@@ -79,6 +81,7 @@ const CliArgs = struct {
     verbose: bool = false,
     debug: bool = false,
     help: bool = false,
+    benchmark: bool = false,
 
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
@@ -102,6 +105,8 @@ const CliArgs = struct {
                 result.verbose = true;
             } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
                 result.debug = true;
+            } else if (std.mem.eql(u8, arg, "--benchmark")) {
+                result.benchmark = true;
             } else if (std.mem.startsWith(u8, arg, "-")) {
                 logger.warn("unknown argument '{s}'", .{arg});
             } else {
@@ -125,6 +130,9 @@ const SimpleEngine = struct {
     kv_cache_mgr: kv_cache.KVCache,
     n_threads: i32,
     gguf_data: []u8,
+
+    // Graph optimization: gallocr reuse context for incremental decoding
+    inc_ctx: graph_context.IncContext,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: []const u8, cli_args: *const CliArgs) !SimpleEngine {
         logger.info("Loading model: {s}", .{model_path});
@@ -167,7 +175,7 @@ const SimpleEngine = struct {
         const max_seq_len = @min(params.max_seq_len, 2048);
         var kv_cache_mgr = try kv_cache.KVCache.init(ctx_kv_cache, params.n_layer, params.n_kv_head, params.n_head_dim, max_seq_len, allocator);
         errdefer kv_cache_mgr.deinit(allocator);
-        // 设置 Qwen35 的 ctx_kv_cache（用于持久 SSM 状态，不受 ctx_graph.reset() 影响）
+        // Set Qwen35's ctx_kv_cache (for persistent SSM states)
         model.setKVCacheContext(ctx_kv_cache);
         const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
         errdefer ctx_graph.deinit();
@@ -175,20 +183,39 @@ const SimpleEngine = struct {
             const b = ggml.backendCpuBufferType();
             try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, b);
         }
-        return SimpleEngine{ .allocator = allocator, .ctx_weights = ctx_weights, .ctx_graph = ctx_graph, .ctx_kv_cache = ctx_kv_cache, .arch = arch, .model = model, .params = params, .tok = tok, .kv_cache_mgr = kv_cache_mgr, .n_threads = n_threads, .gguf_data = gguf_data };
+
+        // Create incremental decoding context for gallocr reuse
+        const inc_ctx_size = 512 * 1024 * 1024; // 512MB for incremental
+        const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
+
+        return SimpleEngine{
+            .allocator = allocator,
+            .ctx_weights = ctx_weights,
+            .ctx_graph = ctx_graph,
+            .ctx_kv_cache = ctx_kv_cache,
+            .arch = arch,
+            .model = model,
+            .params = params,
+            .tok = tok,
+            .kv_cache_mgr = kv_cache_mgr,
+            .n_threads = n_threads,
+            .gguf_data = gguf_data,
+            .inc_ctx = inc_ctx,
+        };
     }
 
     pub fn deinit(self: *SimpleEngine) void {
+        self.inc_ctx.deinit();
         self.kv_cache_mgr.deinit(self.allocator);
         self.tok.deinit();
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
-        // ctx_weights 由 model.deinit() 释放
+        // ctx_weights freed by model.deinit()
         self.model.deinit(self.allocator);
         self.allocator.free(self.gguf_data);
     }
 
-    /// 解码单个 token 并写入 stdout（对齐 llama-simple 的 token_to_piece + printf 行为）
+    /// Decode a single token and write to stdout
     fn decodeAndPrintToken(self: *SimpleEngine, io: std.Io, token_id: u32) !void {
         var buf: [128]u8 = undefined;
         const n = try self.tok.decodeSingle(token_id, &buf);
@@ -203,6 +230,7 @@ const SimpleEngine = struct {
         defer input_tokens.deinit(self.allocator);
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
 
+        // --- Prompt processing (uses ctx_graph) ---
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
         self.ctx_graph.setNoAlloc(true);
@@ -230,7 +258,7 @@ const SimpleEngine = struct {
         const first_token = sampler.Sampler.sampleGreedy(logits);
         logger.debug("first_token (greedy) = {d}", .{first_token});
 
-        // 打印 prompt token-by-token（与 llama-simple 对齐）
+        // Print prompt token-by-token
         for (input_tokens.items) |token_id| {
             try self.decodeAndPrintToken(io, @intCast(token_id));
         }
@@ -239,39 +267,44 @@ const SimpleEngine = struct {
         var new_token_id: i32 = first_token;
         var pos: i32 = n_prompt_tokens;
 
+        // --- Incremental decoding (uses inc_ctx with gallocr reuse) ---
         while (n_decode < max_tokens) {
-            // 检查是否为 EOG token（与 llama-simple 的 llama_vocab_is_eog() 对齐）
+            // Check for EOG token
             if (self.tok.isEog(@intCast(new_token_id))) {
                 logger.debug("EOG token {d} stopping", .{new_token_id});
                 break;
             }
 
-            // 解码并打印新 token
+            // Decode and print new token
             logger.debug("decoding token {d}", .{new_token_id});
             try self.decodeAndPrintToken(io, @intCast(new_token_id));
 
-            // 准备下一个 batch
-            self.ctx_graph.reset();
-            // SSM 状态（conv_state 和 ssm_state）分配在 ctx_kv_cache 中，
-            // 不受 ctx_graph.reset() 影响，因此不需要重置。
-            // 注意：不要调用 model.resetSSMStates()，否则会丢失 SSM 的循环状态！
-            self.ctx_graph.setNoAlloc(false);
-            const single_input = try self.ctx_graph.newTensor1d(.i32, 1);
-            self.ctx_graph.setNoAlloc(true);
-            var inc_graph = try ggml.CGraph.init(self.ctx_graph);
-            var inc_builder = graph_builder.GraphBuilder.init(self.ctx_graph, inc_graph, &self.params, self.allocator);
+            // Prepare next batch using IncContext for gallocr reuse
+            const step = try self.inc_ctx.beginStep();
+            const inc_ctx = step.ctx;
+            const inc_galloc = step.galloc;
+
+            // Build graph in the incremental context
+            inc_ctx.setNoAlloc(false);
+            const single_input = try inc_ctx.newTensor1d(.i32, 1);
+            inc_ctx.setNoAlloc(true);
+
+            var inc_graph = try ggml.CGraph.init(inc_ctx);
+            var inc_builder = graph_builder.GraphBuilder.init(inc_ctx, inc_graph, &self.params, self.allocator);
             const inc_logits = try self.model.buildGraph(&inc_builder, single_input, 1, @ptrCast(&self.kv_cache_mgr), pos);
-            var inc_galloc = try ggml.Gallocr.init(buft);
-            defer inc_galloc.free();
+
+            // Reuse gallocr (avoids expensive graph analysis per token)
             if (!inc_galloc.allocGraph(inc_graph)) {
                 std.debug.print("Error: inc graph alloc failed\n", .{});
                 return error.GraphAllocFailed;
             }
+
             {
                 const data = single_input.dataBytes();
                 const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1];
                 slice[0] = new_token_id;
             }
+
             try inc_graph.compute(self.n_threads);
             new_token_id = sampler.Sampler.sampleGreedy(inc_logits);
             logger.debug("next token (greedy) = {d}", .{new_token_id});
@@ -279,20 +312,22 @@ const SimpleEngine = struct {
             n_decode += 1;
         }
 
-        // 打印换行
+        // Print newline
         {
             const stdout_file = std.Io.File.stdout();
             try stdout_file.writeStreamingAll(io, "\n");
         }
 
-        // 性能统计输出到 stderr
+        // Performance stats to stderr
         const t_main_end = currentTimeUs();
         const elapsed_s = @as(f64, @floatFromInt(t_main_end - t_main_start)) / 1000000.0;
         const speed = if (elapsed_s > 0.0)
             @as(f64, @floatFromInt(n_decode)) / elapsed_s
         else
             0.0;
-        std.debug.print("main: decoded {d} tokens in {d:.2} s, speed: {d:.2} t/s\n", .{ n_decode, elapsed_s, speed });
+        if (n_decode > 0) {
+            std.debug.print("main: decoded {d} tokens in {d:.2} s, speed: {d:.2} t/s\n", .{ n_decode, elapsed_s, speed });
+        }
     }
 };
 
@@ -324,8 +359,10 @@ pub fn main(init: std.process.Init) !void {
     defer engine.deinit();
     logger.info("Model loaded successfully.", .{});
     const prompt = if (args.prompt.len > 0) args.prompt else "Hello my name is";
-    logger.info("Prompt: \"{s}\"", .{prompt});
-    logger.info("Max tokens: {d}", .{args.max_tokens});
+    if (!args.benchmark) {
+        logger.info("Prompt: \"{s}\"", .{prompt});
+        logger.info("Max tokens: {d}", .{args.max_tokens});
+    }
     engine.generate(io, prompt, args.max_tokens) catch |err| {
         std.debug.print("Error: generation failed: {}\n", .{err});
         return;
