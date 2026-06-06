@@ -48,7 +48,10 @@ pub const Sampler = struct {
         const data = logits.dataBytes();
         const ne = logits.ne();
         log.debug("sampleGreedy: ne[0]={d}, ne[1]={d}, ne[2]={d}", .{ ne[0], ne[1], ne[2] });
-        // logits 形状为 [n_vocab, n_tokens]，取最后一个 token
+        // logits 形状可能为 [n_vocab, n_tokens] 或 [n_vocab, n_tokens, n_seqs]
+        // 在列主序中，ne[0] 是最内层维度
+        // 数据布局：[vocab0..n_vocab for token0, vocab0..n_vocab for token1, ...]
+        // 取最后一个 token 的 logits
         const n_vocab = @as(usize, @intCast(ne[0]));
         const n_tokens = @max(@as(usize, @intCast(ne[1])), 1);
         const stride = n_vocab;
@@ -63,6 +66,7 @@ pub const Sampler = struct {
                 best_idx = @intCast(i);
             }
         }
+        log.debug("sampleGreedy: best_idx={d}, best_val={d}", .{ best_idx, best_val });
         return best_idx;
     }
 };

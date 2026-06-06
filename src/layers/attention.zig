@@ -49,7 +49,6 @@ pub fn scaledDotProductAttention(
     _ = params.n_kv_head;
     const head_dim = params.head_dim;
     const n_tokens = params.n_tokens;
-    const cache_len = params.cache_len;
     const start_pos = params.start_pos;
     const scale_factor = params.scale_factor;
 
@@ -77,12 +76,10 @@ pub fn scaledDotProductAttention(
     kq = ggml.scale(ctx, kq, scale_factor);
 
     // Step 4: 因果 mask + softmax
-    // kq: [cache_len, n_tokens, n_head] -> 展平为 [cache_len, n_tokens*n_head]
-    kq = ggml.reshape2d(ctx, kq, cache_len, n_tokens * n_head);
+    // kq: [cache_len, n_tokens, n_head] (3D)
+    // diagMaskInf 对 3D 张量的 ne[0]xne[1] 切片应用 mask
     kq = ggml.diagMaskInf(ctx, kq, start_pos);
     kq = ggml.softMax(ctx, kq);
-    // 重塑回 3D: [cache_len, n_tokens, n_head]
-    kq = ggml.reshape3d(ctx, kq, cache_len, n_tokens, n_head);
 
     // Step 5: v = v^T (transpose)
     // v_perm: [head_dim, cache_len, n_kv_head] -> transpose -> [cache_len, head_dim, n_kv_head]

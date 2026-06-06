@@ -446,3 +446,4 @@ const test_gguf = @import("tests/test_gguf.zig");
 const test_archs = @import("tests/test_archs.zig");
 const test_kv_cache = @import("tests/test_kv_cache.zig");
 const test_compare_logits = @import("tests/test_compare_logits.zig");
+const test_vocab = @import("tests/test_vocab.zig");

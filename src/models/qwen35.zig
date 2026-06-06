@@ -83,6 +83,7 @@ pub const QwenModel = struct {
     qwen_params: QwenParams,
     qwen_weights: QwenWeights,
     ctx_weights: *ggml.Context,
+    ctx_kv_cache: ?*ggml.Context = null, // 用于分配持久状态的 context
     ssm_states: []LayerSSMState, // 每层的 SSM 状态
 
     pub fn init(self: *QwenModel, allocator: std.mem.Allocator, gguf_file: *gguf.GGUFFile, io: std.Io) !void {
@@ -192,37 +193,47 @@ pub const QwenModel = struct {
         const v_w = layer.attn_v_weight orelse return error.MissingWeight;
         const o_w = layer.attn_output_weight orelse return error.MissingWeight;
 
-        // Q projection outputs [Q, gate] combined
-        var q_full = ggml.mulMat(ctx, q_w, attn_input);
+        // Q projection outputs [Q, gate] combined: [n_embd_head*2*n_head, n_tokens]
+        // Qwen3.5: Q and gate are interleaved: Q[0], gate[0], Q[1], gate[1], ...
+        const q_full = ggml.mulMat(ctx, q_w, attn_input);
         var k = ggml.mulMat(ctx, k_w, attn_input);
         var v = ggml.mulMat(ctx, v_w, attn_input);
 
-        // Q norm
+        // View Q as 3D with interleaved stride: [head_dim, n_head, n_tokens] with stride = head_dim * 2
+        var q = ctx.view3d(q_full, head_dim, n_head, n_tokens_i64,
+            @as(usize, @intCast(head_dim * 2 * @sizeOf(f32))),
+            @as(usize, @intCast(head_dim * 2 * n_head * @sizeOf(f32))),
+            0);
+        // Gate is the same view but with offset = head_dim
+        const q_gate_view = ctx.view3d(q_full, head_dim, n_head, n_tokens_i64,
+            @as(usize, @intCast(head_dim * 2 * @sizeOf(f32))),
+            @as(usize, @intCast(head_dim * 2 * n_head * @sizeOf(f32))),
+            @as(usize, @intCast(head_dim * @sizeOf(f32))));
+
+        // Make Q contiguous for norm
+        q = ggml.cont(ctx, q);
+
+        // Q norm: apply RMS norm + Q norm weight to Q only (not gate)
         if (layer.attn_q_norm_weight) |q_norm_raw| {
-            q_full = ggml.rmsNorm(ctx, q_full, p.base.norm_eps);
-            const q_norm_2d = ggml.reshape2d(ctx, q_norm_raw, head_dim, 1);
-            const q_norm_target = ctx.newTensor2d(.f32, n_head * head_dim, 1) catch unreachable;
-            const q_norm_rep = ggml.repeat(ctx, q_norm_2d, q_norm_target);
-            q_full = ggml.mul(ctx, q_full, q_norm_rep);
+            q = ggml.rmsNorm(ctx, q, p.base.norm_eps);
+            // q_norm_raw: [head_dim] -> reshape to [head_dim, 1, 1] for broadcasting
+            const q_norm_3d = ggml.reshape3d(ctx, q_norm_raw, head_dim, 1, 1);
+            const q_norm_target = ctx.newTensor3d(.f32, head_dim, n_head, n_tokens_i64) catch unreachable;
+            const q_norm_rep = ggml.repeat(ctx, q_norm_3d, q_norm_target);
+            q = ggml.mul(ctx, q, q_norm_rep);
         }
 
-        // K norm
+        // K norm: reshape K to 3D first, then apply norm (llama.cpp style)
+        k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
         if (layer.attn_k_norm_weight) |k_norm_raw| {
             k = ggml.rmsNorm(ctx, k, p.base.norm_eps);
-            const k_norm_2d = ggml.reshape2d(ctx, k_norm_raw, head_dim, 1);
-            const k_norm_target = ctx.newTensor2d(.f32, n_kv_head * head_dim, 1) catch unreachable;
-            const k_norm_rep = ggml.repeat(ctx, k_norm_2d, k_norm_target);
+            const k_norm_3d = ggml.reshape3d(ctx, k_norm_raw, head_dim, 1, 1);
+            const k_norm_target = ctx.newTensor3d(.f32, head_dim, n_kv_head, n_tokens_i64) catch unreachable;
+            const k_norm_rep = ggml.repeat(ctx, k_norm_3d, k_norm_target);
             k = ggml.mul(ctx, k, k_norm_rep);
         }
 
-        // Split Q into [Q, gate]
-        const q_attn_size: i64 = n_head * head_dim;
-        var q = ctx.view2d(q_full, q_attn_size, n_tokens_i64, q_full.strides()[1], 0);
-        const q_gate = ctx.view2d(q_full, q_attn_size, n_tokens_i64, q_full.strides()[1], @intCast(q_attn_size * @sizeOf(f32)));
-
-        // Reshape for MRoPE: [head_dim, n_head, n_tokens]
-        q = ggml.reshape3d(ctx, ggml.cont(ctx, q), head_dim, n_head, n_tokens_i64);
-        k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
+        // V reshape
         v = ggml.reshape3d(ctx, v, head_dim, n_kv_head, n_tokens_i64);
 
         // MRoPE (Multi-dimensional RoPE)
@@ -232,12 +243,11 @@ pub const QwenModel = struct {
         q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
         k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
 
-        // KV Cache - 需要 permute 成 [head_dim, n_tokens, n_head/n_kv_head] 存储
-        // 但 attention.scaledDotProductAttention 期望 [head_dim, n_head/n_kv_head, n_tokens/cache_len]
+        // KV Cache: K/V 形状为 [head_dim, n_kv_head, n_tokens]
+        // Cache 布局: [head_dim, n_kv_head, max_seq_len]
+        // 直接存储，不需要 permute（与 cache 布局一致）
         if (kv_cache_mgr) |cache| {
-            const k_perm = ggml.cont(ctx, ggml.permute(ctx, k, 0, 2, 1, 3));
-            const v_perm = ggml.cont(ctx, ggml.permute(ctx, v, 0, 2, 1, 3));
-            cache.setKv(ctx, graph, layer_idx, k_perm, v_perm, @intCast(n_tokens_i64));
+            cache.setKv(ctx, graph, layer_idx, k, v, @intCast(n_tokens_i64));
             k = cache.getKView(ctx, layer_idx);
             v = cache.getVView(ctx, layer_idx);
         }
@@ -260,7 +270,11 @@ pub const QwenModel = struct {
         });
 
         // Gate: sigmoid(gate) * attn_out
-        const gate_sigmoid = ggml.sigmoid(ctx, q_gate);
+        // Ensure gate is contiguous before sigmoid
+        // gate_view: [head_dim, n_head, n_tokens] -> reshape to [n_head*head_dim, n_tokens]
+        const gate_cont = ggml.cont(ctx, q_gate_view);
+        const gate_2d = ggml.reshape2d(ctx, gate_cont, n_head * head_dim, n_tokens_i64);
+        const gate_sigmoid = ggml.sigmoid(ctx, gate_2d);
         attn_out = ggml.mul(ctx, attn_out, gate_sigmoid);
         {
             const name = std.fmt.bufPrint(name_buf, "blk.{d}.attn_gated", .{layer_idx}) catch unreachable;
@@ -328,9 +342,15 @@ pub const QwenModel = struct {
 
         // Get or create conv state for this layer
         if (self.ssm_states[layer_idx].conv_state == null) {
-            ctx.setNoAlloc(false);
-            self.ssm_states[layer_idx].conv_state = try ctx.newTensor2d(.f32, d_conv - 1, conv_dim);
-            ctx.setNoAlloc(true);
+            if (self.ctx_kv_cache) |kv_ctx| {
+                kv_ctx.setNoAlloc(false);
+                self.ssm_states[layer_idx].conv_state = try kv_ctx.newTensor2d(.f32, d_conv - 1, conv_dim);
+                kv_ctx.setNoAlloc(true);
+            } else {
+                ctx.setNoAlloc(false);
+                self.ssm_states[layer_idx].conv_state = try ctx.newTensor2d(.f32, d_conv - 1, conv_dim);
+                ctx.setNoAlloc(true);
+            }
             self.ssm_states[layer_idx].conv_state.?.setZero();
             {
                 var buf: [64]u8 = undefined;
@@ -400,11 +420,12 @@ pub const QwenModel = struct {
         // === Step 6: Gated Delta Net ===
         // Get or create SSM state for this layer
         if (self.ssm_states[layer_idx].ssm_state == null) {
-            ctx.setNoAlloc(false);
+            const alloc_ctx = if (self.ctx_kv_cache) |kv_ctx| kv_ctx else ctx;
+            alloc_ctx.setNoAlloc(false);
             // state: [S_v*S_v*H, K, n_seqs] where K=1 for autoregressive
             const state_size = head_v_dim * head_v_dim * num_v_heads;
-            self.ssm_states[layer_idx].ssm_state = try ctx.newTensor3d(.f32, state_size, 1, n_seqs);
-            ctx.setNoAlloc(true);
+            self.ssm_states[layer_idx].ssm_state = try alloc_ctx.newTensor3d(.f32, state_size, 1, n_seqs);
+            alloc_ctx.setNoAlloc(true);
             self.ssm_states[layer_idx].ssm_state.?.setZero();
             {
                 var buf: [64]u8 = undefined;
@@ -425,21 +446,27 @@ pub const QwenModel = struct {
         // Extract attention output from gdn_output
         // gdn_output layout: [S_v*H, n_tokens*n_seqs + state_rows, 1, 1]
         // First S_v*H*n_tokens*n_seqs elements are the attention output
+        // gdn_output is column-major: ne[0]=S_v*H, ne[1]=n_tokens*n_seqs+state_rows
+        // nb[1] = S_v*H * sizeof(f32) (stride for dim 1)
+        const gdn_nb1 = gdn_output.strides()[1];
+        const gdn_nb2 = gdn_output.strides()[2];
         const attn_output = ctx.view4d(gdn_output,
             head_v_dim, num_v_heads, n_tokens_i64, n_seqs,
             @as(usize, @intCast(head_v_dim * @sizeOf(f32))),
-            @as(usize, @intCast(head_v_dim * num_v_heads * @sizeOf(f32))),
-            @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * @sizeOf(f32))),
+            gdn_nb1,
+            gdn_nb2,
             0);
         attn_output.setName("ssm_attn_output");
 
         // Extract new state from gdn_output and copy to persistent state
         _ = 1 * head_v_dim * n_seqs; // K * S_v * n_seqs (unused for now)
+        // new state starts at offset = S_v * H_v * n_tokens * n_seqs * sizeof(f32)
+        const state_offset = @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * n_seqs * @sizeOf(f32)));
         const new_state = ctx.view3d(gdn_output,
             head_v_dim * head_v_dim * num_v_heads, 1, n_seqs,
             @as(usize, @intCast(head_v_dim * head_v_dim * num_v_heads * @sizeOf(f32))),
             @as(usize, @intCast(head_v_dim * head_v_dim * num_v_heads * @sizeOf(f32))),
-            @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * @sizeOf(f32))));
+            state_offset);
         const state_cpy = ggml.cpy(ctx, new_state, ssm_state);
         graph.buildForwardExpand(state_cpy);
 
@@ -481,6 +508,7 @@ pub const QwenModel = struct {
         .buildGraph = buildGraphAdapter,
         .getParams = getParamsAdapter,
         .resetSSMStates = resetSSMStatesAdapter,
+        .setKVCacheContext = setKVCacheContextAdapter,
     };
 
     fn deinitAdapter(data: *anyopaque, allocator: std.mem.Allocator) void {
@@ -515,6 +543,11 @@ pub const QwenModel = struct {
     fn resetSSMStatesAdapter(data: *anyopaque) void {
         const self = @as(*QwenModel, @ptrCast(@alignCast(data)));
         self.resetSSMStates();
+    }
+
+    fn setKVCacheContextAdapter(data: *anyopaque, ctx: *ggml.Context) void {
+        const self = @as(*QwenModel, @ptrCast(@alignCast(data)));
+        self.ctx_kv_cache = ctx;
     }
 };
 

@@ -271,6 +271,9 @@ pub fn build(b: *std.Build) void {
     const test_kv_cache_step = b.step("test-kv-cache", "Run KV Cache tests only");
     test_kv_cache_step.dependOn(&test_unit.step);
 
+    const test_vocab_step = b.step("test-vocab", "Run vocab-based tokenizer tests only");
+    test_vocab_step.dependOn(&test_unit.step);
+
     // ======================================================================
     // 工具可执行文件
     // ======================================================================

@@ -167,6 +167,8 @@ const SimpleEngine = struct {
         const max_seq_len = @min(params.max_seq_len, 2048);
         var kv_cache_mgr = try kv_cache.KVCache.init(ctx_kv_cache, params.n_layer, params.n_kv_head, params.n_head_dim, max_seq_len, allocator);
         errdefer kv_cache_mgr.deinit(allocator);
+        // 设置 Qwen35 的 ctx_kv_cache（用于持久 SSM 状态，不受 ctx_graph.reset() 影响）
+        model.setKVCacheContext(ctx_kv_cache);
         const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
         errdefer ctx_graph.deinit();
         {
@@ -226,6 +228,7 @@ const SimpleEngine = struct {
         const t_main_start = currentTimeUs();
         try graph.compute(self.n_threads);
         const first_token = sampler.Sampler.sampleGreedy(logits);
+        logger.debug("first_token (greedy) = {d}", .{first_token});
 
         // 打印 prompt token-by-token（与 llama-simple 对齐）
         for (input_tokens.items) |token_id| {
@@ -242,12 +245,21 @@ const SimpleEngine = struct {
                 if (new_token_id == self.tok.special.eos or
                     new_token_id == self.tok.special.bos or
                     new_token_id == self.tok.special.pad or
-                    new_token_id == self.tok.special.unk) break;
+                    new_token_id == self.tok.special.unk) {
+                    logger.debug("EOG token {d} (eos={d}, bos={d}, pad={d}, unk={d}) stopping", .{
+                        new_token_id, self.tok.special.eos, self.tok.special.bos, self.tok.special.pad, self.tok.special.unk,
+                    });
+                    break;
+                }
                 if (@as(usize, @intCast(new_token_id)) < self.tok.token_types.items.len and
-                    self.tok.token_types.items[@as(usize, @intCast(new_token_id))] == .control) break;
+                    self.tok.token_types.items[@as(usize, @intCast(new_token_id))] == .control) {
+                    logger.debug("control token {d} stopping", .{new_token_id});
+                    break;
+                }
             }
 
             // 解码并打印新 token
+            logger.debug("decoding token {d}", .{new_token_id});
             try self.decodeAndPrintToken(io, @intCast(new_token_id));
 
             // 准备下一个 batch
@@ -272,6 +284,7 @@ const SimpleEngine = struct {
             }
             try inc_graph.compute(self.n_threads);
             new_token_id = sampler.Sampler.sampleGreedy(inc_logits);
+            logger.debug("next token (greedy) = {d}", .{new_token_id});
             pos += 1;
             n_decode += 1;
         }

@@ -120,6 +120,12 @@ pub const ModelInstance = struct {
         }
     }
 
+    pub fn setKVCacheContext(self: ModelInstance, ctx: *ggml.Context) void {
+        if (self.vtable.setKVCacheContext) |set| {
+            set(self.ptr, ctx);
+        }
+    }
+
     pub fn deinit(self: ModelInstance, allocator: std.mem.Allocator) void {
         self.vtable.deinit(self.ptr, allocator);
     }
@@ -130,5 +136,6 @@ pub const ModelVTable = struct {
     getParams: *const fn (ptr: *anyopaque) *const ModelParams,
     buildGraph: *const fn (ptr: *anyopaque, builder: *graph_builder.GraphBuilder, input: *ggml.Tensor, n_tokens: i32, cache: ?*anyopaque, pos: i32) anyerror!*ggml.Tensor,
     resetSSMStates: ?*const fn (ptr: *anyopaque) void = null,
+    setKVCacheContext: ?*const fn (ptr: *anyopaque, ctx: *ggml.Context) void = null,
     deinit: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void,
 };

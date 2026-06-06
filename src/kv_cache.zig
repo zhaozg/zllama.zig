@@ -1,18 +1,3 @@
-//! KV Cache 管理
-//!
-//! 为每层预分配 KV Cache 张量，支持增量写入和视图切片。
-//! 避免每 token 复制历史缓存。
-//!
-//! 已适配 MemoryContext 接口（core/memory.zig），
-//! 可通过 toMemoryContext() 转换为通用内存接口。
-//!
-//! KV Cache 布局（与 llama.cpp 一致）:
-//!   K: [head_dim, n_kv_head, max_seq_len]
-//!   V: [head_dim, n_kv_head, max_seq_len]
-//!
-//! 新 K/V 张量布局（经过 RoPE 后）:
-//!   [head_dim, n_kv_head, n_tokens]
-
 const std = @import("std");
 const ggml = @import("ggml");
 const memory = @import("memory");
@@ -104,15 +89,15 @@ pub const KVCache = struct {
         const len: i64 = @intCast(layer.current_len);
         const hdim: i64 = @intCast(self.head_dim);
         const nkv: i64 = @intCast(self.n_kv_head);
-        const max_len: i64 = @intCast(self.max_seq_len);
 
         // layer.k: [head_dim, n_kv_head, max_seq_len]
+        //   nb[0] = sizeof(f32) = 4
+        //   nb[1] = head_dim * sizeof(f32)  (stride along n_kv_head dim)
+        //   nb[2] = head_dim * n_kv_head * sizeof(f32)  (stride along seq dim)
         // View:   [head_dim, n_kv_head, len]
-        // nb1 = n_kv_head * sizeof(f32) (stride along n_kv_head dim)
-        // nb2 = max_seq_len * sizeof(f32) (stride along seq dim in source)
         return ctx.view3d(layer.k, hdim, nkv, len,
-            @intCast(nkv * @sizeOf(f32)),
-            @intCast(max_len * @sizeOf(f32)),
+            @intCast(hdim * @sizeOf(f32)),       // nb1: stride along n_kv_head dim
+            @intCast(hdim * nkv * @sizeOf(f32)), // nb2: stride along seq dim
             0);
     }
 
@@ -122,11 +107,10 @@ pub const KVCache = struct {
         const len: i64 = @intCast(layer.current_len);
         const hdim: i64 = @intCast(self.head_dim);
         const nkv: i64 = @intCast(self.n_kv_head);
-        const max_len: i64 = @intCast(self.max_seq_len);
 
         return ctx.view3d(layer.v, hdim, nkv, len,
-            @intCast(nkv * @sizeOf(f32)),
-            @intCast(max_len * @sizeOf(f32)),
+            @intCast(hdim * @sizeOf(f32)),       // nb1: stride along n_kv_head dim
+            @intCast(hdim * nkv * @sizeOf(f32)), // nb2: stride along seq dim
             0);
     }
 
@@ -147,25 +131,25 @@ pub const KVCache = struct {
 
         const hdim: i64 = @intCast(self.head_dim);
         const nkv: i64 = @intCast(self.n_kv_head);
-        const max_len: i64 = @intCast(self.max_seq_len);
 
         // layer.k: [head_dim, n_kv_head, max_seq_len]
+        //   nb[0] = sizeof(f32) = 4
+        //   nb[1] = head_dim * sizeof(f32)  (stride along n_kv_head dim)
+        //   nb[2] = head_dim * n_kv_head * sizeof(f32)  (stride along seq dim)
         // View into cache at offset along seq dim (ne[2]):
         // [head_dim, n_kv_head, n_tokens]
-        // nb1 = n_kv_head * sizeof(f32)
-        // nb2 = max_seq_len * sizeof(f32)
-        // offset in bytes = offset * sizeof(f32) along the seq dim (ne[2])
+        // offset in bytes = offset * head_dim * n_kv_head * sizeof(f32)
         const k_dst = ctx.view3d(layer.k, hdim, nkv, @intCast(n_tokens),
-            @intCast(nkv * @sizeOf(f32)),
-            @intCast(max_len * @sizeOf(f32)),
-            @intCast(offset * @sizeOf(f32)));
+            @intCast(hdim * @sizeOf(f32)),             // nb1: stride along n_kv_head dim
+            @intCast(hdim * nkv * @sizeOf(f32)),       // nb2: stride along seq dim
+            @intCast(offset * hdim * nkv * @sizeOf(f32))); // offset along seq dim
         const k_cpy = ggml.cpy(ctx, new_k, k_dst);
         graph.buildForwardExpand(k_cpy);
 
         const v_dst = ctx.view3d(layer.v, hdim, nkv, @intCast(n_tokens),
-            @intCast(nkv * @sizeOf(f32)),
-            @intCast(max_len * @sizeOf(f32)),
-            @intCast(offset * @sizeOf(f32)));
+            @intCast(hdim * @sizeOf(f32)),             // nb1: stride along n_kv_head dim
+            @intCast(hdim * nkv * @sizeOf(f32)),       // nb2: stride along seq dim
+            @intCast(offset * hdim * nkv * @sizeOf(f32))); // offset along seq dim
         const v_cpy = ggml.cpy(ctx, new_v, v_dst);
         graph.buildForwardExpand(v_cpy);
 
