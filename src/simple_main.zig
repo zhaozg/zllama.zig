@@ -131,7 +131,7 @@ const SimpleEngine = struct {
     n_threads: i32,
     gguf_data: []u8,
 
-    // Graph optimization: gallocr reuse context for incremental decoding
+    // Graph optimization: graph structure reuse + gallocr for incremental decoding
     inc_ctx: graph_context.IncContext,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: []const u8, cli_args: *const CliArgs) !SimpleEngine {
@@ -184,7 +184,7 @@ const SimpleEngine = struct {
             try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, b);
         }
 
-        // Create incremental decoding context for gallocr reuse
+        // Create incremental decoding context with graph structure reuse
         const inc_ctx_size = 512 * 1024 * 1024; // 512MB for incremental
         const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
 
@@ -267,7 +267,7 @@ const SimpleEngine = struct {
         var new_token_id: i32 = first_token;
         var pos: i32 = n_prompt_tokens;
 
-        // --- Incremental decoding (uses inc_ctx with gallocr reuse) ---
+        // --- Incremental decoding (uses inc_ctx with graph structure reuse) ---
         while (n_decode < max_tokens) {
             // Check for EOG token
             if (self.tok.isEog(@intCast(new_token_id))) {
@@ -279,33 +279,23 @@ const SimpleEngine = struct {
             logger.debug("decoding token {d}", .{new_token_id});
             try self.decodeAndPrintToken(io, @intCast(new_token_id));
 
-            // Prepare next batch using IncContext for gallocr reuse
+            // Prepare next batch: IncContext reuses input tensor + graph + gallocr
             const step = try self.inc_ctx.beginStep();
-            const inc_ctx = step.ctx;
-            const inc_galloc = step.galloc;
 
-            // Build graph in the incremental context
-            inc_ctx.setNoAlloc(false);
-            const single_input = try inc_ctx.newTensor1d(.i32, 1);
-            inc_ctx.setNoAlloc(true);
+            // Set input token on pre-allocated tensor
+            step.setToken(new_token_id);
 
-            var inc_graph = try ggml.CGraph.init(inc_ctx);
-            var inc_builder = graph_builder.GraphBuilder.init(inc_ctx, inc_graph, &self.params, self.allocator);
-            const inc_logits = try self.model.buildGraph(&inc_builder, single_input, 1, @ptrCast(&self.kv_cache_mgr), pos);
+            // Build graph using cached context and graph object
+            var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+            const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
 
             // Reuse gallocr (avoids expensive graph analysis per token)
-            if (!inc_galloc.allocGraph(inc_graph)) {
+            if (!step.galloc.allocGraph(step.graph)) {
                 std.debug.print("Error: inc graph alloc failed\n", .{});
                 return error.GraphAllocFailed;
             }
 
-            {
-                const data = single_input.dataBytes();
-                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1];
-                slice[0] = new_token_id;
-            }
-
-            try inc_graph.compute(self.n_threads);
+            try step.graph.compute(self.n_threads);
             new_token_id = sampler.Sampler.sampleGreedy(inc_logits);
             logger.debug("next token (greedy) = {d}", .{new_token_id});
             pos += 1;

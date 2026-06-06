@@ -316,35 +316,25 @@ const InferenceEngine = struct {
         var gen_token_count: u32 = 0;
         const gen_start_time = currentTimeMs();
 
-        // --- Incremental decoding (uses inc_ctx with gallocr reuse) ---
+        // --- Incremental decoding (uses inc_ctx with graph structure reuse) ---
         while (gen_token_count < max_tokens - 1) {
-            // Prepare next batch using IncContext for gallocr reuse
+            // Prepare next batch: IncContext reuses input tensor + graph + gallocr
             const step = try self.inc_ctx.beginStep();
-            const inc_ctx = step.ctx;
-            const inc_galloc = step.galloc;
 
-            // Build graph in the incremental context
-            inc_ctx.setNoAlloc(false);
-            const single_input = try inc_ctx.newTensor1d(.i32, 1);
-            inc_ctx.setNoAlloc(true);
+            // Set input token on pre-allocated tensor
+            step.setToken(@as(i32, @intCast(current_token)));
 
-            var inc_graph = try ggml.CGraph.init(inc_ctx);
-            var inc_builder = graph_builder.GraphBuilder.init(inc_ctx, inc_graph, &self.params, self.allocator);
-            const inc_logits = try self.model.buildGraph(&inc_builder, single_input, 1, @ptrCast(&self.kv_cache_mgr), pos);
+            // Build graph using cached context and graph object
+            var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+            const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
 
             // Reuse gallocr (avoids expensive graph analysis per token)
-            if (!inc_galloc.allocGraph(inc_graph)) {
+            if (!step.galloc.allocGraph(step.graph)) {
                 logger.err("Failed to allocate incremental graph memory", .{});
                 return error.GraphAllocFailed;
             }
 
-            {
-                const data = single_input.dataBytes();
-                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..1];
-                slice[0] = @as(i32, @intCast(current_token));
-            }
-
-            try inc_graph.compute(self.n_threads);
+            try step.graph.compute(self.n_threads);
 
             const next_token = sampler.Sampler.sampleGreedy(inc_logits);
             logger.debug("next_token = {d}", .{next_token});

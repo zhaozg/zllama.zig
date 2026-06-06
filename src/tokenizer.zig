@@ -298,6 +298,7 @@ pub const Tokenizer = struct {
         while (key_iter.next()) |key| {
             self.allocator.free(key.*);
         }
+        self.merges.deinit();
         self.eog_ids.deinit(self.allocator);
 
         self.trie_root.deinit(self.allocator);
