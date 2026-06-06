@@ -195,6 +195,7 @@ const InferenceEngine = struct {
         const max_seq_len = @min(params.max_seq_len, 2048);
         var kv_cache_mgr = try kv_cache.KVCache.init(ctx_kv_cache, params.n_layer, params.n_kv_head, params.n_head_dim, max_seq_len, allocator);
         errdefer kv_cache_mgr.deinit(allocator);
+        model.setKVCacheContext(ctx_kv_cache);
         const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
         errdefer ctx_graph.deinit();
         {

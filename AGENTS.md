@@ -66,14 +66,20 @@
 
 ```
 zllama.zig/
-├── AGENTS.md                    # 本文件
-├── ARCHITECTURE.md              # 系统架构设计
-├── GGML_BINDING.md              # ggml.zig 绑定设计
-├── TECHNICAL_CHALLENGES.md      # 技术难重点分析
-├── ROADMAP.md                   # 开发路线图
+├── AGENTS.md                    # 本文件（AI 编程入口）
+├── ROADMAP.md                   # 开发路线图（含已完成功能、待办、调试指南）
+├── README.md                    # 项目简介
 ├── build.zig                    # Zig 构建脚本
+├── docs/                        # 设计文档
+│   ├── ARCHITECTURE.md          # 系统架构设计
+│   ├── GGML_BINDING.md          # ggml.zig 绑定设计
+│   ├── TECHNICAL_CHALLENGES.md  # 技术难重点分析
+│   ├── TEST.md                  # 测试体系文档
+│   └── QWEN35.md                # Qwen3.5 模型实现笔记
 ├── src/
 │   ├── main.zig                 # 入口（Juicy Main 签名）
+│   ├── simple_main.zig          # 简化推理入口（与 llama-simple 对齐）
+│   ├── tokenize_main.zig        # 分词工具入口
 │   ├── ggml.zig                 # C 绑定 + 安全封装（模块入口，重新导出子模块）
 │   ├── gguf.zig                 # GGUF 解析器（v2/v3）
 │   ├── model.zig                # 模型抽象接口定义
@@ -116,6 +122,8 @@ zllama.zig/
 │   │   ├── test_archs.zig       # 架构测试
 │   │   ├── test_kv_cache.zig    # KV Cache 测试
 │   │   ├── test_layers.zig      # 层测试
+│   │   ├── test_vocab.zig       # 词汇表测试
+│   │   ├── test_compare_logits.zig # Logits 对比测试
 │   │   └── utils.zig            # 测试工具
 │   └── tools/                   # 工具可执行文件
 │       ├── compare_logits.zig   # logits 对比工具
@@ -165,7 +173,7 @@ const tokenizer = @import("tokenizer");
 
 ## 🤖 AI 工作流程
 
-1. **需求理解**：优先阅读 `AGENTS.md`、`ARCHITECTURE.md`、`GGML_BINDING.md`、`TECHNICAL_CHALLENGES.md`。
+1. **需求理解**：优先阅读 `AGENTS.md`、`docs/ARCHITECTURE.md`、`docs/GGML_BINDING.md`、`docs/TECHNICAL_CHALLENGES.md`。
 2. **代码生成**：
    - 任何涉及 ggml C 调用的代码必须通过 `ggml.zig` 的封装，不可直接 `@cImport` 到业务模块。
    - 新增层或算子时，先在 `ggml.zig` 添加安全封装，再在业务中使用。

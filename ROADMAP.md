@@ -12,9 +12,10 @@
 | Qwen2 / Qwen3.5 / LLaMA 推理 | ✅ 已完成 |
 | 多模型架构（registry + layers/ + models/） | ✅ 已完成 |
 | KV Cache + 增量解码 | ✅ 已完成 |
-| 测试体系（GGUF / 架构 / 层 / KV Cache） | ✅ 已完成 |
+| 测试体系（GGUF / 架构 / 层 / KV Cache / 词汇表） | ✅ 已完成 |
 | 调试工具（dump_graph / compare_logits / gen_ref） | ✅ 已完成 |
 | 内存泄漏修复 | ✅ 已完成 |
+| 推理正确性验证（tinyllama / Llama-3.2 / Qwen3.5） | ✅ 已完成 |
 | Metal / CUDA 后端 | ⬜ 待完成 |
 | CI / 性能基准 / 生态工具 | ⬜ 待完成 |
 
@@ -43,7 +44,69 @@ SSM 参数读取 → forwardSSM → forwardFullAttention → 层类型判断 →
 
 ---
 
-## 验证体系（源自 PLAN.md）
+## 已完成功能清单
+
+### 核心引擎
+- ✅ 项目结构搭建（AGENTS.md、ARCHITECTURE.md、GGML_BINDING.md、TECHNICAL_CHALLENGES.md、ROADMAP.md）
+- ✅ ggml.zig 安全封装层（C 绑定、Context、Tensor、CGraph、Backend、Ops）
+- ✅ GGUF v2/v3 解析器
+- ✅ 模型抽象接口（model.zig）
+- ✅ 模型注册与工厂函数（registry.zig）
+- ✅ Qwen2 模型实现
+- ✅ Qwen3.5 模型实现（含混合注意力、SSM 层）
+- ✅ LLaMA 模型实现
+- ✅ KV Cache 管理
+- ✅ BPE 分词器
+- ✅ 采样器（贪心采样）
+- ✅ zllama-simple 入口（simple_main.zig）
+- ✅ zllama 主入口（main.zig）
+- ✅ 构建脚本（build.zig，含三个可执行文件）
+
+### 算子与修复
+- ✅ 卷积/SSM 相关算子（conv1d、ssmConv、ssmScan、gatedDeltaNet）
+- ✅ 基于词汇表的 tokenizer 测试（test_vocab.zig，18 个词汇表）
+- ✅ 注意力 mask 修复（diagMaskInf 正确处理 3D 张量）
+- ✅ Qwen3.5 Q/gate 交错布局修复（view_3d with interleaved stride）
+- ✅ SSM 状态持久化（ctx_kv_cache 分配，不受 ctx_graph.reset() 影响）
+- ✅ gdn_output view 修复（使用正确的 stride）
+- ✅ RoPE 位置编码修复（buildMultiPositionTensor 布局对齐 MRoPE/IMRoPE）
+- ✅ EOG 检测（tokenizer 新增 isEog() 方法和 eog_ids 集合）
+- ✅ 多 prompt token 支持（sampleGreedy 正确取最后一个 token 的 logits）
+
+### 推理验证
+- ✅ tinyllama 推理正确
+- ✅ Llama-3.2-3B 推理正确
+- ✅ Qwen3.5 SSM 层推理正确性（修复 resetSSMStates 在增量解码循环中被错误调用的问题）
+- ✅ main.zig 段错误修复（缺少 setKVCacheContext 调用导致 Qwen3.5 SSM 状态被释放）
+- ✅ 推理正确性验证：zllama-simple 输出与 llama-simple 对比，三种模型输出基本一致
+
+### 测试覆盖
+- ✅ GGUF 解析测试（手工构造 v2/v3 二进制数据）
+- ✅ 架构检测测试（30+ 用例）
+- ✅ 算子层数值测试（RMSNorm, RoPE, SwiGLU, Attention）
+- ✅ KV Cache 功能测试
+- ✅ 词汇表测试（18 个词汇表，基于 llama.cpp 标准测试数据）
+- ✅ Logits 比较器测试
+- ✅ `zig build test` 全部通过
+
+## ⏳ 待完成
+
+### 性能优化
+- **图复用**：当前每 token 重建计算图，应复用图结构。复杂度较高，涉及架构层面改动。llama.cpp 通过 `llm_graph_input_i` 接口管理输入张量实现图复用。
+
+### 后端支持
+- **Metal 后端**（macOS GPU 加速）
+- **CUDA 后端**（Linux GPU 加速）
+
+### 生态工具
+- 流式 CLI
+- CI（GitHub Actions）
+- 性能基准测试
+- 预编译发布
+
+---
+
+## 验证体系
 
 ### 测试金字塔
 
@@ -69,6 +132,7 @@ SSM 参数读取 → forwardSSM → forwardFullAttention → 层类型判断 →
 | `tests/test_archs.zig` | 架构注册与检测（30+ 用例） |
 | `tests/test_layers.zig` | RMSNorm / RoPE / SwiGLU 数值测试 |
 | `tests/test_kv_cache.zig` | KV Cache 功能测试 |
+| `tests/test_vocab.zig` | 词汇表测试（18 个词汇表） |
 | `tests/test_compare_logits.zig` | Logits 对比测试 |
 
 ### 调试工具
@@ -105,6 +169,28 @@ SSM 参数读取 → forwardSSM → forwardFullAttention → 层类型判断 →
 
 ---
 
+## 调试指南
+
+### 日志级别
+
+```bash
+# 调试模式（显示详细日志）
+zig-out/bin/zllama-simple -d -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
+
+# 详细模式
+zig-out/bin/zllama-simple -v -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
+```
+
+### 常见问题
+
+1. **GraphAllocFailed**：ctx_graph 内存不足，增大 mem_size_estimate
+2. **输出乱码**：tokenizer 的 decodeSingle 实现有问题，检查 BPE 解码逻辑
+3. **输出为空**：采样得到的 token_id 为 0（unk）或 EOS，检查 logits 形状和采样逻辑
+4. **速度慢**：每 token 重建计算图导致，后续应实现图复用
+5. **Qwen3.5 输出 "0"**：SSM 层（gatedDeltaNet）计算图构建有问题，需要检查 gdn_output 的 view 和 state 管理
+
+---
+
 ## 代码验证约束
 
 - [x] `pub fn main(init: std.process.Init) !void`
@@ -115,5 +201,5 @@ SSM 参数读取 → forwardSSM → forwardFullAttention → 层类型判断 →
 ## 近期优先级
 
 1. ⬜ Metal / CUDA 后端
-2. ⬜ 性能优化与基准测试
+2. ⬜ 性能优化（图复用）
 3. ⬜ CI + 生态工具
