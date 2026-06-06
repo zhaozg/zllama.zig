@@ -59,6 +59,10 @@ pub const Tokenizer = struct {
     /// token score 表（用于 SPM 编码）
     token_scores: std.ArrayListUnmanaged(f32),
 
+    /// EOG (End-of-Generation) token ID 集合
+    /// 与 llama.cpp 的 special_eog_ids 对应
+    eog_ids: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
+
     // ========================================================================
     // 初始化
     // ========================================================================
@@ -75,6 +79,7 @@ pub const Tokenizer = struct {
             .trie_root = TrieNode.init(allocator),
             .unicode_to_byte = std.StringHashMap(u8).init(allocator),
             .token_scores = .empty,
+            .eog_ids = .empty,
         };
 
         log.info("Tokenizer model: '{s}' -> {s}", .{
@@ -142,6 +147,82 @@ pub const Tokenizer = struct {
                 tok.merges.putAssumeCapacity(owned_key, @intCast(rank));
             }
             log.info("Tokenizer: {d} BPE merge rules", .{val.array_val.len});
+        }
+
+        // 构建 EOG (End-of-Generation) token ID 集合
+        // 与 llama.cpp 的 special_eog_ids 逻辑保持一致
+        {
+            try tok.eog_ids.ensureTotalCapacity(allocator, 16);
+
+            // 从 GGUF 元数据收集
+            if (gguf_file.getU32("tokenizer.ggml.eos_token_id")) |eos_id| {
+                tok.eog_ids.put(allocator, eos_id, {}) catch {};
+            }
+            if (gguf_file.getU32("tokenizer.ggml.eot_token_id")) |eot_id| {
+                tok.eog_ids.put(allocator, eot_id, {}) catch {};
+            }
+            if (gguf_file.getU32("tokenizer.ggml.eom_token_id")) |eom_id| {
+                tok.eog_ids.put(allocator, eom_id, {}) catch {};
+            }
+            if (gguf_file.getU32("tokenizer.ggml.fim_pad_token_id")) |fim_pad_id| {
+                tok.eog_ids.put(allocator, fim_pad_id, {}) catch {};
+            }
+            if (gguf_file.getU32("tokenizer.ggml.fim_rep_token_id")) |fim_rep_id| {
+                tok.eog_ids.put(allocator, fim_rep_id, {}) catch {};
+            }
+            if (gguf_file.getU32("tokenizer.ggml.fim_sep_token_id")) |fim_sep_id| {
+                tok.eog_ids.put(allocator, fim_sep_id, {}) catch {};
+            }
+
+            // 通过名称匹配收集 EOG tokens（与 llama.cpp 保持一致）
+            const eog_names = [_][]const u8{
+                "<|endoftext|>",
+                "<|im_end|>",
+                "<|fim_pad|>",
+                "<|repo_name|>",
+                "<|file_sep|>",
+                "<|eot_id|>",
+                "<|end|>",
+                "<|END|>",
+                "<EOS>",
+                "<EOT>",
+                "<end_of_text>",
+                "<|end_of_text|>",
+                "<end_of_utterance>",
+                "<eos>",
+                "<|return|>",
+                "<|call|>",
+                "<|flush|>",
+                "<|calls|>",
+                "<end_of_turn>",
+                "</s>",
+                "<|eom_id|>",
+                "[EOT]",
+                "[EOS]",
+                "<turn|>",
+                "<|tool_response>",
+                "<｜end▁of▁sentence｜>",
+            };
+            for (tok.vocab.items, 0..) |entry, id| {
+                if (entry == .normal) {
+                    for (eog_names) |name| {
+                        if (std.mem.eql(u8, entry.normal, name)) {
+                            const uid = @as(u32, @intCast(id));
+                            if (!tok.eog_ids.contains(uid)) {
+                                tok.eog_ids.put(allocator, uid, {}) catch {};
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 确保 special.eos 在集合中
+            if (tok.special.eos != 0 and !tok.eog_ids.contains(tok.special.eos)) {
+                tok.eog_ids.put(allocator, tok.special.eos, {}) catch {};
+            }
+
+            log.info("Tokenizer: {d} EOG tokens", .{tok.eog_ids.count()});
         }
 
         return tok;
@@ -217,7 +298,8 @@ pub const Tokenizer = struct {
         while (key_iter.next()) |key| {
             self.allocator.free(key.*);
         }
-        self.merges.deinit();
+        self.eog_ids.deinit(self.allocator);
+
         self.trie_root.deinit(self.allocator);
         for (&self.bytes_to_unicode) |mapped| {
             self.allocator.free(mapped);
@@ -286,6 +368,11 @@ pub const Tokenizer = struct {
         return false;
     }
 
+    /// 判断 token 是否为 EOG (End-of-Generation) token
+    /// 与 llama.cpp 的 llama_vocab_is_eog() 对应
+    pub fn isEog(self: *const Tokenizer, token_id: u32) bool {
+        return self.eog_ids.contains(token_id);
+    }
     pub fn byteToTokenId(self: *const Tokenizer, byte: u8) u32 {
         if (self.byte_to_token_id[byte]) |tid| return tid;
         return self.special.unk;

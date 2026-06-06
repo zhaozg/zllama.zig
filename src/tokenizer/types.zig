@@ -215,6 +215,8 @@ pub const SpecialTokens = struct {
     sep: u32 = 2,
     cls: u32 = 1,
     mask: u32 = 0,
+    eot: u32 = 0,  // End-of-Turn token (e.g. <|eot_id|>)
+    eom: u32 = 0,  // End-of-Message token (e.g. <|eom_id|>)
 
     pub fn fromGGUF(gguf_file: *const gguf.GGUFFile) SpecialTokens {
         return SpecialTokens{
@@ -225,6 +227,8 @@ pub const SpecialTokens = struct {
             .sep = gguf_file.getU32("tokenizer.ggml.sep_token_id") orelse 2,
             .cls = gguf_file.getU32("tokenizer.ggml.cls_token_id") orelse 1,
             .mask = gguf_file.getU32("tokenizer.ggml.mask_token_id") orelse 0,
+            .eot = gguf_file.getU32("tokenizer.ggml.eot_token_id") orelse 0,
+            .eom = gguf_file.getU32("tokenizer.ggml.eom_token_id") orelse 0,
         };
     }
 };

@@ -240,22 +240,10 @@ const SimpleEngine = struct {
         var pos: i32 = n_prompt_tokens;
 
         while (n_decode < max_tokens) {
-            // 检查是否为 EOG token
-            if (self.tok.isSpecialToken(@intCast(new_token_id))) {
-                if (new_token_id == self.tok.special.eos or
-                    new_token_id == self.tok.special.bos or
-                    new_token_id == self.tok.special.pad or
-                    new_token_id == self.tok.special.unk) {
-                    logger.debug("EOG token {d} (eos={d}, bos={d}, pad={d}, unk={d}) stopping", .{
-                        new_token_id, self.tok.special.eos, self.tok.special.bos, self.tok.special.pad, self.tok.special.unk,
-                    });
-                    break;
-                }
-                if (@as(usize, @intCast(new_token_id)) < self.tok.token_types.items.len and
-                    self.tok.token_types.items[@as(usize, @intCast(new_token_id))] == .control) {
-                    logger.debug("control token {d} stopping", .{new_token_id});
-                    break;
-                }
+            // 检查是否为 EOG token（与 llama-simple 的 llama_vocab_is_eog() 对齐）
+            if (self.tok.isEog(@intCast(new_token_id))) {
+                logger.debug("EOG token {d} stopping", .{new_token_id});
+                break;
             }
 
             // 解码并打印新 token
