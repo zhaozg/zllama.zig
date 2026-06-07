@@ -298,6 +298,15 @@ pub const GGUFFile = struct {
         return null;
     }
 
+    /// 计算所有张量数据的原始总字节数
+    pub fn totalTensorDataSize(self: *const GGUFFile) usize {
+        var total: usize = 0;
+        for (self.tensors.items) |*t| {
+            total += t.sizeBytes();
+        }
+        return total;
+    }
+
     /// 获取张量数据的切片
     pub fn getTensorData(self: *const GGUFFile, info: *const TensorInfo) []const u8 {
         const offset = self.tensor_data_offset + info.offset;

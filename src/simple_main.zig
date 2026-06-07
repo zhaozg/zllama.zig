@@ -180,20 +180,26 @@ const SimpleEngine = struct {
         errdefer tok.deinit();
         logger.info("Tokenizer initialized.", .{});
         const n_threads = if (cli_args.n_threads > 0) cli_args.n_threads else ggml.recommendedThreads();
-        const mem_size_estimate = 2 * 1024 * 1024 * 1024;
-        const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
+        // ctx_weights: NOT used for model weight loading (each model allocates its own).
+        // Keep a small placeholder context for potential future use.
+        const ctx_weights = try ggml.Context.initNoAlloc(16 * 1024 * 1024);
         errdefer ctx_weights.deinit();
-        const ctx_kv_cache = try ggml.Context.initNoAlloc(mem_size_estimate);
-        errdefer ctx_kv_cache.deinit();
+        // ctx_kv_cache: sized for KV cache tensors per layer
         const max_seq_len = @min(params.max_seq_len, 2048);
         const hdim_kv = params.n_head_dim;
         const hdim_k = if (params.n_head_dim_k > 0) params.n_head_dim_k else hdim_kv;
         const hdim_v = if (params.n_head_dim_v > 0) params.n_head_dim_v else hdim_kv;
+        // KV cache: n_layer * 2 * max_seq_len * n_kv_head * head_dim * sizeof(f32), plus 25% buffer
+        const kv_cache_bytes = @as(usize, @intCast(params.n_layer)) * 2 * @as(usize, @intCast(max_seq_len)) * @as(usize, @intCast(params.n_kv_head)) * @as(usize, @intCast(hdim_kv)) * 4;
+        const kv_cache_mem = @max(256 * 1024 * 1024, kv_cache_bytes + kv_cache_bytes / 4);
+        const ctx_kv_cache = try ggml.Context.initNoAlloc(kv_cache_mem);
+        errdefer ctx_kv_cache.deinit();
         var kv_cache_mgr = try kv_cache.KVCache.initWithKVDim(ctx_kv_cache, params.n_layer, params.n_kv_head, hdim_k, hdim_v, max_seq_len, allocator);
         errdefer kv_cache_mgr.deinit(allocator);
         // Set Qwen35's ctx_kv_cache (for persistent SSM states)
         model.setKVCacheContext(ctx_kv_cache);
-        const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
+        // ctx_graph: for compute graph building during prompt processing
+        const ctx_graph = try ggml.Context.initNoAlloc(512 * 1024 * 1024);
         errdefer ctx_graph.deinit();
         {
             const b = ggml.backendCpuBufferType();
