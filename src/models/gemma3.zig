@@ -103,8 +103,7 @@ pub const Gemma3Model = struct {
         _ = io;
         self.params = try parseParams(gguf_file, allocator);
 
-        const mem_size_estimate = estimateMemSize(&self.params);
-        self.ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
+        self.ctx_weights = try ggml.Context.initNoAlloc(estimateMemSize(gguf_file));
 
         self.weights = try loadWeights(gguf_file, self.ctx_weights, &self.params, allocator);
     }
@@ -511,12 +510,12 @@ fn loadWeights(
                 log.warn("Layer {d}: missing attn_k_norm.weight", .{i});
                 break :blk null;
             },
-            .attn_post_norm_weight = loadOpt(ctx, gguf_file, prefix, "attn_post_norm.weight", i) orelse blk: {
-                log.warn("Layer {d}: missing attn_post_norm.weight", .{i});
+            .attn_post_norm_weight = loadOpt(ctx, gguf_file, prefix, "post_attention_norm.weight", i) orelse blk: {
+                log.warn("Layer {d}: missing post_attention_norm.weight", .{i});
                 break :blk null;
             },
-            .ffn_post_norm_weight = loadOpt(ctx, gguf_file, prefix, "ffn_post_norm.weight", i) orelse blk: {
-                log.warn("Layer {d}: missing ffn_post_norm.weight", .{i});
+            .ffn_post_norm_weight = loadOpt(ctx, gguf_file, prefix, "post_ffw_norm.weight", i) orelse blk: {
+                log.warn("Layer {d}: missing post_ffw_norm.weight", .{i});
                 break :blk null;
             },
             .attn_q_weight = try loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight"),
@@ -580,48 +579,15 @@ fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name:
     return error.TensorNotFound;
 }
 
-fn estimateMemSize(params: *const Gemma3Params) usize {
-    const n_vocab = params.base.n_vocab;
-    const n_embd = params.base.n_embd;
-    const n_kv_head = params.base.n_kv_head;
-    const n_layer = params.base.n_layer;
-    const n_ff = params.base.n_ff;
-    const head_dim = params.base.n_head_dim;
-
-    const bytes_per_elem_quant: f64 = 0.6;
-    const bytes_per_elem_f32: u64 = 4;
-
-    // token_embd
-    var total: u64 = @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_vocab)) * bytes_per_elem_quant));
-    // output.weight (if exists)
-    total += @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_vocab)) * bytes_per_elem_quant));
-    // output_norm
-    total += n_embd * bytes_per_elem_f32;
-
-    const kv_dim = n_kv_head * head_dim;
-    const per_layer_quant: u64 =
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_embd)) * bytes_per_elem_quant)) + // attn_q
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * kv_dim)) * bytes_per_elem_quant)) + // attn_k
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * kv_dim)) * bytes_per_elem_quant)) + // attn_v
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_embd)) * bytes_per_elem_quant)) + // attn_output
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_ff)) * bytes_per_elem_quant)) + // ffn_gate
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_ff)) * bytes_per_elem_quant)) + // ffn_up
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_ff * n_embd)) * bytes_per_elem_quant)); // ffn_down
-
-    // Gemma 3 has additional norm weights:
-    // Q/K norm: [n_embd_head_k] each
-    // Post norms: [n_embd] each
-    const per_layer_f32: u64 =
-        6 * n_embd * bytes_per_elem_f32 // attn_norm + ffn_norm + attn_post_norm + ffn_post_norm + q_norm + k_norm
-        + 2 * head_dim * bytes_per_elem_f32; // q_norm_head + k_norm_head
-
-    total += (per_layer_quant + per_layer_f32) * n_layer;
-
-    const n_tensors: u64 = 3 + n_layer * 13;
-    total += n_tensors * 256;
-    total = @as(u64, @intFromFloat(@as(f64, @floatFromInt(total)) * 1.2));
-
-    log.info("Estimated Gemma 3 weights memory: {d} MB", .{total / (1024 * 1024)});
+/// 根据 GGUF 文件中实际张量数据大小估计所需内存
+/// 加上 ggml 元数据开销（每个张量 ~256 字节）和 20% 安全余量
+fn estimateMemSize(gguf_file: *const gguf.GGUFFile) usize {
+    const raw_data_size = gguf_file.totalTensorDataSize();
+    const n_tensors = gguf_file.tensors.items.len;
+    const overhead: usize = n_tensors * 256;
+    const with_overhead = raw_data_size + overhead;
+    const total = with_overhead + with_overhead / 5; // +20%
+    log.info("Estimated Gemma 3 weights memory: {d} MB (raw: {d} MB, {d} tensors)", .{ total / (1024 * 1024), raw_data_size / (1024 * 1024), n_tensors });
     return total;
 }
 
