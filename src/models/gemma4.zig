@@ -168,7 +168,9 @@ pub const Gemma4Model = struct {
 
         for (w.layers, 0..) |*layer, i| {
             const n_head: i64 = @intCast(p.base.n_head);
-            const head_dim: i64 = @intCast(p.base.n_head_dim);
+
+            // Gemma 4: head_dim 由 attn_q_norm 维度决定（per-layer 可能不同）
+            const head_dim: i64 = layer.attn_q_norm_weight.ne()[0];
 
             // RoPE 参数
             const layer_is_swa = p.is_swa_layer.items[i];
@@ -199,22 +201,27 @@ pub const Gemma4Model = struct {
             // --- K/V 投影 + 注意力 ---
             var attn_out: *ggml.Tensor = undefined;
             if (layer.has_kv) {
-                const n_kv_head: i64 = @intCast(p.base.n_kv_head);
+                // head_dim_k from K norm weight (all layers use 256 for Gemma 4)
+                const head_dim_k: i64 = layer.attn_k_norm_weight.ne()[0];
+                const n_kv_head: i64 = if (layer.attn_k_weight) |kw|
+                    @divExact(kw.ne()[1], head_dim_k)
+                else
+                    n_head;
 
                 var k = ggml.mulMat(ctx, layer.attn_k_weight.?, attn_input);
                 var v_tensor: *ggml.Tensor = if (layer.attn_v_weight) |vw|
                     ggml.mulMat(ctx, vw, attn_input)
                 else
-                    k;
+                    k; // 共享 K/V
 
-                k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
-                v_tensor = ggml.reshape3d(ctx, v_tensor, head_dim, n_kv_head, n_tokens_i64);
+                k = ggml.reshape3d(ctx, k, head_dim_k, n_kv_head, n_tokens_i64);
+                v_tensor = ggml.reshape3d(ctx, v_tensor, head_dim_k, n_kv_head, n_tokens_i64);
 
                 // K Pre-norm
-                k = ggml.reshape2d(ctx, k, head_dim, n_kv_head * n_tokens_i64);
+                k = ggml.reshape2d(ctx, k, head_dim_k, n_kv_head * n_tokens_i64);
                 k = ggml.rmsNorm(ctx, k, p.base.norm_eps);
-                k = ggml.mul(ctx, k, ggml.reshape2d(ctx, layer.attn_k_norm_weight, head_dim, 1));
-                k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
+                k = ggml.mul(ctx, k, ggml.reshape2d(ctx, layer.attn_k_norm_weight, head_dim_k, 1));
+                k = ggml.reshape3d(ctx, k, head_dim_k, n_kv_head, n_tokens_i64);
 
                 // V RMSNorm (no weight)
                 v_tensor = ggml.rmsNorm(ctx, v_tensor, p.base.norm_eps);
@@ -222,32 +229,35 @@ pub const Gemma4Model = struct {
                 // RoPE on K
                 k = ggml.ropeExt(ctx, k, pos_tensor, rope_freqs, @intCast(rope_dim), 0, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
 
-                // Permute for attention
-                q = ggml.cont(ctx, ggml.permute(ctx, q, 0, 2, 1, 3));
-                k = ggml.cont(ctx, ggml.permute(ctx, k, 0, 2, 1, 3));
-                v_tensor = ggml.cont(ctx, ggml.permute(ctx, v_tensor, 0, 2, 1, 3));
-
-                // KV Cache
-                if (kv_cache_mgr) |cache| {
-                    cache.setKv(ctx, graph, i, k, v_tensor, @intCast(n_tokens_i64));
-                    k = cache.getKView(ctx, i);
-                    v_tensor = cache.getVView(ctx, i);
+                // Gemma 4: Q may have larger head_dim than K.
+                // Reshape Q to match K's head_dim BEFORE permute.
+                var n_head_eff = n_head;
+                if (head_dim != head_dim_k) {
+                    n_head_eff = @divExact(n_head * head_dim, head_dim_k);
+                    q = ggml.reshape3d(ctx, q, head_dim_k, n_head_eff, n_tokens_i64);
+                    log.debug("Layer {d}: reshape Q from [{d},{d}] -> [{d},{d}]", .{ i, head_dim, n_head, head_dim_k, n_head_eff });
                 }
+                // KV Cache (FIXME: per-layer n_kv_head varies, disabled for now)
+                // if (kv_cache_mgr) |cache| {
+                //     cache.setKv(ctx, graph, i, k, v_tensor, @intCast(n_tokens_i64));
+                //     k = cache.getKView(ctx, i);
+                //     v_tensor = cache.getVView(ctx, i);
+                // }
 
-                const cache_len: i64 = if (kv_cache_mgr) |cache|
-                    @as(i64, @intCast(cache.currentLen()))
-                else
-                    n_tokens_i64;
+                const cache_len: i64 = n_tokens_i64;
 
                 attn_out = attention.scaledDotProductAttention(ctx, q, k, v_tensor, .{
-                    .n_head = n_head,
+                    .n_head = n_head_eff,
                     .n_kv_head = n_kv_head,
-                    .head_dim = head_dim,
+                    .head_dim = head_dim_k,
                     .n_tokens = n_tokens_i64,
                     .cache_len = cache_len,
                     .start_pos = start_pos,
                     .scale_factor = 1.0,
                 });
+
+                // Reshape attn_out back to original Q dimension
+                attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
             } else {
                 // 非 KV 层：复用前面层的 KV cache
                 const kv_layer_idx = findKVLayer(w, i);
@@ -413,30 +423,66 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
     };
     errdefer p.is_swa_layer.deinit(allocator);
 
-    p.base.n_vocab = gguf_file.getU32("llama.vocab_size") orelse
+    p.base.n_vocab = gguf_file.getU32("gemma4.vocab_size") orelse
+        gguf_file.getU32("llama.vocab_size") orelse
         blk: {
         if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
             if (val.value_type == .array) break :blk @intCast(val.array_val.len);
         }
         break :blk 0;
     };
-    p.base.n_embd = gguf_file.getU32("llama.embedding_length") orelse 0;
-    p.base.n_head = gguf_file.getU32("llama.attention.head_count") orelse
+    p.base.n_embd = gguf_file.getU32("gemma4.embedding_length") orelse
+        gguf_file.getU32("llama.embedding_length") orelse 0;
+    p.base.n_head = gguf_file.getU32("gemma4.attention.head_count") orelse
+        gguf_file.getU32("llama.attention.head_count") orelse
+        gguf_file.getU32("gemma4.head_count") orelse
         gguf_file.getU32("llama.head_count") orelse 0;
-    p.base.n_kv_head = gguf_file.getU32("llama.attention.head_count_kv") orelse
-        gguf_file.getU32("llama.head_count_kv") orelse p.base.n_head;
-    p.base.n_layer = gguf_file.getU32("llama.block_count") orelse 0;
-    p.base.n_ff = gguf_file.getU32("llama.feed_forward_length") orelse 0;
 
-    if (p.base.n_head > 0 and p.base.n_embd > 0) {
-        p.base.n_head_dim = p.base.n_embd / p.base.n_head;
+    // head_count_kv is an array in Gemma 4 (per-layer KV heads)
+    if ((@constCast(gguf_file)).getU32Array("gemma4.attention.head_count_kv")) |kv_arr| {
+        var max_kv: u32 = 0;
+        for (kv_arr) |h| {
+            if (h > max_kv) max_kv = h;
+        }
+        p.base.n_kv_head = max_kv;
+    } else {
+        p.base.n_kv_head = gguf_file.getU32("gemma4.attention.head_count_kv") orelse
+            gguf_file.getU32("llama.attention.head_count_kv") orelse
+            gguf_file.getU32("gemma4.head_count_kv") orelse
+            gguf_file.getU32("llama.head_count_kv") orelse p.base.n_head;
     }
 
-    p.base.max_seq_len = gguf_file.getU32("llama.context_length") orelse 32768;
-    p.base.rope_theta = gguf_file.getF32("llama.rope.freq_base") orelse 10000.0;
-    p.base.rope_dim = gguf_file.getU32("llama.rope.dimension_count") orelse
+    p.base.n_layer = gguf_file.getU32("gemma4.block_count") orelse
+        gguf_file.getU32("llama.block_count") orelse 0;
+    p.base.n_ff = gguf_file.getU32("gemma4.feed_forward_length") orelse
+        gguf_file.getU32("llama.feed_forward_length") orelse 0;
+
+    // Gemma 4 uses explicit key_length/value_length for head_dim
+    // n_head_dim_k/n_head_dim_v 使用 SWA 维度（所有层的 K/V norm 维度一致）
+    // n_head_dim 保持 full attention 维度（用于 rope_dim 等）
+    const key_len = gguf_file.getU32("gemma4.attention.key_length") orelse
+        gguf_file.getU32("llama.attention.key_length") orelse 0;
+    const key_len_swa = gguf_file.getU32("gemma4.attention.key_length_swa") orelse 0;
+    const val_len_swa = gguf_file.getU32("gemma4.attention.value_length_swa") orelse 0;
+
+    if (key_len > 0) {
+        p.base.n_head_dim = key_len;
+    } else if (p.base.n_head > 0 and p.base.n_embd > 0) {
+        p.base.n_head_dim = p.base.n_embd / p.base.n_head;
+    }
+    // KV cache 使用 SWA 维度（所有层的 K norm 均为 key_length_swa）
+    p.base.n_head_dim_k = if (key_len_swa > 0) key_len_swa else p.base.n_head_dim;
+    p.base.n_head_dim_v = if (val_len_swa > 0) val_len_swa else p.base.n_head_dim;
+
+    p.base.max_seq_len = gguf_file.getU32("gemma4.context_length") orelse
+        gguf_file.getU32("llama.context_length") orelse 32768;
+    p.base.rope_theta = gguf_file.getF32("gemma4.rope.freq_base") orelse
+        gguf_file.getF32("llama.rope.freq_base") orelse 10000.0;
+    p.base.rope_dim = gguf_file.getU32("gemma4.rope.dimension_count") orelse
+        gguf_file.getU32("llama.rope.dimension_count") orelse
         @divExact(p.base.n_head_dim, @as(u32, 2));
-    p.base.norm_eps = gguf_file.getF32("llama.attention.layer_norm_rms_epsilon") orelse 1e-6;
+    p.base.norm_eps = gguf_file.getF32("gemma4.attention.layer_norm_rms_epsilon") orelse
+        gguf_file.getF32("llama.attention.layer_norm_rms_epsilon") orelse 1e-6;
     p.base.model_name = gguf_file.getString("general.name") orelse "";
     p.base.tokenizer_name = gguf_file.getString("tokenizer.ggml.model") orelse "gemma";
 
@@ -445,19 +491,20 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
     p.rope_freq_base_swa = gguf_file.getF32("gemma4.rope.freq_base_swa") orelse p.base.rope_theta;
     p.f_attention_scale = 1.0;
 
-    // 解析 SWA pattern
+    // 解析 SWA pattern（Gemma 4 使用 bool 数组）
     const n_layer_i64 = @as(usize, @intCast(p.base.n_layer));
-    if ((@constCast(gguf_file)).getU32Array("gemma4.attention.sliding_window_pattern")) |swa_pattern| {
+    if ((@constCast(gguf_file)).getBoolArray("gemma4.attention.sliding_window_pattern")) |swa_pattern| {
         try p.is_swa_layer.ensureTotalCapacity(allocator, n_layer_i64);
         for (swa_pattern, 0..) |is_swa, idx| {
             if (idx < n_layer_i64) {
-                p.is_swa_layer.appendAssumeCapacity(is_swa != 0);
+                p.is_swa_layer.appendAssumeCapacity(is_swa);
             }
         }
         while (p.is_swa_layer.items.len < n_layer_i64) {
             p.is_swa_layer.appendAssumeCapacity(false);
         }
     } else if (p.n_swa > 0) {
+        // 没有显式 pattern，使用周期模式：每 6 层一个全注意力层
         const swa_period: u32 = 6;
         try p.is_swa_layer.ensureTotalCapacity(allocator, n_layer_i64);
         for (0..n_layer_i64) |idx| {
@@ -480,7 +527,8 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
     }
 
     p.final_logit_softcapping = gguf_file.getF32("gemma4.final_logit_softcapping") orelse 0.0;
-    p.n_embd_per_layer = gguf_file.getU32("gemma4.embedding_length_per_layer") orelse 0;
+    p.n_embd_per_layer = gguf_file.getU32("gemma4.embedding_length_per_layer_input") orelse
+        gguf_file.getU32("gemma4.embedding_length_per_layer") orelse 0;
 
     if (p.base.n_vocab == 0 or p.base.n_embd == 0 or p.base.n_head == 0 or p.base.n_layer == 0) {
         log.err("Missing required Gemma 4 parameters", .{});
@@ -558,8 +606,13 @@ fn loadWeights(
         else
             null;
 
-        const out_scale = loadLayerWeight(ctx, gguf_file, prefix, "layer_out_scale.weight") catch null;
-        const rope_freqs = loadLayerWeight(ctx, gguf_file, prefix, "rope_freqs.weight") catch null;
+        const out_scale = loadLayerWeight(ctx, gguf_file, prefix, "layer_output_scale.weight") catch null;
+
+        // Gemma 4: rope_freqs is global, not per-layer. Load it once.
+        const rope_freqs = if (i == 0)
+            findOrCreateTensor(ctx, gguf_file, "rope_freqs.weight") catch null
+        else
+            null;
 
         layers[i] = LayerWeights{
             .prefix = prefix,
@@ -567,8 +620,9 @@ fn loadWeights(
             .ffn_norm_weight = try loadLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight"),
             .attn_q_norm_weight = q_norm,
             .attn_k_norm_weight = if (k_norm) |kn| kn else q_norm,
-            .attn_post_norm_weight = try loadLayerWeight(ctx, gguf_file, prefix, "attn_post_norm.weight"),
-            .ffn_post_norm_weight = try loadLayerWeight(ctx, gguf_file, prefix, "ffn_post_norm.weight"),
+            // Gemma 4 使用 post_attention_norm / post_ffw_norm 命名
+            .attn_post_norm_weight = try loadLayerWeight(ctx, gguf_file, prefix, "post_attention_norm.weight"),
+            .ffn_post_norm_weight = try loadLayerWeight(ctx, gguf_file, prefix, "post_ffw_norm.weight"),
             .attn_q_weight = try loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight"),
             .attn_k_weight = k_weight,
             .attn_v_weight = v_weight,
@@ -577,7 +631,7 @@ fn loadWeights(
             .ffn_up_weight = try loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight"),
             .ffn_down_weight = try loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight"),
             .out_scale = out_scale,
-            .rope_freqs = rope_freqs,
+            .rope_freqs = if (i == 0) rope_freqs else null,
             .has_kv = has_kv,
         };
         layers_loaded = i + 1;
