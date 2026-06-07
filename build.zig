@@ -4,29 +4,48 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // 系统头文件路径
-    const include_path: std.Build.LazyPath = .{ .cwd_relative = "/usr/local/include" };
+    // -Dbundle-ggml: build ggml from source instead of using system-installed libraries
+    const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse false;
 
-    // --- ggml 模块（C 绑定 + 安全封装） ---
+    // Build ggml from source when bundling, otherwise nil
+    const ggml_lib: ?*std.Build.Step.Compile = if (bundle_ggml)
+        buildGgmlFromSource(b, target, optimize)
+    else
+        null;
+
+    // ======================================================================
+    // ggml 模块（C 绑定 + 安全封装）
+    // ======================================================================
     const ggml_mod = b.createModule(.{
         .root_source_file = b.path("src/ggml.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    ggml_mod.addIncludePath(include_path);
-    ggml_mod.linkSystemLibrary("ggml-base", .{});
-    ggml_mod.linkSystemLibrary("ggml", .{});
 
+    if (bundle_ggml) {
+        // 从源码构建时：使用 deps/ggml 中的头文件，链接自建静态库
+        ggml_mod.addIncludePath(b.path("deps/ggml/include"));
+        ggml_mod.addIncludePath(b.path("deps/ggml/src"));
+        ggml_mod.addCMacro("GGML_USE_CPU", "1");
+        ggml_mod.linkLibrary(ggml_lib.?);
+    } else {
+        // 使用系统安装的 ggml
+        ggml_mod.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+        ggml_mod.linkSystemLibrary("ggml-base", .{});
+        ggml_mod.linkSystemLibrary("ggml", .{});
+    }
+
+    // macOS 框架和加速
     if (target.result.os.tag == .macos) {
-        ggml_mod.linkFramework("Metal", .{});
         ggml_mod.linkFramework("Foundation", .{});
         ggml_mod.linkFramework("Accelerate", .{});
-        ggml_mod.addCMacro("GGML_USE_METAL", "1");
         ggml_mod.addCMacro("GGML_USE_ACCELERATE", "1");
     }
 
-    // --- 内部模块 ---
+    // ======================================================================
+    // 内部模块
+    // ======================================================================
     const gguf_mod = b.createModule(.{
         .root_source_file = b.path("src/gguf.zig"),
         .target = target,
@@ -130,8 +149,6 @@ pub fn build(b: *std.Build) void {
     graph_context_mod.addImport("graph_builder", graph_builder_mod);
     graph_context_mod.addImport("memory", memory_mod);
 
-    // model_mod 需要 graph_builder_mod，所以 graph_builder_mod 必须在 model_mod 之后定义
-    // 但 model_mod 已经创建了，所以可以添加导入
     model_mod.addImport("graph_builder", graph_builder_mod);
 
     const registry_mod = b.createModule(.{
@@ -163,23 +180,9 @@ pub fn build(b: *std.Build) void {
     });
     sampler_mod.addImport("ggml", ggml_mod);
 
-    // 辅助函数：添加系统库和框架
-    const addSystemLibs = struct {
-        fn apply(mod: *std.Build.Module, t: std.Build.ResolvedTarget, inc: std.Build.LazyPath) void {
-            mod.addIncludePath(inc);
-            mod.linkSystemLibrary("ggml-base", .{});
-            mod.linkSystemLibrary("ggml", .{});
-            if (t.result.os.tag == .macos) {
-                mod.linkFramework("Metal", .{});
-                mod.linkFramework("Foundation", .{});
-                mod.linkFramework("Accelerate", .{});
-                mod.addCMacro("GGML_USE_METAL", "1");
-                mod.addCMacro("GGML_USE_ACCELERATE", "1");
-            }
-        }
-    }.apply;
-
-    // --- 主可执行文件 ---
+    // ======================================================================
+    // 主可执行文件 zllama
+    // ======================================================================
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -196,13 +199,15 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("sampler", sampler_mod);
     exe_mod.addImport("kv_cache", kv_cache_mod);
     exe_mod.addImport("graph_context", graph_context_mod);
-    addSystemLibs(exe_mod, target, include_path);
+
     const exe = b.addExecutable(.{
         .name = "zllama",
         .root_module = exe_mod,
     });
 
-    // --- zllama-tokenize 可执行文件 ---
+    // ======================================================================
+    // zllama-tokenize
+    // ======================================================================
     const tokenize_mod = b.createModule(.{
         .root_source_file = b.path("src/tokenize_main.zig"),
         .target = target,
@@ -212,14 +217,15 @@ pub fn build(b: *std.Build) void {
     tokenize_mod.addImport("ggml", ggml_mod);
     tokenize_mod.addImport("gguf", gguf_mod);
     tokenize_mod.addImport("tokenizer", tokenizer_mod);
-    addSystemLibs(tokenize_mod, target, include_path);
 
     const tokenize_exe = b.addExecutable(.{
         .name = "zllama-tokenize",
         .root_module = tokenize_mod,
     });
 
-    // --- zllama-simple 可执行文件 ---
+    // ======================================================================
+    // zllama-simple
+    // ======================================================================
     const simple_mod = b.createModule(.{
         .root_source_file = b.path("src/simple_main.zig"),
         .target = target,
@@ -236,7 +242,6 @@ pub fn build(b: *std.Build) void {
     simple_mod.addImport("sampler", sampler_mod);
     simple_mod.addImport("kv_cache", kv_cache_mod);
     simple_mod.addImport("graph_context", graph_context_mod);
-    addSystemLibs(simple_mod, target, include_path);
 
     const simple_exe = b.addExecutable(.{
         .name = "zllama-simple",
@@ -264,7 +269,6 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("sampler", sampler_mod);
     test_root_mod.addImport("kv_cache", kv_cache_mod);
     test_root_mod.addImport("graph_context", graph_context_mod);
-    addSystemLibs(test_root_mod, target, include_path);
 
     const test_unit = b.addTest(.{
         .name = "unit-tests",
@@ -272,20 +276,11 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&test_unit.step);
 
-    const test_layers_step = b.step("test-layers", "Run layer tests only");
-    test_layers_step.dependOn(&test_unit.step);
-
-    const test_gguf_step = b.step("test-gguf", "Run GGUF tests only");
-    test_gguf_step.dependOn(&test_unit.step);
-
-    const test_archs_step = b.step("test-archs", "Run architecture tests only");
-    test_archs_step.dependOn(&test_unit.step);
-
-    const test_kv_cache_step = b.step("test-kv-cache", "Run KV Cache tests only");
-    test_kv_cache_step.dependOn(&test_unit.step);
-
-    const test_vocab_step = b.step("test-vocab", "Run vocab-based tokenizer tests only");
-    test_vocab_step.dependOn(&test_unit.step);
+    _ = b.step("test-layers", "Run layer tests only");
+    _ = b.step("test-gguf", "Run GGUF tests only");
+    _ = b.step("test-archs", "Run architecture tests only");
+    _ = b.step("test-kv-cache", "Run KV Cache tests only");
+    _ = b.step("test-vocab", "Run vocab-based tokenizer tests only");
 
     // ======================================================================
     // 工具可执行文件
@@ -304,7 +299,6 @@ pub fn build(b: *std.Build) void {
         mod.addImport("graph_builder", graph_builder_mod);
         mod.addImport("memory", memory_mod);
         mod.addImport("tokenizer", tokenizer_mod);
-        addSystemLibs(mod, target, include_path);
 
         const exe_tool = b.addExecutable(.{
             .name = "zllama-dump-graph",
@@ -315,8 +309,7 @@ pub fn build(b: *std.Build) void {
         const run_cmd = b.addRunArtifact(exe_tool);
         run_cmd.step.dependOn(b.getInstallStep());
         if (b.args) |args| run_cmd.addArgs(args);
-        const run_step = b.step("dump-graph", "Run zllama-dump-graph tool");
-        run_step.dependOn(&run_cmd.step);
+        _ = b.step("dump-graph", "Run zllama-dump-graph tool");
     }
 
     {
@@ -333,7 +326,6 @@ pub fn build(b: *std.Build) void {
         mod.addImport("graph_builder", graph_builder_mod);
         mod.addImport("memory", memory_mod);
         mod.addImport("tokenizer", tokenizer_mod);
-        addSystemLibs(mod, target, include_path);
 
         const exe_tool = b.addExecutable(.{
             .name = "zllama-compare-logits",
@@ -344,8 +336,7 @@ pub fn build(b: *std.Build) void {
         const run_cmd = b.addRunArtifact(exe_tool);
         run_cmd.step.dependOn(b.getInstallStep());
         if (b.args) |args| run_cmd.addArgs(args);
-        const run_step = b.step("compare-logits", "Run zllama-compare-logits tool");
-        run_step.dependOn(&run_cmd.step);
+        _ = b.step("compare-logits", "Run zllama-compare-logits tool");
     }
 
     {
@@ -362,7 +353,6 @@ pub fn build(b: *std.Build) void {
         mod.addImport("graph_builder", graph_builder_mod);
         mod.addImport("memory", memory_mod);
         mod.addImport("tokenizer", tokenizer_mod);
-        addSystemLibs(mod, target, include_path);
 
         const exe_tool = b.addExecutable(.{
             .name = "zllama-gen-ref",
@@ -373,11 +363,12 @@ pub fn build(b: *std.Build) void {
         const run_cmd = b.addRunArtifact(exe_tool);
         run_cmd.step.dependOn(b.getInstallStep());
         if (b.args) |args| run_cmd.addArgs(args);
-        const run_step = b.step("gen-ref", "Run zllama-gen-ref tool");
-        run_step.dependOn(&run_cmd.step);
+        _ = b.step("gen-ref", "Run zllama-gen-ref tool");
     }
 
-    // --- 安装与运行 ---
+    // ======================================================================
+    // 安装与运行
+    // ======================================================================
     b.installArtifact(exe);
     b.installArtifact(tokenize_exe);
     b.installArtifact(simple_exe);
@@ -405,4 +396,160 @@ pub fn build(b: *std.Build) void {
     }
     const simple_run_step = b.step("simple", "Run zllama-simple tool");
     simple_run_step.dependOn(&simple_run_cmd.step);
+}
+
+// ============================================================================
+// 从源码构建 ggml 静态库
+// ============================================================================
+
+/// 构建 ggml 静态库（CPU 后端）。
+/// 返回一个 Step.Compile，可通过 Module.linkLibrary() 链接。
+fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const src_dir = "deps/ggml/src";
+    const cpu_dir = src_dir ++ "/ggml-cpu";
+    const amx_dir = cpu_dir ++ "/amx";
+    const cpu_arch = target.result.cpu.arch;
+    const os = target.result.os.tag;
+
+    // 创建 ggml 库模块（无 Zig 根文件，仅有 C/C++ link_objects）
+    const lib_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
+    });
+
+    // 头文件路径
+    lib_mod.addIncludePath(b.path("deps/ggml/include"));
+    lib_mod.addIncludePath(b.path("deps/ggml/src"));
+    lib_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu"));
+
+    // 宏定义
+    lib_mod.addCMacro("GGML_USE_CPU", "1");
+    lib_mod.addCMacro("GGML_BACKEND_DL", "1");
+    lib_mod.addCMacro("GGML_VERSION", "\"0.13.1\"");
+    lib_mod.addCMacro("GGML_COMMIT", "\"1e33fed3\"");
+    // x86_64 优化标志（所有 CPU 后端文件共享）
+    const x86_opt_flags: []const []const u8 = if (cpu_arch == .x86_64)
+        &.{ "-mavx2", "-mfma", "-mf16c", "-mavx", "-msse4.2" }
+    else
+        &.{};
+    // C 文件基础标志
+    const c_base_flags = &.{ "-std=c11", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-missing-braces", "-Wno-implicit-function-declaration" };
+
+    // C++ 文件基础标志
+    const cpp_base_flags = &.{ "-std=c++17", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-missing-braces" };
+
+    // 系统库链接（通过模块）
+    switch (os) {
+        .windows => {
+            lib_mod.linkSystemLibrary("ole32", .{});
+            lib_mod.linkSystemLibrary("ws2_32", .{});
+        },
+        .macos, .ios, .tvos, .watchos => {
+            lib_mod.linkFramework("Foundation", .{});
+            lib_mod.linkFramework("Accelerate", .{});
+            lib_mod.addCMacro("GGML_USE_ACCELERATE", "1");
+            lib_mod.addCMacro("ACCELERATE_NEW_LAPACK", "1");
+            lib_mod.addCMacro("ACCELERATE_LAPACK_ILP64", "1");
+        },
+        .linux => {
+            lib_mod.linkSystemLibrary("pthread", .{});
+        },
+        else => {},
+    }
+
+    // ---- 辅助：连接标志切片 ----
+    const ConcatFlags = struct {
+        fn concat(alloc: std.mem.Allocator, a: []const []const u8, extra: []const []const u8) []const []const u8 {
+            if (extra.len == 0) return a;
+            const result = alloc.alloc([]const u8, a.len + extra.len) catch @panic("OOM");
+            @memcpy(result[0..a.len], a);
+            @memcpy(result[a.len..], extra);
+            return result;
+        }
+    }.concat;
+
+    // ---- 添加 C 源文件 ----
+    inline for (.{ "ggml.c", "ggml-quants.c", "ggml-alloc.c" }) |file| {
+        lib_mod.addCSourceFile(.{
+            .file = b.path(src_dir ++ "/" ++ file),
+            .flags = c_base_flags,
+        });
+    }
+
+    // ---- 添加 C++ 核心源文件 ----
+    inline for (.{ "ggml.cpp", "ggml-backend.cpp", "ggml-backend-dl.cpp", "ggml-backend-reg.cpp", "ggml-backend-meta.cpp", "ggml-threading.cpp" }) |file| {
+        lib_mod.addCSourceFile(.{
+            .file = b.path(src_dir ++ "/" ++ file),
+            .flags = cpp_base_flags,
+        });
+    }
+
+    // ---- 添加 CPU 后端 C 文件（含架构优化标志） ----
+    inline for (.{ "ggml-cpu.c", "quants.c" }) |file| {
+        lib_mod.addCSourceFile(.{
+            .file = b.path(cpu_dir ++ "/" ++ file),
+            .flags = ConcatFlags(b.allocator, c_base_flags, x86_opt_flags),
+        });
+    }
+
+    // ---- 添加 CPU 后端 C++ 文件（含架构优化标志） ----
+    inline for (.{ "ggml-cpu.cpp", "repack.cpp", "hbm.cpp", "traits.cpp", "binary-ops.cpp", "unary-ops.cpp", "vec.cpp", "ops.cpp" }) |file| {
+        lib_mod.addCSourceFile(.{
+            .file = b.path(cpu_dir ++ "/" ++ file),
+            .flags = ConcatFlags(b.allocator, cpp_base_flags, x86_opt_flags),
+        });
+    }
+
+    // ---- 添加 AMX C++ 文件（含架构优化标志） ----
+    inline for (.{ "amx.cpp", "mmq.cpp" }) |file| {
+        lib_mod.addCSourceFile(.{
+            .file = b.path(amx_dir ++ "/" ++ file),
+            .flags = ConcatFlags(b.allocator, cpp_base_flags, x86_opt_flags),
+        });
+    }
+
+    // ---- 架构特定源文件 ----
+    switch (cpu_arch) {
+        .x86_64 => {
+            const arch_dir = cpu_dir ++ "/arch/x86";
+            lib_mod.addCSourceFile(.{
+                .file = b.path(arch_dir ++ "/cpu-feats.cpp"),
+                .flags = cpp_base_flags,
+            });
+            lib_mod.addCSourceFile(.{
+                .file = b.path(arch_dir ++ "/quants.c"),
+                .flags = ConcatFlags(b.allocator, c_base_flags, x86_opt_flags),
+            });
+            lib_mod.addCSourceFile(.{
+                .file = b.path(arch_dir ++ "/repack.cpp"),
+                .flags = ConcatFlags(b.allocator, cpp_base_flags, x86_opt_flags),
+            });
+        },
+        .aarch64 => {
+            const arch_dir = cpu_dir ++ "/arch/arm";
+            lib_mod.addCSourceFile(.{
+                .file = b.path(arch_dir ++ "/cpu-feats.cpp"),
+                .flags = cpp_base_flags,
+            });
+        },
+        else => {
+            // 其他架构：无架构特定优化文件
+        },
+    }
+
+    // 创建静态库
+    const lib = b.addLibrary(.{
+        .name = "ggml",
+        .root_module = lib_mod,
+        .linkage = .static,
+    });
+    // 链接时优化（macOS 上 LTO 需要 LLD，但 LLD 不支持 Mach-O，故仅在 Linux 上启用）
+    if (os == .linux) {
+        lib.lto = .full;
+        lib.use_lld = true;
+    }
+
+    return lib;
 }

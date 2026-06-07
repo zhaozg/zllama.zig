@@ -131,8 +131,8 @@ const SimpleEngine = struct {
     n_threads: i32,
     gguf_data: []u8,
 
-    // Graph optimization: graph structure reuse + gallocr for incremental decoding
     inc_ctx: graph_context.IncContext,
+    benchmark: bool,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: []const u8, cli_args: *const CliArgs) !SimpleEngine {
         logger.info("Loading model: {s}", .{model_path});
@@ -201,6 +201,7 @@ const SimpleEngine = struct {
             .n_threads = n_threads,
             .gguf_data = gguf_data,
             .inc_ctx = inc_ctx,
+            .benchmark = cli_args.benchmark,
         };
     }
 
@@ -224,7 +225,6 @@ const SimpleEngine = struct {
             try stdout_file.writeStreamingAll(io, buf[0..n]);
         }
     }
-
     pub fn generate(self: *SimpleEngine, io: std.Io, prompt: []const u8, max_tokens: u32) !void {
         var input_tokens = try self.tok.encode(prompt, true);
         defer input_tokens.deinit(self.allocator);
@@ -253,19 +253,27 @@ const SimpleEngine = struct {
             for (input_tokens.items, 0..) |token, j| slice[j] = @as(i32, @intCast(token));
         }
 
-        const t_main_start = currentTimeUs();
+        // Prompt evaluation timing
+        const t_pp_start = currentTimeUs();
         try graph.compute(self.n_threads);
         const first_token = sampler.Sampler.sampleGreedy(logits);
+        const t_pp_end = currentTimeUs();
+        const pp_time_s = @as(f64, @floatFromInt(t_pp_end - t_pp_start)) / 1000000.0;
         logger.debug("first_token (greedy) = {d}", .{first_token});
 
-        // Print prompt token-by-token
-        for (input_tokens.items) |token_id| {
-            try self.decodeAndPrintToken(io, @intCast(token_id));
+        // Print prompt (skip in benchmark mode)
+        if (!self.benchmark) {
+            for (input_tokens.items) |token_id| {
+                try self.decodeAndPrintToken(io, @intCast(token_id));
+            }
         }
 
         var n_decode: i32 = 0;
         var new_token_id: i32 = first_token;
         var pos: i32 = n_prompt_tokens;
+
+        // Text generation timing
+        const t_tg_start = currentTimeUs();
 
         // --- Incremental decoding (uses inc_ctx with graph structure reuse) ---
         while (n_decode < max_tokens) {
@@ -275,9 +283,11 @@ const SimpleEngine = struct {
                 break;
             }
 
-            // Decode and print new token
+            // Decode and print (skip output in benchmark mode)
             logger.debug("decoding token {d}", .{new_token_id});
-            try self.decodeAndPrintToken(io, @intCast(new_token_id));
+            if (!self.benchmark) {
+                try self.decodeAndPrintToken(io, @intCast(new_token_id));
+            }
 
             // Prepare next batch: IncContext reuses input tensor + graph + gallocr
             const step = try self.inc_ctx.beginStep();
@@ -302,21 +312,59 @@ const SimpleEngine = struct {
             n_decode += 1;
         }
 
-        // Print newline
-        {
+        const t_tg_end = currentTimeUs();
+        const tg_time_s = @as(f64, @floatFromInt(t_tg_end - t_tg_start)) / 1000000.0;
+
+        // Print newline (skip in benchmark mode)
+        if (!self.benchmark) {
             const stdout_file = std.Io.File.stdout();
             try stdout_file.writeStreamingAll(io, "\n");
         }
 
-        // Performance stats to stderr
-        const t_main_end = currentTimeUs();
-        const elapsed_s = @as(f64, @floatFromInt(t_main_end - t_main_start)) / 1000000.0;
-        const speed = if (elapsed_s > 0.0)
-            @as(f64, @floatFromInt(n_decode)) / elapsed_s
-        else
-            0.0;
-        if (n_decode > 0) {
-            std.debug.print("main: decoded {d} tokens in {d:.2} s, speed: {d:.2} t/s\n", .{ n_decode, elapsed_s, speed });
+        // Performance stats
+        if (self.benchmark) {
+            const total_time_s = pp_time_s + tg_time_s;
+            const pp_speed = if (pp_time_s > 0.0)
+                @as(f64, @floatFromInt(n_prompt_tokens)) / pp_time_s
+            else
+                0.0;
+            const tg_speed = if (tg_time_s > 0.0 and n_decode > 0)
+                @as(f64, @floatFromInt(n_decode)) / tg_time_s
+            else
+                0.0;
+            const avg_speed = if (total_time_s > 0.0 and n_decode > 0)
+                @as(f64, @floatFromInt(n_decode)) / total_time_s
+            else
+                0.0;
+
+            std.debug.print(
+                \\
+                \\============ Benchmark Results ============
+                \\  Model            : {s}
+                \\  Architecture     : {s}
+                \\  Threads          : {d}
+                \\  Prompt tokens    : {d}
+                \\  Output tokens    : {d}
+                \\  ------------------------------------------
+                \\  PP eval time     : {d:.3} s ({d:.1} tok/s)
+                \\  TG time          : {d:.3} s ({d:.1} tok/s)
+                \\  Total time       : {d:.3} s ({d:.1} tok/s)
+                \\=============================================
+                \\
+            , .{
+                self.params.tokenizer_name,
+                @tagName(self.arch),
+                self.n_threads,
+                n_prompt_tokens,
+                n_decode,
+                pp_time_s, pp_speed,
+                tg_time_s, tg_speed,
+                total_time_s, avg_speed,
+            });
+        } else if (n_decode > 0) {
+            const total_time_s = pp_time_s + tg_time_s;
+            const avg_speed = @as(f64, @floatFromInt(n_decode)) / total_time_s;
+            std.debug.print("main: decoded {d} tokens in {d:.2} s, speed: {d:.2} t/s\n", .{ n_decode, total_time_s, avg_speed });
         }
     }
 };

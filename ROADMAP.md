@@ -17,6 +17,8 @@
 | 内存泄漏修复 | ✅ 已完成 |
 | 推理正确性验证（tinyllama / Llama-3.2 / Qwen3.5） | ✅ 已完成 |
 | 图优化（Gallocr 复用 + 输入张量缓存 + IncContext） | ✅ 已完成 |
+| `--benchmark` 模式（PP/TG 分离 + 格式化输出） | ✅ 已完成 |
+| `-Dbundle-ggml` 源码构建 | ✅ 已完成 |
 | Metal / CUDA 后端 | ⬜ 待完成 |
 | CI / 性能基准 / 生态工具 | ⬜ 待完成 |
 
@@ -101,7 +103,8 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ✅ **增量上下文分离**：增量解码使用独立的 512MB ctx_inc
 - ✅ **图结构复用**：输入张量预分配跨步复用，参考 llama.cpp `llm_graph_input_i` 模式；CGraph 每步新建（极轻量）；Gallocr 跨步复用；上下文内存 80% 阈值自动回收
 - ⬜ **线程池**：持久化 ggml_threadpool（需 ggml 版本升级以支持线程池 API）
-- ⬜ **`--benchmark` 模式**：已添加 CLI 标志，待完善输出格式
+- ✅ **`--benchmark` 模式**：PP/TG 时间分离 + 格式化 benchmark 输出
+- ✅ **`-Dbundle-ggml` 源码构建**：支持从 deps/ggml 源码构建，含 x86_64 优化
 
 ### 后端支持
 - ⬜ **Metal 后端**（macOS GPU 加速）
