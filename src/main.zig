@@ -151,6 +151,7 @@ const InferenceEngine = struct {
     kv_cache_mgr: kv_cache.KVCache,
     n_threads: i32,
     verbose: bool,
+    benchmark: bool,
     gguf_data: []u8,
 
     // Graph optimization: gallocr reuse context for incremental decoding
@@ -180,8 +181,12 @@ const InferenceEngine = struct {
 
         var model = try registry.createModel(allocator, &gguf_file, arch, io);
         errdefer model.deinit(allocator);
+        var params = model.getParams().*;
 
-        const params = model.getParams().*;
+        // Copy model_name string from GGUF arena to heap (arena will be freed by gguf_file.deinit)
+        if (params.model_name.len > 0) {
+            params.model_name = try allocator.dupe(u8, params.model_name);
+        }
 
         if (cli_args.verbose) {
             logger.info("n_vocab={d}, n_embd={d}, n_head={d}, n_kv_head={d}", .{ params.n_vocab, params.n_embd, params.n_head, params.n_kv_head });
@@ -235,6 +240,7 @@ const InferenceEngine = struct {
             .n_threads = n_threads,
             .verbose = cli_args.verbose,
             .gguf_data = gguf_data,
+            .benchmark = cli_args.benchmark,
             .inc_ctx = inc_ctx,
         };
     }
@@ -250,15 +256,9 @@ const InferenceEngine = struct {
         self.allocator.free(self.gguf_data);
     }
 
-    pub fn generate(self: *InferenceEngine, prompt: []const u8, max_tokens: u32) !void {
+    pub fn generate(self: *InferenceEngine, io: std.Io, prompt: []const u8, max_tokens: u32) !void {
         // Encode prompt, adding special tokens (BOS/EOS)
         var input_tokens = try self.tok.encode(prompt, true);
-        // Debug: print encoded token IDs
-        logger.debug("Encoded tokens ({d}):", .{input_tokens.items.len});
-        for (input_tokens.items, 0..) |t, i| {
-            if (i < 20) logger.debug("  [{d}] = {d}", .{ i, t });
-        }
-
         defer input_tokens.deinit(self.allocator);
 
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
@@ -268,12 +268,10 @@ const InferenceEngine = struct {
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
         self.ctx_graph.setNoAlloc(true);
 
-        logger.info("Building forward graph for prompt...", .{});
         var graph = try ggml.CGraph.init(self.ctx_graph);
         var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, &self.params, self.allocator);
         const logits = try self.model.buildGraph(&builder, input_tensor, n_prompt_tokens, @ptrCast(&self.kv_cache_mgr), 0);
 
-        logger.info("Allocating graph memory...", .{});
         const buft = ggml.backendCpuBufferType();
         var galloc = try ggml.Gallocr.init(buft);
         defer galloc.free();
@@ -291,44 +289,52 @@ const InferenceEngine = struct {
             }
         }
 
-        logger.info("Computing forward pass...", .{});
-        const start_time = currentTimeMs();
+        // Prompt evaluation timing
+        const t_pp_start = currentTimeMs();
         try graph.compute(self.n_threads);
-        const end_time = currentTimeMs();
-        const elapsed_ms = end_time - start_time;
-
-        logger.info("Forward pass completed in {d} ms ({d:.2} tok/s)", .{
-            elapsed_ms,
-            @as(f64, @floatFromInt(n_prompt_tokens)) / (@as(f64, @floatFromInt(elapsed_ms)) / 1000.0),
-        });
-
         const first_token = sampler.Sampler.sampleGreedy(logits);
+        const t_pp_end = currentTimeMs();
+        const pp_time_s = @as(f64, @floatFromInt(t_pp_end - t_pp_start)) / 1000.0;
 
-        logger.info("first_token = {d}", .{first_token});
+        // Stream prompt tokens (skip in benchmark mode)
+        if (!self.benchmark) {
+            for (input_tokens.items) |token_id| {
+                var buf: [128]u8 = undefined;
+                const n = try self.tok.decodeSingle(token_id, &buf);
+                if (n > 0) {
+                    const stdout_file = std.Io.File.stdout();
+                    try stdout_file.writeStreamingAll(io, buf[0..n]);
+                }
+            }
+        }
 
-        var output_tokens = std.ArrayList(u32).initCapacity(self.allocator, 0) catch unreachable;
-        defer output_tokens.deinit(self.allocator);
-
-        try output_tokens.append(self.allocator, @as(u32, @intCast(first_token)));
-
+        var current_token: i32 = first_token;
         var pos: i32 = n_prompt_tokens;
-        var current_token: u32 = @as(u32, @intCast(first_token));
-        var gen_token_count: u32 = 0;
-        const gen_start_time = currentTimeMs();
+        var gen_count: u32 = 0;
 
-        // --- Incremental decoding (uses inc_ctx with graph structure reuse) ---
-        while (gen_token_count < max_tokens - 1) {
-            // Prepare next batch: IncContext reuses input tensor + graph + gallocr
+        // Text generation timing
+        const t_tg_start = currentTimeMs();
+
+        // --- Incremental decoding ---
+        while (gen_count < max_tokens) {
+            if (self.tok.isEog(@intCast(current_token))) break;
+
+            // Stream output immediately (skip in benchmark mode)
+            if (!self.benchmark) {
+                var buf: [128]u8 = undefined;
+                const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
+                if (n > 0) {
+                    const stdout_file = std.Io.File.stdout();
+                    try stdout_file.writeStreamingAll(io, buf[0..n]);
+                }
+            }
+
             const step = try self.inc_ctx.beginStep();
+            step.setToken(current_token);
 
-            // Set input token on pre-allocated tensor
-            step.setToken(@as(i32, @intCast(current_token)));
-
-            // Build graph using cached context and graph object
             var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
             const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
 
-            // Reuse gallocr (avoids expensive graph analysis per token)
             if (!step.galloc.allocGraph(step.graph)) {
                 logger.err("Failed to allocate incremental graph memory", .{});
                 return error.GraphAllocFailed;
@@ -336,46 +342,64 @@ const InferenceEngine = struct {
 
             try step.graph.compute(self.n_threads);
 
-            const next_token = sampler.Sampler.sampleGreedy(inc_logits);
-            logger.debug("next_token = {d}", .{next_token});
-            const next_token_u32 = @as(u32, @intCast(next_token));
-            try output_tokens.append(self.allocator, next_token_u32);
-            current_token = next_token_u32;
+            current_token = sampler.Sampler.sampleGreedy(inc_logits);
             pos += 1;
-            gen_token_count += 1;
+            gen_count += 1;
         }
 
-        const gen_end_time = currentTimeMs();
-        const gen_elapsed_ms = gen_end_time - gen_start_time;
-        if (gen_token_count > 0 and gen_elapsed_ms > 0) {
-            logger.info("Generation: {d} tokens in {d} ms ({d:.2} tok/s)", .{
-                gen_token_count,
-                gen_elapsed_ms,
-                @as(f64, @floatFromInt(gen_token_count)) / (@as(f64, @floatFromInt(gen_elapsed_ms)) / 1000.0),
+        const t_tg_end = currentTimeMs();
+        const tg_time_s = @as(f64, @floatFromInt(t_tg_end - t_tg_start)) / 1000.0;
+
+        // Print newline (skip in benchmark mode)
+        if (!self.benchmark) {
+            const stdout_file = std.Io.File.stdout();
+            try stdout_file.writeStreamingAll(io, "\n");
+        }
+
+        // Performance stats
+        if (self.benchmark) {
+            const total_time_s = pp_time_s + tg_time_s;
+            const pp_speed = if (pp_time_s > 0.0)
+                @as(f64, @floatFromInt(n_prompt_tokens)) / pp_time_s
+            else
+                0.0;
+            const tg_speed = if (tg_time_s > 0.0 and gen_count > 0)
+                @as(f64, @floatFromInt(gen_count)) / tg_time_s
+            else
+                0.0;
+            const avg_speed = if (total_time_s > 0.0 and gen_count > 0)
+                @as(f64, @floatFromInt(gen_count)) / total_time_s
+            else
+                0.0;
+
+            std.debug.print(
+                \\============ Benchmark Results ============
+                \\  Model            : {s}
+                \\  Architecture     : {s}
+                \\  Threads          : {d}
+                \\  Prompt tokens    : {d}
+                \\  Output tokens    : {d}
+                \\  ------------------------------------------
+                \\  PP eval time     : {d:.3} s ({d:.1} tok/s)
+                \\  TG time          : {d:.3} s ({d:.1} tok/s)
+                \\  Total time       : {d:.3} s ({d:.1} tok/s)
+                \\=============================================
+                \\
+            , .{
+                if (self.params.model_name.len > 0) self.params.model_name else @tagName(self.arch),
+                @tagName(self.arch),
+                self.n_threads,
+                n_prompt_tokens,
+                gen_count,
+                pp_time_s, pp_speed,
+                tg_time_s, tg_speed,
+                total_time_s, avg_speed,
             });
+        } else if (gen_count > 0) {
+            const total_time_s = pp_time_s + tg_time_s;
+            const avg_speed = @as(f64, @floatFromInt(gen_count)) / total_time_s;
+            logger.info("decoded {d} tokens in {d:.2} s, speed: {d:.2} t/s", .{ gen_count, total_time_s, avg_speed });
         }
-
-        const decoded_text = try self.tok.decode(output_tokens.items, self.allocator);
-        defer self.allocator.free(decoded_text);
-
-        logger.info("output_tokens count: {d}", .{output_tokens.items.len});
-        if (output_tokens.items.len > 0) {
-            logger.info("first few tokens: {d} {d} {d}", .{ output_tokens.items[0], output_tokens.items[1], output_tokens.items[2] });
-        }
-        logger.info("decoded text length: {d}", .{decoded_text.len});
-        logger.info("decoded text: '{s}'", .{decoded_text});
-
-        if (!std.unicode.utf8ValidateSlice(decoded_text)) {
-            logger.warn("Generated text contains invalid UTF-8 sequences", .{});
-            if (self.verbose) {
-                tokenizer.hexDump(decoded_text[0..@min(decoded_text.len, @as(usize, 64))]);
-            }
-        }
-
-        std.debug.print("{s}\n", .{decoded_text});
-
-        const total_tokens = output_tokens.items.len + @as(usize, @intCast(n_prompt_tokens));
-        logger.info("Generated {d} tokens (total {d})", .{ output_tokens.items.len, total_tokens });
     }
 };
 
@@ -427,7 +451,7 @@ pub fn main(init: std.process.Init) !void {
     logger.info("Max tokens: {d}", .{args.max_tokens});
 
     logger.info("--- Generation ---", .{});
-    engine.generate(args.prompt, args.max_tokens) catch |err| {
+    engine.generate(io, args.prompt, args.max_tokens) catch |err| {
         logger.err("Generation failed: {}\n", .{err});
         return;
     };

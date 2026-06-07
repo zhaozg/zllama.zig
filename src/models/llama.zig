@@ -303,6 +303,7 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Llama
     p.base.rope_dim = gguf_file.getU32("llama.rope.dimension_count") orelse
         @divExact(p.base.n_head_dim, 2);
     p.base.norm_eps = gguf_file.getF32("llama.attention.layer_norm_rms_epsilon") orelse 1e-5;
+    p.base.model_name = gguf_file.getString("general.name") orelse "";
     p.base.tokenizer_name = gguf_file.getString("tokenizer.ggml.model") orelse "llama";
 
     if (p.base.n_vocab == 0 or p.base.n_embd == 0 or p.base.n_head == 0 or p.base.n_layer == 0) {

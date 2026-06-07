@@ -77,7 +77,9 @@ pub const ModelParams = struct {
     // 归一化
     norm_eps: f32 = 1e-6,
 
-    // 分词器
+    // 模型名称（来自 GGUF general.name 元数据）
+    model_name: []const u8 = "",
+    // 分词器类型名称
     tokenizer_name: []const u8 = "",
 
     pub fn deinit(self: *ModelParams) void {

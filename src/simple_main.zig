@@ -161,8 +161,12 @@ const SimpleEngine = struct {
         logger.info("Creating model...", .{});
         var model = try registry.createModel(allocator, &gguf_file, arch, io);
         logger.info("Model created, getting params...", .{});
-        const params = model.getParams().*;
-        logger.info("Initializing tokenizer...", .{});
+        var params = model.getParams().*;
+
+        // Copy model_name string from GGUF arena to heap (arena will be freed by gguf_file.deinit)
+        if (params.model_name.len > 0) {
+            params.model_name = try allocator.dupe(u8, params.model_name);
+        }
         var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
         errdefer tok.deinit();
         logger.info("Tokenizer initialized.", .{});
@@ -352,7 +356,7 @@ const SimpleEngine = struct {
                 \\=============================================
                 \\
             , .{
-                self.params.tokenizer_name,
+                if (self.params.model_name.len > 0) self.params.model_name else @tagName(self.arch),
                 @tagName(self.arch),
                 self.n_threads,
                 n_prompt_tokens,
