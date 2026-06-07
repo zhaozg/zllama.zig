@@ -249,6 +249,7 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Qwen2
     p.base.rope_theta = gguf_file.getF32("llama.rope.freq_base") orelse 10000000.0;
     p.base.rope_dim = gguf_file.getU32("llama.rope.dimension_count") orelse @divExact(p.base.n_head_dim, @as(u32, 2));
     p.base.norm_eps = gguf_file.getF32("llama.attention.layer_norm_rms_epsilon") orelse 1e-6;
+    p.base.model_name = gguf_file.getString("general.name") orelse "";
     p.base.tokenizer_name = gguf_file.getString("tokenizer.ggml.model") orelse "gpt2";
     if (p.base.n_vocab == 0 or p.base.n_embd == 0 or p.base.n_head == 0 or p.base.n_layer == 0) {
         log.err("Missing required model parameters", .{});

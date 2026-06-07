@@ -18,6 +18,7 @@
 - **多后端**：CPU (默认)、Metal (macOS)、CUDA (Linux)
 - **内建 BPE 分词器**：从 GGUF 提取词表，无外部依赖
 - **交互式 CLI**：流式输出、采样参数可调
+- **Benchmark 模式**：`--benchmark` 输出 PP/TG 分离的性能数据，显示模型名称（从 GGUF 元数据读取）
 
 ## 🚀 快速开始
 
@@ -49,6 +50,9 @@ zig build -Doptimize=ReleaseFast
 
 # 指定线程数
 ./zig-out/bin/zllama -m model.gguf --threads 6
+
+# Benchmark 模式
+./zig-out/bin/zllama -m model.gguf --benchmark
 ```
 
 ## 📦 项目结构
@@ -57,13 +61,13 @@ zig build -Doptimize=ReleaseFast
 zllama.zig/
 ├── src/
 │   ├── main.zig           # CLI 入口（Juicy Main）
+│   ├── simple_main.zig    # 简化推理入口
 │   ├── ggml.zig           # ggml C API 安全封装
 │   ├── gguf.zig           # GGUF v2/v3 解析器
 │   ├── model.zig          # 模型抽象接口定义
 │   ├── kv_cache.zig       # KV Cache 管理
 │   ├── tokenizer.zig      # BPE 分词器
 │   ├── sampler.zig        # 采样算法
-│   ├── backend.zig        # 多后端抽象
 │   ├── layers/            # 通用层实现（算子库）
 │   │   ├── rms_norm.zig
 │   │   ├── rope.zig
@@ -73,16 +77,24 @@ zllama.zig/
 │   │   └── embed.zig
 │   ├── models/            # 具体模型实现
 │   │   ├── registry.zig   # 模型注册与工厂函数
-│   │   ├── qwen.zig       # Qwen 系列
+│   │   ├── qwen2.zig      # Qwen2 系列
+│   │   ├── qwen35.zig     # Qwen3.5 混合架构
 │   │   └── llama.zig      # LLaMA 家族
-│   └── core/              # 核心引擎（可选）
+│   └── core/              # 核心引擎
+│       ├── graph_builder.zig
+│       ├── graph_context.zig
+│       └── memory.zig
 ├── deps/ggml/             # ggml 源码（submodule）
 ├── build.zig              # Zig 构建脚本
 ├── AGENTS.md              # AI 协作入口
-├── ARCHITECTURE.md        # 系统架构设计
-├── GGML_BINDING.md        # ggml 绑定设计
-├── TECHNICAL_CHALLENGES.md # 难点与解决方案
-└── ROADMAP.md             # 开发路线图
+├── ROADMAP.md             # 开发路线图
+├── README.md              # 本文件
+└── docs/                  # 设计文档
+    ├── ARCHITECTURE.md
+    ├── GGML_BINDING.md
+    ├── TECHNICAL_CHALLENGES.md
+    ├── TEST.md
+    └── QWEN35.md
 ```
 
 ## 🔧 开发与贡献
@@ -111,9 +123,9 @@ zig build test
 
 | 模型 | 量化 | 后端 | 硬件 | 速度 (tok/s) |
 |------|------|------|------|---------------|
-| Qwen 3.5 9B | Q4_K_M | CPU (16 线程) | AMD Ryzen 9 7950X | 18.2 |
-| Qwen 3.5 9B | Q4_K_M | Metal | M2 Max (30核 GPU) | 42.5 |
-| Qwen 3.5 27B | Q4_K_M | CPU (16 线程) | AMD Ryzen 9 7950X | 6.3 |
+| Llama-3.2-3B | Q4_K_M | CPU (6 线程) | Apple M2 | 16.1 TG |
+| Qwen3.5-0.8B | Q4_K_M | CPU (6 线程) | Apple M2 | 56.7 TG |
+| tinyllama-1.1B | Q4_K_M | CPU (6 线程) | Apple M2 | 53.8 TG |
 
 ## 📄 许可证
 

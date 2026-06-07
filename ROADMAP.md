@@ -2,6 +2,8 @@
 
 > **项目名称：** zllama.zig — 纯 Zig 实现的多模型本地推理引擎
 
+## 📋 当前状态（2026-06-07）
+
 ## 📋 当前状态（2026-06-06）
 
 | 模块 | 状态 |
@@ -11,7 +13,7 @@
 | BPE 分词器 | ✅ 已完成 |
 | Qwen2 / Qwen3.5 / LLaMA 推理 | ✅ 已完成 |
 | 多模型架构（registry + layers/ + models/） | ✅ 已完成 |
-| KV Cache + 增量解码 | ✅ 已完成 |
+| 内存泄漏修复（GGUF arena 字符串悬垂指针 + model_name 泄漏） | ✅ 已完成 |
 | 测试体系（GGUF / 架构 / 层 / KV Cache / 词汇表） | ✅ 已完成 |
 | 调试工具（dump_graph / compare_logits / gen_ref） | ✅ 已完成 |
 | 内存泄漏修复 | ✅ 已完成 |
@@ -67,7 +69,8 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ✅ graph_context.zig 模块（IncContext + DecodeStep API）
 - ✅ threadpool.zig 模块（ggml_threadpool Zig 封装，待 ggml 版本升级后启用）
 - ✅ ggml_graph_dup 绑定（CGraph.dup 方法）
-
+- ✅ 构建脚本（build.zig，含三个可执行文件）
+- ✅ benchmark 输出显示模型名称（从 GGUF general.name 读取，修复 GGUF arena 悬垂指针导致乱码的问题）
 ### 算子与修复
 - ✅ 卷积/SSM 相关算子（conv1d、ssmConv、ssmScan、gatedDeltaNet）
 - ✅ 基于词汇表的 tokenizer 测试（test_vocab.zig，18 个词汇表）

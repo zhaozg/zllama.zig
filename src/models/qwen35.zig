@@ -594,6 +594,7 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !QwenP
     p.ssm_group_count = gguf_file.getU32("qwen35.ssm.group_count") orelse 16;
     p.ssm_time_step_rank = gguf_file.getU32("qwen35.ssm.time_step_rank") orelse 16;
     p.ssm_inner_size = gguf_file.getU32("qwen35.ssm.inner_size") orelse 2048;
+    p.base.model_name = gguf_file.getString("general.name") orelse "";
     p.base.tokenizer_name = gguf_file.getString("tokenizer.ggml.model") orelse "gpt2";
     if (p.base.n_vocab == 0 or p.base.n_embd == 0 or p.base.n_head == 0 or p.base.n_layer == 0) {
         log.err("Missing required model parameters", .{});
