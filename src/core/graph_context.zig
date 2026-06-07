@@ -156,7 +156,7 @@ pub const IncContext = struct {
         }
 
         // 每步创建新 graph（极轻量，~100 字节 struct 分配）
-        const graph = try ggml.CGraph.init(self.ctx_inc);
+        const graph = try ggml.CGraph.initReserved(self.ctx_inc, 16384);
 
         return DecodeStep{
             .ctx = self.ctx_inc,

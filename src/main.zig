@@ -283,7 +283,7 @@ const InferenceEngine = struct {
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
         self.ctx_graph.setNoAlloc(true);
 
-        var graph = try ggml.CGraph.init(self.ctx_graph);
+        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, &self.params, self.allocator);
         const logits = try self.model.buildGraph(&builder, input_tensor, n_prompt_tokens, @ptrCast(&self.kv_cache_mgr), 0);
 

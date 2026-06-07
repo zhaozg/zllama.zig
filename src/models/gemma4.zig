@@ -45,6 +45,10 @@ pub const Gemma4Params = struct {
     /// SWA 的 RoPE base frequency
     rope_freq_base_swa: f32 = 0.0,
     /// 共享 KV 的层数（最后 n_kv_shared_layers 层复用前面层的 KV）
+    /// SWA 的 RoPE 维度（与 full attention 的 rope_dim 可能不同，因为 SWA 层的 head_dim 较小）
+    /// 如果未指定则默认与 base.rope_dim 相同
+    rope_dim_swa: u32 = 0,
+
     n_kv_shared_layers: u32 = 0,
     /// 从开始算起有多少层拥有自己的 KV
     n_layer_kv_from_start: u32 = 0,
@@ -179,7 +183,13 @@ pub const Gemma4Model = struct {
             else
                 p.base.rope_theta;
             const freq_scale_l: f32 = 1.0;
-            const rope_dim: i64 = @intCast(p.base.rope_dim);
+            // SWA 层使用较小的 rope_dim_swa（因为 head_dim 更小），全注意力层使用 base.rope_dim
+            // 同时确保 rope_dim 不超过 head_dim（防止 ggml_rope 断言 n_dims <= ne0）
+            const rope_dim_full: u32 = if (p.rope_dim_swa > 0 and layer_is_swa)
+                @min(p.rope_dim_swa, @as(u32, @intCast(head_dim)))
+            else
+                @min(p.base.rope_dim, @as(u32, @intCast(head_dim)));
+            const rope_dim: i64 = @intCast(rope_dim_full);
 
             // --- Pre-attention RMSNorm ---
             const attn_input = rms_norm.rmsNorm(ctx, cur, layer.attn_norm_weight, p.base.norm_eps);
@@ -481,6 +491,10 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
     p.base.rope_dim = gguf_file.getU32("gemma4.rope.dimension_count") orelse
         gguf_file.getU32("llama.rope.dimension_count") orelse
         @divExact(p.base.n_head_dim, @as(u32, 2));
+    // SWA 层可能使用不同的 rope_dim（因为 head_dim 更小）
+    p.rope_dim_swa = gguf_file.getU32("gemma4.rope.dimension_count_swa") orelse
+        gguf_file.getU32("llama.rope.dimension_count_swa") orelse p.base.rope_dim;
+
     p.base.norm_eps = gguf_file.getF32("gemma4.attention.layer_norm_rms_epsilon") orelse
         gguf_file.getF32("llama.attention.layer_norm_rms_epsilon") orelse 1e-6;
     p.base.model_name = gguf_file.getString("general.name") orelse "";
