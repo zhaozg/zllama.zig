@@ -89,13 +89,13 @@ pub const GraphBuilder = struct {
         config: RopeConfig,
     ) struct { q: *ggml.Tensor, k: *ggml.Tensor } {
         const q_rope = ggml.ropeExt(
-            self.ctx, q, pos,
+            self.ctx, q, pos, null,
             @intCast(config.rope_dim), config.mode, 0,
             config.rope_theta, config.freq_scale,
             0.0, 1.0, 0.0, 0.0,
         );
         const k_rope = ggml.ropeExt(
-            self.ctx, k, pos,
+            self.ctx, k, pos, null,
             @intCast(config.rope_dim), config.mode, 0,
             config.rope_theta, config.freq_scale,
             0.0, 1.0, 0.0, 0.0,

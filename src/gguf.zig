@@ -256,6 +256,40 @@ pub const GGUFFile = struct {
         return val.asBool();
     }
 
+    /// 按 key 获取元数据 u32 数组值
+    pub fn getU32Array(self: *GGUFFile, key: []const u8) ?[]const u32 {
+        const val = self.metadata.get(key) orelse return null;
+        if (val.value_type != .array) return null;
+        const arr = val.array_val;
+        var result = std.ArrayList(u32).initCapacity(self.arena.allocator(), 0) catch return null;
+        for (arr) |item| {
+            if (item.asU32()) |v| {
+                result.append(self.arena.allocator(), v) catch return null;
+            } else if (item.asI32()) |v| {
+                result.append(self.arena.allocator(), @as(u32, @intCast(v))) catch return null;
+            } else {
+                return null;
+            }
+        }
+        return result.items;
+    }
+
+    /// 按 key 获取元数据 bool 数组值
+    pub fn getBoolArray(self: *GGUFFile, key: []const u8) ?[]const bool {
+        const val = self.metadata.get(key) orelse return null;
+        if (val.value_type != .array) return null;
+        const arr = val.array_val;
+        var result = std.ArrayList(bool).initCapacity(self.arena.allocator(), 0) catch return null;
+        for (arr) |item| {
+            if (item.asBool()) |v| {
+                result.append(self.arena.allocator(), v) catch return null;
+            } else {
+                return null;
+            }
+        }
+        return result.items;
+    }
+
     /// 按名称查找张量描述符
     pub fn findTensor(self: *const GGUFFile, name: []const u8) ?*const TensorInfo {
         for (self.tensors.items) |*t| {

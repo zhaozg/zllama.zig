@@ -146,11 +146,20 @@ const SimpleEngine = struct {
         logger.info("File size: {d} bytes", .{file_size});
         const gguf_data = try allocator.alloc(u8, file_size);
         errdefer allocator.free(gguf_data);
-        logger.info("Reading file...", .{});
-        const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
-        if (bytes_read != file_size) {
-            allocator.free(gguf_data);
-            return error.FileReadError;
+        logger.info("Reading file... ({d} MB)", .{@divFloor(file_size, 1024 * 1024)});
+        {
+            var offset: u64 = 0;
+            const chunk_size: usize = 64 * 1024 * 1024; // 64MB chunks
+            while (offset < file_size) {
+                const end = @min(offset + chunk_size, file_size);
+                const len = end - offset;
+                const bytes_read = try file.readPositionalAll(io, gguf_data[offset..][0..len], offset);
+                if (bytes_read != len) {
+                    allocator.free(gguf_data);
+                    return error.FileReadError;
+                }
+                offset += bytes_read;
+            }
         }
         logger.info("Parsing GGUF...", .{});
         var gguf_file = try gguf.parse(gguf_data, allocator);
@@ -177,7 +186,10 @@ const SimpleEngine = struct {
         const ctx_kv_cache = try ggml.Context.initNoAlloc(mem_size_estimate);
         errdefer ctx_kv_cache.deinit();
         const max_seq_len = @min(params.max_seq_len, 2048);
-        var kv_cache_mgr = try kv_cache.KVCache.init(ctx_kv_cache, params.n_layer, params.n_kv_head, params.n_head_dim, max_seq_len, allocator);
+        const hdim_kv = params.n_head_dim;
+        const hdim_k = if (params.n_head_dim_k > 0) params.n_head_dim_k else hdim_kv;
+        const hdim_v = if (params.n_head_dim_v > 0) params.n_head_dim_v else hdim_kv;
+        var kv_cache_mgr = try kv_cache.KVCache.initWithKVDim(ctx_kv_cache, params.n_layer, params.n_kv_head, hdim_k, hdim_v, max_seq_len, allocator);
         errdefer kv_cache_mgr.deinit(allocator);
         // Set Qwen35's ctx_kv_cache (for persistent SSM states)
         model.setKVCacheContext(ctx_kv_cache);
@@ -220,7 +232,6 @@ const SimpleEngine = struct {
         if (self.params.model_name.len > 0) {
             self.allocator.free(self.params.model_name);
         }
-        self.allocator.free(self.gguf_data);
         self.allocator.free(self.gguf_data);
     }
 

@@ -47,8 +47,8 @@ pub fn applyRope(
     const mode = params.mode;
 
     // ggml_rope_ext(ctx, a, pos, rope_factors, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)
-    const q_rope = ggml.ropeExt(ctx, q, pos_tensor, @intCast(rope_dim), mode, 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
-    const k_rope = ggml.ropeExt(ctx, k, pos_tensor, @intCast(rope_dim), mode, 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
+    const q_rope = ggml.ropeExt(ctx, q, pos_tensor, null, @intCast(rope_dim), mode, 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
+    const k_rope = ggml.ropeExt(ctx, k, pos_tensor, null, @intCast(rope_dim), mode, 0, rope_theta, freq_scale, 0.0, 1.0, 0.0, 0.0);
     // 直接在 [head_dim, n_head, n_tokens] 布局上调用 ggml_rope_ext
     // 与 llama.cpp 的调用方式一致
 

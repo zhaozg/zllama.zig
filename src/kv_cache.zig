@@ -22,6 +22,8 @@ pub const KVCache = struct {
     max_seq_len: u32,
     n_kv_head: u32,
     head_dim: u32,
+    head_dim_k: u32,
+    head_dim_v: u32,
 
     /// 初始化 KV Cache
     /// K/V 形状: [head_dim, n_kv_head, max_seq_len] (与 llama.cpp 一致)
@@ -33,11 +35,24 @@ pub const KVCache = struct {
         max_seq_len: u32,
         allocator: std.mem.Allocator,
     ) !KVCache {
+        return initWithKVDim(ctx, n_layer, n_kv_head, head_dim, head_dim, max_seq_len, allocator);
+    }
+
+    /// 初始化 KV Cache，支持 K 和 V 不同 head dim
+    pub fn initWithKVDim(
+        ctx: *ggml.Context,
+        n_layer: u32,
+        n_kv_head: u32,
+        head_dim_k: u32,
+        head_dim_v: u32,
+        max_seq_len: u32,
+        allocator: std.mem.Allocator,
+    ) !KVCache {
         var layers = try allocator.alloc(LayerCache, n_layer);
 
         for (0..n_layer) |i| {
-            // K Cache: [head_dim, n_kv_head, max_seq_len]
-            const k = try ctx.newTensor3d(.f32, @intCast(head_dim), @intCast(n_kv_head), @intCast(max_seq_len));
+            // K Cache: [head_dim_k, n_kv_head, max_seq_len]
+            const k = try ctx.newTensor3d(.f32, @intCast(head_dim_k), @intCast(n_kv_head), @intCast(max_seq_len));
             {
                 var buf: [64]u8 = undefined;
                 const slice = try std.fmt.bufPrint(&buf, "cache.k.{d}", .{i});
@@ -45,8 +60,8 @@ pub const KVCache = struct {
                 k.setName(buf[0..slice.len :0]);
             }
 
-            // V Cache: [head_dim, n_kv_head, max_seq_len]
-            const v = try ctx.newTensor3d(.f32, @intCast(head_dim), @intCast(n_kv_head), @intCast(max_seq_len));
+            // V Cache: [head_dim_v, n_kv_head, max_seq_len]
+            const v = try ctx.newTensor3d(.f32, @intCast(head_dim_v), @intCast(n_kv_head), @intCast(max_seq_len));
             {
                 var buf: [64]u8 = undefined;
                 const slice = try std.fmt.bufPrint(&buf, "cache.v.{d}", .{i});
@@ -61,13 +76,15 @@ pub const KVCache = struct {
             };
         }
 
-        log.info("KV Cache initialized: {d} layers, [{d}, {d}, {d}] per layer", .{ n_layer, head_dim, n_kv_head, max_seq_len });
+        log.info("KV Cache initialized: {d} layers, K:[{d}, {d}, {d}] V:[{d}, {d}, {d}]", .{ n_layer, head_dim_k, n_kv_head, max_seq_len, head_dim_v, n_kv_head, max_seq_len });
 
         return KVCache{
             .layers = layers,
             .max_seq_len = max_seq_len,
             .n_kv_head = n_kv_head,
-            .head_dim = head_dim,
+            .head_dim = head_dim_k,
+            .head_dim_k = head_dim_k,
+            .head_dim_v = head_dim_v,
         };
     }
 
@@ -87,7 +104,7 @@ pub const KVCache = struct {
     pub fn getKView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
         const len: i64 = @intCast(layer.current_len);
-        const hdim: i64 = @intCast(self.head_dim);
+        const hdim: i64 = @intCast(self.head_dim_k);
         const nkv: i64 = @intCast(self.n_kv_head);
 
         // layer.k: [head_dim, n_kv_head, max_seq_len]
@@ -105,7 +122,7 @@ pub const KVCache = struct {
     pub fn getVView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
         const len: i64 = @intCast(layer.current_len);
-        const hdim: i64 = @intCast(self.head_dim);
+        const hdim: i64 = @intCast(self.head_dim_v);
         const nkv: i64 = @intCast(self.n_kv_head);
 
         return ctx.view3d(layer.v, hdim, nkv, len,

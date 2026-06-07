@@ -104,8 +104,8 @@ pub const Qwen2Model = struct {
 
             // RoPE
             const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens_i64), start_pos);
-            q = ggml.ropeExt(ctx, q, pos_tensor, @as(i32, @intCast(rope_dim)), 0, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-            k = ggml.ropeExt(ctx, k, pos_tensor, @as(i32, @intCast(rope_dim)), 0, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            q = ggml.ropeExt(ctx, q, pos_tensor, null, @as(i32, @intCast(rope_dim)), 0, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            k = ggml.ropeExt(ctx, k, pos_tensor, null, @as(i32, @intCast(rope_dim)), 0, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
 
             // Transpose to [head_dim, n_tokens, n_head] for attention
             q = ggml.cont(ctx, ggml.permute(ctx, q, 0, 2, 1, 3));

@@ -14,6 +14,8 @@ const memory = @import("memory");
 const qwen2 = @import("model").qwen2;
 const qwen35 = @import("model").qwen35;
 const llama = @import("model").llama;
+const gemma3 = @import("model").gemma3;
+const gemma4 = @import("model").gemma4;
 
 const log = std.log.scoped(.registry);
 
@@ -50,6 +52,24 @@ pub fn createModel(
             try m.init(allocator, gguf_file, io);
             return model_if.ModelInstance{
                 .vtable = &llama.LlamaModel.vtable,
+                .ptr = @as(*anyopaque, @ptrCast(m)),
+            };
+        },
+        .gemma3 => {
+            var m = try allocator.create(gemma3.Gemma3Model);
+            errdefer allocator.destroy(m);
+            try m.init(allocator, gguf_file, io);
+            return model_if.ModelInstance{
+                .vtable = &gemma3.Gemma3Model.vtable,
+                .ptr = @as(*anyopaque, @ptrCast(m)),
+            };
+        },
+        .gemma4 => {
+            var m = try allocator.create(gemma4.Gemma4Model);
+            errdefer allocator.destroy(m);
+            try m.init(allocator, gguf_file, io);
+            return model_if.ModelInstance{
+                .vtable = &gemma4.Gemma4Model.vtable,
                 .ptr = @as(*anyopaque, @ptrCast(m)),
             };
         },

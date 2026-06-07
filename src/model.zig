@@ -19,6 +19,8 @@ const kv_cache = @import("kv_cache");
 pub const qwen2 = @import("models/qwen2.zig");
 pub const qwen35 = @import("models/qwen35.zig");
 pub const llama = @import("models/llama.zig");
+pub const gemma3 = @import("models/gemma3.zig");
+pub const gemma4 = @import("models/gemma4.zig");
 
 /// RoPE 缩放配置
 pub const RopeScaling = struct {
@@ -32,6 +34,8 @@ pub const Architecture = enum {
     qwen2,
     qwen35,
     llama,
+    gemma3,
+    gemma4,
 
     /// 从 GGUF 元数据中的 general.architecture 字段解析
     pub fn fromString(s: []const u8) ?Architecture {
@@ -51,6 +55,12 @@ pub const Architecture = enum {
         {
             return .llama;
         }
+        if (std.mem.eql(u8, s, "gemma3")) {
+            return .gemma3;
+        }
+        if (std.mem.eql(u8, s, "gemma4")) {
+            return .gemma4;
+        }
         return null;
     }
 };
@@ -63,6 +73,9 @@ pub const ModelParams = struct {
     n_embd: u32 = 0,
     n_head: u32 = 0,
     n_head_dim: u32 = 0,
+    /// K/V 专用 head dim（Gemma 3 等模型使用 attention.key_length/value_length）
+    n_head_dim_k: u32 = 0,
+    n_head_dim_v: u32 = 0,
     n_kv_head: u32 = 0,
     n_layer: u32 = 0,
     n_ff: u32 = 0,

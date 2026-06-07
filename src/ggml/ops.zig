@@ -48,8 +48,9 @@ pub fn l2Norm(ctx: *Context, a: *Tensor, eps: f32) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_l2_norm(@ptrCast(ctx), @ptrCast(@alignCast(a)), eps)));
 }
 
-pub fn ropeExt(ctx: *Context, a: *Tensor, pos: *Tensor, n_dims: i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
-    return @as(*Tensor, @ptrCast(c.ggml_rope_ext(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pos)), null, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)));
+pub fn ropeExt(ctx: *Context, a: *Tensor, pos: *Tensor, freq_factors: ?*Tensor, n_dims: i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
+    const factors_ptr = if (freq_factors) |ff| @as(?*c.struct_ggml_tensor, @ptrCast(@alignCast(ff))) else null;
+    return @as(*Tensor, @ptrCast(c.ggml_rope_ext(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pos)), factors_ptr, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)));
 }
 
 pub fn ropeMulti(ctx: *Context, a: *Tensor, pos: *Tensor, n_dims: i32, sections: *const [4]i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
@@ -78,6 +79,18 @@ pub fn sigmoid(ctx: *Context, a: *Tensor) *Tensor {
 
 pub fn softplus(ctx: *Context, a: *Tensor) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_softplus(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn gelu(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_gelu(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn tanh(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_tanh(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn relu(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_relu(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
 }
 
 // ============================================================================
