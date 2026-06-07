@@ -81,6 +81,7 @@ const CliArgs = struct {
     debug: bool = false,
     help: bool = false,
     benchmark: bool = false,
+    chat: bool = false,
 
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
@@ -108,6 +109,8 @@ const CliArgs = struct {
                 result.debug = true;
             } else if (std.mem.eql(u8, arg, "--benchmark")) {
                 result.benchmark = true;
+            } else if (std.mem.eql(u8, arg, "--chat") or std.mem.eql(u8, arg, "-c")) {
+                result.chat = true;
             } else {
                 logger.warn("unknown argument '{s}'", .{arg});
             }
@@ -133,6 +136,7 @@ const CliArgs = struct {
             \\  -v, --verbose         详细输出
             \\  -d, --debug           输出调试日志
             \\  --benchmark           benchmark 模式
+            \\  -c, --chat            交互式聊天模式
             \\
         , .{});
     }
@@ -416,6 +420,70 @@ const InferenceEngine = struct {
             logger.info("decoded {d} tokens in {d:.2} s, speed: {d:.2} t/s", .{ gen_count, total_time_s, avg_speed });
         }
     }
+
+    /// 交互式聊天循环
+    pub fn chatLoop(self: *InferenceEngine, io: std.Io) !void {
+        const stdin = std.Io.File.stdin();
+        const stdout = std.Io.File.stdout();
+
+        try stdout.writeStreamingAll(io, "zllama chat - Interactive AI\n");
+        try stdout.writeStreamingAll(io, "Type /help for commands.\n\n");
+
+        var line_buf: [4096]u8 = undefined;
+        var history = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        defer {
+            for (history.items) |item| self.allocator.free(item);
+            history.deinit(self.allocator);
+        }
+
+        while (true) {
+            try stdout.writeStreamingAll(io, ">>> ");
+
+            var reader = stdin.reader(io, &line_buf);
+            const line_slice = reader.interface.takeDelimiterExclusive('\n') catch |err| {
+                if (err == error.EndOfStream) {
+                    try stdout.writeStreamingAll(io, "\n");
+                    break;
+                }
+                return err;
+            };
+            const line = std.mem.trimEnd(u8, line_slice, "\r");
+
+            if (line.len == 0) continue;
+
+            if (history.items.len == 0 or !std.mem.eql(u8, history.getLast(), line)) {
+                const owned = try self.allocator.dupe(u8, line);
+                try history.append(self.allocator, owned);
+            }
+
+            if (line[0] == '/') {
+                if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) {
+                    try stdout.writeStreamingAll(io, "Bye.\n");
+                    break;
+                } else if (std.mem.eql(u8, line, "/help")) {
+                    try stdout.writeStreamingAll(io, "Available commands:\n");
+                    try stdout.writeStreamingAll(io, "  /help     Show this help\n");
+                    try stdout.writeStreamingAll(io, "  /clear    Clear screen\n");
+                    try stdout.writeStreamingAll(io, "  /exit     Quit\n");
+                    try stdout.writeStreamingAll(io, "  /reset    Reset KV cache\n");
+                } else if (std.mem.eql(u8, line, "/clear")) {
+                    try stdout.writeStreamingAll(io, "\x1b[2J\x1b[H");
+                } else if (std.mem.eql(u8, line, "/reset")) {
+                    self.kv_cache_mgr.reset();
+                    try stdout.writeStreamingAll(io, "KV cache reset.\n");
+                } else {
+                    try stdout.writeStreamingAll(io, "Unknown command. Try /help.\n");
+                }
+                continue;
+            }
+
+            try stdout.writeStreamingAll(io, ">>> ");
+            self.generate(io, line, 512) catch |err| {
+                logger.err("Generation failed: {}\n", .{err});
+            };
+            try stdout.writeStreamingAll(io, "\n");
+        }
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -465,12 +533,16 @@ pub fn main(init: std.process.Init) !void {
     logger.info("Prompt: \"{s}\"", .{args.prompt});
     logger.info("Max tokens: {d}", .{args.max_tokens});
 
-    logger.info("--- Generation ---", .{});
-    engine.generate(io, args.prompt, args.max_tokens) catch |err| {
+    if (args.chat) {
+        try engine.chatLoop(io);
+    } else {
+        logger.info("--- Generation ---", .{});
+        engine.generate(io, args.prompt, args.max_tokens) catch |err| {
         logger.err("Generation failed: {}\n", .{err});
         return;
-    };
-    logger.info("--- Done ---", .{});
+        };
+        logger.info("--- Done ---", .{});
+    }
 }
 
 const testing = std.testing;
