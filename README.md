@@ -1,6 +1,6 @@
 # zllama.zig - 多模型本地推理引擎
 
-> 纯 Zig 实现的高性能本地推理引擎，基于 ggml，支持多模型架构（Qwen / LLaMA 等）。
+> 纯 Zig 实现的高性能本地推理引擎，基于 ggml，支持多模型架构（Qwen / LLaMA / Gemma 等）。
 
 [![Zig Version](https://img.shields.io/badge/Zig-0.16.0-orange)](https://ziglang.org/)
 [![ggml](https://img.shields.io/badge/ggml-latest-blue)](https://github.com/ggerganov/ggml)
@@ -11,14 +11,17 @@
 - **纯原生二进制**：无 Python、无 C++ 运行时，单文件部署
 - **GGUF 模型支持**：v2/v3 兼容，零拷贝内存映射，支持 Q4_K_M / Q8_0 等量化格式
 - **多模型架构**：
-  - **Qwen 3.5**：全注意力层与线性注意力层混合架构，GQA，RoPE，RMSNorm，SwiGLU FFN
-  - **LLaMA 2/3/3.1**：标准 Transformer 架构（框架已就绪）
+  - **LLaMA 2/3/3.1**：标准 Transformer 架构
+  - **Qwen 2/2.5**：标准 Transformer + GQA
+  - **Qwen 3.5**：全注意力层与线性注意力（SSM/GDN）混合架构
+  - **Gemma 3**：SWA/Full Attention 混合、Q/K pre-norm、logit softcapping
+  - **Gemma 4**：per-layer head_dim、SWA/Full Attention 混合、shared KV、GeGLU FFN
   - 可扩展：新增模型只需在 `registry.zig` 注册
-- **增量解码 & KV Cache**：长上下文（≥32K）内存友好，零拷贝视图
+- **增量解码 & KV Cache**：长上下文（≥32K）内存友好，支持 per-layer 可变维度
 - **多后端**：CPU (默认)、Metal (macOS)、CUDA (Linux)
 - **内建 BPE 分词器**：从 GGUF 提取词表，无外部依赖
-- **交互式 CLI**：流式输出、采样参数可调
-- **Benchmark 模式**：`--benchmark` 输出 PP/TG 分离的性能数据，显示模型名称（从 GGUF 元数据读取）
+- **交互式聊天模式**：`-c/--chat` 流式对话、采样参数可调
+- **Benchmark 模式**：`--benchmark` 输出 PP/TG 分离的性能数据
 
 ## 🚀 快速开始
 
@@ -31,7 +34,7 @@
 ### 构建
 
 ```bash
-git clone https://github.com/your-repo/zllama.zig.git
+git clone https://github.com/zhaozg/zllama.zig.git
 cd zllama.zig
 git submodule update --init --recursive
 zig build -Doptimize=ReleaseFast
@@ -42,8 +45,8 @@ zig build -Doptimize=ReleaseFast
 ### 运行推理
 
 ```bash
-# 交互模式（自动检测模型架构）
-./zig-out/bin/zllama -m /path/to/model.gguf
+# 交互聊天模式（自动检测模型架构）
+./zig-out/bin/zllama -c -m /path/to/model.gguf
 
 # 单次生成
 ./zig-out/bin/zllama -m model.gguf -p "人工智能的未来是" -n 200
@@ -65,7 +68,7 @@ zllama.zig/
 │   ├── ggml.zig           # ggml C API 安全封装
 │   ├── gguf.zig           # GGUF v2/v3 解析器
 │   ├── model.zig          # 模型抽象接口定义
-│   ├── kv_cache.zig       # KV Cache 管理
+│   ├── kv_cache.zig       # KV Cache 管理（per-layer 可变维度）
 │   ├── tokenizer.zig      # BPE 分词器
 │   ├── sampler.zig        # 采样算法
 │   ├── layers/            # 通用层实现（算子库）
@@ -79,22 +82,20 @@ zllama.zig/
 │   │   ├── registry.zig   # 模型注册与工厂函数
 │   │   ├── qwen2.zig      # Qwen2 系列
 │   │   ├── qwen35.zig     # Qwen3.5 混合架构
-│   │   └── llama.zig      # LLaMA 家族
-│   └── core/              # 核心引擎
-│       ├── graph_builder.zig
-│       ├── graph_context.zig
-│       └── memory.zig
+│   │   ├── llama.zig      # LLaMA 家族
+│   │   ├── gemma3.zig     # Gemma 3
+│   │   └── gemma4.zig     # Gemma 4
+│   ├── core/              # 核心引擎
+│   │   ├── graph_builder.zig
+│   │   ├── graph_context.zig
+│   │   └── memory.zig
+│   └── ggml/              # ggml 安全封装子模块
 ├── deps/ggml/             # ggml 源码（submodule）
 ├── build.zig              # Zig 构建脚本
 ├── AGENTS.md              # AI 协作入口
 ├── ROADMAP.md             # 开发路线图
 ├── README.md              # 本文件
 └── docs/                  # 设计文档
-    ├── ARCHITECTURE.md
-    ├── GGML_BINDING.md
-    ├── TECHNICAL_CHALLENGES.md
-    ├── TEST.md
-    └── QWEN35.md
 ```
 
 ## 🔧 开发与贡献
@@ -126,6 +127,7 @@ zig build test
 | Llama-3.2-3B | Q4_K_M | CPU (6 线程) | Apple M2 | 16.1 TG |
 | Qwen3.5-0.8B | Q4_K_M | CPU (6 线程) | Apple M2 | 56.7 TG |
 | tinyllama-1.1B | Q4_K_M | CPU (6 线程) | Apple M2 | 53.8 TG |
+| Gemma 4 E2B | Q4_K_M | CPU (6 线程) | Apple M2 | 待测 |
 
 ## 📄 许可证
 
@@ -136,3 +138,4 @@ zig build test
 - [ggml](https://github.com/ggerganov/ggml) – 高性能张量计算库
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) – 参考实现与 GGUF 规范
 - [Qwen 团队](https://github.com/QwenLM/Qwen) – 开源模型架构
+- [Google Gemma 团队](https://ai.google.dev/gemma) – Gemma 系列模型

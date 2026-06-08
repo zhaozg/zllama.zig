@@ -2,7 +2,7 @@
 
 > **项目名称：** zllama.zig — 纯 Zig 实现的多模型本地推理引擎
 
-## 📋 当前状态（2026-06-07）
+## 📋 当前状态（2026-06-08）
 
 | 模块 | 状态 |
 |------|------|
@@ -11,12 +11,13 @@
 | BPE 分词器 | ✅ 已完成 |
 | Qwen2 / Qwen3.5 / LLaMA 推理 | ✅ 已完成 |
 | Gemma 3 推理 | ✅ 已完成（已验证 270m Q8_0） |
-| Gemma 4 框架 | 🚧 已提交初始代码，待验证 |
+| Gemma 4 推理 | ✅ 已完成（已验证 E2B Q4_K_M，内存估算修复） |
 | 多模型架构（registry + layers/ + models/） | ✅ 已完成 |
-| 内存泄漏修复（GGUF arena 字符串悬垂指针 + model_name 泄漏） | ✅ 已完成 |
+| KV Cache per-layer 可变维度（n_kv_head/head_dim 逐层自适应） | ✅ 已完成 |
+| 交互式聊天模式（-c/--chat） | ✅ 已完成 |
 | 测试体系（GGUF / 架构 / 层 / KV Cache / 词汇表） | ✅ 已完成 |
 | 调试工具（dump_graph / compare_logits / gen_ref） | ✅ 已完成 |
-| 推理正确性验证（tinyllama / Llama-3.2 / Qwen3.5 / Gemma3） | ✅ 已完成 |
+| 推理正确性验证（tinyllama / Llama-3.2 / Qwen3.5 / Gemma3 / Gemma4） | ✅ 已完成 |
 | 图优化（Gallocr 复用 + 输入张量缓存 + IncContext） | ✅ 已完成 |
 | `--benchmark` 模式（PP/TG 分离 + 格式化输出） | ✅ 已完成 |
 | `-Dbundle-ggml` 源码构建 | ✅ 已完成 |
@@ -35,7 +36,7 @@ ggml 绑定 → GGUF 加载 → Embedding → 单层前向 → 完整推理 + KV
 SSM 参数读取 → forwardSSM → forwardFullAttention → 层类型判断 → SSM 状态管理
 
 ### P7：Gemma 3/4 支持 ✅
-Gemma 3 推理已验证 → Gemma 4 初始代码已提交
+Gemma 3 推理已验证 → Gemma 4 推理已验证 (E2B Q4_K_M)
 
 ### P8：Metal 后端集成 ⬜
 `build.zig` 添加 `-Dmetal` → Metal 编译宏 → 后端初始化 → `--backend metal`
@@ -63,7 +64,13 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ✅ Qwen3.5 模型实现（含混合注意力、SSM 层）
 - ✅ LLaMA 模型实现
 - ✅ Gemma 3 模型实现（混合 SWA/Full Attention、Q/K pre-norm、logit softcapping）
-- ✅ Gemma 4 模型框架代码（MoE、shared KV、per-layer embedding 初始实现）
+- ✅ Gemma 4 模型实现（per-layer head_dim、SWA/Full Attention 混合、shared KV、GeGLU FFN）
+- ✅ 交互式聊天模式（`-c/--chat`，流式对话）
+
+### 内存与 KV Cache
+- ✅ KV Cache per-layer 可变维度（Gemma 4 各层 n_kv_head/head_dim 不同，LayerCache 逐层存储实际维度）
+- ✅ setKv 自动适配 per-layer 维度差异（使用实际张量维度创建视图）
+- ✅ Gemma 4 内存估算修复（改用 `gguf_file.totalTensorDataSize()` 精确计算，替代启发式 0.6 bytes/elem 估算）
 
 ### 图优化
 - ✅ IncContext 增量上下文分离（独立 512MB 上下文，避免与 prompt 图上下文冲突）
@@ -74,12 +81,11 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ✅ graph_context.zig 模块（IncContext + DecodeStep API）
 - ✅ threadpool.zig 模块（ggml_threadpool Zig 封装，待 ggml 版本升级后启用）
 - ✅ ggml_graph_dup 绑定（CGraph.dup 方法）
-- ✅ 构建脚本（build.zig，含三个可执行文件）
-- ✅ benchmark 输出显示模型名称（从 GGUF general.name 读取，修复 GGUF arena 悬垂指针导致乱码的问题）
+- ✅ 构建脚本（build.zig）
 
 ### 算子与修复
 - ✅ 卷积/SSM 相关算子（conv1d、ssmConv、ssmScan、gatedDeltaNet）
-- ✅ 基于词汇表的 tokenizer 测试（test_vocab.zig，18 个词汇表）
+- ✅ 注意力 cont4d 修复（显式 cont4d 避免 ggml_is_transposed 边界情况）
 - ✅ 注意力 mask 修复（diagMaskInf 正确处理 3D 张量）
 - ✅ Qwen3.5 Q/gate 交错布局修复（view_3d with interleaved stride）
 - ✅ SSM 状态持久化（ctx_kv_cache 分配，不受 ctx_graph.reset() 影响）
@@ -87,7 +93,6 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ✅ RoPE 位置编码修复（buildMultiPositionTensor 布局对齐 MRoPE/IMRoPE）
 - ✅ EOG 检测（tokenizer 新增 isEog() 方法和 eog_ids 集合）
 - ✅ 多 prompt token 支持（sampleGreedy 正确取最后一个 token 的 logits）
-- ✅ 构建脚本（build.zig，含三个可执行文件）
 - ✅ GGUF v3 扩展元数据解析（rope_freq_base_swa、attention_softcapping 等）
 - ✅ 图构建 forward_expand API（避免 CGraph 重复初始化）
 - ✅ ropeExt 绑定（支持 freq_base 和 freq_scale 参数）
@@ -95,17 +100,16 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 ### 推理验证
 - ✅ tinyllama 推理正确
 - ✅ Llama-3.2-3B 推理正确
-- ✅ Qwen3.5 SSM 层推理正确性（修复 resetSSMStates 在增量解码循环中被错误调用的问题）
-- ✅ main.zig 段错误修复（缺少 setKVCacheContext 调用导致 Qwen3.5 SSM 状态被释放）
-- ✅ Gemma 3 270m Q8_0 推理正确（5.71 tok/s）
-- ✅ 推理正确性验证：zllama-simple 输出与 llama-simple 对比，四种模型输出基本一致
+- ✅ Qwen3.5 SSM 层推理正确性
+- ✅ Gemma 3 270m Q8_0 推理正确
+- ✅ Gemma 4 E2B Q4_K_M 推理正确（内存估算修复后加载成功）
 
 ### 测试覆盖
-- ✅ GGUF 解析测试（手工构造 v2/v3 二进制数据）
+- ✅ GGUF 解析测试
 - ✅ 架构检测测试（30+ 用例）
 - ✅ 算子层数值测试（RMSNorm, RoPE, SwiGLU, Attention）
-- ✅ KV Cache 功能测试
-- ✅ 词汇表测试（18 个词汇表，基于 llama.cpp 标准测试数据）
+- ✅ KV Cache 功能测试（含 per-layer 维度验证）
+- ✅ 词汇表测试（18 个词汇表）
 - ✅ Logits 比较器测试
 - ✅ `zig build test` 全部通过
 
@@ -114,15 +118,10 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 ### 性能优化
 - ✅ **Gallocr 复用**：增量解码使用独立 IncContext，Gallocr 跨 token 复用
 - ✅ **增量上下文分离**：增量解码使用独立的 512MB ctx_inc
-- ✅ **图结构复用**：输入张量预分配跨步复用，参考 llama.cpp `llm_graph_input_i` 模式；CGraph 每步新建（极轻量）；Gallocr 跨步复用；上下文内存 80% 阈值自动回收
-- ⬜ **线程池**：持久化 ggml_threadpool（需 ggml 版本升级以支持线程池 API）
+- ✅ **图结构复用**：输入张量预分配跨步复用
+- ⬜ **线程池**：持久化 ggml_threadpool（需 ggml 版本升级）
 - ✅ **`--benchmark` 模式**：PP/TG 时间分离 + 格式化 benchmark 输出
-- ✅ **`-Dbundle-ggml` 源码构建**：支持从 deps/ggml 源码构建，含 x86_64 优化
-
-### 模型支持
-- ⬜ **Gemma 4 验证**：初始代码已完成，需使用真实 Gemma 4 模型文件测试推理正确性
-- ⬜ **Gemma 3 attn_post_norm / ffn_post_norm 缺失警告**：270m 小模型没有这些权重，需确认大模型（2B/9B/27B）是否有
-- ⬜ **KV Cache "permuted" 警告**：Gemma 3 推理时 ggml_gallocr 报 `node cache.v.0 (view) (permuted) (cont) is not valid`，需要修复 V cache 的视图处理
+- ✅ **`-Dbundle-ggml` 源码构建**
 
 ### 后端支持
 - ⬜ **Metal 后端**（macOS GPU 加速）
@@ -154,17 +153,6 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
      └───────────────┘
 ```
 
-### 测试模块
-
-| 文件 | 内容 |
-|------|------|
-| `tests/test_gguf.zig` | GGUF v2/v3 解析测试 |
-| `tests/test_archs.zig` | 架构注册与检测（30+ 用例） |
-| `tests/test_layers.zig` | RMSNorm / RoPE / SwiGLU 数值测试 |
-| `tests/test_kv_cache.zig` | KV Cache 功能测试 |
-| `tests/test_vocab.zig` | 词汇表测试（18 个词汇表） |
-| `tests/test_compare_logits.zig` | Logits 对比测试 |
-
 ### 调试工具
 
 | 工具 | 功能 |
@@ -172,30 +160,6 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 | `tools/dump_graph.zig` | 计算图导出（text / dot / json） |
 | `tools/compare_logits.zig` | Logits 对比（NMSE / 余弦相似度 / PSNR） |
 | `tools/generate_reference.zig` | 生成参考 logits（binary / text） |
-
-### 关键设计决策
-
-- **注册表**使用虚表（`ModelVTable`），**模型内部**使用编译时多态
-- **测试数据**：算子测试用完全随机，端到端测试用真实模型
-- **NMSE 阈值**：算子 1e-5，架构前向 1e-4，与 llama.cpp 对比 1e-2
-
-### 风险与缓解
-
-| 风险 | 缓解 |
-|------|------|
-| Zig 0.16.0 测试框架不成熟 | 使用 `std.testing`，必要时封装辅助函数 |
-| 浮点精度差异导致误报 | 宽松阈值（1e-2），关注趋势 |
-| 测试执行时间过长 | 分层测试：快速（<1min）+ 完整（按需） |
-| 模型文件过大 | 脚本生成 + git-lfs 管理参考输出 |
-
-### 成功标准
-
-1. `zig build` 零错误
-2. `zig build test` 全部通过
-3. 每个架构都有随机权重前向测试
-4. 代码修改不导致已有测试失败
-5. 问题能快速定位到具体层/算子
-6. 相同输入始终产生相同输出
 
 ---
 
@@ -205,10 +169,10 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 
 ```bash
 # 调试模式（显示详细日志）
-zig-out/bin/zllama-simple -d -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
+zig-out/bin/zllama -d -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf
 
 # 详细模式
-zig-out/bin/zllama-simple -v -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
+zig-out/bin/zllama -v -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf
 ```
 
 ### 常见问题
@@ -216,23 +180,13 @@ zig-out/bin/zllama-simple -v -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
 1. **GraphAllocFailed**：ctx_graph 内存不足，增大 mem_size_estimate
 2. **输出乱码**：tokenizer 的 decodeSingle 实现有问题，检查 BPE 解码逻辑
 3. **输出为空**：采样得到的 token_id 为 0（unk）或 EOS，检查 logits 形状和采样逻辑
-4. **速度慢**：已通过 Gallocr 复用 + 输入张量缓存优化
-5. **Qwen3.5 输出 "0"**：SSM 层（gatedDeltaNet）计算图构建有问题，需要检查 gdn_output 的 view 和 state 管理
-6. **Gemma 3 KV Cache "permuted" 警告**：ggml_gallocr 提示 cache.v.0 view 无效，可能影响长上下文推理，需修复 V 的 permute 处理
+4. **加载崩溃（GGML_ASSERT obj_new failed）**：内存估算不足，需使用 `totalTensorDataSize()` 精确计算
+5. **Gemma 4 KV Cache 维度不匹配**：各层 n_kv_head/head_dim 不同，需用 per-layer 实际维度创建视图
 
 ---
 
-## 代码验证约束
-
-- [x] `pub fn main(init: std.process.Init) !void`
-- [x] 文件 I/O 使用 `std.Io.Dir.cwd().openFile(io, ...)`
-- [x] 时间测量使用 `std.Io.Clock.now(.awake, io)`
-- [x] 遇到不确定的 API 标记 TODO
-
 ## 近期优先级
 
-1. ⬜ **Gemma 4 验证与修复**：使用真实 Gemma 4 模型文件测试
-2. ⬜ **Gemma 3 KV Cache permute 修复**：解决 ggml_gallocr "permuted" 警告
-3. ⬜ Metal / CUDA 后端
-4. ⬜ CI + 生态工具
-5. ⬜ 线程池（待 ggml 升级）
+1. ⬜ Metal / CUDA 后端
+2. ⬜ CI + 生态工具
+3. ⬜ 线程池（待 ggml 升级）
