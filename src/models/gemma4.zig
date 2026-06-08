@@ -129,7 +129,7 @@ pub const Gemma4Model = struct {
         _ = io;
         self.params = try parseParams(gguf_file, allocator);
 
-        const mem_size_estimate = estimateMemSize(&self.params);
+        const mem_size_estimate = estimateMemSize(gguf_file);
         self.ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
 
         self.weights = try loadWeights(gguf_file, self.ctx_weights, &self.params, allocator);
@@ -275,8 +275,6 @@ pub const Gemma4Model = struct {
                 // 非 KV 层：复用前面层的 KV cache
                 const kv_layer_idx = findKVLayer(w, i);
 
-                q = ggml.cont(ctx, ggml.permute(ctx, q, 0, 2, 1, 3));
-
                 var k: *ggml.Tensor = undefined;
                 var v_tensor: *ggml.Tensor = undefined;
                 if (kv_cache_mgr) |cache| {
@@ -286,18 +284,32 @@ pub const Gemma4Model = struct {
                     return error.NonKVLayerNeedsKVCache;
                 }
 
-                const cache_len: i64 = @as(i64, @intCast(kv_cache_mgr.?.currentLen()));
-                const n_kv_head: i64 = @intCast(p.base.n_kv_head);
+                // 从 cached K 获取实际的 head_dim_k（可能与 Q 的 head_dim 不同）
+                const head_dim_k_cache: i64 = k.ne()[0];
+                const n_kv_head_cache: i64 = k.ne()[1];
+                var n_head_eff = n_head;
+                if (head_dim != head_dim_k_cache) {
+                    n_head_eff = @divExact(n_head * head_dim, head_dim_k_cache);
+                    q = ggml.reshape3d(ctx, q, head_dim_k_cache, n_head_eff, n_tokens_i64);
+                }
+
+                const cache_len: i64 = if (kv_cache_mgr) |cache|
+                    @as(i64, @intCast(cache.currentLen()))
+                else
+                    n_tokens_i64;
 
                 attn_out = attention.scaledDotProductAttention(ctx, q, k, v_tensor, .{
-                    .n_head = n_head,
-                    .n_kv_head = n_kv_head,
-                    .head_dim = head_dim,
+                    .n_head = n_head_eff,
+                    .n_kv_head = n_kv_head_cache,
+                    .head_dim = head_dim_k_cache,
                     .n_tokens = n_tokens_i64,
                     .cache_len = cache_len,
                     .start_pos = start_pos,
                     .scale_factor = 1.0,
                 });
+
+                // Reshape attn_out back to original Q dimension
+                attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
             }
 
             // 输出投影
@@ -704,40 +716,21 @@ fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name:
     return error.TensorNotFound;
 }
 
-fn estimateMemSize(params: *const Gemma4Params) usize {
-    const n_vocab = params.base.n_vocab;
-    const n_embd = params.base.n_embd;
-    const n_kv_head = params.base.n_kv_head;
-    const n_layer = params.base.n_layer;
-    const n_ff = params.base.n_ff;
-    const head_dim = params.base.n_head_dim;
+fn estimateMemSize(gguf_file: *const gguf.GGUFFile) usize {
+    const raw_data_size = gguf_file.totalTensorDataSize();
+    const n_tensors = gguf_file.tensors.items.len;
+    // ggml 内部每个张量需要: ggml_tensor (~256B) + ggml_object (~64B) + 对齐
+    // 使用 384 字节/tensor 以确保覆盖
+    const overhead: usize = n_tensors * 384;
+    const with_overhead = raw_data_size + overhead;
+    // 33% 安全余量 + 64MB 固定缓冲
+    const total = with_overhead + with_overhead / 3 + 64 * 1024 * 1024;
 
-    const bytes_per_elem_quant: f64 = 0.6;
-    const bytes_per_elem_f32: u64 = 4;
-
-    var total: u64 = @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_vocab)) * bytes_per_elem_quant));
-    total += @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_vocab)) * bytes_per_elem_quant));
-    total += n_embd * bytes_per_elem_f32;
-
-    const kv_dim = n_kv_head * head_dim;
-    const per_layer_quant: u64 =
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_embd)) * bytes_per_elem_quant)) +
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * kv_dim)) * bytes_per_elem_quant)) +
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * kv_dim)) * bytes_per_elem_quant)) +
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_embd)) * bytes_per_elem_quant)) +
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_ff)) * bytes_per_elem_quant)) +
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_embd * n_ff)) * bytes_per_elem_quant)) +
-        @as(u64, @intFromFloat(@as(f64, @floatFromInt(n_ff * n_embd)) * bytes_per_elem_quant));
-
-    const per_layer_f32: u64 = 6 * n_embd * bytes_per_elem_f32 + 2 * head_dim * bytes_per_elem_f32;
-
-    total += (per_layer_quant + per_layer_f32) * n_layer;
-
-    const n_tensors: u64 = 3 + n_layer * 14;
-    total += n_tensors * 256;
-    total = @as(u64, @intFromFloat(@as(f64, @floatFromInt(total)) * 1.3));
-
-    log.info("Estimated Gemma 4 weights memory: {d} MB", .{total / (1024 * 1024)});
+    log.info("Estimated Gemma 4 weights memory: {d} MB (raw: {d} MB, {d} tensors)", .{
+        total / (1024 * 1024),
+        raw_data_size / (1024 * 1024),
+        n_tensors,
+    });
     return total;
 }
 

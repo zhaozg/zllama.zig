@@ -377,9 +377,12 @@ fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name:
 fn estimateMemSize(gguf_file: *const gguf.GGUFFile) usize {
     const raw_data_size = gguf_file.totalTensorDataSize();
     const n_tensors = gguf_file.tensors.items.len;
-    const overhead: usize = n_tensors * 256;
+    // ggml 内部每个张量需要: ggml_tensor (~256B) + ggml_object (~64B) + 对齐
+    // 使用 384 字节/tensor 以确保覆盖
+    const overhead: usize = n_tensors * 384;
     const with_overhead = raw_data_size + overhead;
-    const total = with_overhead + with_overhead / 5; // +20%
+    // 33% 安全余量 + 64MB 固定缓冲
+    const total = with_overhead + with_overhead / 3 + 64 * 1024 * 1024;
     log.info("Estimated weights memory: {d} MB (raw: {d} MB, {d} tensors)", .{ total / (1024 * 1024), raw_data_size / (1024 * 1024), n_tensors });
     return total;
 }
