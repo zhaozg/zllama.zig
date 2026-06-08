@@ -83,7 +83,10 @@ pub fn scaledDotProductAttention(
 
     // Step 5: v = v^T (transpose)
     // v_perm: [head_dim, cache_len, n_kv_head] -> transpose -> [cache_len, head_dim, n_kv_head]
-    const v_t = ggml.cont(ctx, ggml.transpose(ctx, v_perm));
+    // Use explicit cont4d to guarantee contiguous strides (avoids ggml_is_transposed edge case)
+    const v_t_transposed = ggml.transpose(ctx, v_perm);
+    const v_ne = v_t_transposed.ne();
+    const v_t = ggml.cont4d(ctx, v_t_transposed, v_ne[0], v_ne[1], v_ne[2], v_ne[3]);
 
     // Step 6: kqv = v @ kq (mul_mat)
     // v_t: [cache_len, head_dim, n_kv_head] (ne[0]=cache_len, ne[1]=head_dim, ne[2]=n_kv_head)

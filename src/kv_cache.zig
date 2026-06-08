@@ -10,9 +10,15 @@ const log = std.log.scoped(.kv_cache);
 
 /// 单层的 KV Cache
 pub const LayerCache = struct {
-    k: *ggml.Tensor, // [head_dim, n_kv_head, max_seq_len]
-    v: *ggml.Tensor, // [head_dim, n_kv_head, max_seq_len]
+    k: *ggml.Tensor, // [head_dim_k, n_kv_head, max_seq_len]
+    v: *ggml.Tensor, // [head_dim_v, n_kv_head, max_seq_len]
     current_len: u32, // 当前已使用的长度
+    /// 实际存储在本层的 n_kv_head（可能小于全局 max）
+    n_kv_head_actual: u32,
+    /// 实际存储在本层的 K head_dim
+    head_dim_k_actual: u32,
+    /// 实际存储在本层的 V head_dim
+    head_dim_v_actual: u32,
 };
 
 /// KV Cache 管理器
@@ -73,6 +79,9 @@ pub const KVCache = struct {
                 .k = k,
                 .v = v,
                 .current_len = 0,
+                .n_kv_head_actual = n_kv_head,
+                .head_dim_k_actual = head_dim_k,
+                .head_dim_v_actual = head_dim_v,
             };
         }
 
@@ -100,30 +109,27 @@ pub const KVCache = struct {
         }
     }
 
-    /// 获取指定层的 K Cache 视图 [head_dim, n_kv_head, current_len]
+    /// 获取指定层的 K Cache 视图 [head_dim_k_actual, n_kv_head_actual, current_len]
     pub fn getKView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
         const len: i64 = @intCast(layer.current_len);
-        const hdim: i64 = @intCast(self.head_dim_k);
-        const nkv: i64 = @intCast(self.n_kv_head);
+        const hdim: i64 = @intCast(layer.head_dim_k_actual);
+        const nkv: i64 = @intCast(layer.n_kv_head_actual);
 
-        // layer.k: [head_dim, n_kv_head, max_seq_len]
-        //   nb[0] = sizeof(f32) = 4
-        //   nb[1] = head_dim * sizeof(f32)  (stride along n_kv_head dim)
-        //   nb[2] = head_dim * n_kv_head * sizeof(f32)  (stride along seq dim)
-        // View:   [head_dim, n_kv_head, len]
+        // layer.k: [head_dim_k, n_kv_head, max_seq_len]
+        // View:   [head_dim_k_actual, n_kv_head_actual, len]
         return ctx.view3d(layer.k, hdim, nkv, len,
             @intCast(hdim * @sizeOf(f32)),       // nb1: stride along n_kv_head dim
             @intCast(hdim * nkv * @sizeOf(f32)), // nb2: stride along seq dim
             0);
     }
 
-    /// 获取指定层的 V Cache 视图 [head_dim, n_kv_head, current_len]
+    /// 获取指定层的 V Cache 视图 [head_dim_v_actual, n_kv_head_actual, current_len]
     pub fn getVView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
         const len: i64 = @intCast(layer.current_len);
-        const hdim: i64 = @intCast(self.head_dim_v);
-        const nkv: i64 = @intCast(self.n_kv_head);
+        const hdim: i64 = @intCast(layer.head_dim_v_actual);
+        const nkv: i64 = @intCast(layer.n_kv_head_actual);
 
         return ctx.view3d(layer.v, hdim, nkv, len,
             @intCast(hdim * @sizeOf(f32)),       // nb1: stride along n_kv_head dim
@@ -134,6 +140,7 @@ pub const KVCache = struct {
     /// 将新的 K, V 写入 Cache
     /// new_k: [head_dim, n_kv_head, n_tokens] (RoPE 后的形状)
     /// new_v: [head_dim, n_kv_head, n_tokens]
+    /// 自动适配 per-layer 维度差异，使用实际张量维度创建视图
     pub fn setKv(
         self: *KVCache,
         ctx: *ggml.Context,
@@ -146,27 +153,32 @@ pub const KVCache = struct {
         const layer = &self.layers[layer_idx];
         const offset = layer.current_len;
 
-        const hdim: i64 = @intCast(self.head_dim);
-        const nkv: i64 = @intCast(self.n_kv_head);
+        // 使用实际张量维度（支持 per-layer 变化的 n_kv_head/head_dim）
+        const actual_hdim_k: i64 = new_k.ne()[0];
+        const actual_nkv_k: i64 = new_k.ne()[1];
+        const actual_hdim_v: i64 = new_v.ne()[0];
+        const actual_nkv_v: i64 = new_v.ne()[1];
 
-        // layer.k: [head_dim, n_kv_head, max_seq_len]
-        //   nb[0] = sizeof(f32) = 4
-        //   nb[1] = head_dim * sizeof(f32)  (stride along n_kv_head dim)
-        //   nb[2] = head_dim * n_kv_head * sizeof(f32)  (stride along seq dim)
-        // View into cache at offset along seq dim (ne[2]):
-        // [head_dim, n_kv_head, n_tokens]
-        // offset in bytes = offset * head_dim * n_kv_head * sizeof(f32)
-        const k_dst = ctx.view3d(layer.k, hdim, nkv, @intCast(n_tokens),
-            @intCast(hdim * @sizeOf(f32)),             // nb1: stride along n_kv_head dim
-            @intCast(hdim * nkv * @sizeOf(f32)),       // nb2: stride along seq dim
-            @intCast(offset * hdim * nkv * @sizeOf(f32))); // offset along seq dim
+        // 首次写入时更新本层的实际维度
+        if (offset == 0) {
+            layer.n_kv_head_actual = @intCast(actual_nkv_k);
+            layer.head_dim_k_actual = @intCast(actual_hdim_k);
+            layer.head_dim_v_actual = @intCast(actual_hdim_v);
+        }
+
+        // layer.k: [head_dim_k_cache, n_kv_head_cache, max_seq_len]
+        // 使用实际维度创建视图：写入区域 = [actual_hdim, actual_nkv, n_tokens]
+        const k_dst = ctx.view3d(layer.k, actual_hdim_k, actual_nkv_k, @intCast(n_tokens),
+            @intCast(actual_hdim_k * @sizeOf(f32)),
+            @intCast(actual_hdim_k * actual_nkv_k * @sizeOf(f32)),
+            @intCast(offset * actual_hdim_k * actual_nkv_k * @sizeOf(f32)));
         const k_cpy = ggml.cpy(ctx, new_k, k_dst);
         graph.buildForwardExpand(k_cpy);
 
-        const v_dst = ctx.view3d(layer.v, hdim, nkv, @intCast(n_tokens),
-            @intCast(hdim * @sizeOf(f32)),             // nb1: stride along n_kv_head dim
-            @intCast(hdim * nkv * @sizeOf(f32)),       // nb2: stride along seq dim
-            @intCast(offset * hdim * nkv * @sizeOf(f32))); // offset along seq dim
+        const v_dst = ctx.view3d(layer.v, actual_hdim_v, actual_nkv_v, @intCast(n_tokens),
+            @intCast(actual_hdim_v * @sizeOf(f32)),
+            @intCast(actual_hdim_v * actual_nkv_v * @sizeOf(f32)),
+            @intCast(offset * actual_hdim_v * actual_nkv_v * @sizeOf(f32)));
         const v_cpy = ggml.cpy(ctx, new_v, v_dst);
         graph.buildForwardExpand(v_cpy);
 
@@ -300,6 +312,10 @@ test "KVCache basic lifecycle" {
     try testing.expectEqual(@as(u32, 0), kv.layers[0].current_len);
     try testing.expect(kv.layers[0].k != undefined);
     try testing.expect(kv.layers[0].v != undefined);
+
+    // 验证 per-layer 维度
+    try testing.expectEqual(@as(u32, 2), kv.layers[0].n_kv_head_actual);
+    try testing.expectEqual(@as(u32, 16), kv.layers[0].head_dim_k_actual);
 
     // 测试 reset
     kv.reset();

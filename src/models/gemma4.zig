@@ -247,14 +247,17 @@ pub const Gemma4Model = struct {
                     q = ggml.reshape3d(ctx, q, head_dim_k, n_head_eff, n_tokens_i64);
                     log.debug("Layer {d}: reshape Q from [{d},{d}] -> [{d},{d}]", .{ i, head_dim, n_head, head_dim_k, n_head_eff });
                 }
-                // KV Cache (FIXME: per-layer n_kv_head varies, disabled for now)
-                // if (kv_cache_mgr) |cache| {
-                //     cache.setKv(ctx, graph, i, k, v_tensor, @intCast(n_tokens_i64));
-                //     k = cache.getKView(ctx, i);
-                //     v_tensor = cache.getVView(ctx, i);
-                // }
+                // KV Cache: store K/V, then read back full cache for attention across all tokens
+                if (kv_cache_mgr) |cache| {
+                    cache.setKv(ctx, graph, i, k, v_tensor, @intCast(n_tokens_i64));
+                    k = cache.getKView(ctx, i);
+                    v_tensor = cache.getVView(ctx, i);
+                }
 
-                const cache_len: i64 = n_tokens_i64;
+                const cache_len: i64 = if (kv_cache_mgr) |cache|
+                    @as(i64, @intCast(cache.currentLen()))
+                else
+                    n_tokens_i64;
 
                 attn_out = attention.scaledDotProductAttention(ctx, q, k, v_tensor, .{
                     .n_head = n_head_eff,
