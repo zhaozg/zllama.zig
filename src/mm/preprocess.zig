@@ -4,7 +4,7 @@
 //! - 图像：resize（双线性插值）+ 像素归一化
 //! - 音频：WAV 读取 + Mel 频谱提取（STFT + Mel 滤波器组）
 //!
-//! 图像格式支持：PPM (P6 binary) 和原始 RGB 字节数组
+//! 图像格式支持：PPM (P6 binary), JPEG, PNG, BMP, GIF, TGA (via stb_image)
 //! 音频格式支持：WAV (16-bit PCM, mono/stereo)
 //!
 //! 参考: llama.cpp tools/mtmd/clip-impl.h (clip_image_preprocess)
@@ -14,6 +14,7 @@ const std = @import("std");
 const ggml = @import("ggml");
 const fft_mod = @import("fft");
 const math = std.math;
+const stb_image = @import("stb_image");
 
 const log = std.log.scoped(.mm_preprocess);
 
@@ -128,6 +129,92 @@ pub fn loadPPM(
 }
 
 /// 从原始 RGB 字节数组创建处理后的图像（不做 resize）
+
+/// 通用图像加载器 — 自动检测格式（PPM / JPEG / PNG / BMP / GIF / TGA）
+///
+/// PPM (P6) 使用内置解析器，其他格式委托给 stb_image。
+/// 所有图像都会被缩放到 target_size × target_size (双线性插值)。
+pub fn loadImage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    file_path: []const u8,
+    target_size: u32,
+    format_hint: enum { auto, ppm, stb },
+) !ProcessedImage {
+    // 读取文件头检测格式
+    const cwd = std.Io.Dir.cwd();
+    const file = try cwd.openFile(io, file_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    var header_buf: [12]u8 = undefined;
+    const n_read = try file.readPositionalAll(io, &header_buf, 0);
+
+    // PPM P6 magic
+    const is_ppm = n_read >= 3 and std.mem.eql(u8, header_buf[0..3], "P6\n") or
+        (n_read >= 2 and std.mem.eql(u8, header_buf[0..2], "P6"));
+
+    // JPEG magic: FF D8 FF
+    const is_jpeg = n_read >= 3 and header_buf[0] == 0xFF and header_buf[1] == 0xD8 and header_buf[2] == 0xFF;
+
+    // PNG magic: 89 50 4E 47 0D 0A 1A 0A
+    const is_png = n_read >= 8 and std.mem.eql(u8, header_buf[0..8], &.{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+
+    // GIF magic: GIF87a / GIF89a
+    const is_gif = n_read >= 6 and (std.mem.eql(u8, header_buf[0..6], "GIF87a") or
+        std.mem.eql(u8, header_buf[0..6], "GIF89a"));
+
+    // BMP magic: BM
+    const is_bmp = n_read >= 2 and header_buf[0] == 'B' and header_buf[1] == 'M';
+
+    const use_ppm = switch (format_hint) {
+        .ppm => true,
+        .stb => false,
+        .auto => is_ppm and !is_jpeg and !is_png and !is_gif and !is_bmp,
+    };
+
+    if (use_ppm) {
+        return loadPPM(allocator, io, file_path, target_size);
+    }
+
+    // stb_image path — read full file into buffer and decode
+    const stat = try file.stat(io);
+    const raw = try allocator.alloc(u8, @intCast(stat.size));
+    defer allocator.free(raw);
+    const total_read = try file.readPositionalAll(io, raw, 0);
+    if (total_read != raw.len) return error.FileReadError;
+
+    var w: i32 = 0;
+    var h: i32 = 0;
+    var comp: i32 = 0;
+
+    // Force RGB (3 channels)
+    const pixels = stb_image.loadFromMemory(raw.ptr, @intCast(raw.len), &w, &h, &comp, 3);
+    if (pixels == null) {
+        const reason = stb_image.failureReason();
+        log.err("stb_image failed: {s}", .{reason});
+        return error.ImageDecodeFailed;
+    }
+    defer stb_image.free(pixels);
+
+    const src_w: u32 = @intCast(w);
+    const src_h: u32 = @intCast(h);
+    const pixel_bytes = pixels.?[0..@as(usize, @intCast(src_w * src_h * 3))];
+
+    log.info("Decoded image via stb_image: {d}x{d} ({d} channels)", .{ src_w, src_h, comp });
+
+    // Resize to target size
+    const resized = try bilinearResizeRGB(allocator, pixel_bytes, src_w, src_h, target_size, target_size);
+
+    log.info("Processed image: {d}x{d} -> {d}x{d}", .{ src_w, src_h, target_size, target_size });
+
+    return .{
+        .data = resized,
+        .width = target_size,
+        .height = target_size,
+        .allocator = allocator,
+    };
+}
+
 pub fn fromRawRGB(
     allocator: std.mem.Allocator,
     rgb_data: []const u8,

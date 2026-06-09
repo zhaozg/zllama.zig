@@ -230,6 +230,18 @@ pub fn build(b: *std.Build) void {
     mm_preprocess_mod.addImport("ggml", ggml_mod);
     mm_preprocess_mod.addImport("fft", fft_mod);
 
+    // stb_image — vendor/stb/stb_image.h wrapper for JPEG/PNG decoding
+    const stb_image_mod = b.createModule(.{
+        .root_source_file = b.path("src/stb_image.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    stb_image_mod.addIncludePath(b.path("vendor/stb"));
+    stb_image_mod.addCSourceFile(.{ .file = b.path("vendor/stb/stb_image.c") });
+
+    mm_preprocess_mod.addImport("stb_image", stb_image_mod);
+
     // 主可执行文件 zllama
     // ======================================================================
     const exe_mod = b.createModule(.{
@@ -250,6 +262,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("mm", mm_manager_mod);
     exe_mod.addImport("preprocess", mm_preprocess_mod);
     exe_mod.addImport("kv_cache", kv_cache_mod);
+    exe_mod.addImport("stb_image", stb_image_mod);
 
     const exe = b.addExecutable(.{
         .name = "zllama",
@@ -292,6 +305,7 @@ pub fn build(b: *std.Build) void {
     simple_mod.addImport("tokenizer", tokenizer_mod);
     simple_mod.addImport("sampler", sampler_mod);
     simple_mod.addImport("kv_cache", kv_cache_mod);
+    simple_mod.addImport("stb_image", stb_image_mod);
     simple_mod.addImport("graph_context", graph_context_mod);
     simple_mod.addImport("mm", mm_manager_mod);
     simple_mod.addImport("preprocess", mm_preprocess_mod);

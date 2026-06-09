@@ -143,8 +143,7 @@ const CliArgs = struct {
             \\
             \\多模态选项:
             \\  --mmproj <路径>       多模态投影器文件 (GGUF格式, mmproj)
-            \\  --image <路径>        输入图像文件 (PPM P6 格式)
-            \\  --image <路径>        输入图像文件 (PPM P6 格式)
+            \\  --image <路径>        输入图像文件 (PPM/JPEG/PNG/BMP/GIF)
             \\  --audio <路径>        输入音频文件 (PCM F32, 16kHz)
             \\
         , .{});
@@ -540,9 +539,9 @@ const InferenceEngine = struct {
         }
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
 
-        // Step 1: Load and preprocess image
+        // Step 1: Load and preprocess image (auto-detect format: PPM/JPEG/PNG/GIF/BMP/TGA)
         const target_size: u32 = 896;
-        var img = try preprocess.loadPPM(self.allocator, io, image_path, target_size);
+        var img = try preprocess.loadImage(self.allocator, io, image_path, target_size, .auto);
         defer img.deinit();
 
         logger.info("Loaded image: {d}x{d} -> {d}x{d}", .{ img.width, img.height, target_size, target_size });
