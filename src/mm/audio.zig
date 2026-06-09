@@ -253,7 +253,6 @@ pub const AudioEncoder = struct {
         // 转置: [n_mel_bins, n_frames] -> [n_frames, n_mel_bins, 1, 1]
         // 以匹配 Conv2D 的 [H, W, C, N] 布局
         cur = ggml.cont(ctx, ggml.permute(ctx, cur, 1, 0, 2, 3));
-        cur = cur.reshape4d(ctx, 1, 1, @intCast(n_mel_bins), @intCast(n_frames)).cont(ctx);
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
