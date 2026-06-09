@@ -32,8 +32,10 @@ pub const MediaInput = struct {
     image_data: ?[]const u8 = null,
     image_width: u32 = 0,
     image_height: u32 = 0,
-    /// 音频数据：PCM F32 样本
-    audio_data: ?[]const f32 = null,
+    /// 音频数据：Mel 频谱 F32 [n_mel_bins, n_frames]
+    mel_data: ?[]const f32 = null,
+    mel_bins: u32 = 0,
+    mel_frames: u32 = 0,
     audio_length_sec: f32 = 0,
 };
 
@@ -106,7 +108,7 @@ pub const MultiModalManager = struct {
             .audio => {
                 if (self.audio_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.AudioEncoderNotAvailable;
-                    return enc.encode(ctx, graph, input.audio_data.?);
+                    return enc.encode(ctx, graph, input.mel_data.?, input.mel_bins, input.mel_frames);
                 }
                 return error.AudioEncoderNotAvailable;
             },

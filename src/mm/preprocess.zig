@@ -2,16 +2,43 @@
 //!
 //! 提供图像和音频数据的预处理功能：
 //! - 图像：resize（双线性插值）+ 像素归一化
-//! - 音频：Mel 频谱提取（TODO：待实现 FFT/滤波器组）
+//! - 音频：WAV 读取 + Mel 频谱提取（STFT + Mel 滤波器组）
 //!
 //! 图像格式支持：PPM (P6 binary) 和原始 RGB 字节数组
+//! 音频格式支持：WAV (16-bit PCM, mono/stereo)
 //!
 //! 参考: llama.cpp tools/mtmd/clip-impl.h (clip_image_preprocess)
+//!       llama.cpp tools/mtmd/models/gemma4a.cpp (mel spectrogram)
 
 const std = @import("std");
 const ggml = @import("ggml");
+const fft_mod = @import("fft");
+const math = std.math;
 
 const log = std.log.scoped(.mm_preprocess);
+
+// ============================================================================
+// 音频参数常量
+// ============================================================================
+
+/// 默认音频采样率 (Gemma4 E2B)
+pub const AUDIO_SAMPLE_RATE: u32 = 16000;
+/// STFT 帧长 (25ms @ 16kHz)
+pub const AUDIO_FRAME_LENGTH: u32 = 400;
+/// STFT 帧移 (10ms @ 16kHz)
+pub const AUDIO_HOP_LENGTH: u32 = 160;
+/// FFT 点数（2 的幂）
+pub const AUDIO_N_FFT: u32 = 512;
+/// Mel 滤波器组数量
+pub const AUDIO_N_MEL_BINS: u32 = 128;
+/// Mel 最低频率
+pub const AUDIO_MEL_F_MIN: f32 = 80.0;
+/// Mel 最高频率
+pub const AUDIO_MEL_F_MAX: f32 = 7600.0;
+/// 预加重系数
+pub const AUDIO_PRE_EMPHASIS: f32 = 0.97;
+/// 对数偏移（防止 log(0)）
+pub const AUDIO_LOG_OFFSET: f32 = 1e-6;
 
 // ============================================================================
 // 图像预处理
@@ -248,6 +275,208 @@ pub const ImageNormalize = enum {
 };
 
 // ============================================================================
+// WAV 文件读取
+// ============================================================================
+
+/// WAV 文件信息
+pub const WavInfo = struct {
+    sample_rate: u32,
+    num_channels: u16,
+    bits_per_sample: u16,
+    num_samples: u32,
+};
+
+/// 从 WAV 文件加载 PCM 数据
+/// 支持 16-bit PCM, mono/stereo
+/// 返回 F32 单声道样本（stereo 取左右平均）
+pub fn loadWav(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    file_path: []const u8,
+) !struct { samples: []f32, info: WavInfo } {
+    const cwd = std.Io.Dir.cwd();
+    const file = try cwd.openFile(io, file_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    const raw = try allocator.alloc(u8, @intCast(stat.size));
+    defer allocator.free(raw);
+    const total_read = try file.readPositionalAll(io, raw, 0);
+    if (total_read != raw.len) return error.FileReadError;
+
+    // 验证 RIFF header
+    if (raw.len < 44 or !std.mem.eql(u8, raw[0..4], "RIFF") or !std.mem.eql(u8, raw[8..12], "WAVE")) {
+        return error.InvalidWavFormat;
+    }
+
+    var pos: usize = 12;
+    var fmt_found = false;
+    var data_found = false;
+    var audio_format: u16 = 0;
+    var num_channels: u16 = 0;
+    var sample_rate: u32 = 0;
+    var bits_per_sample: u16 = 0;
+    var data_offset: usize = 0;
+    var data_size: u32 = 0;
+
+    // 解析 chunks
+    while (pos + 8 <= raw.len) {
+        const chunk_id = raw[pos..pos + 4];
+        const chunk_size = std.mem.readInt(u32, @ptrCast(raw.ptr + pos + 4), .little);
+        pos += 8;
+
+        if (std.mem.eql(u8, chunk_id, "fmt ")) {
+            if (pos + 16 > raw.len) return error.InvalidWavFormat;
+
+            audio_format = std.mem.readInt(u16, @ptrCast(raw.ptr + pos), .little);
+            num_channels = std.mem.readInt(u16, @ptrCast(raw.ptr + pos + 2), .little);
+            sample_rate = std.mem.readInt(u32, @ptrCast(raw.ptr + pos + 4), .little);
+            _ = std.mem.readInt(u32, @ptrCast(raw.ptr + pos + 8), .little); // byte_rate
+            _ = std.mem.readInt(u16, @ptrCast(raw.ptr + pos + 12), .little); // block_align
+            bits_per_sample = std.mem.readInt(u16, @ptrCast(raw.ptr + pos + 14), .little);
+            fmt_found = true;
+        } else if (std.mem.eql(u8, chunk_id, "data")) {
+            data_offset = pos;
+            data_size = chunk_size;
+            data_found = true;
+            // 我们可以跳过剩余 chunk
+        }
+
+        pos += chunk_size;
+        // 对齐到偶数边界（WAV chunks 是 2 字节对齐）
+        if (chunk_size % 2 != 0) {
+            pos += 1;
+        }
+    }
+
+    if (!fmt_found or !data_found) return error.InvalidWavFormat;
+    if (audio_format != 1) return error.UnsupportedWavFormat; // 仅支持 PCM
+    if (bits_per_sample != 16) return error.UnsupportedBitDepth;
+
+    const bytes_per_sample: u32 = @divExact(@as(u32, bits_per_sample), 8);
+    const num_samples: u32 = data_size / (bytes_per_sample * num_channels);
+
+    if (data_offset + data_size > raw.len) return error.TruncatedWavData;
+
+    // 转换为 F32 单声道
+    const samples = try allocator.alloc(f32, num_samples);
+    const raw_samples_ptr = raw.ptr + data_offset;
+
+    if (num_channels == 1) {
+        var i: u32 = 0;
+        while (i < num_samples) : (i += 1) {
+            const sample_i16 = std.mem.readInt(i16, @ptrCast(raw_samples_ptr + @as(usize, i * 2)), .little);
+            samples[i] = @as(f32, @floatFromInt(sample_i16)) / 32768.0;
+        }
+    } else if (num_channels == 2) {
+        var i: u32 = 0;
+        while (i < num_samples) : (i += 1) {
+            const off: usize = @as(usize, i) * 4;
+            const left = std.mem.readInt(i16, @ptrCast(raw_samples_ptr + off), .little);
+            const right = std.mem.readInt(i16, @ptrCast(raw_samples_ptr + off + 2), .little);
+            samples[i] = @as(f32, @floatFromInt(left + right)) / 65536.0;
+        }
+    } else {
+        return error.UnsupportedChannels;
+    }
+
+    log.info("Loaded WAV: {d} Hz, {d} ch, {d} bits, {d} samples ({d})",
+        .{ sample_rate, num_channels, bits_per_sample, num_samples, @as(f64, @floatFromInt(num_samples)) / @as(f64, @floatFromInt(sample_rate)) });
+
+    return .{
+        .samples = samples,
+        .info = .{
+            .sample_rate = sample_rate,
+            .num_channels = num_channels,
+            .bits_per_sample = bits_per_sample,
+            .num_samples = num_samples,
+        },
+    };
+}
+// ============================================================================
+// FFT 实现：通过 @import("fft") 使用 Apple Accelerate vDSP
+// ============================================================================
+
+// ============================================================================
+// Mel 滤波器组
+// ============================================================================
+
+/// 预计算 Mel 滤波器组权重矩阵 [n_mel_bins, n_fft/2+1]
+fn computeMelFilterbank(
+    allocator: std.mem.Allocator,
+    n_mel_bins: u32,
+    n_fft: u32,
+    sample_rate: u32,
+    f_min: f32,
+    f_max: f32,
+) ![]f32 {
+    const n_freqs: usize = @intCast(n_fft / 2 + 1);
+    const filterbank = try allocator.alloc(f32, @as(usize, n_mel_bins) * n_freqs);
+    @memset(filterbank, 0.0);
+
+    // Hz -> Mel
+    const hzToMel = struct {
+        fn call(hz: f32) f32 {
+            return 2595.0 * math.log10(1.0 + hz / 700.0);
+        }
+    }.call;
+
+    // Mel -> Hz
+    const melToHz = struct {
+        fn call(mel: f32) f32 {
+            return 700.0 * (math.pow(f32, 10.0, mel / 2595.0) - 1.0);
+        }
+    }.call;
+
+    const mel_min = hzToMel(f_min);
+    const mel_max = hzToMel(f_max);
+
+    // 在 Mel 尺度上均匀分布 n_mel_bins + 2 个点（包含中心频率两侧的边界点）
+    const mel_step = (mel_max - mel_min) / @as(f32, @floatFromInt(n_mel_bins + 1));
+
+    // 每个滤波器的中心频率（Hz）
+    var mel_centers = try allocator.alloc(f32, @as(usize, n_mel_bins) + 2);
+    defer allocator.free(mel_centers);
+    var center_hz = try allocator.alloc(f32, @as(usize, n_mel_bins) + 2);
+    defer allocator.free(center_hz);
+
+    for (0..@as(usize, n_mel_bins) + 2) |i| {
+        mel_centers[i] = mel_min + @as(f32, @floatFromInt(i)) * mel_step;
+        center_hz[i] = melToHz(mel_centers[i]);
+    }
+
+    // FFT bin 对应的频率
+    var bin_freqs = try allocator.alloc(f32, n_freqs);
+    defer allocator.free(bin_freqs);
+    for (0..n_freqs) |i| {
+        bin_freqs[i] = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(sample_rate)) / @as(f32, @floatFromInt(n_fft));
+    }
+
+    // 对每个 mel bin 构建三角形滤波器
+    for (0..@as(usize, n_mel_bins)) |m| {
+        const left = center_hz[m];
+        const center = center_hz[m + 1];
+        const right = center_hz[m + 2];
+        const row = filterbank[m * n_freqs .. (m + 1) * n_freqs];
+
+        for (0..n_freqs) |k| {
+            const freq = bin_freqs[k];
+            if (freq <= left) {
+                row[k] = 0.0;
+            } else if (freq <= center) {
+                row[k] = (freq - left) / (center - left);
+            } else if (freq <= right) {
+                row[k] = (right - freq) / (right - center);
+            } else {
+                row[k] = 0.0;
+            }
+        }
+    }
+
+    return filterbank;
+}
+
+// ============================================================================
 // 音频预处理（Mel 频谱）
 // ============================================================================
 
@@ -266,38 +495,88 @@ pub const ProcessedAudio = struct {
 
 /// 从 PCM F32 音频样本计算 Mel 频谱
 ///
-/// TODO: 完整实现需要以下步骤：
+/// 处理步骤：
 /// 1. 预加重（pre-emphasis）系数 0.97
 /// 2. 短时傅里叶变换（STFT）
 ///    - 帧长（frame_length）= 25ms @ 16kHz = 400 samples
 ///    - 帧移（hop_length）= 10ms @ 16kHz = 160 samples
 ///    - Hann 窗口
+///    - FFT 点数 = 512 (n_fft)
 /// 3. Mel 滤波器组（128 bins, 80-7600 Hz）
 /// 4. log10 压缩
-///
-/// 当前实现：创建占位张量（全零），标记为 TODO。
-/// 原因：FFT/滤波器组实现需要约 300+ 行代码，
-/// 且需要额外的测试验证，无法在本轮完成。
-/// 暂时返回占位数据，使多模态流水线可编译。
 pub fn computeMelSpectrogram(
     allocator: std.mem.Allocator,
     audio_data: []const f32,
     sample_rate: u32,
     n_mel_bins: u32,
 ) !ProcessedAudio {
-    _ = audio_data;
-    _ = sample_rate;
+    if (audio_data.len == 0) return error.EmptyAudioData;
 
-    // TODO: 实现完整的 Mel 频谱计算
-    // 当前创建 1 帧占位数据（Conformer 需要至少 n_mel_bins * 1 的输入）
-    const n_frames: u32 = 1;
-    const data = try allocator.alloc(f32, n_mel_bins * n_frames);
-    @memset(data, 0.0);
+    const n_fft: u32 = AUDIO_N_FFT;
+    const f_min: f32 = AUDIO_MEL_F_MIN;
+    const f_max: f32 = AUDIO_MEL_F_MAX;
+    const frame_length: u32 = AUDIO_FRAME_LENGTH;
+    const hop_length: u32 = AUDIO_HOP_LENGTH;
+    const n_freqs: u32 = n_fft / 2 + 1;
 
-    log.warn("Mel spectrogram: using placeholder (FFT not yet implemented)", .{});
+    // Step 1: 预加重
+    var pre_emph = try allocator.alloc(f32, audio_data.len);
+    defer allocator.free(pre_emph);
+    pre_emph[0] = audio_data[0];
+    for (1..audio_data.len) |i| {
+        pre_emph[i] = audio_data[i] - AUDIO_PRE_EMPHASIS * audio_data[i - 1];
+    }
+
+    // 初始化 Accelerate FFT 引擎（Hann 窗 + 重用缓冲区）
+    var fft_engine = try fft_mod.AccelFFT.init(allocator, n_fft);
+    defer fft_engine.deinit();
+
+    // 预计算 Mel 滤波器组
+    const filterbank = try computeMelFilterbank(allocator, n_mel_bins, n_fft, sample_rate, f_min, f_max);
+    defer allocator.free(filterbank);
+
+    // Step 2: STFT - 计算帧数
+    const n_frames: u32 = if (pre_emph.len >= frame_length)
+        @as(u32, @intCast((pre_emph.len - frame_length) / hop_length)) + 1
+    else
+        0;
+
+    if (n_frames == 0) return error.AudioTooShort;
+
+    // 输出: [n_mel_bins, n_frames]
+    const mel_out = try allocator.alloc(f32, @as(usize, n_mel_bins) * @as(usize, n_frames));
+
+    const spectrum = try allocator.alloc(f32, @intCast(n_freqs));
+    defer allocator.free(spectrum);
+
+    // 逐帧处理
+    var frame_buf: [400]f32 = undefined;
+    for (0..n_frames) |fi| {
+        const start: usize = fi * @as(usize, hop_length);
+
+        // 提取帧（AccelFFT 内部自动零填充 + 加窗）
+        const frame_end = @min(start + frame_length, pre_emph.len);
+        @memcpy(frame_buf[0 .. frame_end - start], pre_emph[start..frame_end]);
+
+        // 使用 Accelerate vDSP 计算功率谱（自动零填充、加窗、FFT、|·|²）
+        fft_engine.powerSpectrum(frame_buf[0 .. frame_end - start], spectrum);
+
+        // Step 3: Mel 滤波器组
+        for (0..@as(usize, n_mel_bins)) |m| {
+            const row = filterbank[m * @as(usize, n_freqs) .. (m + 1) * @as(usize, n_freqs)];
+            var mel_val: f32 = 0.0;
+            for (0..@as(usize, n_freqs)) |k| {
+                mel_val += row[k] * spectrum[k];
+            }
+            // Step 4: log10 压缩
+            mel_out[m * @as(usize, n_frames) + fi] = math.log10(@max(mel_val, AUDIO_LOG_OFFSET));
+        }
+    }
+
+    log.info("Mel spectrogram: {d} frames x {d} bins, sr={d}Hz", .{ n_frames, n_mel_bins, sample_rate });
 
     return .{
-        .data = data,
+        .data = mel_out,
         .n_mel_bins = n_mel_bins,
         .n_frames = n_frames,
         .allocator = allocator,

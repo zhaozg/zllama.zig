@@ -200,6 +200,13 @@ pub fn build(b: *std.Build) void {
     });
     mm_vision_mod.addImport("ggml", ggml_mod);
     mm_vision_mod.addImport("gguf", gguf_mod);
+    const fft_mod = b.createModule(.{
+        .root_source_file = b.path("src/mm/fft.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    fft_mod.linkFramework("Accelerate", .{});
 
     const mm_manager_mod = b.createModule(.{
         .root_source_file = b.path("src/mm/manager.zig"),
@@ -221,6 +228,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mm_preprocess_mod.addImport("ggml", ggml_mod);
+    mm_preprocess_mod.addImport("fft", fft_mod);
 
     // 主可执行文件 zllama
     // ======================================================================

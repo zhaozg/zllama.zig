@@ -173,23 +173,34 @@ pub const AudioEncoder = struct {
         // 输出投影
         const audio_out_proj_w = findTensorInGGUF(ctx, gguf_file, "a.pre_encode.out.weight") catch null;
         const audio_out_proj_b = findTensorInGGUF(ctx, gguf_file, "a.pre_encode.out.bias") catch null;
-
-        // 多模态嵌入投影
         const mm_soft_emb_norm_w = findTensorInGGUF(ctx, gguf_file, "mm.a.soft_emb_norm.weight") catch null;
         const mm_input_proj_w = findTensorInGGUF(ctx, gguf_file, "mm.a.input_projection.weight") catch null;
 
-        // 加载 Conformer 层权重
+        // Load Conformer layer weights
+        // Detect n_layer from actual tensors rather than metadata
+        var actual_n_layer: u32 = 0;
+        for (0..64) |il| {
+            var buf: [32]u8 = undefined;
+            const test_name = try std.fmt.bufPrint(&buf, "a.blk.{d}.attn_q.weight", .{il});
+            if (gguf_file.findTensor(test_name) == null) break;
+            actual_n_layer = @intCast(il + 1);
+        }
+        if (actual_n_layer == 0) actual_n_layer = params.n_layer;
+        if (actual_n_layer != params.n_layer) {
+            log.info("Audio encoder layers: metadata={d}, actual={d}", .{ params.n_layer, actual_n_layer });
+            params.n_layer = actual_n_layer;
+        }
+
         const n_layer: usize = @intCast(params.n_layer);
         var layers = try allocator.alloc(ConformerLayerWeights, n_layer);
 
         for (0..n_layer) |il| {
             const prefix = try std.fmt.allocPrint(allocator, "a.blk.{d}", .{il});
+            defer allocator.free(prefix);
             layers[il] = loadConformerLayer(ctx, gguf_file, prefix) catch |err| {
                 log.err("Failed to load conformer layer {d}: {}", .{ il, err });
-                allocator.free(prefix);
                 return err;
             };
-            allocator.free(prefix);
         }
 
         log.info("Audio encoder loaded: {d} layers, subsampling convs ready", .{n_layer});
@@ -222,27 +233,27 @@ pub const AudioEncoder = struct {
         self: *const AudioEncoder,
         ctx: *ggml.Context,
         cgraph: *ggml.CGraph,
-        audio_data: []const f32,
+        mel_data: []const f32,
+        n_mel_bins: u32,
+        n_frames: u32,
     ) !*ggml.Tensor {
-        _ = audio_data;
         const w = self.weights;
         const p = self.params;
         const norm_eps = p.norm_eps;
         const res_weight: f32 = 0.5;
 
-        // 1. 创建输入张量
-        // TODO: 实际音频数据输入 - 当前创建占位张量
-        // 输入形状: [n_mel_bins, n_frames] (transposed from [n_frames, n_mel_bins])
-        // 对于 Mel 频谱: n_frames = sr * duration / hop_length
-        // 典型值: sr=16000, duration=30s, hop=160 -> n_frames=3000
-        const n_frames: i64 = @intCast(p.sample_rate * @as(u32, @intFromFloat(p.max_audio_length_sec)) / 160);
-        var cur = try ctx.newTensor2d(ggml.Type.f32, @intCast(p.n_mel_bins), @intCast(n_frames));
-        cur.setName("audio_input");
+        // 1. 创建输入张量并填充实际 Mel 数据
+        var cur = try ctx.newTensor2d(ggml.Type.f32, @intCast(n_mel_bins), @intCast(n_frames));
+        cur.setName("audio_mel_input");
+
+        const raw_bytes = cur.dataBytes();
+        const mel_byte_len = mel_data.len * @sizeOf(f32);
+        @memcpy(raw_bytes[0..mel_byte_len], @as([*]const u8, @ptrCast(mel_data.ptr))[0..mel_byte_len]);
 
         // 转置: [n_mel_bins, n_frames] -> [n_frames, n_mel_bins, 1, 1]
         // 以匹配 Conv2D 的 [H, W, C, N] 布局
         cur = ggml.cont(ctx, ggml.permute(ctx, cur, 1, 0, 2, 3));
-        cur = cur.reshape4d(ctx, 1, 1, @intCast(p.n_mel_bins), @intCast(n_frames)).cont(ctx);
+        cur = cur.reshape4d(ctx, 1, 1, @intCast(n_mel_bins), @intCast(n_frames)).cont(ctx);
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
@@ -546,7 +557,7 @@ fn loadConformerLayer(
     layer.v_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_v.weight");
     layer.o_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_out.weight");
     layer.o_b = findLayerWeight(ctx, gguf_file, prefix, "attn_out.bias") catch null;
-    layer.ln_1_w = try findLayerWeight(ctx, gguf_file, prefix, "ln1.weight");
+    layer.ln_1_w = findLayerWeight(ctx, gguf_file, prefix, "ln1.weight") catch null;
 
     // FFN 1
     layer.ff_norm_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight") catch null;

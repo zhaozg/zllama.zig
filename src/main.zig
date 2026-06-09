@@ -222,7 +222,7 @@ const InferenceEngine = struct {
 
 
         // Detect and log model capabilities
-        const capabilities = registry.detectCapabilities(&gguf_file, arch);
+        var capabilities = registry.detectCapabilities(&gguf_file, arch);
         if (capabilities.has_vision or capabilities.has_audio) {
             logger.info("Multi-modal: yes", .{});
         } else {
@@ -260,7 +260,7 @@ const InferenceEngine = struct {
         // Load multimodal encoder if mmproj file is provided
         var mm_manager: ?mm.MultiModalManager = null;
         if (cli_args.mmproj_path.len > 0) {
-            mm_manager = try loadMMProj(io, allocator, cli_args.mmproj_path, capabilities);
+            mm_manager = try loadMMProj(io, allocator, cli_args.mmproj_path, &capabilities);
             logger.info("Multimodal encoder loaded from: {s}", .{cli_args.mmproj_path});
         } else if (capabilities.has_vision or capabilities.has_audio) {
             logger.warn("Model has multimodal capabilities but no --mmproj file provided", .{});
@@ -583,28 +583,71 @@ const InferenceEngine = struct {
     /// Generate with audio input (audio + text)
     ///
     /// Workflow:
-    /// 1. Load and preprocess audio (compute Mel spectrogram)
-    /// 2. Run Conformer audio encoder to get audio embeddings
-    /// 3. Create prompt with audio tokens + text tokens
-    /// 4. Run LLM inference
+    /// 1. Load WAV audio file
+    /// 2. Compute Mel spectrogram
+    /// 3. Run Conformer audio encoder to get audio embeddings
+    /// 4. Log dimensions and fall back to text-only (LLM token integration TODO)
     pub fn generateWithAudio(self: *InferenceEngine, io: std.Io, prompt: []const u8, audio_path: [:0]const u8, max_tokens: u32) !void {
-        _ = audio_path;
-        const mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
+        var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_audio) return error.AudioNotSupported;
 
-        // Step 1: Load audio file
-        // TODO: Implement PCM F32 audio loading from file
-        // For now, log the limitation
-        logger.warn("Audio file loading not yet implemented. Use --audio with PCM F32 raw data.", .{});
+        // Step 1: Load WAV file
+        const wav_result = try preprocess.loadWav(self.allocator, io, audio_path);
+        const wav_samples = wav_result.samples;
+        const wav_info = wav_result.info;
+        defer self.allocator.free(wav_samples);
+
+        logger.info("Loaded audio: {d:.1}s, {d} Hz, {d} ch", .{
+            @as(f32, @floatFromInt(wav_info.num_samples)) / @as(f32, @floatFromInt(wav_info.sample_rate)),
+            wav_info.sample_rate,
+            wav_info.num_channels,
+        });
+
+        // Step 2: Compute Mel spectrogram
+        const n_mel_bins: u32 = preprocess.AUDIO_N_MEL_BINS;
+        var mel = try preprocess.computeMelSpectrogram(self.allocator, wav_samples, wav_info.sample_rate, n_mel_bins);
+        defer mel.deinit();
+
+        logger.info("Mel spectrogram: {d} frames x {d} bins", .{ mel.n_frames, mel.n_mel_bins });
+
+        // Step 3: Run Conformer audio encoder
+        self.ctx_graph.setNoAlloc(false);
+        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
+
+        const audio_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, graph, .{
+            .media_type = .audio,
+            .mel_data = mel.data,
+            .mel_bins = mel.n_mel_bins,
+            .mel_frames = mel.n_frames,
+            .audio_length_sec = @as(f32, @floatFromInt(wav_info.num_samples)) / @as(f32, @floatFromInt(wav_info.sample_rate)),
+        });
+        self.ctx_graph.setNoAlloc(true);
+
+        // Allocate and compute
+        const buft = ggml.backendCpuBufferType();
+        var galloc = try ggml.Gallocr.init(buft);
+        defer galloc.free();
+        if (!galloc.allocGraph(graph)) {
+            return error.GraphAllocFailed;
+        }
+        try graph.compute(self.n_threads);
+
+        // Log audio encoding results
+        const n_audio_tokens: usize = @intCast(audio_embeddings.ne()[1]);
+        const n_embd: usize = @intCast(audio_embeddings.ne()[0]);
+        logger.info("Audio encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd, n_audio_tokens });
+
+        // Step 4: Multimodal inference
+        // TODO: Feed audio_embeddings into the LLM as context tokens
         logger.warn("Audio-to-LLM token integration not yet implemented. Using text-only generation.", .{});
 
-        _ = mm_mgr;
         try self.generate(io, prompt, max_tokens);
     }
 };
 
 /// Load multimodal projector from separate GGUF file
-fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]const u8, capabilities: model_if.ModelCapabilities) !mm.MultiModalManager {
+/// Also detects audio/vision capabilities from the mmproj GGUF file.
+fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]const u8, capabilities: *model_if.ModelCapabilities) !mm.MultiModalManager {
     const cwd = std.Io.Dir.cwd();
     const file = try cwd.openFile(io, mmproj_path, .{ .mode = .read_only });
     defer file.close(io);
@@ -612,7 +655,7 @@ fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]const u
     const stat = try file.stat(io);
     const file_size = @as(usize, @intCast(stat.size));
     const gguf_data = try allocator.alloc(u8, file_size);
-    errdefer allocator.free(gguf_data);
+    defer allocator.free(gguf_data);
 
     {
         var offset: u64 = 0;
@@ -622,7 +665,6 @@ fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]const u
             const len = end - offset;
             const bytes_read = try file.readPositionalAll(io, gguf_data[offset..][0..len], offset);
             if (bytes_read != len) {
-                allocator.free(gguf_data);
                 return error.FileReadError;
             }
             offset += bytes_read;
@@ -632,11 +674,36 @@ fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]const u
     var gguf_file = try gguf.parse(gguf_data, allocator);
     defer gguf_file.deinit();
 
+    // Detect capabilities from mmproj file
+    if (gguf_file.findTensor("a.conv1d.0.weight") != null or
+        gguf_file.findTensor("a.pre_encode.out.weight") != null or
+        gguf_file.findTensor("mm.a.input_projection.weight") != null)
+    {
+        capabilities.has_audio = true;
+        if (capabilities.audio_encoder_type.len == 0) {
+            capabilities.audio_encoder_type = "Conformer (E2B)";
+        }
+        if (capabilities.audio_sample_rate == 0) {
+            capabilities.audio_sample_rate = 16000;
+        }
+    }
+    if (gguf_file.findTensor("v.patch_embd.weight") != null or
+        gguf_file.findTensor("mm.input_projection.weight") != null or
+        gguf_file.findTensor("mm.soft_emb_norm.weight") != null)
+    {
+        capabilities.has_vision = true;
+        if (capabilities.vision_encoder_type.len == 0) {
+            capabilities.vision_encoder_type = "ViT (SigLIP/Gemma4V)";
+        }
+    }
+
+    logger.info("MMProj capabilities: audio={}, vision={}", .{ capabilities.has_audio, capabilities.has_vision });
+
     const mem_size = 2 * 1024 * 1024 * 1024;
     const ctx = try ggml.Context.initNoAlloc(mem_size);
     errdefer ctx.deinit();
 
-    const mgr = try mm.MultiModalManager.init(allocator, &gguf_file, ctx, capabilities);
+    const mgr = try mm.MultiModalManager.init(allocator, &gguf_file, ctx, capabilities.*);
     return mgr;
 }
 pub fn main(init: std.process.Init) !void {
