@@ -149,6 +149,49 @@ pub const Gemma4Model = struct {
         return &self.weights.base;
     }
 
+
+    /// Forward pass with pre-computed embedding override (for multimodal input).
+    /// When embd_override is non-null, the first embd_override.ne()[1] token positions
+    /// use the override embeddings instead of looking up token embeddings.
+    /// Text tokens (from input_tokens) follow after the override positions.
+    pub fn forwardWithEmbdOverride(
+        self: *Gemma4Model,
+        ctx: *ggml.Context,
+        graph: *ggml.CGraph,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        start_pos: i32,
+        embd_override: *ggml.Tensor,
+    ) !*ggml.Tensor {
+        const p = &self.params;
+        const w = &self.weights;
+        const n_tokens_i64: i64 = n_tokens;
+        const n_override: i64 = embd_override.ne()[1];
+        const n_text: i64 = n_tokens_i64 - n_override;
+        const n_embd_i64: i64 = @intCast(p.base.n_embd);
+
+        // Mixed embeddings: first n_override from override, rest from token embeddings
+        var cur: *ggml.Tensor = undefined;
+        if (n_text > 0) {
+            // Get embeddings for ALL tokens, then replace first n_override positions
+            var all_embd = embed.tokenEmbedding(ctx, w.base.token_embd, input_tokens);
+            all_embd = ggml.scale(ctx, all_embd, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+            // Extract text-only portion: [n_embd, n_text]
+            const text_embd = all_embd.view2d(ctx, n_embd_i64, n_text, all_embd.nb()[1], @as(usize, @intCast(n_override)) * @sizeOf(f32) * @as(usize, @intCast(n_embd_i64)));
+            cur = ggml.concat(ctx, embd_override, ggml.cont(ctx, text_embd), 1);
+        } else {
+            cur = embd_override;
+        }
+        cur.setName("inp_scaled_mm");
+
+        // Position encoding
+        const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
+
+        // Main transformer loop (identical to forward())
+        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr);
+    }
+
     pub fn forward(
         self: *Gemma4Model,
         ctx: *ggml.Context,
@@ -169,6 +212,24 @@ pub const Gemma4Model = struct {
 
         // 位置编码
         const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
+
+        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr);
+    }
+
+    /// Shared transformer loop (used by both forward and forwardWithEmbdOverride).
+    fn transformerForward(
+        self: *Gemma4Model,
+        ctx: *ggml.Context,
+        graph: *ggml.CGraph,
+        cur_in: *ggml.Tensor,
+        pos_tensor: *ggml.Tensor,
+        n_tokens_i64: i64,
+        start_pos: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+    ) !*ggml.Tensor {
+        const p = &self.params;
+        const w = &self.weights;
+        var cur = cur_in;
 
         for (w.layers, 0..) |*layer, i| {
             const n_head: i64 = @intCast(p.base.n_head);

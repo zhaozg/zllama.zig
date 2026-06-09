@@ -591,6 +591,13 @@ const InferenceEngine = struct {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_audio) return error.AudioNotSupported;
 
+        // Only Gemma4 supports audio currently
+        if (self.arch != .gemma4) {
+            logger.warn("Audio only supported for Gemma4 models. Using text-only generation.", .{});
+            return self.generate(io, prompt, max_tokens);
+        }
+        const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
+
         // Step 1: Load WAV file
         const wav_result = try preprocess.loadWav(self.allocator, io, audio_path);
         const wav_samples = wav_result.samples;
@@ -612,9 +619,9 @@ const InferenceEngine = struct {
 
         // Step 3: Run Conformer audio encoder
         self.ctx_graph.setNoAlloc(false);
-        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
+        var audio_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
 
-        const audio_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, graph, .{
+        const audio_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, audio_graph, .{
             .media_type = .audio,
             .mel_data = mel.data,
             .mel_bins = mel.n_mel_bins,
@@ -623,25 +630,113 @@ const InferenceEngine = struct {
         });
         self.ctx_graph.setNoAlloc(true);
 
-        // Allocate and compute
+        // Allocate and compute audio encoder graph
         const buft = ggml.backendCpuBufferType();
+        {
+            var a_galloc = try ggml.Gallocr.init(buft);
+            defer a_galloc.free();
+            if (!a_galloc.allocGraph(audio_graph)) {
+                return error.GraphAllocFailed;
+            }
+            try audio_graph.compute(self.n_threads);
+        }
+
+        // Log audio encoding results
+        const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
+        const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
+        logger.info("Audio encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd_val, n_audio_tokens });
+
+        // Step 4: Tokenize prompt text
+        var input_tokens = try self.tok.encode(prompt, true);
+        defer input_tokens.deinit(self.allocator);
+        const n_text_tokens: i32 = @intCast(input_tokens.items.len);
+        const n_total_tokens: i32 = n_audio_tokens + n_text_tokens;
+
+        // Step 5: Create input token tensor (audio positions = PAD, text positions = real tokens)
+        self.ctx_graph.setNoAlloc(false);
+        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
+        self.ctx_graph.setNoAlloc(true);
+        {
+            const data = input_tensor.dataBytes();
+            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
+            for (0..@as(usize, @intCast(n_audio_tokens))) |j| {
+                slice[j] = 0;
+            }
+            for (input_tokens.items, 0..) |token, j| {
+                slice[@as(usize, @intCast(n_audio_tokens)) + j] = @as(i32, @intCast(token));
+            }
+        }
+
+        // Step 6: Build LLM graph with audio embedding override
+        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
+        const start_pos: i32 = 0;
+        const logits = try gemma4_model.forwardWithEmbdOverride(
+            self.ctx_graph, graph, input_tensor, n_total_tokens,
+            @ptrCast(&self.kv_cache_mgr), start_pos, audio_embeddings,
+        );
+
+        // Allocate and compute LLM graph
         var galloc = try ggml.Gallocr.init(buft);
         defer galloc.free();
         if (!galloc.allocGraph(graph)) {
+            logger.err("Failed to allocate LLM graph for audio+text", .{});
             return error.GraphAllocFailed;
         }
+
+        const t_start = currentTimeMs();
         try graph.compute(self.n_threads);
+        const t_end = currentTimeMs();
+        const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
 
-        // Log audio encoding results
-        const n_audio_tokens: usize = @intCast(audio_embeddings.ne()[1]);
-        const n_embd: usize = @intCast(audio_embeddings.ne()[0]);
-        logger.info("Audio encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd, n_audio_tokens });
+        // Step 7: Sample first token and generate
+        var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
+        var pos: i32 = n_total_tokens;
+        var gen_count: u32 = 0;
 
-        // Step 4: Multimodal inference
-        // TODO: Feed audio_embeddings into the LLM as context tokens
-        logger.warn("Audio-to-LLM token integration not yet implemented. Using text-only generation.", .{});
+        const t_tg_start = currentTimeMs();
 
-        try self.generate(io, prompt, max_tokens);
+        while (gen_count < max_tokens) {
+            if (self.tok.isEog(@intCast(current_token))) break;
+
+            if (!self.benchmark) {
+                var buf: [128]u8 = undefined;
+                const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
+                if (n > 0) {
+                    const stdout_file = std.Io.File.stdout();
+                    try stdout_file.writeStreamingAll(io, buf[0..n]);
+                }
+            }
+
+            const step = try self.inc_ctx.beginStep();
+            step.setToken(current_token);
+
+            var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+            const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
+
+            if (!step.galloc.allocGraph(step.graph)) {
+                logger.err("Failed to allocate incremental graph memory", .{});
+                return error.GraphAllocFailed;
+            }
+            try step.graph.compute(self.n_threads);
+
+            current_token = sampler.Sampler.sampleGreedy(inc_logits);
+            pos += 1;
+            gen_count += 1;
+        }
+
+        const t_tg_end = currentTimeMs();
+        const tg_time_s = @as(f64, @floatFromInt(t_tg_end - t_tg_start)) / 1000.0;
+
+        if (!self.benchmark) {
+            const stdout_file = std.Io.File.stdout();
+            try stdout_file.writeStreamingAll(io, "\n");
+        }
+
+        if (gen_count > 0) {
+            const total_time_s = pp_time_s + tg_time_s;
+            const avg_speed = @as(f64, @floatFromInt(gen_count)) / total_time_s;
+            logger.info("Audio generation: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, total_time_s, avg_speed });
+        }
     }
 };
 
