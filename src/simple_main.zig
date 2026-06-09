@@ -9,9 +9,9 @@ const memory = @import("memory");
 const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
 const kv_cache = @import("kv_cache");
+const engine_common = @import("engine_common");
 
 const logger = std.log.scoped(.simple);
-var runtime_log_level: std.log.Level = .warn;
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
@@ -25,26 +25,8 @@ pub const std_options: std.Options = .{
         .{ .scope = .registry, .level = .warn },
         .{ .scope = .kv_cache, .level = .warn },
     },
-    .logFn = log,
+    .logFn = engine_common.logFilter,
 };
-
-pub fn log(comptime level: std.log.Level, comptime scope: @TypeOf(.EnumLiteral), comptime format: []const u8, args: anytype) void {
-    if (@intFromEnum(level) > @intFromEnum(runtime_log_level)) return;
-    std.log.defaultLog(level, scope, format, args);
-}
-
-pub fn setLogLevel(level: std.log.Level) void {
-    runtime_log_level = level;
-}
-pub fn getLogLevel() std.log.Level {
-    return runtime_log_level;
-}
-
-fn currentTimeUs() i64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
-    return @as(i64, ts.sec) * 1000000 + @as(i64, @divTrunc(ts.nsec, 1000));
-}
 
 fn printUsage(argv0: []const u8) void {
     std.debug.print(
@@ -301,10 +283,10 @@ const SimpleEngine = struct {
         }
 
         // Prompt evaluation timing
-        const t_pp_start = currentTimeUs();
+        const t_pp_start = engine_common.currentTimeUs();
         try graph.compute(self.n_threads);
         const first_token = sampler.Sampler.sampleGreedy(logits);
-        const t_pp_end = currentTimeUs();
+        const t_pp_end = engine_common.currentTimeUs();
         const pp_time_s = @as(f64, @floatFromInt(t_pp_end - t_pp_start)) / 1000000.0;
         logger.debug("first_token (greedy) = {d}", .{first_token});
 
@@ -320,7 +302,7 @@ const SimpleEngine = struct {
         var pos: i32 = n_prompt_tokens;
 
         // Text generation timing
-        const t_tg_start = currentTimeUs();
+        const t_tg_start = engine_common.currentTimeUs();
 
         // --- Incremental decoding (uses inc_ctx with graph structure reuse) ---
         while (n_decode < max_tokens) {
@@ -359,7 +341,7 @@ const SimpleEngine = struct {
             n_decode += 1;
         }
 
-        const t_tg_end = currentTimeUs();
+        const t_tg_end = engine_common.currentTimeUs();
         const tg_time_s = @as(f64, @floatFromInt(t_tg_end - t_tg_start)) / 1000000.0;
 
         // Print newline (skip in benchmark mode)
@@ -427,10 +409,10 @@ pub fn main(init: std.process.Init) !void {
     };
     if (args.help) return;
     if (args.debug) {
-        setLogLevel(.debug);
+        engine_common.setLogLevel(.debug);
     }
     if (args.verbose) {
-        setLogLevel(.info);
+        engine_common.setLogLevel(.info);
     }
     if (args.model_path.len == 0) {
         std.debug.print("Error: no model specified. Use --model <path>\n", .{});

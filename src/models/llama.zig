@@ -15,6 +15,7 @@ const memory = @import("memory");
 
 const attention = @import("attention");
 const embed = @import("embed");
+const weight_loader = @import("weight_loader");
 
 const model = @import("../model.zig");
 
@@ -355,51 +356,15 @@ fn loadWeights(
 
         layers[i] = LayerWeights{
             .prefix = prefix,
-            .attn_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_norm.weight: {}", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .ffn_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_norm.weight: {}", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .attn_q_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_q.weight: {}", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .attn_k_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_k.weight: {}", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .attn_v_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_v.weight: {}", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .attn_output_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_output.weight: {}", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .ffn_gate_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_gate.weight: {}", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .ffn_up_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_up.weight: {}", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .ffn_down_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_down.weight: {}", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
+            .attn_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight"),
+            .ffn_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight"),
+            .attn_q_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight"),
+            .attn_k_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight"),
+            .attn_v_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight"),
+            .attn_output_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight"),
+            .ffn_gate_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight"),
+            .ffn_up_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight"),
+            .ffn_down_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight"),
         };
         layers_loaded = i + 1;
     }

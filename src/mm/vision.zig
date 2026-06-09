@@ -15,17 +15,14 @@
 //! - Gemma4UV: 统一视觉编码器（gemma4uv, 带额外 patch 归一化）
 //!
 //! 参考: llama.cpp tools/mtmd/models/gemma4v.cpp, gemma4uv.cpp
-
 const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
-
+const weight_loader = @import("weight_loader");
 const log = std.log.scoped(.vision_encoder);
-
 // ============================================================================
 // 视觉编码器超参数
 // ============================================================================
-
 pub const VisionEncoderParams = struct {
     /// 输入图像尺寸（正方形，边长）
     image_size: u32 = 896,
@@ -50,16 +47,13 @@ pub const VisionEncoderParams = struct {
     // FFN activation
     ffn_op: FfnOp = .silu,
 };
-
 pub const FfnOp = enum {
     silu,
     gelu,
 };
-
 // ============================================================================
 // ViT 层权重
 // ============================================================================
-
 pub const ViTLayerWeights = struct {
     // 注意力
     ln_1_w: ?*ggml.Tensor = null,
@@ -69,25 +63,20 @@ pub const ViTLayerWeights = struct {
     v_w: ?*ggml.Tensor = null,
     o_w: ?*ggml.Tensor = null,
     o_b: ?*ggml.Tensor = null,
-
     // FFN
     ln_2_w: ?*ggml.Tensor = null,
     ln_2_b: ?*ggml.Tensor = null,
     ff_up_w: ?*ggml.Tensor = null,
     ff_down_w: ?*ggml.Tensor = null,
 };
-
 // ============================================================================
 // 视觉编码器权重
 // ============================================================================
-
 pub const VisionEncoderWeights = struct {
     params: VisionEncoderParams,
-
     // Patch embedding
     patch_embeddings_0: ?*ggml.Tensor = null,
     patch_bias: ?*ggml.Tensor = null,
-
     // Patch 归一化（Gemma4UV 特有）
     patch_norm_1_w: ?*ggml.Tensor = null,
     patch_norm_1_b: ?*ggml.Tensor = null,
@@ -95,41 +84,32 @@ pub const VisionEncoderWeights = struct {
     patch_norm_2_b: ?*ggml.Tensor = null,
     patch_norm_3_w: ?*ggml.Tensor = null, // pos_norm
     patch_norm_3_b: ?*ggml.Tensor = null, // pos_norm
-
     // 位置编码
     position_embeddings: ?*ggml.Tensor = null,
-
     // ViT 层
     layers: []ViTLayerWeights = &.{},
-
     // 标准化
     std_bias: ?*ggml.Tensor = null,
     std_scale: ?*ggml.Tensor = null,
-
     // 多模态嵌入投影
     mm_input_proj_w: ?*ggml.Tensor = null,
     mm_soft_emb_norm_w: ?*ggml.Tensor = null,
 };
-
 // ============================================================================
 // 视觉编码器类型
 // ============================================================================
-
 pub const EncoderType = enum {
     gemma4v, // 标准 ViT + SigLIP
     gemma4uv, // 统一视觉编码器（带额外 patch 归一化）
 };
-
 // ============================================================================
 // 视觉编码器
 // ============================================================================
-
 pub const VisionEncoder = struct {
     params: VisionEncoderParams,
     weights: VisionEncoderWeights,
     encoder_type: EncoderType,
     ctx_weights: *ggml.Context,
-
     /// 从 GGUF 文件初始化视觉编码器
     pub fn init(
         gguf_file: *const gguf.GGUFFile,
@@ -137,7 +117,6 @@ pub const VisionEncoder = struct {
         allocator: std.mem.Allocator,
     ) !VisionEncoder {
         var params = VisionEncoderParams{};
-
         // 从 GGUF 元数据读取参数
         if (gguf_file.getU32("gemma4.vision.image_size")) |v| params.image_size = v;
         if (gguf_file.getU32("gemma4.vision.patch_size")) |v| params.patch_size = v;
@@ -147,22 +126,18 @@ pub const VisionEncoder = struct {
         if (gguf_file.getU32("gemma4.vision.feed_forward_length")) |v| params.n_ff = v;
         if (gguf_file.getU32("gemma4.vision.projection_dim")) |v| params.n_merge = v;
         if (gguf_file.getF32("gemma4.vision.rope_theta")) |v| params.rope_theta = v;
-
         // 检测编码器类型
         const enc_type: EncoderType = if (gguf_file.findTensor("patch_norm_1.weight") != null)
             .gemma4uv
         else
             .gemma4v;
-
         log.info("Loading vision encoder: type={s}, size={d}, patch={d}, embd={d}, heads={d}, layers={d}", .{
             @tagName(enc_type), params.image_size, params.patch_size,
             params.n_embd, params.n_head, params.n_layer,
         });
-
         // 加载 Patch embedding (v.patch_embd.*)
         const patch_embd = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;
         const patch_bias = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.bias") catch null;
-
         // Patch 归一化（Gemma4UV）
         const pn1_w = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.1.weight") catch null;
         const pn1_b = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.1.bias") catch null;
@@ -170,22 +145,17 @@ pub const VisionEncoder = struct {
         const pn2_b = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.2.bias") catch null;
         const pn3_w = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.3.weight") catch null;
         const pn3_b = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.3.bias") catch null;
-
         // 位置编码 (v.position_embd.weight)
         const pos_embd = findTensorInGGUF(ctx, gguf_file, "v.position_embd.weight") catch null;
-
         // 标准化 (v.std_bias, v.std_scale)
         const std_bias = findTensorInGGUF(ctx, gguf_file, "v.std_bias") catch null;
         const std_scale = findTensorInGGUF(ctx, gguf_file, "v.std_scale") catch null;
-
         // 多模态投影 (mm.*)
         const mm_proj = findTensorInGGUF(ctx, gguf_file, "mm.input_projection.weight") catch null;
         const mm_soft = findTensorInGGUF(ctx, gguf_file, "mm.soft_emb_norm.weight") catch null;
-
         // 加载 ViT 层
         const n_layer: usize = @intCast(params.n_layer);
         var layers = try allocator.alloc(ViTLayerWeights, n_layer);
-
         for (0..n_layer) |il| {
             const prefix = try std.fmt.allocPrint(allocator, "v.blk.{d}", .{il});
             layers[il] = loadViTLayer(ctx, gguf_file, prefix) catch |err| {
@@ -195,9 +165,7 @@ pub const VisionEncoder = struct {
             };
             allocator.free(prefix);
         }
-
         log.info("Vision encoder loaded: {d} ViT layers", .{n_layer});
-
         return VisionEncoder{
             .params = params,
             .weights = .{
@@ -221,7 +189,6 @@ pub const VisionEncoder = struct {
             .ctx_weights = ctx,
         };
     }
-
     /// 编码 RGB 图像数据，返回视觉嵌入 tokens
     /// @param ctx ggml 计算上下文
     /// @param graph 计算图
@@ -245,19 +212,16 @@ pub const VisionEncoder = struct {
         var n_patches_x: i64 = 0;
         var n_patches_y: i64 = 0;
         var n_patches: i64 = 0;
-
         // Validate input size
         const expected_len: usize = @as(usize, @intCast(img_width)) * @as(usize, @intCast(img_height)) * 3;
         if (image_data.len < expected_len) {
             log.err("Image data too small: got {d}, expected {d}", .{ image_data.len, expected_len });
             return error.InvalidImageData;
         }
-
         // 1. Create input tensor [width, height, channels] = [W, H, C]
         // ggml conv2d WHCN: kernel=[KW,KH,IC,OC], input=[IW,IH,IC]
         var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(img_width), @intCast(img_height), 3);
         inp.setName("vision_input");
-
         // Fill tensor with image data: HWC u8 [0,255] -> WHC f32 [0,1]
         {
             const src = image_data;
@@ -275,7 +239,6 @@ pub const VisionEncoder = struct {
                 }
             }
         }
-
         switch (self.encoder_type) {
             .gemma4v => {
                 // 标准化: patches * 2 - 1
@@ -286,7 +249,6 @@ pub const VisionEncoder = struct {
                     bias.setName("vision_bias");
                     inp = inp.add(ctx, bias);
                 }
-
                 // Conv2D patch embedding — use kernel dimensions for stride
                 if (w.patch_embeddings_0) |pe| {
                     const kw: i32 = @intCast(pe.ne()[0]);
@@ -340,16 +302,13 @@ pub const VisionEncoder = struct {
                 }
             },
         }
-
         // 2. 位置编码 (lookup from position_embeddings)
         if (w.position_embeddings) |pos_embd| {
             const pos_size = pos_embd.ne()[1];
             const row_size = ggml.Type.rowSize(pos_embd.dataType(), effective_n_embd);
-
             // Position embeddings stored as [n_embd, 2*pos_size]: first half=X, second half=Y
             const tbl_x = pos_embd.view2d(ctx, effective_n_embd, pos_size, row_size, 0);
             const tbl_y = pos_embd.view2d(ctx, effective_n_embd, pos_size, row_size, @as(usize, @intCast(pos_size)) * row_size);
-
             // Create and fill position index tensors
             var pos_x = try ctx.newTensor1d(ggml.Type.i32, n_patches);
             pos_x.setName("pos_x");
@@ -363,14 +322,11 @@ pub const VisionEncoder = struct {
                     py[i] = @divTrunc(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
                 }
             }
-
             // getRows produces [n_embd, n_patches]; transpose to match inp [n_patches, n_embd]
             const emb_x = tbl_x.getRows(ctx, pos_x).permute(ctx, 1, 0, 2, 3).cont(ctx);
             const emb_y = tbl_y.getRows(ctx, pos_y).permute(ctx, 1, 0, 2, 3).cont(ctx);
-
             inp = inp.add(ctx, emb_x);
             inp = inp.add(ctx, emb_y);
-
             // Pos norm (Gemma4UV only)
             if (self.encoder_type == .gemma4uv) {
                 if (w.patch_norm_3_w) |pn3_w| {
@@ -382,7 +338,6 @@ pub const VisionEncoder = struct {
                 }
             }
         }
-
         // 3. ViT blocks (only for gemma4v - gemma4uv skips ViT)
         var cur = inp;
         if (self.encoder_type == .gemma4v) {
@@ -398,18 +353,15 @@ pub const VisionEncoder = struct {
                             attn_in = attn_in.add(ctx, ln1_b);
                         }
                     }
-
                     // Q, K, V projections
                     // transpose input for ggml_mul_mat: ne[0] must match
                     var Q = attn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.q_w.?);
                     var K = attn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.k_w.?);
                     var V = attn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.v_w.?);
-
                     // Reshape to [d_head, n_head, n_patches]
                     Q = Q.reshape3d(ctx, d_head, effective_n_head, n_patches);
                     K = K.reshape3d(ctx, d_head, effective_n_head, n_patches);
                     V = V.reshape3d(ctx, d_head, effective_n_head, n_patches);
-
                     // Apply 2D RoPE with filled position indices
                     var pos_x = try ctx.newTensor1d(ggml.Type.i32, n_patches);
                     pos_x.setName("rope_pos_x");
@@ -423,7 +375,6 @@ pub const VisionEncoder = struct {
                             py[i] = @divTrunc(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
                         }
                     }
-
                     // First half RoPE with pos_x (neox)
                     const half_d = @divExact(d_head, 2);
                     var Q_first = Q.view3d(ctx, half_d, effective_n_head, n_patches, Q.nb()[1], Q.nb()[2], 0);
@@ -431,37 +382,29 @@ pub const VisionEncoder = struct {
                     var Q_second = Q.view3d(ctx, half_d, effective_n_head, n_patches, Q.nb()[1], Q.nb()[2], @as(usize, @intCast(half_d * @sizeOf(f32))));
                     Q_second = Q_second.ropeExt(ctx, pos_y, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
                     Q = Q_first.concat(ctx, Q_second, 0);
-
                     var K_first = K.view3d(ctx, half_d, effective_n_head, n_patches, K.nb()[1], K.nb()[2], 0);
                     K_first = K_first.ropeExt(ctx, pos_x, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
                     var K_second = K.view3d(ctx, half_d, effective_n_head, n_patches, K.nb()[1], K.nb()[2], @as(usize, @intCast(half_d * @sizeOf(f32))));
                     K_second = K_second.ropeExt(ctx, pos_y, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
                     K = K_first.concat(ctx, K_second, 0);
-
                     // K transpose: [d_head, n_head, n_patches] -> [d_head, n_patches, n_head]
                     K = K.permute(ctx, 0, 2, 1, 3).cont(ctx);
-
                     // V transpose: [d_head, n_head, n_patches] -> [n_patches, d_head, n_head]
                     V = V.permute(ctx, 2, 0, 1, 3).cont(ctx);
-
                     // Q @ K^T: [d_head, n_head, n_patches] @ [d_head, n_patches, n_head] -> [n_patches, n_head, n_head] -> [n_head, n_patches, n_patches]
                     var scores = K.mulMat(ctx, Q);
                     scores = scores.scale(ctx, 1.0 / @sqrt(@as(f32, @floatFromInt(d_head))));
                     scores = scores.softMax(ctx);
-
                     // attn @ V: [n_head, n_patches, n_patches] @ [n_patches, d_head, n_head] -> [n_head, n_patches, d_head]
                     var x = V.mulMat(ctx, scores);
                     x = x.permute(ctx, 2, 0, 1, 3).cont(ctx); // [d_head, n_head, n_patches]
                     x = x.cont2d(ctx, effective_n_embd, n_patches);
-
                     x = x.mulMat(ctx, layer.o_w.?);
                     if (layer.o_b) |ob| {
                         x = x.add(ctx, ob);
                     }
-
                     cur = cur.add(ctx, x);
                 }
-
                 // FFN
                 if (layer.ff_up_w != null and layer.ff_down_w != null) {
                     var ffn_in = cur;
@@ -472,7 +415,6 @@ pub const VisionEncoder = struct {
                             ffn_in = ffn_in.add(ctx, ln2_b);
                         }
                     }
-
                     const h = ffn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.ff_up_w.?);
                     const activated = switch (p.ffn_op) {
                         .silu => h.silu(ctx),
@@ -483,7 +425,6 @@ pub const VisionEncoder = struct {
                 }
             }
         }
-
         // 4. Gemma4VisionPooler (average pool + scale)
         if (self.encoder_type == .gemma4v) {
             const kernel_size: i64 = @intCast(p.n_merge);
@@ -497,7 +438,6 @@ pub const VisionEncoder = struct {
             cur = cur.permute(ctx, 1, 0, 2, 3).cont(ctx);
             cur = cur.scale(ctx, @sqrt(@as(f32, @floatFromInt(effective_n_embd))));
         }
-
         // 5. Standardization
         if (w.std_bias) |sb| {
             cur = cur.sub(ctx, sb);
@@ -505,7 +445,6 @@ pub const VisionEncoder = struct {
         if (w.std_scale) |ss| {
             cur = cur.mul(ctx, reshapeForBroadcast(ctx, ss));
         }
-
         // 6. Multimodal embedder
         cur = cur.rmsNorm(ctx, p.norm_eps);
         if (w.mm_soft_emb_norm_w) |sn| {
@@ -514,16 +453,13 @@ pub const VisionEncoder = struct {
         if (w.mm_input_proj_w) |proj| {
             cur = cur.mulMat(ctx, proj);
         }
-
         cgraph.buildForwardExpand(cur);
         return cur;
     }
-
     /// 返回视觉编码器是否可用（权重已加载）
     pub fn isAvailable(self: *const VisionEncoder) bool {
         return self.weights.patch_embeddings_0 != null;
     }
-
     /// 估算给定分辨率图像的 token 数量
     pub fn estimateOutputTokens(self: *const VisionEncoder, img_width: u32, img_height: u32) u32 {
         const patches_x = (img_width + self.params.patch_size - 1) / self.params.patch_size;
@@ -532,7 +468,6 @@ pub const VisionEncoder = struct {
         const n_merge = if (self.params.n_merge > 0) self.params.n_merge else 1;
         return n_patches / (n_merge * n_merge);
     }
-
     /// 计算视觉 token 预算下的最佳图像分辨率
     pub fn bestResolution(self: *const VisionEncoder, max_tokens: u32) struct { width: u32, height: u32 } {
         const n_merge = if (self.params.n_merge > 0) self.params.n_merge else 1;
@@ -541,46 +476,21 @@ pub const VisionEncoder = struct {
         const side = side_patches * self.params.patch_size;
         return .{ .width = side, .height = side };
     }
-
     pub fn deinit(self: *VisionEncoder, allocator: std.mem.Allocator) void {
         allocator.free(self.weights.layers);
     }
 };
-
 // ============================================================================
 // 辅助函数
-// ============================================================================
-
 fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
-    const info = gguf_file.findTensor(name) orelse return error.TensorNotFound;
-    const n_dims = info.n_dims;
-    const typ: ggml.Type = @enumFromInt(@intFromEnum(info.data_type));
-
-    ctx.setNoAlloc(false);
-    const tensor = switch (n_dims) {
-        1 => try ctx.newTensor1d(typ, @intCast(info.dims[0])),
-        2 => try ctx.newTensor2d(typ, @intCast(info.dims[0]), @intCast(info.dims[1])),
-        3 => try ctx.newTensor3d(typ, @intCast(info.dims[0]), @intCast(info.dims[1]), @intCast(info.dims[2])),
-        4 => try ctx.newTensor4d(typ, @intCast(info.dims[0]), @intCast(info.dims[1]), @intCast(info.dims[2]), @intCast(info.dims[3])),
-        else => return error.UnsupportedTensorDims,
-    };
-    ctx.setNoAlloc(true);
-
-    tensor.setName(@ptrCast(name));
-
-    const tensor_data = gguf_file.getTensorData(info);
-    @memcpy(tensor.dataBytes(), tensor_data);
-
-    return tensor;
+    return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
 }
-
 fn loadViTLayer(
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
     prefix: []const u8,
 ) !ViTLayerWeights {
     var layer = ViTLayerWeights{};
-
     // Attention
     layer.ln_1_w = findLayerWeight(ctx, gguf_file, prefix, "ln1.weight") catch null;
     layer.ln_1_b = findLayerWeight(ctx, gguf_file, prefix, "ln1.bias") catch null;
@@ -589,30 +499,24 @@ fn loadViTLayer(
     layer.v_w = findLayerWeight(ctx, gguf_file, prefix, "attn_v.weight") catch null;
     layer.o_w = findLayerWeight(ctx, gguf_file, prefix, "attn_out.weight") catch null;
     layer.o_b = findLayerWeight(ctx, gguf_file, prefix, "attn_out.bias") catch null;
-
     // FFN
     layer.ln_2_w = findLayerWeight(ctx, gguf_file, prefix, "ln2.weight") catch null;
     layer.ln_2_b = findLayerWeight(ctx, gguf_file, prefix, "ln2.bias") catch null;
     layer.ff_up_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight") catch null;
     layer.ff_down_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch null;
-
     return layer;
 }
-
 /// Reshape a 1D weight tensor [n] to [1, n] for broadcasting with [m, n] tensors.
 /// ggml broadcasting: [n] vs [m, n] -> ne[0]: n vs m (fail); [1, n] vs [m, n] -> ne[0]: 1 vs m (ok)
 fn reshapeForBroadcast(ctx: *ggml.Context, t: *ggml.Tensor) *ggml.Tensor {
     const n = t.ne()[0];
     return ctx.view2d(t, 1, n, ggml.Type.rowSize(t.dataType(), n), 0);
 }
-
 fn findLayerWeight(
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
     prefix: []const u8,
     name: []const u8,
 ) !*ggml.Tensor {
-    var buf: [256]u8 = undefined;
-    const full_name = try std.fmt.bufPrint(&buf, "{s}.{s}", .{ prefix, name });
-    return findTensorInGGUF(ctx, gguf_file, full_name);
+    return weight_loader.loadLayerWeight(ctx, gguf_file, prefix, name);
 }

@@ -9,6 +9,8 @@ const std = @import("std");
 const ggml = @import("ggml");
 const model_if = @import("model");
 const memory = @import("memory");
+const rope = @import("rope");
+
 
 /// RoPE 配置
 pub const RopeConfig = struct {
@@ -104,16 +106,9 @@ pub const GraphBuilder = struct {
     }
 
     /// 构建位置张量 [start_pos, start_pos+1, ..., start_pos+n_tokens-1]
+    /// 委托给 rope 模块的实现
     pub fn buildPositionTensor(self: *GraphBuilder, n_tokens: i32, start_pos: i32) !*ggml.Tensor {
-        self.ctx.setNoAlloc(false);
-        defer self.ctx.setNoAlloc(true);
-        const pos_tensor = try self.ctx.newTensor1d(.i32, n_tokens);
-        const data = pos_tensor.dataBytes();
-        const pos_slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_tokens))];
-        for (0..@as(usize, @intCast(n_tokens))) |i| {
-            pos_slice[i] = @as(i32, @intCast(i)) + start_pos;
-        }
-        return pos_tensor;
+        return rope.buildPositionTensor(self.ctx, n_tokens, start_pos);
     }
 
     // ======================================================================

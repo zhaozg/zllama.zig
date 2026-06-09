@@ -14,6 +14,7 @@ const graph_builder = @import("graph_builder");
 const memory = @import("memory");
 
 const embed = @import("embed");
+const weight_loader = @import("weight_loader");
 
 const model = @import("../model.zig");
 
@@ -622,17 +623,11 @@ fn estimateMemSize(gguf_file: *const gguf.GGUFFile) usize {
 pub fn loadWeights(gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, params: *const QwenParams, allocator: std.mem.Allocator) !QwenWeights {
     const n_layer: usize = @intCast(params.base.n_layer);
     log.info("Loading Qwen35 weights...", .{});
-    const token_embd = findOrCreateTensor(ctx, gguf_file, "token_embd.weight") catch |err| {
-        log.err("Failed to load token_embd.weight: {}\n", .{err});
-        return error.MissingWeight;
-    };
+    const token_embd = try weight_loader.findOrCreateTensor(ctx, gguf_file, "token_embd.weight");
     token_embd.setName("token_embd.weight");
-    const output_weight = findOrCreateTensor(ctx, gguf_file, "output.weight") catch null;
+    const output_weight = weight_loader.findOrCreateTensor(ctx, gguf_file, "output.weight") catch null;
     if (output_weight) |ow| ow.setName("output.weight");
-    const output_norm_weight = findOrCreateTensor(ctx, gguf_file, "output_norm.weight") catch |err| {
-        log.err("Failed to load output_norm.weight: {}\n", .{err});
-        return error.MissingWeight;
-    };
+    const output_norm_weight = try weight_loader.findOrCreateTensor(ctx, gguf_file, "output_norm.weight");
     output_norm_weight.setName("output_norm.weight");
     var layers = try allocator.alloc(LayerWeights, n_layer);
     var layers_loaded: usize = 0;
@@ -648,103 +643,31 @@ pub fn loadWeights(gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, params: 
         var lw = LayerWeights{
             .prefix = prefix,
             .layer_type = if (is_full_attn) .full_attention else .ssm,
-            .attn_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_norm.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .post_attention_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "post_attention_norm.weight") catch |err| {
-                log.err("Layer {d}: failed to load post_attention_norm.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
+            .attn_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight"),
+            .post_attention_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "post_attention_norm.weight"),
             .ffn_norm_weight = undefined,
-            .ffn_gate_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_gate.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .ffn_up_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_up.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
-            .ffn_down_weight = loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch |err| {
-                log.err("Layer {d}: failed to load ffn_down.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            },
+            .ffn_gate_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight"),
+            .ffn_up_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight"),
+            .ffn_down_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight"),
         };
         lw.ffn_norm_weight = lw.post_attention_norm_weight;
         if (is_full_attn) {
-            lw.attn_q_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_q.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.attn_k_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_k.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.attn_v_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_v.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.attn_output_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_output.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.attn_q_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_q_norm.weight") catch null;
-            lw.attn_k_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_k_norm.weight") catch null;
+            lw.attn_q_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight");
+            lw.attn_k_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight");
+            lw.attn_v_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight");
+            lw.attn_output_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight");
+            lw.attn_q_norm_weight = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q_norm.weight") catch null;
+            lw.attn_k_norm_weight = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_k_norm.weight") catch null;
         } else {
-            lw.attn_qkv_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_qkv.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_qkv.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.attn_gate_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_gate.weight") catch |err| {
-                log.err("Layer {d}: failed to load attn_gate.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.ssm_conv1d_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_conv1d.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_conv1d.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.ssm_a = loadLayerWeight(ctx, gguf_file, prefix, "ssm_a") catch |err| {
-                log.err("Layer {d}: failed to load ssm_a: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.ssm_dt_bias = loadLayerWeight(ctx, gguf_file, prefix, "ssm_dt.bias") catch |err| {
-                log.err("Layer {d}: failed to load ssm_dt.bias: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.ssm_alpha_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_alpha.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_alpha.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.ssm_beta_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_beta.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_beta.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.ssm_norm_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_norm.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_norm.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
-            lw.ssm_out_weight = loadLayerWeight(ctx, gguf_file, prefix, "ssm_out.weight") catch |err| {
-                log.err("Layer {d}: failed to load ssm_out.weight: {}\n", .{ i, err });
-                allocator.free(prefix);
-                return error.MissingWeight;
-            };
+            lw.attn_qkv_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_qkv.weight");
+            lw.attn_gate_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_gate.weight");
+            lw.ssm_conv1d_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ssm_conv1d.weight");
+            lw.ssm_a = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ssm_a");
+            lw.ssm_dt_bias = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ssm_dt.bias");
+            lw.ssm_alpha_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ssm_alpha.weight");
+            lw.ssm_beta_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ssm_beta.weight");
+            lw.ssm_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ssm_norm.weight");
+            lw.ssm_out_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ssm_out.weight");
         }
         layers[i] = lw;
         layers_loaded = i + 1;
@@ -756,36 +679,6 @@ pub fn loadWeights(gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, params: 
     };
 }
 
-fn loadLayerWeight(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, prefix: []const u8, name: []const u8) !*ggml.Tensor {
-    var buf: [256]u8 = undefined;
-    const full_name = try std.fmt.bufPrint(&buf, "{s}.{s}", .{ prefix, name });
-    buf[full_name.len] = 0;
-    return findOrCreateTensor(ctx, gguf_file, buf[0..full_name.len :0]);
-}
-
-fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
-    if (gguf_file.findTensor(name)) |info| {
-        const n_dims = info.n_dims;
-        const dims = info.dims;
-        const typ: ggml.Type = @enumFromInt(@intFromEnum(info.data_type));
-        ctx.setNoAlloc(false);
-        const tensor = switch (n_dims) {
-            1 => try ctx.newTensor1d(typ, @intCast(dims[0])),
-            2 => try ctx.newTensor2d(typ, @intCast(dims[0]), @intCast(dims[1])),
-            3 => try ctx.newTensor3d(typ, @intCast(dims[0]), @intCast(dims[1]), @intCast(dims[2])),
-            4 => try ctx.newTensor4d(typ, @intCast(dims[0]), @intCast(dims[1]), @intCast(dims[2]), @intCast(dims[3])),
-            else => return error.UnsupportedTensorDims,
-        };
-        ctx.setNoAlloc(true);
-        tensor.setName(@ptrCast(name));
-        const tensor_data = gguf_file.getTensorData(info);
-        const tensor_bytes = tensor.dataBytes();
-        if (tensor_bytes.len != tensor_data.len) log.warn("Tensor '{s}' size mismatch: expected {d} bytes, got {d} bytes", .{ name, tensor_bytes.len, tensor_data.len });
-        @memcpy(tensor_bytes, tensor_data);
-        return tensor;
-    }
-    return error.TensorNotFound;
-}
 
 const testing = std.testing;
 

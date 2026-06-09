@@ -26,6 +26,7 @@ const memory = @import("memory");
 
 const attention = @import("attention");
 const embed = @import("embed");
+const weight_loader = @import("weight_loader");
 
 const model = @import("../model.zig");
 
@@ -696,30 +697,30 @@ fn loadWeights(
         else
             null;
 
-        const out_scale = loadLayerWeight(ctx, gguf_file, prefix, "layer_output_scale.weight") catch null;
+        const out_scale = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "layer_output_scale.weight") catch null;
 
         // Gemma 4: rope_freqs is global, not per-layer. Load it once.
         const rope_freqs = if (i == 0)
-            findOrCreateTensor(ctx, gguf_file, "rope_freqs.weight") catch null
+            weight_loader.findOrCreateTensor(ctx, gguf_file, "rope_freqs.weight") catch null
         else
             null;
 
         layers[i] = LayerWeights{
             .prefix = prefix,
-            .attn_norm_weight = try loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight"),
-            .ffn_norm_weight = try loadLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight"),
+            .attn_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight"),
+            .ffn_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight"),
             .attn_q_norm_weight = q_norm,
             .attn_k_norm_weight = if (k_norm) |kn| kn else q_norm,
             // Gemma 4 使用 post_attention_norm / post_ffw_norm 命名
-            .attn_post_norm_weight = try loadLayerWeight(ctx, gguf_file, prefix, "post_attention_norm.weight"),
-            .ffn_post_norm_weight = try loadLayerWeight(ctx, gguf_file, prefix, "post_ffw_norm.weight"),
-            .attn_q_weight = try loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight"),
+            .attn_post_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "post_attention_norm.weight"),
+            .ffn_post_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "post_ffw_norm.weight"),
+            .attn_q_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight"),
             .attn_k_weight = k_weight,
             .attn_v_weight = v_weight,
-            .attn_output_weight = try loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight"),
-            .ffn_gate_weight = try loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight"),
-            .ffn_up_weight = try loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight"),
-            .ffn_down_weight = try loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight"),
+            .attn_output_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight"),
+            .ffn_gate_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight"),
+            .ffn_up_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight"),
+            .ffn_down_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight"),
             .out_scale = out_scale,
             .rope_freqs = if (i == 0) rope_freqs else null,
             .has_kv = has_kv,

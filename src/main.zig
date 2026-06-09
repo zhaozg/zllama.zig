@@ -26,10 +26,11 @@ const sampler = @import("sampler");
 const kv_cache = @import("kv_cache");
 const mm = @import("mm");
 const preprocess = @import("preprocess");
+const engine_common = @import("engine_common");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
-    .logFn = log,
+    .logFn = engine_common.logFilter,
     .log_scope_levels = &[_]std.log.ScopeLevel{
         .{ .scope = .tokenizer, .level = .info},
         .{ .scope = .ggml, .level = .info },
@@ -42,34 +43,6 @@ pub const std_options: std.Options = .{
 };
 
 const logger = std.log.scoped(.main);
-
-var runtime_log_level: std.log.Level = .info;
-
-pub fn setLogLevel(level: std.log.Level) void {
-    runtime_log_level = level;
-}
-
-pub fn getLogLevel() std.log.Level {
-    return runtime_log_level;
-}
-
-pub fn log(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    if (@intFromEnum(level) > @intFromEnum(runtime_log_level)) return;
-    std.log.defaultLog(level, scope, format, args);
-}
-
-fn currentTimeMs() i64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) {
-        return 0;
-    }
-    return @as(i64, ts.sec) * 1000 + @as(i64, @divTrunc(ts.nsec, 1000000));
-}
 
 const CliArgs = struct {
     model_path: [:0]const u8 = "",
@@ -345,10 +318,10 @@ const InferenceEngine = struct {
         }
 
         // Prompt evaluation timing
-        const t_pp_start = currentTimeMs();
+        const t_pp_start = engine_common.currentTimeMs();
         try graph.compute(self.n_threads);
         const first_token = sampler.Sampler.sampleGreedy(logits);
-        const t_pp_end = currentTimeMs();
+        const t_pp_end = engine_common.currentTimeMs();
         const pp_time_s = @as(f64, @floatFromInt(t_pp_end - t_pp_start)) / 1000.0;
 
         // Stream prompt tokens (skip in benchmark mode)
@@ -368,7 +341,7 @@ const InferenceEngine = struct {
         var gen_count: u32 = 0;
 
         // Text generation timing
-        const t_tg_start = currentTimeMs();
+        const t_tg_start = engine_common.currentTimeMs();
 
         // --- Incremental decoding ---
         while (gen_count < max_tokens) {
@@ -402,7 +375,7 @@ const InferenceEngine = struct {
             gen_count += 1;
         }
 
-        const t_tg_end = currentTimeMs();
+        const t_tg_end = engine_common.currentTimeMs();
         const tg_time_s = @as(f64, @floatFromInt(t_tg_end - t_tg_start)) / 1000.0;
 
         // Print newline (skip in benchmark mode)
@@ -611,9 +584,9 @@ const InferenceEngine = struct {
             return error.GraphAllocFailed;
         }
 
-        const t_start = currentTimeMs();
+        const t_start = engine_common.currentTimeMs();
         try graph.compute(self.n_threads);
-        const t_end = currentTimeMs();
+        const t_end = engine_common.currentTimeMs();
         const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
 
         // Step 6: Sample first token and generate
@@ -621,7 +594,7 @@ const InferenceEngine = struct {
         var pos: i32 = n_total_tokens;
         var gen_count: u32 = 0;
 
-        const t_tg_start = currentTimeMs();
+        const t_tg_start = engine_common.currentTimeMs();
 
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
@@ -652,7 +625,7 @@ const InferenceEngine = struct {
             gen_count += 1;
         }
 
-        const t_tg_end = currentTimeMs();
+        const t_tg_end = engine_common.currentTimeMs();
         const tg_time_s = @as(f64, @floatFromInt(t_tg_end - t_tg_start)) / 1000.0;
 
         if (!self.benchmark) {
@@ -767,9 +740,9 @@ const InferenceEngine = struct {
             return error.GraphAllocFailed;
         }
 
-        const t_start = currentTimeMs();
+        const t_start = engine_common.currentTimeMs();
         try graph.compute(self.n_threads);
-        const t_end = currentTimeMs();
+        const t_end = engine_common.currentTimeMs();
         const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
 
         // Step 7: Sample first token and generate
@@ -777,7 +750,7 @@ const InferenceEngine = struct {
         var pos: i32 = n_total_tokens;
         var gen_count: u32 = 0;
 
-        const t_tg_start = currentTimeMs();
+        const t_tg_start = engine_common.currentTimeMs();
 
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
@@ -808,7 +781,7 @@ const InferenceEngine = struct {
             gen_count += 1;
         }
 
-        const t_tg_end = currentTimeMs();
+        const t_tg_end = engine_common.currentTimeMs();
         const tg_time_s = @as(f64, @floatFromInt(t_tg_end - t_tg_start)) / 1000.0;
 
         if (!self.benchmark) {
@@ -908,11 +881,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (args.debug) {
-        setLogLevel(.debug);
+        engine_common.setLogLevel(.debug);
     } else if (args.verbose) {
-        setLogLevel(.info);
+        engine_common.setLogLevel(.info);
     } else {
-        setLogLevel(.warn);
+        engine_common.setLogLevel(.warn);
     }
     logger.info("zllama.zig v0.1.0 (ggml {s})", .{ggml.version()});
 

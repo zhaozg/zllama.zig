@@ -19,6 +19,8 @@ const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
 
+const weight_loader = @import("weight_loader");
+
 const log = std.log.scoped(.audio_encoder);
 
 // ============================================================================
@@ -517,29 +519,8 @@ pub const AudioEncoder = struct {
 // ============================================================================
 // 辅助函数
 // ============================================================================
-
-/// 从 GGUF 查找张量并加载到 ggml context
 fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
-    const info = gguf_file.findTensor(name) orelse return error.TensorNotFound;
-    const n_dims = info.n_dims;
-    const typ: ggml.Type = @enumFromInt(@intFromEnum(info.data_type));
-
-    ctx.setNoAlloc(false);
-    const tensor = switch (n_dims) {
-        1 => try ctx.newTensor1d(typ, @intCast(info.dims[0])),
-        2 => try ctx.newTensor2d(typ, @intCast(info.dims[0]), @intCast(info.dims[1])),
-        3 => try ctx.newTensor3d(typ, @intCast(info.dims[0]), @intCast(info.dims[1]), @intCast(info.dims[2])),
-        4 => try ctx.newTensor4d(typ, @intCast(info.dims[0]), @intCast(info.dims[1]), @intCast(info.dims[2]), @intCast(info.dims[3])),
-        else => return error.UnsupportedTensorDims,
-    };
-    ctx.setNoAlloc(true);
-
-    tensor.setName(@ptrCast(name));
-
-    const tensor_data = gguf_file.getTensorData(info);
-    @memcpy(tensor.dataBytes(), tensor_data);
-
-    return tensor;
+    return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
 }
 
 /// 加载单个 Conformer 层
@@ -590,17 +571,13 @@ fn loadConformerLayer(
 
     return layer;
 }
-
-/// 查找层权重（带前缀）
 fn findLayerWeight(
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
     prefix: []const u8,
     name: []const u8,
 ) !*ggml.Tensor {
-    var buf: [256]u8 = undefined;
-    const full_name = try std.fmt.bufPrint(&buf, "{s}.{s}", .{ prefix, name });
-    return findTensorInGGUF(ctx, gguf_file, full_name);
+    return weight_loader.loadLayerWeight(ctx, gguf_file, prefix, name);
 }
 
 /// RMS 归一化
@@ -613,3 +590,4 @@ fn ffnSilu(ctx: *ggml.Context, x: *ggml.Tensor, up_w: *ggml.Tensor, down_w: *ggm
     const h = up_w.mulMat(ctx, x);
     return down_w.mulMat(ctx, h.silu(ctx));
 }
+

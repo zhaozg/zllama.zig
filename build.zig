@@ -112,6 +112,17 @@ pub fn build(b: *std.Build) void {
     });
     embed_mod.addImport("ggml", ggml_mod);
 
+
+    const weight_loader_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/weight_loader.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    weight_loader_mod.addImport("ggml", ggml_mod);
+    weight_loader_mod.addImport("gguf", gguf_mod);
+
+
     const model_mod = b.createModule(.{
         .root_source_file = b.path("src/model.zig"),
         .target = target,
@@ -128,6 +139,9 @@ pub fn build(b: *std.Build) void {
     model_mod.addImport("attention", attention_mod);
     model_mod.addImport("embed", embed_mod);
 
+    model_mod.addImport("weight_loader", weight_loader_mod);
+
+
     const graph_builder_mod = b.createModule(.{
         .root_source_file = b.path("src/core/graph_builder.zig"),
         .target = target,
@@ -135,6 +149,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     graph_builder_mod.addImport("ggml", ggml_mod);
+    graph_builder_mod.addImport("rope", rope_mod);
+
     graph_builder_mod.addImport("model", model_mod);
     graph_builder_mod.addImport("memory", memory_mod);
 
@@ -149,9 +165,24 @@ pub fn build(b: *std.Build) void {
     graph_context_mod.addImport("graph_builder", graph_builder_mod);
     graph_context_mod.addImport("memory", memory_mod);
 
+
+
+
     model_mod.addImport("graph_builder", graph_builder_mod);
 
+    model_mod.addImport("graph_builder", graph_builder_mod);
+
+    const engine_common_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/engine_common.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    engine_common_mod.addImport("ggml", ggml_mod);
+    engine_common_mod.addImport("model", model_mod);
+
     const registry_mod = b.createModule(.{
+
         .root_source_file = b.path("src/models/registry.zig"),
         .target = target,
         .optimize = optimize,
@@ -169,6 +200,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    tokenizer_mod.addImport("ggml", ggml_mod);
+    tokenizer_mod.addImport("gguf", gguf_mod);
     tokenizer_mod.addImport("ggml", ggml_mod);
     tokenizer_mod.addImport("gguf", gguf_mod);
 
@@ -191,6 +224,8 @@ pub fn build(b: *std.Build) void {
     });
     mm_audio_mod.addImport("ggml", ggml_mod);
     mm_audio_mod.addImport("gguf", gguf_mod);
+    mm_audio_mod.addImport("weight_loader", weight_loader_mod);
+
 
     const mm_vision_mod = b.createModule(.{
         .root_source_file = b.path("src/mm/vision.zig"),
@@ -200,6 +235,8 @@ pub fn build(b: *std.Build) void {
     });
     mm_vision_mod.addImport("ggml", ggml_mod);
     mm_vision_mod.addImport("gguf", gguf_mod);
+    mm_vision_mod.addImport("weight_loader", weight_loader_mod);
+
     const fft_mod = b.createModule(.{
         .root_source_file = b.path("src/mm/fft.zig"),
         .target = target,
@@ -207,6 +244,18 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     fft_mod.linkFramework("Accelerate", .{});
+
+
+    const utils_mod = b.createModule(.{
+        .root_source_file = b.path("src/utils.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    utils_mod.addImport("ggml", ggml_mod);
+    utils_mod.addImport("gguf", gguf_mod);
+    utils_mod.addImport("tokenizer", tokenizer_mod);
+
 
     const mm_manager_mod = b.createModule(.{
         .root_source_file = b.path("src/mm/manager.zig"),
@@ -263,6 +312,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("preprocess", mm_preprocess_mod);
     exe_mod.addImport("kv_cache", kv_cache_mod);
     exe_mod.addImport("stb_image", stb_image_mod);
+    exe_mod.addImport("engine_common", engine_common_mod);
+
 
     const exe = b.addExecutable(.{
         .name = "zllama",
@@ -281,6 +332,8 @@ pub fn build(b: *std.Build) void {
     tokenize_mod.addImport("ggml", ggml_mod);
     tokenize_mod.addImport("gguf", gguf_mod);
     tokenize_mod.addImport("tokenizer", tokenizer_mod);
+    tokenize_mod.addImport("utils", utils_mod);
+
 
     const tokenize_exe = b.addExecutable(.{
         .name = "zllama-tokenize",
@@ -306,6 +359,8 @@ pub fn build(b: *std.Build) void {
     simple_mod.addImport("sampler", sampler_mod);
     simple_mod.addImport("kv_cache", kv_cache_mod);
     simple_mod.addImport("stb_image", stb_image_mod);
+    simple_mod.addImport("engine_common", engine_common_mod);
+
     simple_mod.addImport("graph_context", graph_context_mod);
     simple_mod.addImport("mm", mm_manager_mod);
     simple_mod.addImport("preprocess", mm_preprocess_mod);
