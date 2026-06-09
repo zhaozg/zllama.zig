@@ -237,42 +237,83 @@ pub const VisionEncoder = struct {
         img_width: u32,
         img_height: u32,
     ) !*ggml.Tensor {
-        _ = image_data;
         const w = self.weights;
         const p = self.params;
-        const patch_size: i64 = @intCast(p.patch_size);
-        const n_embd: i64 = @intCast(p.n_embd);
-        const n_head: i64 = @intCast(p.n_head);
-        const d_head: i64 = @divExact(n_embd, n_head);
-        const n_patches_x = @divTrunc(@as(i64, @intCast(img_width)), patch_size);
-        const n_patches_y = @divTrunc(@as(i64, @intCast(img_height)), patch_size);
-        const n_patches = n_patches_x * n_patches_y;
+        var effective_n_embd: i64 = @intCast(p.n_embd);
+        const effective_n_head: i64 = @intCast(p.n_head);
+        var d_head: i64 = @divExact(effective_n_embd, effective_n_head);
+        var n_patches_x: i64 = 0;
+        var n_patches_y: i64 = 0;
+        var n_patches: i64 = 0;
 
-        // 1. 创建输入张量 [channels, height, width] -> [C, H, W]
-        // 输入为 RGB: [3, height, width]
-        var inp = try ctx.newTensor3d(ggml.Type.f32, n_patches_x, n_patches_y, 3);
+        // Validate input size
+        const expected_len: usize = @as(usize, @intCast(img_width)) * @as(usize, @intCast(img_height)) * 3;
+        if (image_data.len < expected_len) {
+            log.err("Image data too small: got {d}, expected {d}", .{ image_data.len, expected_len });
+            return error.InvalidImageData;
+        }
+
+        // 1. Create input tensor [width, height, channels] = [W, H, C]
+        // ggml conv2d WHCN: kernel=[KW,KH,IC,OC], input=[IW,IH,IC]
+        var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(img_width), @intCast(img_height), 3);
         inp.setName("vision_input");
+
+        // Fill tensor with image data: HWC u8 [0,255] -> WHC f32 [0,1]
+        {
+            const src = image_data;
+            const W: usize = @intCast(img_width);
+            const H: usize = @intCast(img_height);
+            const wh: usize = W * H;
+            const dst = inp.dataF32();
+            for (0..H) |y| {
+                for (0..W) |x| {
+                    const src_idx = (y * W + x) * 3;
+                    const dst_base = y * W + x;
+                    dst[dst_base] = @as(f32, @floatFromInt(src[src_idx + 0])) / 255.0;
+                    dst[dst_base + wh] = @as(f32, @floatFromInt(src[src_idx + 1])) / 255.0;
+                    dst[dst_base + 2 * wh] = @as(f32, @floatFromInt(src[src_idx + 2])) / 255.0;
+                }
+            }
+        }
 
         switch (self.encoder_type) {
             .gemma4v => {
                 // 标准化: patches * 2 - 1
                 inp = ggml.scale(ctx, inp, 2.0);
-                inp = inp.add(ctx, try ctx.newTensor1d(ggml.Type.f32, 1)); // bias=-1 as add
-
-                // Conv2D patch embedding
-                if (w.patch_embeddings_0) |pe| {
-                    inp = inp.conv2d(ctx, pe, @as(i32, @intCast(patch_size)), @as(i32, @intCast(patch_size)), 0, 0, 1, 1);
+                {
+                    const bias = try ctx.newTensor1d(ggml.Type.f32, 1);
+                    bias.dataF32()[0] = -1.0;
+                    bias.setName("vision_bias");
+                    inp = inp.add(ctx, bias);
                 }
-                // [out_c, out_h, out_w] -> [n_embd, n_patches_y * n_patches_x] -> transpose to [n_patches, n_embd]
-                inp = inp.reshape2d(ctx, n_embd, n_patches);
-                inp = inp.permute(ctx, 1, 0, 2, 3).cont(ctx);
+
+                // Conv2D patch embedding — use kernel dimensions for stride
+                if (w.patch_embeddings_0) |pe| {
+                    const kw: i32 = @intCast(pe.ne()[0]);
+                    const kh: i32 = @intCast(pe.ne()[1]);
+                    effective_n_embd = pe.ne()[3];
+                    d_head = @divExact(effective_n_embd, effective_n_head);
+                    n_patches_x = @divTrunc(@as(i64, @intCast(img_width)), kw);
+                    n_patches_y = @divTrunc(@as(i64, @intCast(img_height)), kh);
+                    n_patches = n_patches_x * n_patches_y;
+                    inp = inp.conv2d(ctx, pe, kw, kh, 0, 0, 1, 1);
+                    inp = inp.reshape2d(ctx, effective_n_embd, n_patches);
+                    inp = inp.permute(ctx, 1, 0, 2, 3).cont(ctx);
+                }
             },
             .gemma4uv => {
                 // Gemma4UV: im2col + patch norms + projection
                 if (w.patch_norm_1_w) |pn1_w| {
-                    // im2col: [C, H, W] -> [patch_size*patch_size*C, n_patches_y, n_patches_x]
-                    const kernel = try ctx.newTensor3d(ggml.Type.f32, patch_size, patch_size, 3);
-                    inp = inp.im2col(ctx, kernel, @as(i32, @intCast(patch_size)), @as(i32, @intCast(patch_size)), 0, 0, 1, 1, true, ggml.Type.f32);
+                    if (w.patch_embeddings_0) |pe| {
+                        const kw: i32 = @intCast(pe.ne()[0]);
+                        const kh: i32 = @intCast(pe.ne()[1]);
+                        const ic: i32 = @intCast(pe.ne()[2]);
+                        n_patches_x = @divTrunc(@as(i64, @intCast(img_width)), kw);
+                        n_patches_y = @divTrunc(@as(i64, @intCast(img_height)), kh);
+                        n_patches = n_patches_x * n_patches_y;
+                        const im2col_kernel = try ctx.newTensor4d(ggml.Type.f32, kw, kh, ic, 1);
+                        inp = inp.im2col(ctx, im2col_kernel, kw, kh, 0, 0, 1, 1, true, ggml.Type.f32);
+                    }
                     // Flatten to [patch_size*patch_size*C, n_patches]
                     inp = inp.reshape2d(ctx, inp.ne()[0], n_patches);
                     // Patch norm 1
@@ -303,21 +344,29 @@ pub const VisionEncoder = struct {
         // 2. 位置编码 (lookup from position_embeddings)
         if (w.position_embeddings) |pos_embd| {
             const pos_size = pos_embd.ne()[1];
-            const row_size = ggml.Type.rowSize(pos_embd.dataType(), n_embd);
+            const row_size = ggml.Type.rowSize(pos_embd.dataType(), effective_n_embd);
 
             // Position embeddings stored as [n_embd, 2*pos_size]: first half=X, second half=Y
-            const tbl_x = pos_embd.view2d(ctx, n_embd, pos_size, row_size, 0);
-            const tbl_y = pos_embd.view2d(ctx, n_embd, pos_size, row_size, @as(usize, @intCast(pos_size)) * row_size);
+            const tbl_x = pos_embd.view2d(ctx, effective_n_embd, pos_size, row_size, 0);
+            const tbl_y = pos_embd.view2d(ctx, effective_n_embd, pos_size, row_size, @as(usize, @intCast(pos_size)) * row_size);
 
-            // Create position indices [n_patches]
+            // Create and fill position index tensors
             var pos_x = try ctx.newTensor1d(ggml.Type.i32, n_patches);
             pos_x.setName("pos_x");
             var pos_y = try ctx.newTensor1d(ggml.Type.i32, n_patches);
             pos_y.setName("pos_y");
+            {
+                const px = pos_x.dataI32();
+                const py = pos_y.dataI32();
+                for (0..@as(usize, @intCast(n_patches))) |i| {
+                    px[i] = @mod(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
+                    py[i] = @divTrunc(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
+                }
+            }
 
-            // Lookup position embeddings
-            const emb_x = tbl_x.getRows(ctx, pos_x);
-            const emb_y = tbl_y.getRows(ctx, pos_y);
+            // getRows produces [n_embd, n_patches]; transpose to match inp [n_patches, n_embd]
+            const emb_x = tbl_x.getRows(ctx, pos_x).permute(ctx, 1, 0, 2, 3).cont(ctx);
+            const emb_y = tbl_y.getRows(ctx, pos_y).permute(ctx, 1, 0, 2, 3).cont(ctx);
 
             inp = inp.add(ctx, emb_x);
             inp = inp.add(ctx, emb_y);
@@ -344,39 +393,48 @@ pub const VisionEncoder = struct {
                     var attn_in = cur;
                     if (layer.ln_1_w) |ln1_w| {
                         attn_in = attn_in.rmsNorm(ctx, p.norm_eps);
-                        attn_in = attn_in.mul(ctx, ln1_w);
+                        attn_in = attn_in.mul(ctx, reshapeForBroadcast(ctx, ln1_w));
                         if (layer.ln_1_b) |ln1_b| {
                             attn_in = attn_in.add(ctx, ln1_b);
                         }
                     }
 
                     // Q, K, V projections
-                    var Q = attn_in.mulMat(ctx, layer.q_w.?);
-                    var K = attn_in.mulMat(ctx, layer.k_w.?);
-                    var V = attn_in.mulMat(ctx, layer.v_w.?);
+                    // transpose input for ggml_mul_mat: ne[0] must match
+                    var Q = attn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.q_w.?);
+                    var K = attn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.k_w.?);
+                    var V = attn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.v_w.?);
 
                     // Reshape to [d_head, n_head, n_patches]
-                    Q = Q.reshape3d(ctx, d_head, n_head, n_patches);
-                    K = K.reshape3d(ctx, d_head, n_head, n_patches);
-                    V = V.reshape3d(ctx, d_head, n_head, n_patches);
+                    Q = Q.reshape3d(ctx, d_head, effective_n_head, n_patches);
+                    K = K.reshape3d(ctx, d_head, effective_n_head, n_patches);
+                    V = V.reshape3d(ctx, d_head, effective_n_head, n_patches);
 
-                    // Apply 2D RoPE
+                    // Apply 2D RoPE with filled position indices
                     var pos_x = try ctx.newTensor1d(ggml.Type.i32, n_patches);
                     pos_x.setName("rope_pos_x");
                     var pos_y = try ctx.newTensor1d(ggml.Type.i32, n_patches);
                     pos_y.setName("rope_pos_y");
+                    {
+                        const px = pos_x.dataI32();
+                        const py = pos_y.dataI32();
+                        for (0..@as(usize, @intCast(n_patches))) |i| {
+                            px[i] = @mod(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
+                            py[i] = @divTrunc(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
+                        }
+                    }
 
                     // First half RoPE with pos_x (neox)
                     const half_d = @divExact(d_head, 2);
-                    var Q_first = Q.view3d(ctx, half_d, n_head, n_patches, Q.nb()[1], Q.nb()[2], 0);
+                    var Q_first = Q.view3d(ctx, half_d, effective_n_head, n_patches, Q.nb()[1], Q.nb()[2], 0);
                     Q_first = Q_first.ropeExt(ctx, pos_x, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    var Q_second = Q.view3d(ctx, half_d, n_head, n_patches, Q.nb()[1], Q.nb()[2], @as(usize, @intCast(half_d * @sizeOf(f32))));
+                    var Q_second = Q.view3d(ctx, half_d, effective_n_head, n_patches, Q.nb()[1], Q.nb()[2], @as(usize, @intCast(half_d * @sizeOf(f32))));
                     Q_second = Q_second.ropeExt(ctx, pos_y, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
                     Q = Q_first.concat(ctx, Q_second, 0);
 
-                    var K_first = K.view3d(ctx, half_d, n_head, n_patches, K.nb()[1], K.nb()[2], 0);
+                    var K_first = K.view3d(ctx, half_d, effective_n_head, n_patches, K.nb()[1], K.nb()[2], 0);
                     K_first = K_first.ropeExt(ctx, pos_x, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    var K_second = K.view3d(ctx, half_d, n_head, n_patches, K.nb()[1], K.nb()[2], @as(usize, @intCast(half_d * @sizeOf(f32))));
+                    var K_second = K.view3d(ctx, half_d, effective_n_head, n_patches, K.nb()[1], K.nb()[2], @as(usize, @intCast(half_d * @sizeOf(f32))));
                     K_second = K_second.ropeExt(ctx, pos_y, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
                     K = K_first.concat(ctx, K_second, 0);
 
@@ -394,7 +452,7 @@ pub const VisionEncoder = struct {
                     // attn @ V: [n_head, n_patches, n_patches] @ [n_patches, d_head, n_head] -> [n_head, n_patches, d_head]
                     var x = V.mulMat(ctx, scores);
                     x = x.permute(ctx, 2, 0, 1, 3).cont(ctx); // [d_head, n_head, n_patches]
-                    x = x.cont2d(ctx, n_embd, n_patches);
+                    x = x.cont2d(ctx, effective_n_embd, n_patches);
 
                     x = x.mulMat(ctx, layer.o_w.?);
                     if (layer.o_b) |ob| {
@@ -409,18 +467,18 @@ pub const VisionEncoder = struct {
                     var ffn_in = cur;
                     if (layer.ln_2_w) |ln2_w| {
                         ffn_in = ffn_in.rmsNorm(ctx, p.norm_eps);
-                        ffn_in = ffn_in.mul(ctx, ln2_w);
+                        ffn_in = ffn_in.mul(ctx, reshapeForBroadcast(ctx, ln2_w));
                         if (layer.ln_2_b) |ln2_b| {
                             ffn_in = ffn_in.add(ctx, ln2_b);
                         }
                     }
 
-                    const h = ffn_in.mulMat(ctx, layer.ff_up_w.?);
+                    const h = ffn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.ff_up_w.?);
                     const activated = switch (p.ffn_op) {
                         .silu => h.silu(ctx),
                         .gelu => h.gelu(ctx),
                     };
-                    const ffn_out = activated.mulMat(ctx, layer.ff_down_w.?);
+                    const ffn_out = activated.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.ff_down_w.?);
                     cur = cur.add(ctx, ffn_out);
                 }
             }
@@ -431,13 +489,13 @@ pub const VisionEncoder = struct {
             const kernel_size: i64 = @intCast(p.n_merge);
             // [n_embd, n_patches] -> [n_patches_x, n_patches_y, n_embd, 1]
             cur = cur.permute(ctx, 1, 0, 2, 3).cont(ctx);
-            cur = cur.cont4d(ctx, n_patches_x, n_patches_y, n_embd, 1);
+            cur = cur.cont4d(ctx, n_patches_x, n_patches_y, effective_n_embd, 1);
             cur = cur.pool2d(ctx, 1, @as(i32, @intCast(kernel_size)), @as(i32, @intCast(kernel_size)), @as(i32, @intCast(kernel_size)), @as(i32, @intCast(kernel_size)), 0, 0);
             const out_x = @divTrunc(n_patches_x, kernel_size);
             const out_y = @divTrunc(n_patches_y, kernel_size);
-            cur = cur.reshape3d(ctx, out_x * out_y, n_embd, 1);
+            cur = cur.reshape3d(ctx, out_x * out_y, effective_n_embd, 1);
             cur = cur.permute(ctx, 1, 0, 2, 3).cont(ctx);
-            cur = cur.scale(ctx, @sqrt(@as(f32, @floatFromInt(n_embd))));
+            cur = cur.scale(ctx, @sqrt(@as(f32, @floatFromInt(effective_n_embd))));
         }
 
         // 5. Standardization
@@ -445,13 +503,13 @@ pub const VisionEncoder = struct {
             cur = cur.sub(ctx, sb);
         }
         if (w.std_scale) |ss| {
-            cur = cur.mul(ctx, ss);
+            cur = cur.mul(ctx, reshapeForBroadcast(ctx, ss));
         }
 
         // 6. Multimodal embedder
         cur = cur.rmsNorm(ctx, p.norm_eps);
         if (w.mm_soft_emb_norm_w) |sn| {
-            cur = cur.mul(ctx, sn);
+            cur = cur.mul(ctx, reshapeForBroadcast(ctx, sn));
         }
         if (w.mm_input_proj_w) |proj| {
             cur = cur.mulMat(ctx, proj);
@@ -539,6 +597,13 @@ fn loadViTLayer(
     layer.ff_down_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch null;
 
     return layer;
+}
+
+/// Reshape a 1D weight tensor [n] to [1, n] for broadcasting with [m, n] tensors.
+/// ggml broadcasting: [n] vs [m, n] -> ne[0]: n vs m (fail); [1, n] vs [m, n] -> ne[0]: 1 vs m (ok)
+fn reshapeForBroadcast(ctx: *ggml.Context, t: *ggml.Tensor) *ggml.Tensor {
+    const n = t.ne()[0];
+    return ctx.view2d(t, 1, n, ggml.Type.rowSize(t.dataType(), n), 0);
 }
 
 fn findLayerWeight(
