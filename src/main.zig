@@ -533,55 +533,140 @@ const InferenceEngine = struct {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_vision) return error.VisionNotSupported;
 
+        // Only Gemma4 supports vision currently
+        if (self.arch != .gemma4) {
+            logger.warn("Vision only supported for Gemma4 models. Using text-only generation.", .{});
+            return self.generate(io, prompt, max_tokens);
+        }
+        const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
+
         // Step 1: Load and preprocess image
-        // TODO: Use vision encoder's expected image_size from params
-        // For now, use 896 as default (gemma4v default)
         const target_size: u32 = 896;
         var img = try preprocess.loadPPM(self.allocator, io, image_path, target_size);
         defer img.deinit();
 
+        logger.info("Loaded image: {d}x{d} -> {d}x{d}", .{ img.width, img.height, target_size, target_size });
+
         // Step 2: Run vision encoder
         self.ctx_graph.setNoAlloc(false);
-        _ = try preprocess.imageToTensor(self.ctx_graph, &img, .siglip); // TODO: use as vision encoder input
-        self.ctx_graph.setNoAlloc(true);
+        var vision_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
 
-        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
-
-        const vision_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, graph, .{
+        const vision_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, vision_graph, .{
             .media_type = .image,
             .image_data = img.data,
             .image_width = img.width,
             .image_height = img.height,
         });
+        self.ctx_graph.setNoAlloc(true);
 
-        // Allocate and compute
+        // Allocate and compute vision encoder graph
         const buft = ggml.backendCpuBufferType();
+        {
+            var v_galloc = try ggml.Gallocr.init(buft);
+            defer v_galloc.free();
+            if (!v_galloc.allocGraph(vision_graph)) {
+                return error.GraphAllocFailed;
+            }
+            try vision_graph.compute(self.n_threads);
+        }
+
+        // Log vision encoding results
+        const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
+        const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
+        logger.info("Vision encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd_val, n_vision_tokens });
+
+        // Step 3: Tokenize prompt text
+        var input_tokens = try self.tok.encode(prompt, true);
+        defer input_tokens.deinit(self.allocator);
+        const n_text_tokens: i32 = @intCast(input_tokens.items.len);
+        const n_total_tokens: i32 = n_vision_tokens + n_text_tokens;
+
+        // Step 4: Create input token tensor (vision positions = PAD, text positions = real tokens)
+        self.ctx_graph.setNoAlloc(false);
+        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
+        self.ctx_graph.setNoAlloc(true);
+        {
+            const data = input_tensor.dataBytes();
+            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
+            for (0..@as(usize, @intCast(n_vision_tokens))) |j| {
+                slice[j] = 0;
+            }
+            for (input_tokens.items, 0..) |token, j| {
+                slice[@as(usize, @intCast(n_vision_tokens)) + j] = @as(i32, @intCast(token));
+            }
+        }
+
+        // Step 5: Build LLM graph with vision embedding override
+        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
+        const start_pos: i32 = 0;
+        const logits = try gemma4_model.forwardWithEmbdOverride(
+            self.ctx_graph, graph, input_tensor, n_total_tokens,
+            @ptrCast(&self.kv_cache_mgr), start_pos, vision_embeddings,
+        );
+
+        // Allocate and compute LLM graph
         var galloc = try ggml.Gallocr.init(buft);
         defer galloc.free();
         if (!galloc.allocGraph(graph)) {
+            logger.err("Failed to allocate LLM graph for vision+text", .{});
             return error.GraphAllocFailed;
         }
+
+        const t_start = currentTimeMs();
         try graph.compute(self.n_threads);
+        const t_end = currentTimeMs();
+        const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
 
-        // Step 3: Build multimodal prompt
-        // TODO: Create proper multimodal prompt format with vision tokens
-        // Current approach: log the vision embedding dimensions for debugging
-        const n_vision_tokens: usize = @intCast(vision_embeddings.ne()[1]);
-        const n_embd: usize = @intCast(vision_embeddings.ne()[0]);
-        logger.info("Vision encoder output: [{d}, {d}] tokens", .{ n_embd, n_vision_tokens });
+        // Step 6: Sample first token and generate
+        var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
+        var pos: i32 = n_total_tokens;
+        var gen_count: u32 = 0;
 
-        // Step 4: Generate text
-        // TODO: Feed vision_embeddings into the LLM as context tokens
-        // This requires integration with the LLM's embedding layer.
-        // For now, fall back to text-only generation with a note.
-        logger.warn("Vision-to-LLM token integration not yet implemented. Using text-only generation.", .{});
-        logger.warn("Vision embeddings shape: [n_embd={d}, n_tokens={d}]", .{ n_embd, n_vision_tokens });
+        const t_tg_start = currentTimeMs();
 
-        try self.generate(io, prompt, max_tokens);
+        while (gen_count < max_tokens) {
+            if (self.tok.isEog(@intCast(current_token))) break;
+
+            if (!self.benchmark) {
+                var buf: [128]u8 = undefined;
+                const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
+                if (n > 0) {
+                    const stdout_file = std.Io.File.stdout();
+                    try stdout_file.writeStreamingAll(io, buf[0..n]);
+                }
+            }
+
+            const step = try self.inc_ctx.beginStep();
+            step.setToken(current_token);
+
+            var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+            const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
+
+            if (!step.galloc.allocGraph(step.graph)) {
+                logger.err("Failed to allocate incremental graph memory", .{});
+                return error.GraphAllocFailed;
+            }
+            try step.graph.compute(self.n_threads);
+
+            current_token = sampler.Sampler.sampleGreedy(inc_logits);
+            pos += 1;
+            gen_count += 1;
+        }
+
+        const t_tg_end = currentTimeMs();
+        const tg_time_s = @as(f64, @floatFromInt(t_tg_end - t_tg_start)) / 1000.0;
+
+        if (!self.benchmark) {
+            const stdout_file = std.Io.File.stdout();
+            try stdout_file.writeStreamingAll(io, "\n");
+        }
+
+        if (gen_count > 0) {
+            const total_time_s = pp_time_s + tg_time_s;
+            const avg_speed = @as(f64, @floatFromInt(gen_count)) / total_time_s;
+            logger.info("Vision generation: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, total_time_s, avg_speed });
+        }
     }
-
-    /// Generate with audio input (audio + text)
-    ///
     /// Workflow:
     /// 1. Load WAV audio file
     /// 2. Compute Mel spectrogram
