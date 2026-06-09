@@ -1,6 +1,6 @@
 # zllama.zig - 多模型本地推理引擎
 
-> 纯 Zig 实现的高性能本地推理引擎，基于 ggml，支持多模型架构（Qwen / LLaMA / Gemma 等）。
+> 纯 Zig 实现的高性能本地推理引擎，基于 ggml，支持多模型架构（Qwen / LLaMA / Gemma 等），初步支持多模态（图像/音频）。
 
 [![Zig Version](https://img.shields.io/badge/Zig-0.16.0-orange)](https://ziglang.org/)
 [![ggml](https://img.shields.io/badge/ggml-latest-blue)](https://github.com/ggerganov/ggml)
@@ -22,6 +22,10 @@
 - **内建 BPE 分词器**：从 GGUF 提取词表，无外部依赖
 - **交互式聊天模式**：`-c/--chat` 流式对话、采样参数可调
 - **Benchmark 模式**：`--benchmark` 输出 PP/TG 分离的性能数据
+- **多模态支持**（🚧 进行中）：
+  - ViT 图像编码器（gemma4v / gemma4uv）
+  - Conformer 音频编码器（ChunkedAttention + SSM Conv）
+  - PPM 图像预处理（加载 + Resize + 标准化）
 
 ## 🚀 快速开始
 
@@ -56,6 +60,10 @@ zig build -Doptimize=ReleaseFast
 
 # Benchmark 模式
 ./zig-out/bin/zllama -m model.gguf --benchmark
+
+# 多模态（需要 --mmproj 投影器文件）
+./zig-out/bin/zllama -m model.gguf --mmproj /path/to/mmproj.gguf --image input.ppm -p "描述这张图片"
+./zig-out/bin/zllama -m model.gguf --mmproj /path/to/mmproj.gguf --audio input.pcm -p "转录这段音频"
 ```
 
 ## 📦 项目结构
@@ -65,7 +73,7 @@ zllama.zig/
 ├── src/
 │   ├── main.zig           # CLI 入口（Juicy Main）
 │   ├── simple_main.zig    # 简化推理入口
-│   ├── ggml.zig           # ggml C API 安全封装
+│   ├── ggml.zig           # ggml C API 安全封装 + Tensor 方法式算子
 │   ├── gguf.zig           # GGUF v2/v3 解析器
 │   ├── model.zig          # 模型抽象接口定义
 │   ├── kv_cache.zig       # KV Cache 管理（per-layer 可变维度）
@@ -89,7 +97,16 @@ zllama.zig/
 │   │   ├── graph_builder.zig
 │   │   ├── graph_context.zig
 │   │   └── memory.zig
-│   └── ggml/              # ggml 安全封装子模块
+│   ├── mm/                # 多模态模块
+│   │   ├── manager.zig    # 多模态调度器（MMProj 加载）
+│   │   ├── vision.zig     # ViT 视觉编码器
+│   │   ├── audio.zig      # Conformer 音频编码器
+│   │   └── preprocess.zig # 图像/音频预处理
+│   ├── ggml/              # ggml 安全封装子模块
+│   └── tools/             # 调试工具
+│       ├── dump_graph.zig
+│       ├── compare_logits.zig
+│       └── generate_reference.zig
 ├── deps/ggml/             # ggml 源码（submodule）
 ├── build.zig              # Zig 构建脚本
 ├── AGENTS.md              # AI 协作入口

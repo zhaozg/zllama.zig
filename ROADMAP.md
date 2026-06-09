@@ -2,7 +2,7 @@
 
 > **项目名称：** zllama.zig — 纯 Zig 实现的多模型本地推理引擎
 
-## 📋 当前状态（2026-06-08）
+## 📋 当前状态（2026-06-09）
 
 | 模块 | 状态 |
 |------|------|
@@ -21,7 +21,9 @@
 | 图优化（Gallocr 复用 + 输入张量缓存 + IncContext） | ✅ 已完成 |
 | `--benchmark` 模式（PP/TG 分离 + 格式化输出） | ✅ 已完成 |
 | `-Dbundle-ggml` 源码构建 | ✅ 已完成 |
-| 多模态支持（音频/图像输入） | ⬜ 规划中 |
+| Tensor 方法式算子（mulMat/add/permute/ropeExt/pool2d/im2col/ssmConv/concat 等） | ✅ 已完成 |
+| 多模态预处理（PPM 加载/Resize/图像标准化/音频 Mel 占位） | 🚧 进行中 |
+| 多模态 CLI 集成（--mmproj / --image / --audio） | 🚧 进行中 |
 | Metal / CUDA 后端 | ⬜ 待完成 |
 | CI / 性能基准 / 生态工具 | ⬜ 待完成 |
 
@@ -51,11 +53,14 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 ### P11：生态工具 ⬜
 流式 CLI → CI（GitHub Actions）→ 文档完善 → 预编译发布
 
-### 多模态支持 ⬜
-- ⬜ 音频编码器集成（需升级 ggml 以支持 `mtmd-audio.c` 中的算子）
-- ⬜ 图像编码器集成（可选，按需）
+### 多模态支持 🚧
+- ✅ 音频编码器集成（Conformer + ChunkedAttention，位于 `src/mm/audio.zig`）
+- ✅ 图像编码器集成（ViT + 2D RoPE，位于 `src/mm/vision.zig`）
+- ✅ 多模态管理器（`src/mm/manager.zig`，MMProj GGUF 加载与调度）
+- ✅ 图像预处理（`src/mm/preprocess.zig`：PPM 加载、双线性 Resize、F32 张量标准化）
+- ⬜ 音频预处理（Mel 频谱 FFT/滤波器组实现，当前为占位）
 - ⬜ 多模态输入缓存与图优化
-- ⬜ CLI 交互式多模态输入（`-a/--audio`, `-i/--image`）
+- ⬜ CLI 图像/音频输入端到端联调（`--image` / `--audio` 已添加，vision/audio to LLM token 集成待完成）
 - ⬜ 与现有模型架构（Gemma 4 E2B）联调
 
 ---
@@ -79,6 +84,7 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ✅ KV Cache per-layer 可变维度（Gemma 4 各层 n_kv_head/head_dim 不同，LayerCache 逐层存储实际维度）
 - ✅ setKv 自动适配 per-layer 维度差异（使用实际张量维度创建视图）
 - ✅ Gemma 4 内存估算修复（改用 `gguf_file.totalTensorDataSize()` 精确计算，替代启发式 0.6 bytes/elem 估算）
+- ✅ 内存泄漏修复（`tok.deinit()` / `kv_cache_mgr.deinit()` 释放）
 
 ### 图优化
 - ✅ IncContext 增量上下文分离（独立 512MB 上下文，避免与 prompt 图上下文冲突）
@@ -104,6 +110,15 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ✅ GGUF v3 扩展元数据解析（rope_freq_base_swa、attention_softcapping 等）
 - ✅ 图构建 forward_expand API（避免 CGraph 重复初始化）
 - ✅ ropeExt 绑定（支持 freq_base 和 freq_scale 参数）
+- ✅ **Tensor 方法式算子重构**（`ggml.mulMat(ctx, a, b)` → `a.mulMat(ctx, b)`，统一风格，新增 pool2d/im2col/ssmConv/concat 等 30+ 方法）
+
+### 多模态
+- ✅ `src/mm/` 目录结构（`manager.zig` / `audio.zig` / `vision.zig` / `preprocess.zig`）
+- ✅ Conformer 音频编码器（ChunkedAttention + Relative Position Attention + SSM Conv）
+- ✅ Vision Transformer 编码器（gemma4v / gemma4uv，2D RoPE + im2col + pooling）
+- ✅ 图像预处理管线（PPM 解析 → 双线性 Resize → F32 张量标准化）
+- ✅ CLI 多模态参数（`--mmproj <path>` / `--image <path>` / `--audio <path>`）
+- ✅ MMProj GGUF 文件加载（`loadMMProj` 辅助函数）
 
 ### 推理验证
 - ✅ tinyllama 推理正确
@@ -111,6 +126,7 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ✅ Qwen3.5 SSM 层推理正确性
 - ✅ Gemma 3 270m Q8_0 推理正确
 - ✅ Gemma 4 E2B Q4_K_M 推理正确（内存估算修复后加载成功）
+- ✅ 三模型快速冒烟测试全部通过（Llama-3.2 / Qwen3.5 / tinyllama，无内存泄漏）
 
 ### 测试覆盖
 - ✅ GGUF 解析测试
@@ -134,6 +150,11 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 ### 后端支持
 - ⬜ **Metal 后端**（macOS GPU 加速）
 - ⬜ **CUDA 后端**（Linux GPU 加速）
+
+### 多模态联调
+- ⬜ 端到端 image → vision encoder → LLM 联调
+- ⬜ 端到端 audio → Conformer → LLM 联调
+- ⬜ 音频预处理 FFT/Mel 滤波器组实现
 
 ### 生态工具
 - 流式 CLI
@@ -190,11 +211,13 @@ zig-out/bin/zllama -v -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf
 3. **输出为空**：采样得到的 token_id 为 0（unk）或 EOS，检查 logits 形状和采样逻辑
 4. **加载崩溃（GGML_ASSERT obj_new failed）**：内存估算不足，需使用 `totalTensorDataSize()` 精确计算
 5. **Gemma 4 KV Cache 维度不匹配**：各层 n_kv_head/head_dim 不同，需用 per-layer 实际维度创建视图
+6. **内存泄漏（DebugAllocator）**：检查 InferenceEngine.deinit() 是否释放 tok 和 kv_cache_mgr
 
 ---
 
 ## 近期优先级
 
 1. ⬜ Metal / CUDA 后端
-2. ⬜ CI + 生态工具
-3. ⬜ 线程池（待 ggml 升级）
+2. 🚧 多模态端到端联调（vision/audio → LLM）
+3. ⬜ CI + 生态工具
+4. ⬜ 线程池（待 ggml 升级）
