@@ -236,13 +236,13 @@ pub const AudioEncoder = struct {
         // 对于 Mel 频谱: n_frames = sr * duration / hop_length
         // 典型值: sr=16000, duration=30s, hop=160 -> n_frames=3000
         const n_frames: i64 = @intCast(p.sample_rate * @as(u32, @intFromFloat(p.max_audio_length_sec)) / 160);
-        var cur = try ctx.newTensor2d(ggml.Type.F32, @intCast(p.n_mel_bins), @intCast(n_frames));
+        var cur = try ctx.newTensor2d(ggml.Type.f32, @intCast(p.n_mel_bins), @intCast(n_frames));
         cur.setName("audio_input");
 
         // 转置: [n_mel_bins, n_frames] -> [n_frames, n_mel_bins, 1, 1]
         // 以匹配 Conv2D 的 [H, W, C, N] 布局
-        cur = cur.permute(1, 0, 2, 3).cont(ctx);
-        cur = cur.reshape4d(1, 1, @intCast(p.n_mel_bins), @intCast(n_frames)).cont(ctx);
+        cur = ggml.cont(ctx, ggml.permute(ctx, cur, 1, 0, 2, 3));
+        cur = cur.reshape4d(ctx, 1, 1, @intCast(p.n_mel_bins), @intCast(n_frames)).cont(ctx);
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
@@ -254,19 +254,19 @@ pub const AudioEncoder = struct {
                 }
                 // LayerNorm: permute to [N, H, W, C] -> [N, C, H, W] for norm on C axis
                 if (w.sscp_norm_w[i]) |norm_w| {
-                    cur = cur.permute(1, 2, 0, 3).cont(ctx);
+                    cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
                     cur = cur.norm(ctx, norm_eps);
                     cur = cur.mul(ctx, norm_w);
-                    cur = cur.permute(2, 0, 1, 3).cont(ctx);
+                    cur = cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
                 }
                 cur = cur.relu(ctx);
             }
         }
 
         // Flatten: [freq, time, channels, 1] -> [channels*freq, time]
-        cur = cur.permute(1, 2, 0, 3).cont(ctx);
-        const flat_dim0 = cur.ne[0] * cur.ne[1];
-        cur = cur.reshape2d(flat_dim0, cur.ne[2]);
+        cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
+        const flat_dim0 = cur.ne()[0] * cur.ne()[1];
+        cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
 
         // 输入投影
         if (w.sscp_inp_proj_w) |proj_w| {
@@ -276,7 +276,7 @@ pub const AudioEncoder = struct {
             }
         }
 
-        const n_pos = cur.ne[1];
+        const n_pos = cur.ne()[1];
 
         // 3. Conformer Blocks
         for (w.layers, 0..) |*layer, il| {
@@ -315,49 +315,49 @@ pub const AudioEncoder = struct {
                 const n_pos_i: i64 = n_pos;
 
                 // Reshape: [n_embd, n_pos] -> [d_head, n_head, n_pos]
-                Qcur = Qcur.reshape3d(d_head_i, n_head_i, n_pos_i);
-                Kcur = Kcur.reshape3d(d_head_i, n_head_i, n_pos_i);
-                Vcur = Vcur.reshape3d(d_head_i, n_head_i, n_pos_i);
+                Qcur = Qcur.reshape3d(ctx, d_head_i, n_head_i, n_pos_i);
+                Kcur = Kcur.reshape3d(ctx, d_head_i, n_head_i, n_pos_i);
+                Vcur = Vcur.reshape3d(ctx, d_head_i, n_head_i, n_pos_i);
 
                 // Q/K scaling
                 Qcur = Qcur.scale(ctx, q_scale);
                 if (layer.per_dim_scale_w) |ps| {
-                    Qcur = Qcur.mul(ctx, ps.reshape3d(d_head_i, 1, 1));
+                    Qcur = Qcur.mul(ctx, ps.reshape3d(ctx, d_head_i, 1, 1));
                 }
                 Kcur = Kcur.scale(ctx, k_scale);
                 if (layer.per_dim_k_scale_w) |pks| {
-                    Kcur = Kcur.mul(ctx, pks.reshape3d(d_head_i, 1, 1));
+                    Kcur = Kcur.mul(ctx, pks.reshape3d(ctx, d_head_i, 1, 1));
                 }
 
                 // Chunked attention parameters
                 const C: i64 = 12; // chunk_size
                 const P: i64 = 12; // max_past_horizon
                 const S: i64 = C + P; // context_size = 24
-                const B: i64 = (n_pos_i + C - 1) / C; // num_blocks
+                const B: i64 = @divTrunc((n_pos_i + C - 1), C); // num_blocks
                 const Np: i64 = B * C; // padded sequence length
                 const pad_seq: i64 = Np - n_pos_i;
                 const R: i64 = P + 1; // RPE positions
 
                 // Q blocking: pad to Np, reshape to [D, H, C, B], then permute
-                Qcur = Qcur.pad(ctx, 0, 0, pad_seq, 0);
-                Qcur = Qcur.reshape4d(d_head_i, n_head_i, C, B);
-                Qcur = Qcur.permute(0, 3, 1, 2).cont(ctx); // [D, C, B, H]
+                Qcur = Qcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_seq)), 0);
+                Qcur = Qcur.reshape4d(ctx, d_head_i, n_head_i, C, B);
+                Qcur = Qcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, C, B, H]
 
                 // K/V: extract overlapping blocks
                 const pad_kv: i64 = S * B - n_pos_i;
-                Kcur = Kcur.pad(ctx, 0, 0, pad_kv, 0); // [D, H, S*B]
+                Kcur = Kcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0); // [D, H, S*B]
                 Kcur = Kcur.roll(ctx, 0, 0, P, 0); // left-pad by P
                 Kcur = Kcur.cont(ctx);
-                Kcur = Kcur.view4d(d_head_i, n_head_i, S, B, Kcur.nb[1], Kcur.nb[2], C * Kcur.nb[2], 0);
+                Kcur = Kcur.view4d(ctx, d_head_i, n_head_i, S, B, Kcur.nb()[1], Kcur.nb()[2], @as(usize, @intCast(C)) * Kcur.nb()[2], 0);
                 Kcur = Kcur.cont(ctx);
-                var Kblk = Kcur.permute(0, 3, 1, 2).cont(ctx); // [D, S, B, H]
+                var Kblk = Kcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, S, B, H]
 
-                Vcur = Vcur.pad(ctx, 0, 0, pad_kv, 0);
+                Vcur = Vcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0);
                 Vcur = Vcur.roll(ctx, 0, 0, P, 0);
                 Vcur = Vcur.cont(ctx);
-                Vcur = Vcur.view4d(d_head_i, n_head_i, S, B, Vcur.nb[1], Vcur.nb[2], C * Vcur.nb[2], 0);
+                Vcur = Vcur.view4d(ctx, d_head_i, n_head_i, S, B, Vcur.nb()[1], Vcur.nb()[2], @as(usize, @intCast(C)) * Vcur.nb()[2], 0);
                 Vcur = Vcur.cont(ctx);
-                var Vblk = Vcur.permute(1, 3, 0, 2).cont(ctx); // [S, D, B, H]
+                var Vblk = Vcur.permute(ctx, 1, 3, 0, 2).cont(ctx); // [S, D, B, H]
 
                 // Content attention: Q @ K^T
                 var scores = Kblk.mulMat(ctx, Qcur); // [S, C, B, H]
@@ -365,24 +365,24 @@ pub const AudioEncoder = struct {
                 // Relative position attention
                 if (layer.attn_k_rel_w) |k_rel| {
                     // Create position embedding input
-                    var pos_emb = try ctx.newTensor2d(ggml.Type.F32, d_head_i * n_head_i, R);
+                    var pos_emb = try ctx.newTensor2d(ggml.Type.f32, d_head_i * n_head_i, R);
                     pos_emb.setName("pos_emb");
                     // RPE projection
                     var p_rpe = pos_emb.mulMat(ctx, k_rel); // [n_embd, R]
-                    p_rpe = p_rpe.reshape3d(d_head_i, n_head_i, R);
-                    p_rpe = p_rpe.permute(0, 2, 1, 3).cont(ctx); // [D, R, H]
+                    p_rpe = p_rpe.reshape3d(ctx, d_head_i, n_head_i, R);
+                    p_rpe = p_rpe.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, R, H]
 
                     // Q_flat @ RPE^T
-                    const Q_flat = Qcur.reshape3d(d_head_i, C * B, n_head_i);
+                    const Q_flat = Qcur.reshape3d(ctx, d_head_i, C * B, n_head_i);
                     var matrix_bd = p_rpe.mulMat(ctx, Q_flat); // [R, C*B, H]
-                    matrix_bd = matrix_bd.reshape4d(R, C, B, n_head_i); // [R, C, B, H]
+                    matrix_bd = matrix_bd.reshape4d(ctx, R, C, B, n_head_i); // [R, C, B, H]
 
                     // Blocked relative shift
                     matrix_bd = matrix_bd.pad(ctx, S + 1 - R, 0, 0, 0);
-                    matrix_bd = matrix_bd.reshape3d((S + 1) * C, B, n_head_i);
-                    matrix_bd = matrix_bd.view3d(C * S, B, n_head_i, matrix_bd.nb[1], matrix_bd.nb[2], 0);
+                    matrix_bd = matrix_bd.reshape3d(ctx, (S + 1) * C, B, n_head_i);
+                    matrix_bd = matrix_bd.view3d(ctx, C * S, B, n_head_i, matrix_bd.nb()[1], matrix_bd.nb()[2], 0);
                     matrix_bd = matrix_bd.cont(ctx);
-                    matrix_bd = matrix_bd.reshape4d(S, C, B, n_head_i);
+                    matrix_bd = matrix_bd.reshape4d(ctx, S, C, B, n_head_i);
 
                     scores = scores.add(ctx, matrix_bd);
                 }
@@ -393,17 +393,17 @@ pub const AudioEncoder = struct {
                 scores = scores.scale(ctx, softcap);
 
                 // Create attention mask [S, C, B]
-                var kq_mask = try ctx.newTensor3d(ggml.Type.F32, S, C, B);
+                var kq_mask = try ctx.newTensor3d(ggml.Type.f32, S, C, B);
                 kq_mask.setName("kq_mask");
                 scores = scores.add(ctx, kq_mask);
-                var attn = scores.softMax(ctx);
+                const attn = scores.softMax(ctx);
 
                 // attn @ V
                 var x = Vblk.mulMat(ctx, attn); // [D, C, B, H]
-                x = x.permute(0, 2, 3, 1).cont(ctx); // [D, H, C, B]
+                x = x.permute(ctx, 0, 2, 3, 1).cont(ctx); // [D, H, C, B]
                 x = x.cont2d(ctx, d_head_i * n_head_i, C * B);
                 if (pad_seq > 0) {
-                    x = x.view2d(d_head_i * n_head_i, n_pos_i, x.nb[1], 0);
+                    x = x.view2d(ctx, d_head_i * n_head_i, n_pos_i, x.nb()[1], 0);
                     x = x.cont(ctx);
                 }
 
@@ -425,11 +425,11 @@ pub const AudioEncoder = struct {
                 var x_conv = cur.mulMat(ctx, layer.conv_pw1_w.?);
 
                 // GLU gate (sigmoid)
-                const d_gate = x_conv.ne[0] / 2;
-                const gate = x_conv.view2d(d_gate, x_conv.ne[1], x_conv.nb[1], @sizeOf(f32) * d_gate).cont(ctx).sigmoid(ctx);
-                const act = x_conv.view2d(d_gate, x_conv.ne[1], x_conv.nb[1], 0);
+                const d_gate = @divExact(x_conv.ne()[0], 2);
+                const gate = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], @as(usize, @intCast(@sizeOf(f32) * d_gate))).cont(ctx).sigmoid(ctx);
+                const act = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], 0);
                 x_conv = act.mul(ctx, gate);
-                x_conv = x_conv.cont(ctx).permute(1, 0, 2, 3).cont(ctx);
+                x_conv = x_conv.cont(ctx).permute(ctx, 1, 0, 2, 3).cont(ctx);
 
                 // Causal depthwise conv1d via ssm_conv
                 x_conv = x_conv.pad(ctx, 4, 0, 0, 0);

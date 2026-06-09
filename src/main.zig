@@ -24,6 +24,8 @@ const memory = @import("memory");
 const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
 const kv_cache = @import("kv_cache");
+const mm = @import("mm");
+const preprocess = @import("preprocess");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -83,7 +85,10 @@ const CliArgs = struct {
     benchmark: bool = false,
     chat: bool = false,
     info: bool = false,
-
+    // Multimodal
+    mmproj_path: [:0]const u8 = "",
+    image_path: [:0]const u8 = "",
+    audio_path: [:0]const u8 = "",
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
         _ = args_it.next();
@@ -105,15 +110,14 @@ const CliArgs = struct {
             } else if (std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "-th")) {
                 result.n_threads = std.fmt.parseInt(i32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
-                result.verbose = true;
-            } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
-                result.debug = true;
-            } else if (std.mem.eql(u8, arg, "--benchmark")) {
-                result.benchmark = true;
-            } else if (std.mem.eql(u8, arg, "--info")) {
-                result.info = true;
             } else if (std.mem.eql(u8, arg, "--chat") or std.mem.eql(u8, arg, "-c")) {
                 result.chat = true;
+            } else if (std.mem.eql(u8, arg, "--mmproj")) {
+                result.mmproj_path = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--image")) {
+                result.image_path = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--audio")) {
+                result.audio_path = args_it.next() orelse return error.InvalidArgs;
             } else {
                 logger.warn("unknown argument '{s}'", .{arg});
             }
@@ -133,13 +137,15 @@ const CliArgs = struct {
             \\  -p, --prompt <文本>    输入提示词
             \\  -n, --max-tokens <N>  最大生成token数 (默认: 256)
             \\  -t, --temperature <F> 采样温度 (默认: 0.7)
-            \\  -k, --top-k <N>       Top-K 采样 (默认: 40)
-            \\  -tp, --top-p <F>      Top-P 采样 (默认: 0.9)
-            \\  -th, --threads <N>    线程数 (默认: auto)
-            \\  -v, --verbose         详细输出
-            \\  -d, --debug           输出调试日志
             \\  --benchmark           benchmark 模式
             \\  -c, --chat            交互式聊天模式
+            \\  --info                显示模型能力信息后退出
+            \\
+            \\多模态选项:
+            \\  --mmproj <路径>       多模态投影器文件 (GGUF格式, mmproj)
+            \\  --image <路径>        输入图像文件 (PPM P6 格式)
+            \\  --image <路径>        输入图像文件 (PPM P6 格式)
+            \\  --audio <路径>        输入音频文件 (PCM F32, 16kHz)
             \\
         , .{});
     }
@@ -163,6 +169,10 @@ const InferenceEngine = struct {
 
     // Graph optimization: gallocr reuse context for incremental decoding
     inc_ctx: graph_context.IncContext,
+
+    // Multimodal support
+    mm_manager: ?mm.MultiModalManager = null,
+    capabilities: model_if.ModelCapabilities = .{},
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
         const cwd = std.Io.Dir.cwd();
@@ -243,21 +253,26 @@ const InferenceEngine = struct {
         errdefer kv_cache_mgr.deinit(allocator);
         model.setKVCacheContext(ctx_kv_cache);
         const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
-        errdefer ctx_graph.deinit();
-        {
-            const buft = ggml.backendCpuBufferType();
-            try ggml.backendAllocCtxTensorsFromBuft(ctx_kv_cache, buft);
+        // Create incremental decoding context for gallocr reuse
+        const inc_ctx_size = 512 * 1024 * 1024; // 512MB
+        const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
+
+        // Load multimodal encoder if mmproj file is provided
+        var mm_manager: ?mm.MultiModalManager = null;
+        if (cli_args.mmproj_path.len > 0) {
+            mm_manager = try loadMMProj(io, allocator, cli_args.mmproj_path, capabilities);
+            logger.info("Multimodal encoder loaded from: {s}", .{cli_args.mmproj_path});
+        } else if (capabilities.has_vision or capabilities.has_audio) {
+            logger.warn("Model has multimodal capabilities but no --mmproj file provided", .{});
+            logger.warn("  Use --mmproj <path> to load vision/audio encoder weights", .{});
         }
+
 
         const sampler_state = sampler.Sampler.init(.{
             .temperature = cli_args.temperature,
             .top_k = cli_args.top_k,
             .top_p = cli_args.top_p,
         });
-
-        // Create incremental decoding context for gallocr reuse
-        const inc_ctx_size = 512 * 1024 * 1024; // 512MB
-        const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
 
         return InferenceEngine{
             .allocator = allocator,
@@ -275,13 +290,16 @@ const InferenceEngine = struct {
             .gguf_data = gguf_data,
             .benchmark = cli_args.benchmark,
             .inc_ctx = inc_ctx,
+            .mm_manager = mm_manager,
+            .capabilities = capabilities,
         };
     }
 
     pub fn deinit(self: *InferenceEngine) void {
+        if (self.mm_manager) |*m| {
+            m.deinit();
+        }
         self.inc_ctx.deinit();
-        self.kv_cache_mgr.deinit(self.allocator);
-        self.tok.deinit();
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
         // ctx_weights freed by model.deinit()
@@ -290,6 +308,8 @@ const InferenceEngine = struct {
             self.allocator.free(self.params.model_name);
         }
         self.allocator.free(self.gguf_data);
+        self.tok.deinit();
+        self.kv_cache_mgr.deinit(self.allocator);
     }
 
     pub fn generate(self: *InferenceEngine, io: std.Io, prompt: []const u8, max_tokens: u32) !void {
@@ -501,8 +521,124 @@ const InferenceEngine = struct {
             try stdout.writeStreamingAll(io, "\n");
         }
     }
+
+    /// Generate with image input (vision + text)
+    ///
+    /// Workflow:
+    /// 1. Load and preprocess image (resize + normalize)
+    /// 2. Run vision encoder to get image embeddings
+    /// 3. Create prompt with vision tokens + text tokens
+    /// 4. Run LLM inference
+    pub fn generateWithImage(self: *InferenceEngine, io: std.Io, prompt: []const u8, image_path: [:0]const u8, max_tokens: u32) !void {
+        var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
+        if (!self.capabilities.has_vision) return error.VisionNotSupported;
+
+        // Step 1: Load and preprocess image
+        // TODO: Use vision encoder's expected image_size from params
+        // For now, use 896 as default (gemma4v default)
+        const target_size: u32 = 896;
+        var img = try preprocess.loadPPM(self.allocator, io, image_path, target_size);
+        defer img.deinit();
+
+        // Step 2: Run vision encoder
+        self.ctx_graph.setNoAlloc(false);
+        _ = try preprocess.imageToTensor(self.ctx_graph, &img, .siglip); // TODO: use as vision encoder input
+        self.ctx_graph.setNoAlloc(true);
+
+        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
+
+        const vision_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, graph, .{
+            .media_type = .image,
+            .image_data = img.data,
+            .image_width = img.width,
+            .image_height = img.height,
+        });
+
+        // Allocate and compute
+        const buft = ggml.backendCpuBufferType();
+        var galloc = try ggml.Gallocr.init(buft);
+        defer galloc.free();
+        if (!galloc.allocGraph(graph)) {
+            return error.GraphAllocFailed;
+        }
+        try graph.compute(self.n_threads);
+
+        // Step 3: Build multimodal prompt
+        // TODO: Create proper multimodal prompt format with vision tokens
+        // Current approach: log the vision embedding dimensions for debugging
+        const n_vision_tokens: usize = @intCast(vision_embeddings.ne()[1]);
+        const n_embd: usize = @intCast(vision_embeddings.ne()[0]);
+        logger.info("Vision encoder output: [{d}, {d}] tokens", .{ n_embd, n_vision_tokens });
+
+        // Step 4: Generate text
+        // TODO: Feed vision_embeddings into the LLM as context tokens
+        // This requires integration with the LLM's embedding layer.
+        // For now, fall back to text-only generation with a note.
+        logger.warn("Vision-to-LLM token integration not yet implemented. Using text-only generation.", .{});
+        logger.warn("Vision embeddings shape: [n_embd={d}, n_tokens={d}]", .{ n_embd, n_vision_tokens });
+
+        try self.generate(io, prompt, max_tokens);
+    }
+
+    /// Generate with audio input (audio + text)
+    ///
+    /// Workflow:
+    /// 1. Load and preprocess audio (compute Mel spectrogram)
+    /// 2. Run Conformer audio encoder to get audio embeddings
+    /// 3. Create prompt with audio tokens + text tokens
+    /// 4. Run LLM inference
+    pub fn generateWithAudio(self: *InferenceEngine, io: std.Io, prompt: []const u8, audio_path: [:0]const u8, max_tokens: u32) !void {
+        _ = audio_path;
+        const mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
+        if (!self.capabilities.has_audio) return error.AudioNotSupported;
+
+        // Step 1: Load audio file
+        // TODO: Implement PCM F32 audio loading from file
+        // For now, log the limitation
+        logger.warn("Audio file loading not yet implemented. Use --audio with PCM F32 raw data.", .{});
+        logger.warn("Audio-to-LLM token integration not yet implemented. Using text-only generation.", .{});
+
+        _ = mm_mgr;
+        try self.generate(io, prompt, max_tokens);
+    }
 };
 
+/// Load multimodal projector from separate GGUF file
+fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]const u8, capabilities: model_if.ModelCapabilities) !mm.MultiModalManager {
+    const cwd = std.Io.Dir.cwd();
+    const file = try cwd.openFile(io, mmproj_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    const file_size = @as(usize, @intCast(stat.size));
+    const gguf_data = try allocator.alloc(u8, file_size);
+    errdefer allocator.free(gguf_data);
+
+    {
+        var offset: u64 = 0;
+        const chunk_size: usize = 64 * 1024 * 1024;
+        while (offset < file_size) {
+            const end = @min(offset + chunk_size, file_size);
+            const len = end - offset;
+            const bytes_read = try file.readPositionalAll(io, gguf_data[offset..][0..len], offset);
+            if (bytes_read != len) {
+                allocator.free(gguf_data);
+                return error.FileReadError;
+            }
+            offset += bytes_read;
+        }
+    }
+
+    var gguf_file = try gguf.parse(gguf_data, allocator);
+    defer gguf_file.deinit();
+
+    const mem_size = 2 * 1024 * 1024 * 1024;
+    const ctx = try ggml.Context.initNoAlloc(mem_size);
+    errdefer ctx.deinit();
+
+    const mgr = try mm.MultiModalManager.init(allocator, &gguf_file, ctx, capabilities);
+    return mgr;
+}
 pub fn main(init: std.process.Init) !void {
     // Set ggml log callback
     ggml.logSet();
@@ -552,15 +688,29 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.chat) {
         try engine.chatLoop(io);
+    } else if (args.image_path.len > 0) {
+        logger.info("--- Vision Generation ---", .{});
+        engine.generateWithImage(io, args.prompt, args.image_path, args.max_tokens) catch |err| {
+            logger.err("Vision generation failed: {}", .{err});
+            return;
+        };
+        logger.info("--- Done ---", .{});
+    } else if (args.audio_path.len > 0) {
+        logger.info("--- Audio Generation ---", .{});
+        engine.generateWithAudio(io, args.prompt, args.audio_path, args.max_tokens) catch |err| {
+            logger.err("Audio generation failed: {}", .{err});
+            return;
+        };
+        logger.info("--- Done ---", .{});
     } else {
         logger.info("--- Generation ---", .{});
         engine.generate(io, args.prompt, args.max_tokens) catch |err| {
-        logger.err("Generation failed: {}\n", .{err});
-        return;
+            logger.err("Generation failed: {}", .{err});
+            return;
         };
         logger.info("--- Done ---", .{});
     }
-}
+    }
 
 const testing = std.testing;
 

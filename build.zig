@@ -212,6 +212,16 @@ pub fn build(b: *std.Build) void {
     mm_manager_mod.addImport("model", model_mod);
     mm_manager_mod.addImport("audio", mm_audio_mod);
     mm_manager_mod.addImport("vision", mm_vision_mod);
+    mm_manager_mod.addImport("vision", mm_vision_mod);
+
+    const mm_preprocess_mod = b.createModule(.{
+        .root_source_file = b.path("src/mm/preprocess.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mm_preprocess_mod.addImport("ggml", ggml_mod);
+
     // 主可执行文件 zllama
     // ======================================================================
     const exe_mod = b.createModule(.{
@@ -228,9 +238,10 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("memory", memory_mod);
     exe_mod.addImport("tokenizer", tokenizer_mod);
     exe_mod.addImport("sampler", sampler_mod);
-    exe_mod.addImport("kv_cache", kv_cache_mod);
     exe_mod.addImport("graph_context", graph_context_mod);
     exe_mod.addImport("mm", mm_manager_mod);
+    exe_mod.addImport("preprocess", mm_preprocess_mod);
+    exe_mod.addImport("kv_cache", kv_cache_mod);
 
     const exe = b.addExecutable(.{
         .name = "zllama",
@@ -275,7 +286,7 @@ pub fn build(b: *std.Build) void {
     simple_mod.addImport("kv_cache", kv_cache_mod);
     simple_mod.addImport("graph_context", graph_context_mod);
     simple_mod.addImport("mm", mm_manager_mod);
-
+    simple_mod.addImport("preprocess", mm_preprocess_mod);
     const simple_exe = b.addExecutable(.{
         .name = "zllama-simple",
         .root_module = simple_mod,
