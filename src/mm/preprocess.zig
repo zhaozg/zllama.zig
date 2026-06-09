@@ -23,8 +23,8 @@ const log = std.log.scoped(.mm_preprocess);
 
 /// 默认音频采样率 (Gemma4 E2B)
 pub const AUDIO_SAMPLE_RATE: u32 = 16000;
-/// STFT 帧长 (25ms @ 16kHz)
-pub const AUDIO_FRAME_LENGTH: u32 = 400;
+/// STFT 帧长 (20ms @ 16kHz)
+pub const AUDIO_FRAME_LENGTH: u32 = 320;
 /// STFT 帧移 (10ms @ 16kHz)
 pub const AUDIO_HOP_LENGTH: u32 = 160;
 /// FFT 点数（2 的幂）
@@ -498,7 +498,7 @@ pub const ProcessedAudio = struct {
 /// 处理步骤：
 /// 1. 预加重（pre-emphasis）系数 0.97
 /// 2. 短时傅里叶变换（STFT）
-///    - 帧长（frame_length）= 25ms @ 16kHz = 400 samples
+///    - 帧长（frame_length）= 20ms @ 16kHz = 400 samples
 ///    - 帧移（hop_length）= 10ms @ 16kHz = 160 samples
 ///    - Hann 窗口
 ///    - FFT 点数 = 512 (n_fft)

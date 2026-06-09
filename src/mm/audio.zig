@@ -139,10 +139,10 @@ pub const AudioEncoder = struct {
         var params = AudioEncoderParams{};
 
         // 从 GGUF 元数据读取参数
-        if (gguf_file.getU32("gemma4.audio.encoder_embedding_length")) |v| params.n_embd = v;
-        if (gguf_file.getU32("gemma4.audio.encoder_attention_heads")) |v| params.n_head = v;
-        if (gguf_file.getU32("gemma4.audio.encoder_layers")) |v| params.n_layer = v;
-        if (gguf_file.getU32("gemma4.audio.encoder_ffn_dim")) |v| params.n_ff = v;
+        if (gguf_file.getU32("clip.audio.embedding_length")) |v| params.n_embd = v;
+        if (gguf_file.getU32("clip.audio.attention.head_count")) |v| params.n_head = v;
+        if (gguf_file.getU32("clip.audio.block_count")) |v| params.n_layer = v;
+        if (gguf_file.getU32("clip.audio.feed_forward_length")) |v| params.n_ff = v;
         if (gguf_file.getU32("gemma4.audio.sample_rate")) |v| params.sample_rate = v;
         params.d_head = params.n_embd / params.n_head;
 
@@ -243,7 +243,7 @@ pub const AudioEncoder = struct {
         const res_weight: f32 = 0.5;
 
         // 1. 创建输入张量并填充实际 Mel 数据
-        var cur = try ctx.newTensor2d(ggml.Type.f32, @intCast(n_mel_bins), @intCast(n_frames));
+        var cur = try ctx.newTensor4d(ggml.Type.f32, @intCast(n_frames), @intCast(n_mel_bins), 1, 1);
         cur.setName("audio_mel_input");
 
         const raw_bytes = cur.dataBytes();
@@ -252,7 +252,7 @@ pub const AudioEncoder = struct {
 
         // 转置: [n_mel_bins, n_frames] -> [n_frames, n_mel_bins, 1, 1]
         // 以匹配 Conv2D 的 [H, W, C, N] 布局
-        cur = ggml.cont(ctx, ggml.permute(ctx, cur, 1, 0, 2, 3));
+        cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
@@ -280,7 +280,7 @@ pub const AudioEncoder = struct {
 
         // 输入投影
         if (w.sscp_inp_proj_w) |proj_w| {
-            cur = cur.mulMat(ctx, proj_w);
+            cur = proj_w.mulMat(ctx, cur);
             if (w.sscp_inp_proj_b) |proj_b| {
                 cur = cur.add(ctx, proj_b);
             }
@@ -310,15 +310,15 @@ pub const AudioEncoder = struct {
                 const softcap: f32 = 50.0;
 
                 const attn_norm = if (layer.attn_pre_norm_w) |w2| w2 else layer.ln_1_w;
-                var attn_in = if (attn_norm) |norm_w|
+                const attn_in = if (attn_norm) |norm_w|
                     rmsNorm(ctx, residual, norm_w, norm_eps)
                 else
                     residual;
 
                 // Q, K, V 投影
-                var Qcur = attn_in.mulMat(ctx, layer.q_w.?);
-                var Kcur = attn_in.mulMat(ctx, layer.k_w.?);
-                var Vcur = attn_in.mulMat(ctx, layer.v_w.?);
+                var Qcur = layer.q_w.?.mulMat(ctx, attn_in);
+                var Kcur = layer.k_w.?.mulMat(ctx, attn_in);
+                var Vcur = layer.v_w.?.mulMat(ctx, attn_in);
 
                 const d_head_i: i64 = @intCast(p.d_head);
                 const n_head_i: i64 = @intCast(p.n_head);
@@ -378,7 +378,7 @@ pub const AudioEncoder = struct {
                     var pos_emb = try ctx.newTensor2d(ggml.Type.f32, d_head_i * n_head_i, R);
                     pos_emb.setName("pos_emb");
                     // RPE projection
-                    var p_rpe = pos_emb.mulMat(ctx, k_rel); // [n_embd, R]
+                    var p_rpe = k_rel.mulMat(ctx, pos_emb); // [n_embd, R]
                     p_rpe = p_rpe.reshape3d(ctx, d_head_i, n_head_i, R);
                     p_rpe = p_rpe.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, R, H]
 
@@ -417,7 +417,7 @@ pub const AudioEncoder = struct {
                     x = x.cont(ctx);
                 }
 
-                x = x.mulMat(ctx, layer.o_w.?);
+                x = layer.o_w.?.mulMat(ctx, x);
                 if (layer.o_b) |ob| {
                     x = x.add(ctx, ob);
                 }
@@ -432,7 +432,7 @@ pub const AudioEncoder = struct {
                 layer.conv_dw_w != null and layer.conv_pw2_w != null)
             {
                 cur = rmsNorm(ctx, residual, layer.norm_conv_w.?, norm_eps);
-                var x_conv = cur.mulMat(ctx, layer.conv_pw1_w.?);
+                var x_conv = layer.conv_pw1_w.?.mulMat(ctx, cur);
 
                 // GLU gate (sigmoid)
                 const d_gate = @divExact(x_conv.ne()[0], 2);
@@ -454,7 +454,7 @@ pub const AudioEncoder = struct {
                     x_conv = x_conv.mul(ctx, cn_w);
                 }
                 x_conv = x_conv.silu(ctx);
-                x_conv = x_conv.mulMat(ctx, layer.conv_pw2_w.?);
+                x_conv = layer.conv_pw2_w.?.mulMat(ctx, x_conv);
                 residual = residual.add(ctx, x_conv);
             }
 
@@ -477,7 +477,7 @@ pub const AudioEncoder = struct {
 
         // 4. 输出投影
         if (w.audio_out_proj_w) |out_w| {
-            cur = cur.mulMat(ctx, out_w);
+            cur = out_w.mulMat(ctx, cur);
             if (w.audio_out_proj_b) |out_b| {
                 cur = cur.add(ctx, out_b);
             }
@@ -489,7 +489,7 @@ pub const AudioEncoder = struct {
             cur = cur.mul(ctx, sn_w);
         }
         if (w.mm_input_proj_w) |proj_w| {
-            cur = cur.mulMat(ctx, proj_w);
+            cur = proj_w.mulMat(ctx, cur);
         }
 
         cgraph.buildForwardExpand(cur);
@@ -610,6 +610,6 @@ fn rmsNorm(ctx: *ggml.Context, x: *ggml.Tensor, weight: *ggml.Tensor, eps: f32) 
 
 /// SiLU FFN: down(up(x) * silu(gate(x)))
 fn ffnSilu(ctx: *ggml.Context, x: *ggml.Tensor, up_w: *ggml.Tensor, down_w: *ggml.Tensor) *ggml.Tensor {
-    const h = x.mulMat(ctx, up_w);
-    return h.silu(ctx).mulMat(ctx, down_w);
+    const h = up_w.mulMat(ctx, x);
+    return down_w.mulMat(ctx, h.silu(ctx));
 }
