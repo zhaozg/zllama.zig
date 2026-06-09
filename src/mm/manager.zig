@@ -14,14 +14,16 @@ const vision = @import("vision");
 
 const log = std.log.scoped(.mm);
 
-/// 多模态输入类型
+// ============================================================================
+// 多模态输入类型
+// ============================================================================
+
 pub const MediaType = enum {
     text,
     image,
     audio,
 };
 
-/// 多模态输入数据
 pub const MediaInput = struct {
     media_type: MediaType,
     /// 文本数据（仅 text 类型）
@@ -35,29 +37,35 @@ pub const MediaInput = struct {
     audio_length_sec: f32 = 0,
 };
 
-/// 多模态管理器
+// ============================================================================
+// 多模态管理器
+// ============================================================================
+
 pub const MultiModalManager = struct {
     allocator: std.mem.Allocator,
     capabilities: model.ModelCapabilities,
-    audio_encoder: ?audio.AudioEncoder,
-    vision_encoder: ?vision.VisionEncoder,
+    audio_encoder: ?audio.AudioEncoder = null,
+    vision_encoder: ?vision.VisionEncoder = null,
 
     /// 初始化多模态管理器
+    /// @param gguf_file 包含多模态编码器权重的 GGUF 文件（通常为 mmproj 文件）
+    /// @param ctx ggml 权重上下文
     pub fn init(
         allocator: std.mem.Allocator,
         gguf_file: *const gguf.GGUFFile,
+        ctx: *ggml.Context,
         caps: model.ModelCapabilities,
     ) !MultiModalManager {
         var audio_enc: ?audio.AudioEncoder = null;
         var vision_enc: ?vision.VisionEncoder = null;
 
         if (caps.has_audio) {
-            audio_enc = try audio.AudioEncoder.init(gguf_file, allocator);
+            audio_enc = try audio.AudioEncoder.init(gguf_file, ctx, allocator);
             log.info("Audio encoder initialized", .{});
         }
 
         if (caps.has_vision) {
-            vision_enc = try vision.VisionEncoder.init(gguf_file);
+            vision_enc = try vision.VisionEncoder.init(gguf_file, ctx, allocator);
             log.info("Vision encoder initialized", .{});
         }
 
@@ -71,15 +79,15 @@ pub const MultiModalManager = struct {
 
     /// 释放多模态管理器
     pub fn deinit(self: *MultiModalManager) void {
-        _ = self;
-        // AudioEncoder 和 VisionEncoder 暂不需要显式释放
+        if (self.audio_encoder) |*enc| {
+            enc.deinit(self.allocator);
+        }
+        if (self.vision_encoder) |*enc| {
+            enc.deinit(self.allocator);
+        }
     }
 
     /// 编码单个多模态输入，返回嵌入 tokens
-    /// @param ctx ggml 上下文
-    /// @param graph 计算图
-    /// @param input 多模态输入数据
-    /// @returns 嵌入张量 [n_embd, n_tokens]
     pub fn encodeMedia(
         self: *MultiModalManager,
         ctx: *ggml.Context,
@@ -108,7 +116,7 @@ pub const MultiModalManager = struct {
     /// 估算多模态输入的 token 数量
     pub fn estimateTokenCount(self: *const MultiModalManager, input: MediaInput) u32 {
         return switch (input.media_type) {
-            .text => 0, // 文本 token 计数由 tokenizer 处理
+            .text => 0,
             .image => {
                 if (self.vision_encoder) |*enc| {
                     return enc.estimateOutputTokens(input.image_width, input.image_height);

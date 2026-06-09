@@ -121,19 +121,31 @@ pub fn detectCapabilities(gguf_file: *const gguf.GGUFFile, arch: model_if.Archit
     switch (arch) {
         .gemma4 => {
             // Gemma 4 E2B: 检查音频编码器（Conformer）张量
-            if (gguf_file.findTensor("sscp_conv_w.0.weight") != null or
-                gguf_file.findTensor("sscp_conv_w.1.weight") != null or
-                gguf_file.findTensor("audio_out_proj.weight") != null)
+            // 张量命名遵循 llama.cpp clip-impl.h 的约定:
+            // TN_A_CONV1D = "a.conv1d.%d.%s"
+            // TN_A_INP_PROJ = "a.input_projection.%s"
+            // TN_A_OUT_PROJ = "a.pre_encode.out.%s"
+            // TN_A_MM_INP_PROJ = "mm.a.input_projection.%s"
+            // TN_A_MM_SOFT_EMB_N = "mm.a.soft_emb_norm.%s"
+            if (gguf_file.findTensor("a.conv1d.0.weight") != null or
+                gguf_file.findTensor("a.conv1d.1.weight") != null or
+                gguf_file.findTensor("a.pre_encode.out.weight") != null or
+                gguf_file.findTensor("mm.a.input_projection.weight") != null)
             {
                 caps.has_audio = true;
                 caps.audio_encoder_type = "Conformer (E2B)";
-                caps.audio_sample_rate = 16000; // Gemma 4 E2B 使用 16kHz
+                caps.audio_sample_rate = 16000;
             }
 
             // Gemma 4 E2B: 检查视觉编码器张量
-            if (gguf_file.findTensor("v.patch_embeddings.weight") != null or
-                gguf_file.findTensor("mm_input_proj.weight") != null or
-                gguf_file.findTensor("mm_soft_emb_norm.weight") != null)
+            // TN_PATCH_EMBD = "v.patch_embd.weight"
+            // TN_POS_EMBD = "%s.position_embd.weight"
+            // TN_MM_INP_PROJ = "mm.input_projection.weight"
+            // TN_MM_SOFT_EMB_N = "mm.soft_emb_norm.weight"
+            if (gguf_file.findTensor("v.patch_embd.weight") != null or
+                gguf_file.findTensor("v.position_embd.weight") != null or
+                gguf_file.findTensor("mm.input_projection.weight") != null or
+                gguf_file.findTensor("mm.soft_emb_norm.weight") != null)
             {
                 caps.has_vision = true;
                 caps.vision_encoder_type = "ViT (SigLIP/Gemma4V)";
@@ -150,32 +162,34 @@ pub fn detectCapabilities(gguf_file: *const gguf.GGUFFile, arch: model_if.Archit
             }
         },
         .gemma3 => {
-            // Gemma 3 可能有视觉能力（通过 mmproj 文件）
-            if (gguf_file.findTensor("mm_input_proj.weight") != null) {
+            // Gemma 3 视觉能力
+            if (gguf_file.findTensor("mm.input_projection.weight") != null or
+                gguf_file.findTensor("mm.soft_emb_norm.weight") != null)
+            {
                 caps.has_vision = true;
                 caps.vision_encoder_type = "SigLIP";
             }
         },
         .llama => {
-            // LLaMA 家族可能有多模态变体
+            // LLaMA 家族多模态变体
             if (gguf_file.findTensor("mm.input_projection.weight") != null or
-                gguf_file.findTensor("mm_input_proj.weight") != null)
+                gguf_file.findTensor("mm.soft_emb_norm.weight") != null)
             {
                 caps.has_vision = true;
                 caps.vision_encoder_type = "LLaVA/ViT";
             }
         },
         .qwen2, .qwen35 => {
-            // Qwen 家族：检查视觉编码器
-            if (gguf_file.findTensor("v.patch_embeddings.weight") != null or
+            // Qwen 家族视觉编码器
+            if (gguf_file.findTensor("v.patch_embd.weight") != null or
                 gguf_file.findTensor("visual.patch_embeddings.weight") != null)
             {
                 caps.has_vision = true;
                 caps.vision_encoder_type = "ViT";
             }
-            // Qwen 家族：检查音频编码器
-            if (gguf_file.findTensor("audio_encoder") != null or
-                gguf_file.findTensor("audio_out_proj.weight") != null)
+            // Qwen 家族音频编码器
+            if (gguf_file.findTensor("a.conv1d.0.weight") != null or
+                gguf_file.findTensor("a.pre_encode.out.weight") != null)
             {
                 caps.has_audio = true;
                 caps.audio_encoder_type = "Whisper/Conformer";
@@ -184,9 +198,24 @@ pub fn detectCapabilities(gguf_file: *const gguf.GGUFFile, arch: model_if.Archit
         },
     }
 
+    // Detect capabilities through GGUF metadata (separate mmproj files may also contribute)
+    // The main model GGUF typically only has text tensors;
+    // multimodal encoder weights are loaded from a separate file.
+    if (gguf_file.getString("gemma4.audio.encoder_type")) |enc_type| {
+        caps.has_audio = true;
+        caps.audio_encoder_type = enc_type;
+    }
+    if (gguf_file.getString("gemma4.vision.encoder_type")) |enc_type| {
+        caps.has_vision = true;
+        caps.vision_encoder_type = enc_type;
+    }
+
+    if (caps.has_audio or caps.has_vision) {
+        log.info("Multi-modal capabilities detected: audio={}, vision={}", .{ caps.has_audio, caps.has_vision });
+    }
+
     return caps;
 }
-
 const testing = std.testing;
 
 test "detectArchitecture" {
