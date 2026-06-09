@@ -82,6 +82,7 @@ const CliArgs = struct {
     debug: bool = false,
     help: bool = false,
     benchmark: bool = false,
+    info: bool = false,
 
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
@@ -108,6 +109,8 @@ const CliArgs = struct {
             } else if (std.mem.eql(u8, arg, "--benchmark")) {
                 result.benchmark = true;
             } else if (std.mem.startsWith(u8, arg, "-")) {
+            } else if (std.mem.eql(u8, arg, "--info")) {
+                result.info = true;
                 logger.warn("unknown argument '{s}'", .{arg});
             } else {
                 result.prompt = arg;
@@ -175,6 +178,25 @@ const SimpleEngine = struct {
         // Copy model_name string from GGUF arena to heap (arena will be freed by gguf_file.deinit)
         if (params.model_name.len > 0) {
             params.model_name = try allocator.dupe(u8, params.model_name);
+        }
+
+        // Detect and log model capabilities
+        const capabilities = registry.detectCapabilities(&gguf_file, arch);
+        if (capabilities.has_vision or capabilities.has_audio) {
+            logger.info("Multi-modal: yes", .{});
+        } else {
+            logger.info("Multi-modal: no (text-only)", .{});
+        }
+        logger.info("  Text  : yes", .{});
+        if (capabilities.has_vision) {
+            logger.info("  Vision: yes ({s})", .{capabilities.vision_encoder_type});
+        } else {
+            logger.info("  Vision: no", .{});
+        }
+        if (capabilities.has_audio) {
+            logger.info("  Audio : yes ({s}, {d} Hz)", .{ capabilities.audio_encoder_type, capabilities.audio_sample_rate });
+        } else {
+            logger.info("  Audio : no", .{});
         }
         var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
         errdefer tok.deinit();

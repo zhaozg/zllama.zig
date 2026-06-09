@@ -82,6 +82,7 @@ const CliArgs = struct {
     help: bool = false,
     benchmark: bool = false,
     chat: bool = false,
+    info: bool = false,
 
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
@@ -109,6 +110,8 @@ const CliArgs = struct {
                 result.debug = true;
             } else if (std.mem.eql(u8, arg, "--benchmark")) {
                 result.benchmark = true;
+            } else if (std.mem.eql(u8, arg, "--info")) {
+                result.info = true;
             } else if (std.mem.eql(u8, arg, "--chat") or std.mem.eql(u8, arg, "-c")) {
                 result.chat = true;
             } else {
@@ -207,6 +210,20 @@ const InferenceEngine = struct {
             logger.info("max_seq_len={d}, rope_theta={d}, rope_dim={d}", .{ params.max_seq_len, params.rope_theta, params.rope_dim });
         }
 
+
+        // Detect and log model capabilities
+        const capabilities = registry.detectCapabilities(&gguf_file, arch);
+        if (capabilities.has_vision or capabilities.has_audio) {
+            logger.info("Multi-modal: yes", .{});
+        } else {
+            logger.info("Multi-modal: no (text-only)", .{});
+        }
+        if (capabilities.has_vision) {
+            logger.info("  Vision: yes ({s})", .{capabilities.vision_encoder_type});
+        }
+        if (capabilities.has_audio) {
+            logger.info("  Audio : yes ({s}, {d} Hz)", .{ capabilities.audio_encoder_type, capabilities.audio_sample_rate });
+        }
         var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
         errdefer tok.deinit();
         logger.info("Tokenizer: {d} tokens", .{tok.vocabSize()});

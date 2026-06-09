@@ -181,6 +181,37 @@ pub fn build(b: *std.Build) void {
     sampler_mod.addImport("ggml", ggml_mod);
 
     // ======================================================================
+
+    // --- 多模态模块 ---
+    const mm_audio_mod = b.createModule(.{
+        .root_source_file = b.path("src/mm/audio.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mm_audio_mod.addImport("ggml", ggml_mod);
+    mm_audio_mod.addImport("gguf", gguf_mod);
+
+    const mm_vision_mod = b.createModule(.{
+        .root_source_file = b.path("src/mm/vision.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mm_vision_mod.addImport("ggml", ggml_mod);
+    mm_vision_mod.addImport("gguf", gguf_mod);
+
+    const mm_manager_mod = b.createModule(.{
+        .root_source_file = b.path("src/mm/manager.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mm_manager_mod.addImport("ggml", ggml_mod);
+    mm_manager_mod.addImport("gguf", gguf_mod);
+    mm_manager_mod.addImport("model", model_mod);
+    mm_manager_mod.addImport("audio", mm_audio_mod);
+    mm_manager_mod.addImport("vision", mm_vision_mod);
     // 主可执行文件 zllama
     // ======================================================================
     const exe_mod = b.createModule(.{
@@ -199,6 +230,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("sampler", sampler_mod);
     exe_mod.addImport("kv_cache", kv_cache_mod);
     exe_mod.addImport("graph_context", graph_context_mod);
+    exe_mod.addImport("mm", mm_manager_mod);
 
     const exe = b.addExecutable(.{
         .name = "zllama",
@@ -242,6 +274,7 @@ pub fn build(b: *std.Build) void {
     simple_mod.addImport("sampler", sampler_mod);
     simple_mod.addImport("kv_cache", kv_cache_mod);
     simple_mod.addImport("graph_context", graph_context_mod);
+    simple_mod.addImport("mm", mm_manager_mod);
 
     const simple_exe = b.addExecutable(.{
         .name = "zllama-simple",
@@ -269,6 +302,7 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("sampler", sampler_mod);
     test_root_mod.addImport("kv_cache", kv_cache_mod);
     test_root_mod.addImport("graph_context", graph_context_mod);
+    test_root_mod.addImport("mm", mm_manager_mod);
 
     const test_unit = b.addTest(.{
         .name = "unit-tests",

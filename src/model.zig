@@ -154,3 +154,41 @@ pub const ModelVTable = struct {
     setKVCacheContext: ?*const fn (ptr: *anyopaque, ctx: *ggml.Context) void = null,
     deinit: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void,
 };
+
+
+/// 模型能力描述
+/// 描述模型支持哪些输入模态
+pub const ModelCapabilities = struct {
+    /// 是否支持文本输入（总是 true）
+    has_text: bool = true,
+    /// 是否支持图像输入（视觉编码器）
+    has_vision: bool = false,
+    /// 是否支持音频输入（音频编码器，如 Conformer）
+    has_audio: bool = false,
+    /// 音频采样率（Hz），如 16000
+    audio_sample_rate: i32 = -1,
+    /// 视觉编码器类型名称
+    vision_encoder_type: []const u8 = "",
+    /// 音频编码器类型名称
+    audio_encoder_type: []const u8 = "",
+
+    /// 格式化输出能力描述
+    pub fn format(self: ModelCapabilities, writer: anytype) !void {
+        try writer.print("  Text  : {s}\n", .{if (self.has_text) "yes" else "no"});
+        try writer.print("  Vision: {s}", .{if (self.has_vision) "yes" else "no"});
+        if (self.has_vision and self.vision_encoder_type.len > 0) {
+            try writer.print(" ({s})", .{self.vision_encoder_type});
+        }
+        try writer.print("\n", .{});
+        try writer.print("  Audio : {s}", .{if (self.has_audio) "yes" else "no"});
+        if (self.has_audio) {
+            if (self.audio_encoder_type.len > 0) {
+                try writer.print(" ({s})", .{self.audio_encoder_type});
+            }
+            if (self.audio_sample_rate > 0) {
+                try writer.print(", sample_rate={d} Hz", .{self.audio_sample_rate});
+            }
+        }
+        try writer.print("\n", .{});
+    }
+};
