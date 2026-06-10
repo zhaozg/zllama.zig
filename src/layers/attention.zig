@@ -30,6 +30,8 @@ pub const AttentionParams = struct {
     cache_len: i64,
     start_pos: i32,
     scale_factor: f32,
+    /// Attention logit softcapping (0 = disabled). Used by Gemma 2/4.
+    attn_logit_softcap: f32 = 0.0,
 };
 
 /// 执行缩放点积注意力计算
@@ -74,6 +76,13 @@ pub fn scaledDotProductAttention(
 
     // Step 3: 缩放
     kq = ggml.scale(ctx, kq, scale_factor);
+
+    // Step 3.5: attention logit softcapping (Gemma 2/4)
+    if (params.attn_logit_softcap > 0.0) {
+        kq = ggml.scale(ctx, kq, 1.0 / params.attn_logit_softcap);
+        kq = ggml.tanh(ctx, kq);
+        kq = ggml.scale(ctx, kq, params.attn_logit_softcap);
+    }
 
     // Step 4: 因果 mask + softmax
     // kq: [cache_len, n_tokens, n_head] (3D)

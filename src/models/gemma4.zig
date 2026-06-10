@@ -57,6 +57,8 @@ pub const Gemma4Params = struct {
     f_attention_scale: f32 = 1.0,
     /// 最终 logit softcapping 阈值（0 表示禁用）
     final_logit_softcapping: f32 = 0.0,
+    /// 注意力 logit softcapping 阈值（0 表示禁用，Gemma 默认 ~50.0）
+    attn_logit_softcapping: f32 = 0.0,
     /// per-layer embedding 维度（0 表示禁用）
     n_embd_per_layer: u32 = 0,
 
@@ -328,7 +330,7 @@ pub const Gemma4Model = struct {
                     .n_tokens = n_tokens_i64,
                     .cache_len = cache_len,
                     .start_pos = start_pos,
-                    .scale_factor = 1.0,
+                    .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim_k))),
                 });
 
                 // Reshape attn_out back to original Q dimension
@@ -367,7 +369,7 @@ pub const Gemma4Model = struct {
                     .n_tokens = n_tokens_i64,
                     .cache_len = cache_len,
                     .start_pos = start_pos,
-                    .scale_factor = 1.0,
+                    .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim_k_cache))),
                 });
 
                 // Reshape attn_out back to original Q dimension
@@ -618,6 +620,7 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
     }
 
     p.final_logit_softcapping = gguf_file.getF32("gemma4.final_logit_softcapping") orelse 0.0;
+    p.attn_logit_softcapping = gguf_file.getF32("gemma4.attn_logit_softcapping") orelse 50.0;
     p.n_embd_per_layer = gguf_file.getU32("gemma4.embedding_length_per_layer_input") orelse
         gguf_file.getU32("gemma4.embedding_length_per_layer") orelse 0;
 
@@ -671,6 +674,9 @@ fn loadWeights(
         allocator.free(layers);
     }
 
+    // Gemma 4: rope_freqs is global, shared across all full-attention layers
+    const global_rope_freqs = findOrCreateTensor(ctx, gguf_file, "rope_freqs.weight") catch null;
+
     for (0..n_layer) |i| {
         const prefix = try std.fmt.allocPrint(allocator, "blk.{d}", .{i});
 
@@ -697,14 +703,10 @@ fn loadWeights(
         else
             null;
 
+
         const out_scale = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "layer_output_scale.weight") catch null;
 
-        // Gemma 4: rope_freqs is global, not per-layer. Load it once.
-        const rope_freqs = if (i == 0)
-            weight_loader.findOrCreateTensor(ctx, gguf_file, "rope_freqs.weight") catch null
-        else
-            null;
-
+        // Gemma 4: all full-attention layers share the global rope_freqs
         layers[i] = LayerWeights{
             .prefix = prefix,
             .attn_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight"),
@@ -722,7 +724,7 @@ fn loadWeights(
             .ffn_up_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight"),
             .ffn_down_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight"),
             .out_scale = out_scale,
-            .rope_freqs = if (i == 0) rope_freqs else null,
+            .rope_freqs = if (!params.is_swa_layer.items[i]) global_rope_freqs else null,
             .has_kv = has_kv,
         };
         layers_loaded = i + 1;

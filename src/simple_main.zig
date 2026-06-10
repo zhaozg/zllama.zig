@@ -191,7 +191,7 @@ const SimpleEngine = struct {
         // ctx_kv_cache: sized for KV cache tensors per layer
         const max_seq_len = @min(params.max_seq_len, 2048);
         const hdim_kv = params.n_head_dim;
-        const hdim_k = if (params.n_head_dim_k > 0) params.n_head_dim_k else hdim_kv;
+        const hdim_k = @max(params.n_head_dim, params.n_head_dim_k);
         const hdim_v = if (params.n_head_dim_v > 0) params.n_head_dim_v else hdim_kv;
         // KV cache: n_layer * 2 * max_seq_len * n_kv_head * head_dim * sizeof(f32), plus 25% buffer
         const kv_cache_bytes = @as(usize, @intCast(params.n_layer)) * 2 * @as(usize, @intCast(max_seq_len)) * @as(usize, @intCast(params.n_kv_head)) * @as(usize, @intCast(hdim_kv)) * 4;

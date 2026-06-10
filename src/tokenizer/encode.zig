@@ -47,7 +47,7 @@ pub fn preTokenize(text: []const u8, pre_type: types.PreTokenizerType, allocator
     };
 
     switch (pre_type) {
-        .default, .llama3, .gpt2 => {
+        .default, .llama3, .gpt2, .gemma4 => {
             // GPT-2 / LLaMA 3 风格预分词
             try preTokenizeGPT2(text, &result);
         },

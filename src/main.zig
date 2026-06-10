@@ -237,7 +237,7 @@ const InferenceEngine = struct {
         errdefer ctx_kv_cache.deinit();
         const max_seq_len = @min(params.max_seq_len, 2048);
         const hdim_kv = params.n_head_dim;
-        const hdim_k = if (params.n_head_dim_k > 0) params.n_head_dim_k else hdim_kv;
+        const hdim_k = @max(params.n_head_dim, params.n_head_dim_k);
         const hdim_v = if (params.n_head_dim_v > 0) params.n_head_dim_v else hdim_kv;
         var kv_cache_mgr = try kv_cache.KVCache.initWithKVDim(ctx_kv_cache, params.n_layer, params.n_kv_head, hdim_k, hdim_v, max_seq_len, allocator);
         errdefer kv_cache_mgr.deinit(allocator);
