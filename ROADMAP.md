@@ -2,7 +2,7 @@
 
 > **项目名称：** zllama.zig — 纯 Zig 实现的多模型本地推理引擎
 
-## 📋 当前状态（2026-06-09）
+## 📋 当前状态（2026-06-10）
 
 | 模块 | 状态 |
 |------|------|
@@ -22,6 +22,8 @@
 | `--benchmark` 模式（PP/TG 分离 + 格式化输出） | ✅ 已完成 |
 | `-Dbundle-ggml` 源码构建 | ✅ 已完成 |
 | Tensor 方法式算子（mulMat/add/permute/ropeExt/pool2d/im2col/ssmConv/concat 等） | ✅ 已完成 |
+| 嵌入模型生成（`--embed`，Qwen3-Embedding mean/cls/last pooling + L2 归一化） | ✅ 已完成 |
+| `n_head_dim` 修复：解析 `key_length` 覆盖 `n_embd/n_head`（Qwen3-Embedding 等差异化 head dim 模型） | ✅ 已完成 |
 | 多模态预处理（PPM 加载/Resize/图像标准化/音频 Mel 占位） | 🚧 进行中 |
 | 多模态 CLI 集成（--mmproj / --image / --audio） | 🚧 进行中 |
 | Metal / CUDA 后端 | ⬜ 待完成 |
@@ -63,7 +65,20 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ⬜ CLI 图像/音频输入端到端联调（`--image` / `--audio` 已添加，vision/audio to LLM token 集成待完成）
 - ⬜ 与现有模型架构（Gemma 4 E2B）联调
 
----
+## 已完成功能清单
+
+### 核心引擎
+- ✅ 项目结构搭建（AGENTS.md、ARCHITECTURE.md、GGML_BINDING.md、TECHNICAL_CHALLENGES.md、ROADMAP.md）
+- ✅ ggml.zig 安全封装层（C 绑定、Context、Tensor、CGraph、Backend、Ops）
+- ✅ GGUF v2/v3 解析器
+- ✅ 模型抽象接口（model.zig）
+- ✅ 模型注册与工厂函数（registry.zig）
+- ✅ Qwen2 模型实现（含 qwen3.*/qwen2.* 参数回退、差异化 head_dim 支持）
+- ✅ Qwen3.5 模型实现（含混合注意力、SSM 层）
+- ✅ LLaMA 模型实现
+- ✅ Gemma 3 模型实现（混合 SWA/Full Attention、Q/K pre-norm、logit softcapping）
+- ✅ Gemma 4 模型实现（per-layer head_dim、SWA/Full Attention 混合、shared KV、GeGLU FFN）
+- ✅ 嵌入模型实现（Qwen3-Embedding：双向注意力 + mean/cls/last pooling + L2 归一化）
 
 ## 已完成功能清单
 

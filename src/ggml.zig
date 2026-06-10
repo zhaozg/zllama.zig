@@ -78,6 +78,7 @@ pub const getRows = @import("ggml/ops.zig").getRows;
 pub const conv1d = @import("ggml/ops.zig").conv1d;
 pub const ssmConv = @import("ggml/ops.zig").ssmConv;
 pub const ssmScan = @import("ggml/ops.zig").ssmScan;
+pub const sumRows = @import("ggml/ops.zig").sumRows;
 pub const setOutput = @import("ggml/ops.zig").setOutput;
 
 pub const version = @import("ggml/utils.zig").version;

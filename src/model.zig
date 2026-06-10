@@ -21,6 +21,7 @@ pub const qwen35 = @import("models/qwen35.zig");
 pub const llama = @import("models/llama.zig");
 pub const gemma3 = @import("models/gemma3.zig");
 pub const gemma4 = @import("models/gemma4.zig");
+pub const embedding = @import("models/embedding.zig");
 
 /// RoPE 缩放配置
 pub const RopeScaling = struct {
@@ -36,11 +37,13 @@ pub const Architecture = enum {
     llama,
     gemma3,
     gemma4,
+    embedding_qwen2,
 
     /// 从 GGUF 元数据中的 general.architecture 字段解析
     pub fn fromString(s: []const u8) ?Architecture {
         if (std.mem.eql(u8, s, "qwen2") or
-            std.mem.eql(u8, s, "qwen2.5"))
+            std.mem.eql(u8, s, "qwen2.5") or
+            std.mem.eql(u8, s, "qwen3"))
         {
             return .qwen2;
         }
@@ -60,6 +63,12 @@ pub const Architecture = enum {
         }
         if (std.mem.eql(u8, s, "gemma4")) {
             return .gemma4;
+        }
+        if (std.mem.eql(u8, s, "bert") or
+            std.mem.eql(u8, s, "nomic-bert") or
+            std.mem.eql(u8, s, "embedding"))
+        {
+            return .embedding_qwen2;
         }
         return null;
     }

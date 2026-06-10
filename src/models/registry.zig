@@ -16,6 +16,7 @@ const qwen35 = @import("model").qwen35;
 const llama = @import("model").llama;
 const gemma3 = @import("model").gemma3;
 const gemma4 = @import("model").gemma4;
+const embedding = @import("model").embedding;
 
 const log = std.log.scoped(.registry);
 
@@ -29,11 +30,11 @@ pub fn createModel(
 ) !model_if.ModelInstance {
     return switch (arch) {
         .qwen2 => {
-            var m = try allocator.create(qwen2.Qwen2Model);
+            var m = try allocator.create(embedding.EmbeddingModel);
             errdefer allocator.destroy(m);
             try m.init(allocator, gguf_file, io);
             return model_if.ModelInstance{
-                .vtable = &qwen2.Qwen2Model.vtable,
+                .vtable = &embedding.EmbeddingModel.vtable,
                 .ptr = @as(*anyopaque, @ptrCast(m)),
             };
         },
@@ -73,6 +74,16 @@ pub fn createModel(
                 .ptr = @as(*anyopaque, @ptrCast(m)),
             };
         },
+        .embedding_qwen2 => {
+            // Embedding model: reuses Qwen2 architecture with pooling
+            var m = try allocator.create(embedding.EmbeddingModel);
+            errdefer allocator.destroy(m);
+            try m.init(allocator, gguf_file, io);
+            return model_if.ModelInstance{
+                .vtable = &embedding.EmbeddingModel.vtable,
+                .ptr = @as(*anyopaque, @ptrCast(m)),
+            };
+        },
     };
 }
 
@@ -85,34 +96,51 @@ pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model_if.Architectur
         "model.architecture",
     };
 
+    var arch: ?model_if.Architecture = null;
+
     for (arch_names) |key| {
         if (gguf_file.getString(key)) |arch_str| {
-            if (model_if.Architecture.fromString(arch_str)) |arch| {
-                log.info("Detected architecture: {s} (from '{s}')", .{ @tagName(arch), arch_str });
-                return arch;
+            if (model_if.Architecture.fromString(arch_str)) |a| {
+                arch = a;
+                break;
             }
             log.warn("Unknown architecture: '{s}' from key '{s}'", .{ arch_str, key });
         }
     }
 
     // Fallback: detect by tensor names
-    if (gguf_file.findTensor("blk.0.ssm_conv1d.weight") != null) {
-        log.info("Fallback: detected qwen35 architecture (found ssm_conv1d.weight)", .{});
-        return .qwen35;
+    if (arch == null) {
+        if (gguf_file.findTensor("blk.0.ssm_conv1d.weight") != null) {
+            log.info("Fallback: detected qwen35 architecture (found ssm_conv1d.weight)", .{});
+            arch = .qwen35;
+        } else if (gguf_file.findTensor("blk.0.attn_q.weight") != null) {
+            log.info("Fallback: detected qwen2 architecture (found attn_q.weight)", .{});
+            arch = .qwen2;
+        } else if (gguf_file.findTensor("blk.0.attn_qkv.weight") != null) {
+            log.info("Fallback: detected qwen2 architecture (found attn_qkv.weight)", .{});
+            arch = .qwen2;
+        }
     }
-    if (gguf_file.findTensor("blk.0.attn_q.weight") != null) {
-        log.info("Fallback: detected qwen2 architecture (found attn_q.weight)", .{});
-        return .qwen2;
-    }
-    if (gguf_file.findTensor("blk.0.attn_qkv.weight") != null) {
-        log.info("Fallback: detected qwen2 architecture (found attn_qkv.weight)", .{});
-        return .qwen2;
+    // Check if it's an embedding model: pooling_type metadata distinguishes
+    // embedding models from generative models.
+    // Check multiple possible keys: general.pooling_type (string), qwen3.pooling_type (u32),
+    // qwen2.pooling_type (u32)
+    if (arch) |a| {
+        if (a == .qwen2 and
+            (gguf_file.getString("general.pooling_type") != null or
+            gguf_file.getU32("qwen3.pooling_type") != null or
+            gguf_file.getU32("qwen2.pooling_type") != null))
+        {
+            log.info("Detected embedding model (pooling_type present), architecture: embedding_qwen2", .{});
+            return .embedding_qwen2;
+        }
+        log.info("Detected architecture: {s}", .{@tagName(a)});
+        return a;
     }
 
     log.err("Could not detect model architecture from GGUF metadata", .{});
     return null;
 }
-
 /// 检测模型的多模态能力
 /// 通过检查 GGUF 文件中的张量和元数据来判断模型是否支持视觉/音频输入
 pub fn detectCapabilities(gguf_file: *const gguf.GGUFFile, arch: model_if.Architecture) model_if.ModelCapabilities {
@@ -195,6 +223,9 @@ pub fn detectCapabilities(gguf_file: *const gguf.GGUFFile, arch: model_if.Archit
                 caps.audio_encoder_type = "Whisper/Conformer";
                 caps.audio_sample_rate = 16000;
             }
+        },
+        .embedding_qwen2 => {
+            // Embedding models: no vision/audio, text-only
         },
     }
 

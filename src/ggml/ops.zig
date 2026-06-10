@@ -168,9 +168,23 @@ pub fn gatedDeltaNet(ctx: *Context, q: *Tensor, k: *Tensor, v: *Tensor, g: *Tens
 // ============================================================================
 // 输出设置
 // ============================================================================
+// 输出设置
+// ============================================================================
 
 pub fn setOutput(tensor: *Tensor) void {
     c.ggml_set_output(@ptrCast(@alignCast(tensor)));
+}
+
+// ============================================================================
+// 归约操作
+// ============================================================================
+
+/// 沿第 1 维求和：输入 [ne0, ne1, ne2, ne3] → 输出 [ne0, 1, ne2, ne3]
+pub fn sumRows(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_sum_rows(
+        @ptrCast(ctx),
+        @ptrCast(@alignCast(a)),
+    )));
 }
 
 const testing = std.testing;

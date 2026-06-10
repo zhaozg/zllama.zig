@@ -58,6 +58,10 @@ const CliArgs = struct {
     benchmark: bool = false,
     chat: bool = false,
     info: bool = false,
+    // Embedding
+    embed: bool = false,
+    pooling: []const u8 = "mean",
+    embed_normalize: bool = true,
     // Multimodal
     mmproj_path: [:0]const u8 = "",
     image_path: [:0]const u8 = "",
@@ -91,6 +95,13 @@ const CliArgs = struct {
                 result.image_path = args_it.next() orelse return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--audio")) {
                 result.audio_path = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--embed")) {
+                result.embed = true;
+            } else if (std.mem.eql(u8, arg, "--pooling")) {
+                result.pooling = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--embd-normalize")) {
+                const val = args_it.next() orelse return error.InvalidArgs;
+                result.embed_normalize = std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
             } else {
                 logger.warn("unknown argument '{s}'", .{arg});
             }
@@ -113,6 +124,11 @@ const CliArgs = struct {
             \\  --benchmark           benchmark 模式
             \\  -c, --chat            交互式聊天模式
             \\  --info                显示模型能力信息后退出
+            \\
+            \\嵌入模式选项:
+            \\  --embed               启用嵌入向量生成模式
+            \\  --pooling <策略>      池化策略: mean | cls | last (默认: mean)
+            \\  --embd-normalize 1    是否 L2 归一化 (默认: 1/true)
             \\
             \\多模态选项:
             \\  --mmproj <路径>       多模态投影器文件 (GGUF格式, mmproj)
@@ -430,7 +446,66 @@ const InferenceEngine = struct {
         }
     }
 
-    /// 交互式聊天循环
+    /// 嵌入向量生成
+    /// 将输入文本编码为固定维度向量
+    pub fn generateEmbedding(self: *InferenceEngine, io: std.Io, prompt: []const u8) ![]f32 {
+        // Tokenize
+        var input_tokens = try self.tok.encode(prompt, true);
+        defer input_tokens.deinit(self.allocator);
+
+        const n_tokens: i32 = @intCast(input_tokens.items.len);
+        if (n_tokens == 0) {
+            return error.EmptyInput;
+        }
+
+        // Build input tensor
+        self.ctx_graph.setNoAlloc(false);
+        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_tokens);
+        self.ctx_graph.setNoAlloc(true);
+
+        // Fill token data
+        {
+            const data = input_tensor.dataBytes();
+            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_tokens))];
+            for (input_tokens.items, 0..) |token, j| {
+                slice[j] = @as(i32, @intCast(token));
+            }
+        }
+
+        // Build compute graph (bidirectional attention, no KV cache, pooling output)
+        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
+        var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, &self.params, self.allocator);
+
+        // Embedding models ignore KV cache (passed as null context)
+        const embedding_vector = try self.model.buildGraph(&builder, input_tensor, n_tokens, null, 0);
+
+        // Allocate & compute
+        const buft = ggml.backendCpuBufferType();
+        var galloc = try ggml.Gallocr.init(buft);
+        defer galloc.free();
+        if (!galloc.allocGraph(graph)) {
+            return error.GraphAllocFailed;
+        }
+        try graph.compute(self.n_threads);
+
+        // Extract result
+        const result_data = embedding_vector.dataF32();
+        const n_embd = @as(usize, @intCast(self.params.n_embd));
+        const result = try self.allocator.alloc(f32, n_embd);
+        @memcpy(result, result_data[0..n_embd]);
+
+        // Print embedding vector
+        const stdout_file = std.Io.File.stdout();
+        var buf: [128]u8 = undefined;
+        for (result) |v| {
+            const line = try std.fmt.bufPrint(&buf, "{d:.6}\n", .{v});
+            try stdout_file.writeStreamingAll(io, line);
+        }
+
+        return result;
+    }
+
+        /// 交互式聊天循环
     pub fn chatLoop(self: *InferenceEngine, io: std.Io) !void {
         const stdin = std.Io.File.stdin();
         const stdout = std.Io.File.stdout();
@@ -905,7 +980,16 @@ pub fn main(init: std.process.Init) !void {
     logger.info("Prompt: \"{s}\"", .{args.prompt});
     logger.info("Max tokens: {d}", .{args.max_tokens});
 
-    if (args.chat) {
+    if (args.embed) {
+        logger.info("--- Embedding Generation ---", .{});
+        const emb = engine.generateEmbedding(io, args.prompt) catch |err| {
+            logger.err("Embedding generation failed: {}", .{err});
+            return;
+        };
+        defer allocator.free(emb);
+
+        logger.info("--- Done (dims={d}) ---", .{emb.len});
+    } else if (args.chat) {
         try engine.chatLoop(io);
     } else if (args.image_path.len > 0) {
         logger.info("--- Vision Generation ---", .{});
@@ -952,3 +1036,4 @@ const test_archs = @import("tests/test_archs.zig");
 const test_kv_cache = @import("tests/test_kv_cache.zig");
 const test_compare_logits = @import("tests/test_compare_logits.zig");
 const test_vocab = @import("tests/test_vocab.zig");
+const test_embed = @import("tests/test_embed.zig");

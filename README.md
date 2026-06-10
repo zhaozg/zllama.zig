@@ -1,6 +1,6 @@
 # zllama.zig - 多模型本地推理引擎
 
-> 纯 Zig 实现的高性能本地推理引擎，基于 ggml，支持多模型架构（Qwen / LLaMA / Gemma 等），初步支持多模态（图像/音频）。
+> 纯 Zig 实现的高性能本地推理引擎，基于 ggml，支持多模型架构（Qwen / LLaMA / Gemma 等），支持文本生成与嵌入向量，初步支持多模态（图像/音频）。
 
 [![Zig Version](https://img.shields.io/badge/Zig-0.16.0-orange)](https://ziglang.org/)
 [![ggml](https://img.shields.io/badge/ggml-latest-blue)](https://github.com/ggerganov/ggml)
@@ -15,12 +15,15 @@
   - **Qwen 2/2.5**：标准 Transformer + GQA
   - **Qwen 3.5**：全注意力层与线性注意力（SSM/GDN）混合架构
   - **Gemma 3**：SWA/Full Attention 混合、Q/K pre-norm、logit softcapping
-  - **Gemma 4**：per-layer head_dim、SWA/Full Attention 混合、shared KV、GeGLU FFN
+   - **Gemma 4**：per-layer head_dim、SWA/Full Attention 混合、shared KV、GeGLU FFN
+   - **Qwen3-Embedding**：双向注意力 + mean/cls/last 池化 + L2 归一化
   - 可扩展：新增模型只需在 `registry.zig` 注册
 - **增量解码 & KV Cache**：长上下文（≥32K）内存友好，支持 per-layer 可变维度
 - **多后端**：CPU (默认)、Metal (macOS)、CUDA (Linux)
 - **内建 BPE 分词器**：从 GGUF 提取词表，无外部依赖
 - **交互式聊天模式**：`-c/--chat` 流式对话、采样参数可调
+- **嵌入向量生成**：`--embed` 模式，池化策略可配，支持文本嵌入与语义搜索
+- **Benchmark 模式**：`--benchmark` 输出 PP/TG 分离的性能数据
 - **Benchmark 模式**：`--benchmark` 输出 PP/TG 分离的性能数据
 - **多模态支持**（🚧 进行中）：
   - ViT 图像编码器（gemma4v / gemma4uv）
@@ -54,6 +57,9 @@ zig build -Doptimize=ReleaseFast
 
 # 单次生成
 ./zig-out/bin/zllama -m model.gguf -p "人工智能的未来是" -n 200
+
+# 嵌入向量生成
+./zig-out/bin/zllama --embed -m Qwen3-Embedding-0.6B-Q8_0.gguf -p "你好世界"
 
 # 指定线程数
 ./zig-out/bin/zllama -m model.gguf --threads 6

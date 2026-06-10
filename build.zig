@@ -112,6 +112,14 @@ pub fn build(b: *std.Build) void {
     });
     embed_mod.addImport("ggml", ggml_mod);
 
+    const pooling_mod = b.createModule(.{
+        .root_source_file = b.path("src/layers/pooling.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    pooling_mod.addImport("ggml", ggml_mod);
+
 
     const weight_loader_mod = b.createModule(.{
         .root_source_file = b.path("src/core/weight_loader.zig"),
@@ -138,6 +146,7 @@ pub fn build(b: *std.Build) void {
     model_mod.addImport("swiglu", swiglu_mod);
     model_mod.addImport("attention", attention_mod);
     model_mod.addImport("embed", embed_mod);
+    model_mod.addImport("pooling", pooling_mod);
 
     model_mod.addImport("weight_loader", weight_loader_mod);
 
@@ -312,6 +321,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("preprocess", mm_preprocess_mod);
     exe_mod.addImport("kv_cache", kv_cache_mod);
     exe_mod.addImport("stb_image", stb_image_mod);
+    exe_mod.addImport("pooling", pooling_mod);
     exe_mod.addImport("engine_common", engine_common_mod);
 
 
