@@ -406,9 +406,10 @@ pub const AudioEncoder = struct {
                 scores = scores.tanh(ctx);
                 scores = scores.scale(ctx, softcap);
 
-                // Create attention mask [S, C, B]
+                // Create and fill causal attention mask
                 var kq_mask = try ctx.newTensor3d(ggml.Type.f32, S, C, B);
                 kq_mask.setName("kq_mask");
+                fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos_i));
                 scores = scores.add(ctx, kq_mask);
                 const attn = scores.softMax(ctx);
 
@@ -614,3 +615,40 @@ fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize) void 
     }
 }
 
+
+/// Fill a 3D attention mask tensor [S, C, B] for chunked self-attention.
+fn fillChunkedAttentionMask(
+    tensor: *ggml.Tensor,
+    n_ctx: usize,
+    chunk_size: usize,
+    n_blocks: usize,
+    past: usize,
+    n_pos: usize,
+) void {
+    const data = tensor.dataF32();
+    const neg_inf: f32 = -std.math.inf(f32);
+    const S = n_ctx;
+    const C = chunk_size;
+    const past_i64: i64 = @intCast(past);
+    const n_pos_i64: i64 = @intCast(n_pos);
+
+    for (0..n_blocks) |b| {
+        const bC: i64 = @intCast(b * C);
+        for (0..C) |c| {
+            const query_pos: i64 = @intCast(b * C + c);
+            const query_valid = b * C + c < n_pos;
+            for (0..S) |s| {
+                const s_i64: i64 = @intCast(s);
+                const key_pos: i64 = s_i64 + bC - past_i64;
+                const key_valid = key_pos >= 0 and key_pos < n_pos_i64;
+                const causal = key_pos <= query_pos;
+                const idx = s + c * S + b * S * C;
+                if (query_valid and key_valid and causal) {
+                    data[idx] = 0.0;
+                } else {
+                    data[idx] = neg_inf;
+                }
+            }
+        }
+    }
+}
