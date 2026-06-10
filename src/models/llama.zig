@@ -171,7 +171,7 @@ pub const LlamaModel = struct {
                 .cache_len = cache_len,
                 .start_pos = start_pos,
                 .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
-            });
+            }, null); // LLaMA: no SWA mask
 
             // 输出投影
             attn_out = ggml.mulMat(ctx, layer.attn_output_weight, attn_out);

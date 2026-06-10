@@ -331,26 +331,51 @@ pub const Gemma4Model = struct {
                     .cache_len = cache_len,
                     .start_pos = start_pos,
                     .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim_k))),
-                });
+                }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
                 // Reshape attn_out back to original Q dimension
                 attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
             } else {
-                // 非 KV 层：复用前面层的 KV cache
+                // 非 KV 层：复用前面层的 KV（来自 cache 或实时计算）
                 const kv_layer_idx = findKVLayer(w, i);
+                const kv_layer = &w.layers[kv_layer_idx];
 
                 var k: *ggml.Tensor = undefined;
                 var v_tensor: *ggml.Tensor = undefined;
+                var head_dim_k_cache: i64 = undefined;
+                var n_kv_head_cache: i64 = undefined;
+
                 if (kv_cache_mgr) |cache| {
                     k = cache.getKView(ctx, kv_layer_idx);
                     v_tensor = cache.getVView(ctx, kv_layer_idx);
+                    head_dim_k_cache = k.ne()[0];
+                    n_kv_head_cache = k.ne()[1];
                 } else {
-                    return error.NonKVLayerNeedsKVCache;
+                    // No KV cache: compute K/V from nearest KV layer's weights
+                    head_dim_k_cache = kv_layer.attn_k_norm_weight.ne()[0];
+                    n_kv_head_cache = if (kv_layer.attn_k_weight) |kw|
+                        @divExact(kw.ne()[1], head_dim_k_cache)
+                    else
+                        n_head;
+
+                    k = ggml.mulMat(ctx, kv_layer.attn_k_weight.?, attn_input);
+                    v_tensor = if (kv_layer.attn_v_weight) |vw|
+                        ggml.mulMat(ctx, vw, attn_input)
+                    else
+                        k;
+
+                    k = ggml.reshape3d(ctx, k, head_dim_k_cache, n_kv_head_cache, n_tokens_i64);
+                    v_tensor = ggml.reshape3d(ctx, v_tensor, head_dim_k_cache, n_kv_head_cache, n_tokens_i64);
+
+                    k = ggml.reshape2d(ctx, k, head_dim_k_cache, n_kv_head_cache * n_tokens_i64);
+                    k = ggml.rmsNorm(ctx, k, p.base.norm_eps);
+                    k = ggml.mul(ctx, k, ggml.reshape2d(ctx, kv_layer.attn_k_norm_weight, head_dim_k_cache, 1));
+                    k = ggml.reshape3d(ctx, k, head_dim_k_cache, n_kv_head_cache, n_tokens_i64);
+
+                    v_tensor = ggml.rmsNorm(ctx, v_tensor, p.base.norm_eps);
+                    k = ggml.ropeExt(ctx, k, pos_tensor, rope_freqs, @intCast(rope_dim), 0, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
                 }
 
-                // 从 cached K 获取实际的 head_dim_k（可能与 Q 的 head_dim 不同）
-                const head_dim_k_cache: i64 = k.ne()[0];
-                const n_kv_head_cache: i64 = k.ne()[1];
                 var n_head_eff = n_head;
                 if (head_dim != head_dim_k_cache) {
                     n_head_eff = @divExact(n_head * head_dim, head_dim_k_cache);
@@ -370,7 +395,7 @@ pub const Gemma4Model = struct {
                     .cache_len = cache_len,
                     .start_pos = start_pos,
                     .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim_k_cache))),
-                });
+                }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
                 // Reshape attn_out back to original Q dimension
                 attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);

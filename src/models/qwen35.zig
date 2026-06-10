@@ -268,7 +268,7 @@ pub const QwenModel = struct {
             .cache_len = cache_len,
             .start_pos = start_pos,
             .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
-        });
+        }, null);
 
         // Gate: sigmoid(gate) * attn_out
         // Ensure gate is contiguous before sigmoid

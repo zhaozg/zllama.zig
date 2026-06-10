@@ -109,38 +109,42 @@ pub const KVCache = struct {
         }
     }
 
-    /// 获取指定层的 K Cache 视图 [head_dim_k_actual, n_kv_head_actual, current_len]
+    /// 获取指定层的 K Cache 视图 [head_dim_k_actual, n_kv_head_actual, seq_len]
+    /// 对于共享 KV 层（current_len == 0），使用全局最大长度。
     pub fn getKView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
-        const len: i64 = @intCast(layer.current_len);
+        // 使用全局最大长度而非层自身长度，支持共享 KV 层
+        const len: i64 = @intCast(self.currentLen());
         const hdim: i64 = @intCast(layer.head_dim_k_actual);
         const nkv: i64 = @intCast(layer.n_kv_head_actual);
 
-        // layer.k: [head_dim_k, n_kv_head, max_seq_len]
-        // View:   [head_dim_k_actual, n_kv_head_actual, len]
+        // 使用父张量的实际 stride（支持 per-layer head_dim 不同的情况）
+        const parent_nb = layer.k.nb();
         return ctx.view3d(layer.k, hdim, nkv, len,
-            @intCast(hdim * @sizeOf(f32)),       // nb1: stride along n_kv_head dim
-            @intCast(hdim * nkv * @sizeOf(f32)), // nb2: stride along seq dim
+            parent_nb[1],  // nb1: 父张量沿 dim 1 的 stride
+            parent_nb[2],  // nb2: 父张量沿 dim 2 的 stride
             0);
     }
 
-    /// 获取指定层的 V Cache 视图 [head_dim_v_actual, n_kv_head_actual, current_len]
+    /// 获取指定层的 V Cache 视图 [head_dim_v_actual, n_kv_head_actual, seq_len]
+    /// 对于共享 KV 层（current_len == 0），使用全局最大长度。
     pub fn getVView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
-        const len: i64 = @intCast(layer.current_len);
+        const len: i64 = @intCast(self.currentLen());
         const hdim: i64 = @intCast(layer.head_dim_v_actual);
         const nkv: i64 = @intCast(layer.n_kv_head_actual);
 
+        const parent_nb = layer.v.nb();
         return ctx.view3d(layer.v, hdim, nkv, len,
-            @intCast(hdim * @sizeOf(f32)),       // nb1: stride along n_kv_head dim
-            @intCast(hdim * nkv * @sizeOf(f32)), // nb2: stride along seq dim
+            parent_nb[1],
+            parent_nb[2],
             0);
     }
 
     /// 将新的 K, V 写入 Cache
-    /// new_k: [head_dim, n_kv_head, n_tokens] (RoPE 后的形状)
+    /// new_k: [head_dim, n_kv_head, n_tokens]（RoPE 后，permute 前的形状）
     /// new_v: [head_dim, n_kv_head, n_tokens]
-    /// 自动适配 per-layer 维度差异，使用实际张量维度创建视图
+    /// 自动适配 per-layer 维度差异，使用父张量 stride 创建视图
     pub fn setKv(
         self: *KVCache,
         ctx: *ggml.Context,
@@ -166,19 +170,22 @@ pub const KVCache = struct {
             layer.head_dim_v_actual = @intCast(actual_hdim_v);
         }
 
+        // 使用父张量的实际 stride（支持 per-layer head_dim 不同）
+        const k_parent_nb = layer.k.nb();
+        const v_parent_nb = layer.v.nb();
+
         // layer.k: [head_dim_k_cache, n_kv_head_cache, max_seq_len]
-        // 使用实际维度创建视图：写入区域 = [actual_hdim, actual_nkv, n_tokens]
         const k_dst = ctx.view3d(layer.k, actual_hdim_k, actual_nkv_k, @intCast(n_tokens),
-            @intCast(actual_hdim_k * @sizeOf(f32)),
-            @intCast(actual_hdim_k * actual_nkv_k * @sizeOf(f32)),
-            @intCast(offset * actual_hdim_k * actual_nkv_k * @sizeOf(f32)));
+            k_parent_nb[1],
+            k_parent_nb[2],
+            @intCast(offset * k_parent_nb[2]));
         const k_cpy = ggml.cpy(ctx, new_k, k_dst);
         graph.buildForwardExpand(k_cpy);
 
         const v_dst = ctx.view3d(layer.v, actual_hdim_v, actual_nkv_v, @intCast(n_tokens),
-            @intCast(actual_hdim_v * @sizeOf(f32)),
-            @intCast(actual_hdim_v * actual_nkv_v * @sizeOf(f32)),
-            @intCast(offset * actual_hdim_v * actual_nkv_v * @sizeOf(f32)));
+            v_parent_nb[1],
+            v_parent_nb[2],
+            @intCast(offset * v_parent_nb[2]));
         const v_cpy = ggml.cpy(ctx, new_v, v_dst);
         graph.buildForwardExpand(v_cpy);
 

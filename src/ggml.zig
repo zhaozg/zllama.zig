@@ -54,6 +54,7 @@ pub const ropeExt = @import("ggml/ops.zig").ropeExt;
 pub const ropeMulti = @import("ggml/ops.zig").ropeMulti;
 pub const scale = @import("ggml/ops.zig").scale;
 pub const softMax = @import("ggml/ops.zig").softMax;
+pub const softMaxExt = @import("ggml/ops.zig").softMaxExt;
 pub const diagMaskInf = @import("ggml/ops.zig").diagMaskInf;
 pub const silu = @import("ggml/ops.zig").silu;
 pub const gelu = @import("ggml/ops.zig").gelu;

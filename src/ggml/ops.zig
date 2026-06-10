@@ -65,6 +65,13 @@ pub fn softMax(ctx: *Context, a: *Tensor) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_soft_max(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
 }
 
+/// Fused softmax with optional mask, scaling, and ALiBi bias
+/// mask can be null. scaling applied before softmax. max_bias=0.0 for no ALiBi.
+pub fn softMaxExt(ctx: *Context, a: *Tensor, mask: ?*Tensor, scaling: f32, max_bias: f32) *Tensor {
+    const mask_ptr = if (mask) |m| @as(?*c.struct_ggml_tensor, @ptrCast(@alignCast(m))) else null;
+    return @as(*Tensor, @ptrCast(c.ggml_soft_max_ext(@ptrCast(ctx), @ptrCast(@alignCast(a)), mask_ptr, scaling, max_bias)));
+}
+
 pub fn diagMaskInf(ctx: *Context, a: *Tensor, n_past: i32) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_diag_mask_inf(@ptrCast(ctx), @ptrCast(@alignCast(a)), n_past)));
 }
@@ -165,8 +172,6 @@ pub fn gatedDeltaNet(ctx: *Context, q: *Tensor, k: *Tensor, v: *Tensor, g: *Tens
     return @as(*Tensor, @ptrCast(c.ggml_gated_delta_net(@ptrCast(ctx), @ptrCast(@alignCast(q)), @ptrCast(@alignCast(k)), @ptrCast(@alignCast(v)), @ptrCast(@alignCast(g)), @ptrCast(@alignCast(beta)), @ptrCast(@alignCast(state)))));
 }
 
-// ============================================================================
-// 输出设置
 // ============================================================================
 // 输出设置
 // ============================================================================

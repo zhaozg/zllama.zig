@@ -206,12 +206,9 @@ pub const Gemma3Model = struct {
             // 应用注意力缩放到 Q（在进入 attention 之前）
             q = ggml.scale(ctx, q, attn_scale);
 
-            // 转换为 attention 所需布局: [head_dim, n_tokens, n_head]
-            q = ggml.cont(ctx, ggml.permute(ctx, q, 0, 2, 1, 3));
-            k = ggml.cont(ctx, ggml.permute(ctx, k, 0, 2, 1, 3));
-            v = ggml.cont(ctx, ggml.permute(ctx, v, 0, 2, 1, 3));
-
             // --- KV Cache ---
+            // 在 permute 之前存入 cache，保持 [head_dim, n_kv_head, n_tokens] 布局
+            // attention 层内部会自动执行 permute(0,2,1,3)
             if (kv_cache_mgr) |cache| {
                 cache.setKv(ctx, graph, i, k, v, @intCast(n_tokens_i64));
                 k = cache.getKView(ctx, i);
@@ -232,7 +229,7 @@ pub const Gemma3Model = struct {
                 .cache_len = cache_len,
                 .start_pos = start_pos,
                 .scale_factor = 1.0, // 已经通过 ggml_scale 应用了
-            });
+            }, null); // Gemma 3: no SWA mask, sliding window handled via RoPE frequency
 
             // 输出投影
             attn_out = ggml.mulMat(ctx, layer.attn_output_weight, attn_out);
