@@ -235,10 +235,11 @@ pub const Gemma4Model = struct {
         var cur = cur_in;
 
         for (w.layers, 0..) |*layer, i| {
-            const n_head: i64 = @intCast(p.base.n_head);
-
-            // Gemma 4: head_dim 由 attn_q_norm 维度决定（per-layer 可能不同）
+            // Gemma 4: head_dim 由 attn_q_norm 维度决定（per-layer，与 llama.cpp n_embd_head_k(il) 一致）
+            // llama.cpp 使用 n_embd_head = hparams.n_embd_head_k(il) 同时作为 Q 和 K 的 head_dim
             const head_dim: i64 = layer.attn_q_norm_weight.ne()[0];
+            // Per-layer n_head from Q weight shape: attn_q_weight [n_embd, n_head * head_dim]
+            const n_head: i64 = @divExact(layer.attn_q_weight.ne()[1], head_dim);
 
             // RoPE 参数
             const layer_is_swa = p.is_swa_layer.items[i];
@@ -331,6 +332,7 @@ pub const Gemma4Model = struct {
                     .cache_len = cache_len,
                     .start_pos = start_pos,
                     .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim_k))),
+                    .attn_logit_softcap = p.attn_logit_softcapping,
                 }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
                 // Reshape attn_out back to original Q dimension
@@ -395,6 +397,7 @@ pub const Gemma4Model = struct {
                     .cache_len = cache_len,
                     .start_pos = start_pos,
                     .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim_k_cache))),
+                    .attn_logit_softcap = p.attn_logit_softcapping,
                 }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
                 // Reshape attn_out back to original Q dimension

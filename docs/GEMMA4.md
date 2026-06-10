@@ -1,5 +1,6 @@
 基于目前的 `zllama.zig` 架构（已支持 Llama 和 Qwen35, Gemma3），新增的 Gemma4 支持不完善。
 
+Gemma 4 推理乱码，而 Llama 3、Gemma 3、Qwen3.5 正常，说明问题并非通用的注意力或图构建逻辑，而是 Gemma 4 **特有架构** 的实现偏差。下面我直接对比关键差异，帮你定位剩余缺陷。
 ---
 
 ## 0. 任务与参考
@@ -14,81 +15,91 @@
 
 - src/models/gemma4.cpp
 
-## 1. ✅ 已修复：RoPE 崩溃问题（2026-06-07）
+## 一、Gemma 4 与正常模型的架构差异
 
-### 崩溃原因
+| 特性 | Llama 3 | Gemma 3 | Qwen3.5 | **Gemma 4** (E2B) |
+|------|---------|---------|---------|-------------------|
+| 注意力模式 | 全部全局因果 | 全部全局因果 | 全部全局因果 | **混合**：交替 SWA（滑动窗口 4096）和全局注意力 |
+| 共享 KV 层 | 无 | 无 | 无 | **有**（后 1/3 层不计算 K/V，复用前面层） |
+| GQA 比率 | 1:8（常见）| 1:1 | 1:1 或 1:8 | **1:1**（所有头 KV 头数 = Q 头数） |
+| Q/K 头维度 | 一致 | 一致 | 一致 | **分层变化**：SWA 层 256，全局层 512 |
+| 位置编码 | RoPE (NEOX) | RoPE | RoPE | **RoPE + 每层独立的 `rope_freqs`（全局层用）** |
+| 前 SWA 层是否有特殊 qk_norm？ | 否 | 否 | 否 | **有** `q_norm` / `k_norm`，且 SWA 层头维度为 256 |
+| 注意力 logit 软上限 | 无 | 无 | 无 | llama.cpp 中默认启用 `attn_logit_softcap = 50.0` |
 
-Gemma 4 使用**混合注意力架构**：部分层是全注意力（full attention），部分层是滑动窗口注意力（SWA）。
-这两类层的 `head_dim` 不同：
-
-- **全注意力层**：使用 `key_length`（较大的维度，如 256 或 512）
-- **SWA 层**：使用 `key_length_swa`（较小的维度，如 128 或 256）
-
-但代码中 `rope_dim` 是**全局单一值**（从 `gemma4.rope.dimension_count` 读取，对应全注意力层的维度）。
-当 SWA 层的 `head_dim` < `rope_dim` 时，`ggml_ropeExt` 会断言 `n_dims <= ne0` 失败并崩溃。
-
-### 修复内容
-
-**文件：`src/models/gemma4.zig`**
-
-1. **`Gemma4Params` 结构体**：新增 `rope_dim_swa: u32 = 0` 字段，存储 SWA 专用的 RoPE 维度
-
-2. **`parseParams` 函数**：读取 GGUF 元数据键 `gemma4.rope.dimension_count_swa`（对应 llama.cpp 的 `LLM_KV_ROPE_DIMENSION_COUNT_SWA`），默认回退到 `base.rope_dim`
-
-3. **`forward` 函数**：根据 `is_swa_layer[i]` 标志动态选择 RoPE 维度：
-   - SWA 层：使用 `p.rope_dim_swa`
-   - 全注意力层：使用 `p.base.rope_dim`
-   - 安全夹持：`@min(rope_dim, head_dim)` 防止超限
-
-4. **图节点容量**：`ggml_new_graph` 默认支持 2048 个节点，Gemma 4（48 层）需要更多。
-   - `src/main.zig`：提示处理使用 `CGraph.initReserved(ctx, 16384)`
-   - `src/core/graph_context.zig`：增量解码使用 `CGraph.initReserved(ctx, 16384)`
-
-### 验证结果
-
-- ✅ 模型加载成功，不再触发 `n_dims <= ne0` 断言
-- ✅ 模型加载成功，不再触发 `cgraph->n_nodes < cgraph->size` 断言
-- ⚠️ 生成质量不佳（输出乱码），说明架构实现仍有其他问题（KV Cache、注意力实现等需要进一步对齐 llama.cpp）
+**致命点**：即便你修复了 RoPE mode、freqs 加载和 scale_factor，若 **SWA 掩码** 和 **共享 KV 的引用逻辑** 未正确实现，全局层会读到全零或错乱的历史，导致输出完全无意义。
 
 ---
 
-## 2. 参考：llama.cpp 的 Gemma 4 RoPE 处理
+## 二、最可能残留的两个问题
 
-在 llama.cpp 中，Gemma 4 使用 `n_rot(il)` 方法**按层返回**不同的 RoPE 维度：
+### 1. SWA 掩码未实现（或实现错误）
+Gemma 4 的 SWA 层只能关注当前 token 之前的 **4096** 个 token（而非整个序列）。如果不施加这个窗口掩码，SWA 层会错误地关注到远处无关的 token；更关键的是，**你目前很可能根本没加任何掩码，或者只加了因果掩码（全上三角）**，导致 SWA 层信息完全混乱，进而污染全局层的输出。
 
-```cpp
-uint32_t n_rot(uint32_t il) const {
-    return is_swa(il) ? n_rot_swa : n_rot_full;
-}
-```
+**验证方法**：在 SWA 层的注意力计算中，检查是否调用了类似 `build_attn_mask_swa(ctx, n_tokens, window_size)` 的函数。若没有，就是原因。
 
-其中：
-- `n_rot_full` 从 `{arch}.rope.dimension_count` 读取（默认 = `n_embd_head_k_full`）
-- `n_rot_swa` 从 `{arch}.rope.dimension_count_swa` 读取（默认 = `n_rot_full`）
-- 全注意力层还使用 `rope_freqs` 进行 proportional RoPE
+**修复要点**：
+- 为每个 SWA 层生成一个 `[1, 1, n_tokens, n_tokens]` 的掩码，其中 `mask[i,j] = 0.0` 如果 `j <= i` 且 `i - j < window_size`，否则 `-inf`。
+- 将此掩码加到 QK^T 上后再 softmax。
+- 参考 llama.cpp 的 `llama_build_attn_mask_swa`。
 
----
+### 2. 共享 KV 层的 cache 引用错误
+Gemma 4 的后半层（层索引 15~34）共享前面层的 K/V。你的实现在这些层中可能做了以下错误之一：
 
-## 3. 待解决：后续问题
+- **错误 1**：仍然为该层分配了新 cache，并用该层自己的 Q 计算 K/V（但实际上权重不存在，导致 K/V 为零或随机）。
+- **错误 2**：正确不计算 K/V，但在 `setKv` 时未将 cache 引用指向被共享层的 cache，后续注意力读取时取到空值。
+- **错误 3**：cache 引用正确，但读取时使用了当前层的 `n_head_dim`（SWA 层为 256，全局层为 512），与被共享层的实际维度不匹配，导致视图变形。
 
-Gemma 4 架构实现仍有以下问题需要解决：
+**验证**：检查 `kv_cache.zig` 中 `setKv` 的实现，对于共享层是否调用了类似 `self.getKv(shared_layer_id)` 而不是创建新视图。
 
-1. **KV Cache**：当前 Gemma 4 的 KV Cache 被禁用（待实现 per-layer n_kv_head 支持）
-2. **共享 KV 层**：后面几层复用前面层的 KV（`gemma4.attention.shared_kv_layers`）
-3. **Per-layer embeddings**：支持 `gemma4.embedding_length_per_layer`
-4. **MoE（Mixture of Experts）**：部分 Gemma 4 模型使用 MoE FFN
-5. **Q/K 维度不匹配的处理**：当 `head_dim_q != head_dim_k` 时的 reshape 逻辑
-6. **输出乱码**：当前生成结果不正确，需要对照 llama.cpp 逐层调试
+**修复**：
+- 在模型定义中标记每层是否共享，共享时 `setKv` 应返回被共享层的 K/V 张量。
+- 确保注意力的 `K` 和 `V` 直接从 cache 读取，且该 cache 具有正确的维度（与被共享层一致）。
 
 ---
 
-## 4. 总结
+## 三、其他高嫌疑点
 
-- **直接崩溃点（已修复）**：RoPE 的 `n_dims` 大于输入向量长度。
-- **根本原因**：Gemma 4 的 SWA 层 `head_dim` 小于全注意力层，但 `rope_dim` 使用全局单一值。
-- **修复路径**：
-  1. 从 GGUF 正确读取 `rope.dimension_count_swa` 超参数 ✅
-  2. 在 `forward` 中按层动态选择 `rope_dim` ✅
-  3. 安全夹持 `rope_dim ≤ head_dim` ✅
-  4. 增大计算图节点容量 ✅
-- **下一步**：修复 KV Cache、共享 KV 层、per-layer embeddings 等，对齐 llama.cpp 实现以提高生成质量。
+- **`attn_logit_softcap`**：llama.cpp 对 Gemma 4 启用了 50.0 的 softcap。你目前可能未启用（文档中说“暂时未启用”）。虽然缺失 softcap 不一定直接导致乱码，但在高 logit 值下可能导致 softmax 饱和，加重错误。建议加回。
+- **GQA 广播**：Gemma 4 的 Q 头数 = KV 头数，理论上不需要广播，但你的 cache 维度可能错误地使用了 `n_head_dim` 而非 `head_dim_k`，如果两者不同就会出问题。不过你已验证 Q/K 头维度总是相同，这点可能不是主因。
+- **每层不同的 `rope_freqs`**：你已修复只加载一次并共享，但需要确认共享时的切片逻辑是否正确（全局层需要对应的频段）。若切片错误，位置编码将完全错位，导致乱码。
+
+---
+
+## 四、建议的调试路径
+
+1. **单层对比**：用 Python llama-cpp-python 加载同模型，提取某一层（例如第 0 层 SWA 层和第 4 层全局层）的 Q、K、V、attention output，与你 zig 实现逐元素对比。差异会直接暴露错误。
+2. **先屏蔽 SWA 和共享层**：临时将所有层改为全局注意力且无共享，即强制 gemma4 像普通 transformer 一样工作，看乱码是否消失。如果消失，则确定是 SWA/共享逻辑问题；如果仍乱码，则是更基础的计算错误（如 qk_norm 或投影）。
+3. **检查 SWA 窗口大小**：Gemma 4 的 SWA 层滑动窗口是 4096（不是 1024 或其他）。确保掩码构造使用正确值。
+
+优先实施第 2 点，它是最快的二分定位法。修复 SWA 掩码和共享 KV 后，乱码问题极大概率会解决。
+
+## 补充
+
+### 🎯 首要问题：混合注意力与KV缓存
+
+Gemma 4的一项关键创新是采用了**异构注意力**机制，即滑动窗口注意力（SWA）和全局注意力（GQA）在层间交错。
+
+*   **缺乏正确掩码**：这是你推测的主要原因。由于SWA层有一个固定的注意力窗口（通常为4096个token），如果未实现掩码，模型无法正确处理长距离依赖。
+*   **共享KV缓存失效**：另一项核心优化是**跨层KV共享**（Cross-Layer KV Sharing）。模型的后三分之一层不再独立计算K/V，而是复用前面层的计算结果。如果你的实现为每一层都分配了独立K/V，或者复用时索引错误，会导致后续层读取到错误的数据，引发推理崩溃。
+
+> 实际上，`llama.cpp` 也针对此问题进行了专门的修复（PR #21513），以解决对异构iSWA的支持。
+
+### 🛠️ 验证与调试路径
+这里更推荐你采用一个更直接、侵入性更小的验证方法：
+
+1.  **修改配置**：在模型中，将**所有层都临时强制设置为全局注意力（GQA）**，并**禁用KV复用**。
+2.  **重新测试**：如果乱码问题消失，就可以百分百确认问题出在上述两点。
+3.  **确认根源**：这种方式能直接锁定问题范围，避免在复杂代码中盲目寻找。
+
+### 💡 其他常见疑点
+*   **注意力Logit软上限**：Gemma模型确实采用了此技术（例如`50.0`的软上限）。它主要负责训练稳定性而非推理正确性，缺失它一般不会直接导致乱码，但其配置仍需留意。
+*   **异构头维度**：需要留意，部分模型变体的SWA层和全局层**头维度可能不同**（如SWA层256，全局层512）。
+*   **特殊位置编码**：Gemma 4实现的“比例RoPE”（Proportional RoPE）也与Llama等模型不尽相同，需要检查自己的实现是否严格遵循了其公式。
+
+你的分析思路正确而深入。如果实施这些调试后问题依然存在，可以随时提供更多日志，我们一起继续分析。
+
+### llama.cpp 的相关变更
+
+在 llama.cpp 目录下， 通过 `git show 4eb19514dd2984662f13aacbb052c559c8fde3b1` 分析
+
