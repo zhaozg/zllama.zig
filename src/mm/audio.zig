@@ -146,10 +146,11 @@ pub const AudioEncoder = struct {
         if (gguf_file.getU32("clip.audio.block_count")) |v| params.n_layer = v;
         if (gguf_file.getU32("clip.audio.feed_forward_length")) |v| params.n_ff = v;
         if (gguf_file.getU32("gemma4.audio.sample_rate")) |v| params.sample_rate = v;
+        if (gguf_file.getU32("clip.audio.num_mel_bins")) |v| params.n_mel_bins = v;
         params.d_head = params.n_embd / params.n_head;
 
-        log.info("Loading audio encoder: embd={d}, heads={d}, d_head={d}, layers={d}, ff={d}", .{
-            params.n_embd, params.n_head, params.d_head, params.n_layer, params.n_ff,
+        log.info("Loading audio encoder: embd={d}, heads={d}, d_head={d}, layers={d}, ff={d}, mel_bins={d}", .{
+            params.n_embd, params.n_head, params.d_head, params.n_layer, params.n_ff, params.n_mel_bins,
         });
 
         // 加载子采样卷积权重
@@ -376,9 +377,10 @@ pub const AudioEncoder = struct {
 
                 // Relative position attention
                 if (layer.attn_k_rel_w) |k_rel| {
-                    // Create position embedding input
+                    // Create and fill position embedding with sinusoidal encodings [n_embd, R]
                     var pos_emb = try ctx.newTensor2d(ggml.Type.f32, d_head_i * n_head_i, R);
                     pos_emb.setName("pos_emb");
+                    fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.d_head * p.n_head));
                     // RPE projection
                     var p_rpe = k_rel.mulMat(ctx, pos_emb); // [n_embd, R]
                     p_rpe = p_rpe.reshape3d(ctx, d_head_i, n_head_i, R);
@@ -589,5 +591,26 @@ fn rmsNorm(ctx: *ggml.Context, x: *ggml.Tensor, weight: *ggml.Tensor, eps: f32) 
 fn ffnSilu(ctx: *ggml.Context, x: *ggml.Tensor, up_w: *ggml.Tensor, down_w: *ggml.Tensor) *ggml.Tensor {
     const h = up_w.mulMat(ctx, x);
     return down_w.mulMat(ctx, h.silu(ctx));
+}
+
+/// Fill a 2D tensor [n_embd, n_pos] with sinusoidal position encodings.
+/// Used for Relative Position Encoding (RPE) in Conformer attention.
+/// Matrix layout: data[pos * n_embd + dim] encodes position `pos` at dimension `dim`.
+fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize) void {
+    const data = tensor.dataF32();
+    const theta: f32 = 10000.0;
+
+    for (0..n_pos) |pos| {
+        const pos_f: f32 = @floatFromInt(pos);
+        var i: usize = 0;
+        while (i < n_embd) : (i += 2) {
+            const freq: f32 = 1.0 / std.math.pow(f32, theta, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n_embd)));
+            const angle: f32 = pos_f * freq;
+            data[pos * n_embd + i] = @sin(angle);
+            if (i + 1 < n_embd) {
+                data[pos * n_embd + i + 1] = @cos(angle);
+            }
+        }
+    }
 }
 

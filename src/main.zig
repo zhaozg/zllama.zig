@@ -87,6 +87,9 @@ const CliArgs = struct {
             } else if (std.mem.eql(u8, arg, "--threads") or std.mem.eql(u8, arg, "-th")) {
                 result.n_threads = std.fmt.parseInt(i32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+                result.verbose = true;
+            } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
+                result.debug = true;
             } else if (std.mem.eql(u8, arg, "--chat") or std.mem.eql(u8, arg, "-c")) {
                 result.chat = true;
             } else if (std.mem.eql(u8, arg, "--mmproj")) {
@@ -120,10 +123,10 @@ const CliArgs = struct {
             \\  -m, --model <路径>     模型文件路径 (GGUF格式)
             \\  -p, --prompt <文本>    输入提示词
             \\  -n, --max-tokens <N>  最大生成token数 (默认: 256)
-            \\  -t, --temperature <F> 采样温度 (默认: 0.7)
+            \\  -v, --verbose         详细日志输出 (info 级别)
+            \\  -d, --debug           调试日志输出 (debug 级别)
             \\  --benchmark           benchmark 模式
             \\  -c, --chat            交互式聊天模式
-            \\  --info                显示模型能力信息后退出
             \\
             \\嵌入模式选项:
             \\  --embed               启用嵌入向量生成模式
@@ -133,8 +136,7 @@ const CliArgs = struct {
             \\多模态选项:
             \\  --mmproj <路径>       多模态投影器文件 (GGUF格式, mmproj)
             \\  --image <路径>        输入图像文件 (PPM/JPEG/PNG/BMP/GIF)
-            \\  --audio <路径>        输入音频文件 (PCM F32, 16kHz)
-            \\
+            \\  --audio <路径>        输入音频文件 (WAV 16-bit PCM)
         , .{});
     }
 };
@@ -742,8 +744,8 @@ const InferenceEngine = struct {
             wav_info.num_channels,
         });
 
-        // Step 2: Compute Mel spectrogram
-        const n_mel_bins: u32 = preprocess.AUDIO_N_MEL_BINS;
+        // Step 2: Compute Mel spectrogram using n_mel_bins from audio encoder params
+        const n_mel_bins: u32 = if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else preprocess.AUDIO_N_MEL_BINS;
         var mel = try preprocess.computeMelSpectrogram(self.allocator, wav_samples, wav_info.sample_rate, n_mel_bins);
         defer mel.deinit();
 
