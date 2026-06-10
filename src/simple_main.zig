@@ -24,6 +24,7 @@ pub const std_options: std.Options = .{
         .{ .scope = .model, .level = .warn },
         .{ .scope = .registry, .level = .warn },
         .{ .scope = .kv_cache, .level = .warn },
+        .{ .scope = .gemma4, .level = .debug },
     },
     .logFn = engine_common.logFilter,
 };

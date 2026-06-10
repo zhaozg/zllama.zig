@@ -37,11 +37,21 @@ pub const Type = enum(c.ggml_type) {
     q5_K = c.GGML_TYPE_Q5_K,
     q6_K = c.GGML_TYPE_Q6_K,
     q8_K = c.GGML_TYPE_Q8_K,
+    iq2_xxs = c.GGML_TYPE_IQ2_XXS,
+    iq2_xs = c.GGML_TYPE_IQ2_XS,
+    iq3_xxs = c.GGML_TYPE_IQ3_XXS,
+    iq1_s = c.GGML_TYPE_IQ1_S,
+    iq4_nl = c.GGML_TYPE_IQ4_NL,
+    iq3_s = c.GGML_TYPE_IQ3_S,
+    iq2_s = c.GGML_TYPE_IQ2_S,
+    iq4_xs = c.GGML_TYPE_IQ4_XS,
     i8 = c.GGML_TYPE_I8,
     i16 = c.GGML_TYPE_I16,
     i32 = c.GGML_TYPE_I32,
     i64 = c.GGML_TYPE_I64,
     f64 = c.GGML_TYPE_F64,
+    iq1_m = c.GGML_TYPE_IQ1_M,
+    bf16 = c.GGML_TYPE_BF16,
 
     pub fn sizeOf(t: Type) usize {
         return c.ggml_type_size(@intFromEnum(t));

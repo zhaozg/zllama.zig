@@ -11,10 +11,6 @@
 //! - Final logit softcapping
 //!
 //! 参考 llama.cpp gemma4.cpp 实现。
-//!
-//! 注意：此实现为初始版本，暂不支持 MoE 路由和 per-layer embedding。
-//! 这些特性将在后续版本中实现。
-
 const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
@@ -103,13 +99,22 @@ pub const LayerWeights = struct {
     // RoPE freqs（全注意力层使用 proportional rope）
     rope_freqs: ?*ggml.Tensor,
 
+    // Per-layer embedding 权重（仅当 n_embd_per_layer > 0 时加载）
+    per_layer_inp_gate: ?*ggml.Tensor = null,
+    per_layer_proj: ?*ggml.Tensor = null,
+    per_layer_post_norm: ?*ggml.Tensor = null,
+
     // 该层是否有自己的 KV
     has_kv: bool,
 };
-
 pub const Gemma4Weights = struct {
     base: model.ModelWeights,
     layers: []LayerWeights,
+
+    // Per-layer embedding global weights（仅当 n_embd_per_layer > 0 时加载）
+    per_layer_token_embd: ?*ggml.Tensor = null,
+    per_layer_model_proj: ?*ggml.Tensor = null,
+    per_layer_proj_norm: ?*ggml.Tensor = null,
 
     pub fn deinit(self: *Gemma4Weights, allocator: std.mem.Allocator) void {
         for (self.layers) |*layer| {
@@ -190,8 +195,8 @@ pub const Gemma4Model = struct {
         // 位置编码：使用普通位置张量（不是 multi）
         const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
 
-        // Main transformer loop (identical to forward())
-        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr);
+        // Main transformer loop (pass input_tokens for per-layer embedding if needed)
+        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens);
     }
 
     pub fn forward(
@@ -214,7 +219,7 @@ pub const Gemma4Model = struct {
 
         const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
 
-        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr);
+        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens);
     }
 
     /// Shared transformer loop (used by both forward and forwardWithEmbdOverride).
@@ -227,10 +232,46 @@ pub const Gemma4Model = struct {
         n_tokens_i64: i64,
         start_pos: i32,
         kv_cache_mgr: ?*kv_cache.KVCache,
+        input_tokens: ?*ggml.Tensor,
     ) !*ggml.Tensor {
         const p = &self.params;
         const w = &self.weights;
         var cur = cur_in;
+
+        // --- Per-layer embedding: pre-compute inp_per_layer before layer loop ---
+        // Matches llama.cpp project_per_layer_inputs() in gemma4.cpp.
+        const inp_per_layer: ?*ggml.Tensor = if (p.n_embd_per_layer > 0 and input_tokens != null) blk: {
+            const n_embd_pl: i64 = @intCast(p.n_embd_per_layer);
+            const n_layer_i64: i64 = @intCast(p.base.n_layer);
+
+            // Lookup per-layer token embeddings
+            // Lookup per-layer token embeddings
+            var inp_pl = ggml.getRows(ctx, w.per_layer_token_embd.?, input_tokens.?);
+            // reshape: [n_embd_per_layer*n_layer, n_tokens] -> [n_embd_per_layer, n_layer, n_tokens]
+            inp_pl = ggml.reshape3d(ctx, inp_pl, n_embd_pl, n_layer_i64, n_tokens_i64);
+            inp_pl = ggml.scale(ctx, inp_pl, @sqrt(@as(f32, @floatFromInt(p.n_embd_per_layer))));
+
+            // Project input through per_layer_model_proj
+            var proj = ggml.mulMat(ctx, w.per_layer_model_proj.?, cur_in);
+            proj = ggml.scale(ctx, proj, 1.0 / @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+            proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
+            // RMSNorm on per-layer projection (norm weight is [n_embd_per_layer])
+            proj = ggml.reshape2d(ctx, proj, n_embd_pl, n_layer_i64 * n_tokens_i64);
+            proj = ggml.rmsNorm(ctx, proj, p.base.norm_eps);
+            proj = ggml.mul(ctx, proj, ggml.reshape2d(ctx, w.per_layer_proj_norm.?, n_embd_pl, 1));
+            proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
+
+            // Combine: proj + token_embd
+            inp_pl = ggml.add(ctx, proj, inp_pl);
+            inp_pl = ggml.scale(ctx, inp_pl, 1.0 / @sqrt(2.0));
+
+            // Permute to [n_embd_per_layer, n_tokens, n_layer] for per-layer slice access
+            inp_pl = ggml.cont(ctx, ggml.permute(ctx, inp_pl, 0, 2, 1, 3));
+            inp_pl.setName("inp_per_layer");
+
+            graph.buildForwardExpand(inp_pl);
+            break :blk inp_pl;
+        } else null;
 
         for (w.layers, 0..) |*layer, i| {
             // Gemma 4: head_dim 由 attn_q_norm 维度决定（per-layer，与 llama.cpp n_embd_head_k(il) 一致）
@@ -241,12 +282,17 @@ pub const Gemma4Model = struct {
 
             // RoPE 参数
             const layer_is_swa = p.is_swa_layer.items[i];
+
+            // Per-layer dimensions for shared KV debugging (set log level to debug to see)
+            log.debug("Layer {d}: is_swa={}, has_kv={}, head_dim={d}, head_dim_k={d}", .{
+                i, layer_is_swa, layer.has_kv, head_dim, if (layer.has_kv) layer.attn_k_norm_weight.ne()[0] else @as(i64, 0),
+            });
+
             const freq_base_l: f32 = if (layer_is_swa and p.rope_freq_base_swa > 0)
                 p.rope_freq_base_swa
             else
                 p.base.rope_theta;
             const freq_scale_l: f32 = 1.0;
-            // SWA 层使用较小的 rope_dim_swa（因为 head_dim 更小），全注意力层使用 base.rope_dim
             // 同时确保 rope_dim 不超过 head_dim（防止 ggml_rope 断言 n_dims <= ne0）
             const rope_dim_full: u32 = if (p.rope_dim_swa > 0 and layer_is_swa)
                 @min(p.rope_dim_swa, @as(u32, @intCast(head_dim)))
@@ -390,13 +436,39 @@ pub const Gemma4Model = struct {
             // 残差连接
             cur = ggml.add(ctx, cur, ffn_normed);
 
+            // --- Per-layer embedding (matches llama.cpp gemma4.cpp order) ---
+            if (inp_per_layer) |inp_pl| {
+                if (layer.per_layer_inp_gate) |pl_gate| {
+                    const n_embd_pl: i64 = @intCast(p.n_embd_per_layer);
+                    const pe_in = cur; // save for residual
+
+                    // Gate projection: [n_embd, n_tokens] -> [n_embd_per_layer, n_tokens]
+                    cur = ggml.mulMat(ctx, pl_gate, cur);
+                    cur = ggml.gelu(ctx, cur);
+
+                    // Slice inp_per_layer[il]: view2d of [n_embd_per_layer, n_tokens, n_layer]
+                    const elem_size = @sizeOf(f32); // inp_per_layer is F32 after cont
+                    const slice_offset: usize = @as(usize, @intCast(i)) * @as(usize, @intCast(n_embd_pl)) * @as(usize, @intCast(n_tokens_i64)) * elem_size;
+                    const inp_this = ctx.view2d(inp_pl, n_embd_pl, n_tokens_i64, inp_pl.nb()[1], slice_offset);
+
+                    cur = ggml.mul(ctx, cur, inp_this);
+
+                    // Project back: [n_embd_per_layer, n_tokens] -> [n_embd, n_tokens]
+                    cur = ggml.mulMat(ctx, layer.per_layer_proj.?, cur);
+
+                    // Post-norm
+                    cur = rms_norm.rmsNorm(ctx, cur, layer.per_layer_post_norm.?, p.base.norm_eps);
+
+                    // Residual connection
+                    cur = ggml.add(ctx, pe_in, cur);
+                }
+            }
+
             // --- Layer output scale（可选） ---
             if (layer.out_scale) |scale| {
                 cur = ggml.mul(ctx, cur, scale);
             }
         }
-
-        // --- 最终 RMSNorm ---
         cur = rms_norm.rmsNorm(ctx, cur, w.base.output_norm_weight, p.base.norm_eps);
         cur.setName("output_norm");
 
@@ -467,12 +539,9 @@ pub const Gemma4Model = struct {
         _ = data;
     }
 };
-
-// ============================================================================
-// 辅助函数
-// ============================================================================
-
-/// GeGLU FFN: gate(h) * up(h) -> down
+/// GeGLU FFN: gelu(h @ W_gate) * (h @ W_up) -> down
+/// Gemma 4 uses GeGLU (GELU-gated Linear Unit) activation,
+/// matching llama.cpp's LLM_FFN_GELU.
 fn gegluFFN(
     ctx: *ggml.Context,
     x: *ggml.Tensor,
@@ -550,6 +619,12 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
         gguf_file.getU32("llama.block_count") orelse 0;
     p.base.n_ff = gguf_file.getU32("gemma4.feed_forward_length") orelse
         gguf_file.getU32("llama.feed_forward_length") orelse 0;
+
+    // Fallback: if n_ff is still 0, derive from n_embd (Gemma 4 uses 4 * n_embd)
+    if (p.base.n_ff == 0 and p.base.n_embd > 0) {
+        p.base.n_ff = 4 * p.base.n_embd;
+        log.info("n_ff not specified in GGUF, using default 4 * n_embd = {d}", .{p.base.n_ff});
+    }
 
     // Gemma 4 uses explicit key_length/value_length for head_dim
     // n_head_dim_k/n_head_dim_v 使用 SWA 维度（所有层的 K/V norm 维度一致）
@@ -634,9 +709,9 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
         return error.InvalidModelParams;
     }
 
-    log.info("Gemma4: vocab={d}, embd={d}, heads={d}, kv_heads={d}, layers={d}, ff={d}, swa={d}, shared_kv={d}, softcap={d}", .{
+    log.info("Gemma4: vocab={d}, embd={d}, heads={d}, kv_heads={d}, layers={d}, ff={d}, swa={d}, shared_kv={d}, softcap={d}, embd_per_layer={d}", .{
         p.base.n_vocab, p.base.n_embd, p.base.n_head, p.base.n_kv_head,
-        p.base.n_layer, p.base.n_ff, p.n_swa, p.n_kv_shared_layers, p.final_logit_softcapping,
+        p.base.n_layer, p.base.n_ff, p.n_swa, p.n_kv_shared_layers, p.final_logit_softcapping, p.n_embd_per_layer,
     });
 
     return p;
@@ -649,11 +724,11 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
 fn loadWeights(
     gguf_file: *const gguf.GGUFFile,
     ctx: *ggml.Context,
-    params: *const Gemma4Params,
+    params: *Gemma4Params,
     allocator: std.mem.Allocator,
 ) !Gemma4Weights {
     const n_layer: usize = @intCast(params.base.n_layer);
-    log.info("Loading Gemma 4 weights...", .{});
+    log.info("Loading Gemma 4 weights ({d} layers)...", .{n_layer});
 
     const token_embd = findOrCreateTensor(ctx, gguf_file, "token_embd.weight") catch |err| {
         log.err("Failed to load token_embd.weight: {}", .{err});
@@ -669,6 +744,36 @@ fn loadWeights(
         return error.MissingWeight;
     };
     output_norm_weight.setName("output_norm.weight");
+
+    // Per-layer embedding global weights (only when n_embd_per_layer > 0)
+    const per_layer_token_embd: ?*ggml.Tensor = if (params.n_embd_per_layer > 0)
+        blk: {
+            const t = findOrCreateTensor(ctx, gguf_file, "per_layer_token_embd.weight") catch null;
+            if (t) |tt| tt.setName("per_layer_token_embd.weight");
+            break :blk t;
+        }
+    else
+        null;
+    const per_layer_model_proj: ?*ggml.Tensor = if (params.n_embd_per_layer > 0)
+        blk: {
+            const t = findOrCreateTensor(ctx, gguf_file, "per_layer_model_proj.weight") catch null;
+            if (t) |tt| tt.setName("per_layer_model_proj.weight");
+            break :blk t;
+        }
+    else
+        null;
+    const per_layer_proj_norm: ?*ggml.Tensor = if (params.n_embd_per_layer > 0)
+        blk: {
+            const t = findOrCreateTensor(ctx, gguf_file, "per_layer_proj_norm.weight") catch null;
+            if (t) |tt| tt.setName("per_layer_proj_norm.weight");
+            break :blk t;
+        }
+    else
+        null;
+
+    if (per_layer_token_embd != null) {
+        log.info("Gemma4: per-layer embedding enabled (n_embd_per_layer={d})", .{params.n_embd_per_layer});
+    }
 
     var layers = try allocator.alloc(LayerWeights, n_layer);
     var layers_loaded: usize = 0;
@@ -686,18 +791,15 @@ fn loadWeights(
         global_rope_freqs = findOrCreateTensor(ctx, gguf_file, "rope_freqs.weight") catch null;
     }
 
+    // Derive n_ff from first layer's FFN gate weight shape
+    var n_ff_derived: i64 = params.base.n_ff;
+
     for (0..n_layer) |i| {
         const prefix = try std.fmt.allocPrint(allocator, "blk.{d}", .{i});
 
-        const has_kv: bool = if (params.n_layer_kv_from_start > 0)
-            i < params.n_layer_kv_from_start
-        else
-            true;
-
-        const k_weight = if (has_kv)
-            loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch null
-        else
-            null;
+        // Detect has_kv: check if attn_k.weight exists for this layer
+        const k_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch null;
+        const has_kv: bool = k_weight != null;
         const v_weight = if (has_kv)
             loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight") catch null
         else
@@ -714,6 +816,28 @@ fn loadWeights(
 
         const out_scale = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "layer_output_scale.weight") catch null;
 
+        // Per-layer embedding weights
+        const per_layer_inp_gate: ?*ggml.Tensor = if (params.n_embd_per_layer > 0)
+            loadLayerWeight(ctx, gguf_file, prefix, "inp_gate.weight") catch null
+        else
+            null;
+        const per_layer_proj: ?*ggml.Tensor = if (params.n_embd_per_layer > 0)
+            loadLayerWeight(ctx, gguf_file, prefix, "proj.weight") catch null
+        else
+            null;
+        const per_layer_post_norm: ?*ggml.Tensor = if (params.n_embd_per_layer > 0)
+            loadLayerWeight(ctx, gguf_file, prefix, "post_norm.weight") catch null
+        else
+            null;
+
+        const ffn_gate = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight");
+
+        // Derive n_ff from first layer
+        if (i == 0) {
+            n_ff_derived = ffn_gate.ne()[1];
+            log.info("Layer 0 FFN gate: [{d}, {d}], n_embd={d}", .{ ffn_gate.ne()[0], ffn_gate.ne()[1], params.base.n_embd });
+        }
+
         // Gemma 4: all full-attention layers share the global rope_freqs
         layers[i] = LayerWeights{
             .prefix = prefix,
@@ -721,24 +845,39 @@ fn loadWeights(
             .ffn_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight"),
             .attn_q_norm_weight = q_norm,
             .attn_k_norm_weight = if (k_norm) |kn| kn else q_norm,
-            // Gemma 4 使用 post_attention_norm / post_ffw_norm 命名
             .attn_post_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "post_attention_norm.weight"),
             .ffn_post_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "post_ffw_norm.weight"),
             .attn_q_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight"),
             .attn_k_weight = k_weight,
             .attn_v_weight = v_weight,
             .attn_output_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight"),
-            .ffn_gate_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight"),
+            .ffn_gate_weight = ffn_gate,
             .ffn_up_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight"),
             .ffn_down_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight"),
             .out_scale = out_scale,
             .rope_freqs = if (!params.is_swa_layer.items[i]) global_rope_freqs else null,
+            .per_layer_inp_gate = per_layer_inp_gate,
+            .per_layer_proj = per_layer_proj,
+            .per_layer_post_norm = per_layer_post_norm,
             .has_kv = has_kv,
         };
+
         layers_loaded = i + 1;
     }
 
-    log.info("All Gemma 4 weights loaded ({d} layers, {d} with KV)", .{ n_layer, params.n_layer_kv_from_start });
+    // Update n_ff from actual weight shape if metadata was missing
+    const n_embd_per_layer = params.n_embd_per_layer;
+    const n_kv_layers = blk: {
+        var count: u32 = 0;
+        for (layers) |l| {
+            if (l.has_kv) count += 1;
+        }
+        break :blk count;
+    };
+
+    log.info("Gemma4 weights: {d} layers, {d} with KV, n_ff={d}, per_layer={d}", .{
+        n_layer, n_kv_layers, n_ff_derived, n_embd_per_layer,
+    });
 
     return Gemma4Weights{
         .base = .{
@@ -748,6 +887,9 @@ fn loadWeights(
             .output_norm_weight = output_norm_weight,
         },
         .layers = layers,
+        .per_layer_token_embd = per_layer_token_embd,
+        .per_layer_model_proj = per_layer_model_proj,
+        .per_layer_proj_norm = per_layer_proj_norm,
     };
 }
 
@@ -763,7 +905,6 @@ fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name:
         const n_dims = info.n_dims;
         const dims = info.dims;
         const typ: ggml.Type = @enumFromInt(@intFromEnum(info.data_type));
-
         ctx.setNoAlloc(false);
         const tensor = switch (n_dims) {
             1 => try ctx.newTensor1d(typ, @intCast(dims[0])),

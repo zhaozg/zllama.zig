@@ -133,39 +133,54 @@ pub const TensorDataType = enum(u32) {
     q5_k = 13,
     q6_k = 14,
     q8_k = 15,
-    i8 = 16,
-    i16 = 17,
-    i32 = 18,
+    iq2_xxs = 16,
+    iq2_xs = 17,
+    iq3_xxs = 18,
+    iq1_s = 19,
+    iq4_nl = 20,
+    iq3_s = 21,
+    iq2_s = 22,
+    iq4_xs = 23,
+    i8 = 24,
+    i16 = 25,
+    i32 = 26,
+    i64 = 27,
+    f64 = 28,
+    iq1_m = 29,
+    bf16 = 30,
     _,
+
+    /// 返回该数据类型每个元素的字节数（近似值，量化类型为块大小平均）
 
     /// 返回该数据类型每个元素的字节数（近似值，量化类型为块大小平均）
     pub fn typeSize(self: TensorDataType) usize {
         return switch (self) {
             .f32 => 4,
-            .f16 => 2,
+            .f16, .bf16 => 2,
+            .f64, .i64 => 8,
             .i8 => 1,
             .i16 => 2,
             .i32 => 4,
-            .q4_0 => 18, // sizeof(block_q4_0) = sizeof(ggml_half) + QK4_0/2 = 2 + 16
-            .q4_1 => 20, // sizeof(block_q4_1) = 2*sizeof(ggml_half) + QK4_1/2 = 4 + 16
-            .q5_0 => 22, // sizeof(block_q5_0) = sizeof(ggml_half) + sizeof(uint32_t) + QK5_0/2 = 2 + 4 + 16
-            .q5_1 => 24, // sizeof(block_q5_1) = 2*sizeof(ggml_half) + sizeof(uint32_t) + QK5_1/2 = 4 + 4 + 16
-            .q8_0 => 34, // sizeof(block_q8_0) = sizeof(ggml_half) + QK8_0 = 2 + 32
-            .q8_1 => 36, // sizeof(block_q8_1) = 2*sizeof(ggml_half) + QK8_1 = 4 + 32
-            .q2_k => 74, // sizeof(block_q2_K)
-            .q3_k => 106, // sizeof(block_q3_K)
-            .q4_k => 144, // sizeof(block_q4_K) = 2*sizeof(ggml_half) + K_SCALE_SIZE + QK_K/2 = 4 + 12 + 128
-            .q5_k => 176, // sizeof(block_q5_K)
-            .q6_k => 210, // sizeof(block_q6_K)
-            .q8_k => 292, // sizeof(block_q8_K)
-            else => 4, // 默认返回 f32 大小
+            .q4_0 => 18,
+            .q4_1 => 20,
+            .q5_0 => 22,
+            .q5_1 => 24,
+            .q8_0 => 34,
+            .q8_1 => 36,
+            .q2_k => 74,
+            .q3_k => 106,
+            .q4_k => 144,
+            .q5_k => 176,
+            .q6_k => 210,
+            .q8_k => 292,
+            else => 4, // 默认返回 f32 大小（兼容未识别类型）
         };
     }
 
     /// 返回该数据类型的块大小
     pub fn blockSize(self: TensorDataType) usize {
         return switch (self) {
-            .f32, .f16, .i8, .i16, .i32 => 1,
+            .f32, .f16, .bf16, .f64, .i8, .i16, .i32, .i64 => 1,
             .q4_0, .q4_1, .q5_0, .q5_1, .q8_0, .q8_1 => 32,
             .q2_k, .q3_k, .q4_k, .q5_k, .q6_k, .q8_k => 256,
             else => 1,

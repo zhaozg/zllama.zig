@@ -3,120 +3,80 @@
 Gemma 4 推理乱码，而 Llama 3、Gemma 3、Qwen3.5 正常，说明问题并非通用的注意力或图构建逻辑，而是 Gemma 4 **特有架构** 的实现偏差。下面我直接对比关键差异，帮你定位剩余缺陷。
 ---
 
-## 0. 任务与参考
+---
 
-实现对 gemma 4 模型的支持,
+## 🔴 核心问题一：前馈网络维度 `n_ff` 为 0（致命）
 
-模型路径:
+日志中明确显示：
+```
+info(gemma4): Gemma4: vocab=262144, embd=1536, heads=8, kv_heads=1, layers=35, ff=0, ...
+```
+`ff=0` 意味着 `parseParams` 未能从 GGUF 文件中读取到 `feed_forward_length`。这导致后续权重加载时，`ffn_gate_weight`、`ffn_up_weight`、`ffn_down_weight` 的形状完全错误（可能为空或维度不匹配），进而使 FFN 层输出随机值，污染整个残差流。
 
-- ~/.cache/models/gemma-4-12b-it-Q4_K_M.gguf
+### 验证方法
+检查 GGUF 文件中是否存在以下任意一个键：
+- `gemma4.feed_forward_length`
+- `llama.feed_forward_length`
 
-参考 [llama.cpp](deps/llama.cpp) 目录下的
+若都不存在，则需要**根据 `n_embd` 和模型类型推导**。对于 Gemma 4，通常 `n_ff = 4 * n_embd`（即 4×1536 = 6144）。你可以手动计算并赋值给 `p.base.n_ff`。
 
-- src/models/gemma4.cpp
-
-## 一、Gemma 4 与正常模型的架构差异
-
-| 特性 | Llama 3 | Gemma 3 | Qwen3.5 | **Gemma 4** (E2B) |
-|------|---------|---------|---------|-------------------|
-| 注意力模式 | 全部全局因果 | 全部全局因果 | 全部全局因果 | **混合**：交替 SWA（滑动窗口 4096）和全局注意力 |
-| 共享 KV 层 | 无 | 无 | 无 | **有**（后 1/3 层不计算 K/V，复用前面层） |
-| GQA 比率 | 1:8（常见）| 1:1 | 1:1 或 1:8 | **1:1**（所有头 KV 头数 = Q 头数） |
-| Q/K 头维度 | 一致 | 一致 | 一致 | **分层变化**：SWA 层 256，全局层 512 |
-| 位置编码 | RoPE (NEOX) | RoPE | RoPE | **RoPE + 每层独立的 `rope_freqs`（全局层用）** |
-| 前 SWA 层是否有特殊 qk_norm？ | 否 | 否 | 否 | **有** `q_norm` / `k_norm`，且 SWA 层头维度为 256 |
-| 注意力 logit 软上限 | 无 | 无 | 无 | llama.cpp 中默认启用 `attn_logit_softcap = 50.0` |
-
-**致命点**：即便你修复了 RoPE mode、freqs 加载和 scale_factor，若 **SWA 掩码** 和 **共享 KV 的引用逻辑** 未正确实现，全局层会读到全零或错乱的历史，导致输出完全无意义。
+### 临时修复
+在 `parseParams` 中，若 `n_ff` 仍为 0，则设置：
+```zig
+if (p.base.n_ff == 0) {
+    p.base.n_ff = 4 * p.base.n_embd;
+    log.warn("n_ff missing, using default 4 * n_embd = {d}", .{p.base.n_ff});
+}
+```
 
 ---
 
-## 🔴 关键缺陷与修正建议
+## 🟠 核心问题二：共享 KV 层维度不匹配（严重）
 
-### 1. SWA 掩码很可能未正确实现
-**现象**：`attention.scaledDotProductAttention` 虽然接收 `window_size` 参数，但需要确认其内部是否真的构造了滑动窗口掩码（只允许当前 token 向前 `window_size` 个 token 的注意力）。如果仅仅是因果掩码，模型会关注到过远的 token，破坏 SWA 层的局部性。
+参数显示：
+- `shared_kv=20` → 后 20 层共享 KV
+- `n_layer_kv_from_start = 35 - 20 = 15`，即前 15 层有各自 KV，后 20 层复用。
+- `swa=512`，但之前提到 SWA 层的 `head_dim` 应为 256，全局层为 512。这里 `swa=512` 可能是滑动窗口大小，而非 head_dim。
 
-**修正**：检查 `attention.zig` 中的 `scaledDotProductAttention` 函数。
+日志中没有打印每层的 `head_dim`，但从代码逻辑可知：
+- SWA 层的 `attn_q_norm_weight.ne()[0]` = 256
+- 全局层的 `attn_q_norm_weight.ne()[0]` = 512
+
+当共享层（例如第 20 层，可能是全局层）复用前面被共享层（例如第 14 层，可能是 SWA 层）的 KV 时：
+- 被共享层的 K/V `head_dim_k_cache` = 256
+- 当前层的 Q `head_dim` = 512
+- 你的代码会执行 `n_head_eff = (n_head * head_dim) / head_dim_k_cache`，将 Q reshape 为 `[head_dim_k_cache, n_head_eff, n_tokens]`，然后注意力计算，输出后再 reshape 回 `[n_head * head_dim, n_tokens]`。
+
+**此过程可能损失信息**，因为注意力输出是基于 256 维的 K/V 空间计算的，却要映射回 512 维。正确的做法是：共享 KV 的层应该**强制与被共享层具有相同的 head_dim**，或者模型设计保证共享层与被共享层的 head_dim 一致。检查你的 `is_swa_layer` 数组，确认被共享层和共享层的类型是否匹配。
+
+### 验证方法
+在 `transformerForward` 中，对每一层打印：
 ```zig
-// 伪代码：当 window_size != null 时，应生成形如
-// mask[i,j] = 0 if j <= i and (i - j) < window_size else -inf
+log.debug("Layer {d}: is_swa={}, has_kv={}, head_dim={}, head_dim_k={}",
+    .{i, layer_is_swa, layer.has_kv, head_dim, if (layer.has_kv) head_dim_k else 0});
 ```
-如果未实现，需要补全。
+对于共享层，还要打印实际从 cache 中读到的 `head_dim_k_cache`。
 
-### 2. 共享 KV 的层索引计算错误
-当前 `findKVLayer` 函数：
-```zig
-fn findKVLayer(p: *const Gemma4Params, layer_idx: usize) usize {
-    if (p.n_layer_kv_from_start > 1 and layer_idx >= p.n_layer_kv_from_start) {
-        const is_swa = p.is_swa_layer.items[layer_idx];
-        if (is_swa) return p.n_layer_kv_from_start - 2;
-        else return p.n_layer_kv_from_start - 1;
-    }
-    return 0;
-}
-```
-**问题**：
-- 当 `n_layer_kv_from_start = 1` 时，`-2` 会下溢（usize 下溢成巨大值）。
-- 总是回退到第 0 层不合理，应该复用**最近的非共享层**。
-- llama.cpp 的实际逻辑是：共享层复用 `n_layer_kv_from_start - 1` 层（对全注意力层）或 `n_layer_kv_from_start - 2`（对 SWA 层），但前提是这些索引有效。
+---
 
-**修正**：参考 llama.cpp `gemma4.cpp` 中的 `llama_build_gemma4` 和 `reuse` 函数：
-```zig
-fn findKVLayer(p: *const Gemma4Params, layer_idx: usize) usize {
-    if (layer_idx >= p.n_layer_kv_from_start) {
-        const is_swa = p.is_swa_layer.items[layer_idx];
-        // 确保减后索引不越界
-        if (is_swa and p.n_layer_kv_from_start >= 2) {
-            return p.n_layer_kv_from_start - 2;
-        } else if (p.n_layer_kv_from_start >= 1) {
-            return p.n_layer_kv_from_start - 1;
-        }
-    }
-    // 如果层本身有 KV，返回自身
-    return layer_idx;
-}
-```
-然后在 `forward` 中，对于非 KV 层应使用 `kv_layer_idx` 从 cache 中读取 K/V。
+## 🟡 其他可疑点
 
-### 3. Proportional RoPE 可能未生效
-代码中全注意力层使用 `global_rope_freqs` 张量，但 `ggml.ropeExt` 是否正确处理了该张量？如果 `ropeExt` 只是将 `freqs` 作为普通输入（如加在位置编码上），而不是按 proportional RoPE 公式进行插值，则位置编码完全错误。
+### 1. RoPE 模式正确但缺少 `rope_freqs`
+日志中没有 `rope_freqs` 加载的信息，说明 `blk.0.rope_freqs.weight` 和 `rope_freqs.weight` 都不存在。因此全注意力层退化到普通 RoPE。这**不是乱码的直接原因**（因为许多模型只用普通 RoPE），但可能影响长文本质量。
 
-**验证**：检查 `rope.zig` 中 `ropeExt` 的实现。若未实现 `freqs` 的语义，需按 llama.cpp 的 `ggml_rope_ext` 实现：
-```c
-// 伪逻辑：如果 freqs 不为空，则使用 freqs 中的频率值代替预计算的基频
-// 具体参考 llama.cpp 中 gemma4 的 rope_freqs 使用方式
-```
+### 2. Softcapping 后 logits 仍有正数
+日志中多次出现正 logit（例如 `best_val=18.527977`），而 `final_logit_softcapping=30`。Softcapping 会限制范围在 `[-30,30]`，正数是正常的。问题不在于绝对值，而在于**概率分布过于平坦**（logits 相差不大），导致采样到的 token 无意义。
 
-### 4. 注意力 logit softcap 未实际应用
-`p.attn_logit_softcapping` 默认为 50.0，但需要确认 `scaledDotProductAttention` 内部是否在 softmax 前对 logits 做了 `tanh` 缩放：
-```python
-logits = logits / cap
-logits = tanh(logits)
-logits = logits * cap
-```
-若未实现，会导致注意力分布过于极端，影响生成质量。
+### 3. Tokenizer 词汇表巨大（262144）
+这通常是 Gemma 的 SentencePiece 词表，包含多语言 token。输出乱码中包含孟加拉语、阿拉伯语等，说明模型未能聚焦于英文 prompt “hello”，而是随机生成了各种语言的 token。
 
-### 5. 内存分配方式可能有隐患
-`ctx_weights` 使用 `ggml.Context.initNoAlloc(mem_size_estimate)` 但未提供实际的内存缓冲区。查看 `ggml` 的 API，`initNoAlloc` 通常需要一个外部预分配的缓冲区。当前写法可能导致后续 `newTensor` 时在未初始化的内存上操作，引发随机崩溃或数据损坏。
+---
 
-**修正**：正确做法是先分配内存，再传入：
-```zig
-const mem_buf = try allocator.alignedAlloc(u8, 64, mem_size_estimate);
-var ctx = try ggml.Context.init(mem_buf, mem_size_estimate);
-```
-或使用 `init` 自动分配。
+## 🛠️ 立即行动方案
 
-### 6. 缺少对 per‑layer embedding 的支持
-虽然文档标记为“暂不支持”，但若模型确实使用了 per‑layer token embedding（例如多模态场景），缺失会导致输入嵌入错误。检查 GGUF 中是否存在 `token_embd_per_layer.weight` 等张量，若有则必须实现。
+1. **修复 `n_ff`**（最紧急）：添加 fallback 计算，重新编译测试。
+2. **检查每层 head_dim**：运行带 `-v` 的简单 prompt，观察层维度输出。如果共享层 head_dim 不匹配，需要确认模型设计是否允许跨 head_dim 共享（通常不允许）。若不允许，应调整 `has_kv` 分配，使共享层与被共享层 head_dim 相同。
+3. **临时禁用共享 KV**：在 `gemma4.zig` 中强制所有层 `has_kv = true`，`n_layer_kv_from_start = n_layer`。这会让模型退化为无共享的普通 Transformer，如果乱码消失，则问题确认为共享层维度不匹配。
+4. **验证 FFN 权重形状**：在 `loadWeights` 中添加断言，确保 `ffn_gate_weight`、`ffn_up_weight`、`ffn_down_weight` 的 `ne[0]` 等于 `n_ff`，`ne[1]` 等于 `n_embd`。
 
-## 🛠️ 建议的调试步骤
-
-1. **临时禁用 SWA 和共享 KV**：在 `forward` 中强制所有层 `layer_is_swa = false`，并让所有层 `has_kv = true`。如果乱码消失，则问题出在 SWA 或共享逻辑。
-2. **打印关键张量**：在注意力计算前打印 Q 和 K 的前几个值，对比 llama.cpp 的输出。
-3. **验证 rope_freqs**：确认 `global_rope_freqs` 是否成功加载（不为 null），并打印其数值。
-4. **修复内存分配**：按正确方式初始化 `ctx_weights`，避免内存损坏。
-
-## 📌 总结
-
-你的 `gemma4.zig` 框架是完整的，但几个关键细节偏离了 llama.cpp 的实现，尤其是 **SWA 掩码** 和 **共享 KV 索引**。优先修复这两点，乱码问题大概率会解决。如果你能提供 `attention.zig` 和 `rope.zig` 中相关函数的实现，我可以给出更精确的修正代码。
-
+完成上述修复后，重新运行 `zllama-simple -p "hello"`，输出应该变为合理的英文单词（例如 “hello” 或 “Hello”）。如果仍有问题，请提供新的日志，特别是每层维度打印和 `n_ff` 修复后的输出。
