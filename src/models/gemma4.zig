@@ -133,7 +133,7 @@ pub const Gemma4Model = struct {
         self.params = try parseParams(gguf_file, allocator);
 
         const mem_size_estimate = estimateMemSize(gguf_file);
-        self.ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
+        self.ctx_weights = try ggml.Context.init(mem_size_estimate);
 
         self.weights = try loadWeights(gguf_file, self.ctx_weights, &self.params, allocator);
     }
@@ -151,7 +151,6 @@ pub const Gemma4Model = struct {
     pub fn getWeights(self: *const Gemma4Model) *const model.ModelWeights {
         return &self.weights.base;
     }
-
 
     /// Forward pass with pre-computed embedding override (for multimodal input).
     /// When embd_override is non-null, the first embd_override.ne()[1] token positions
@@ -188,7 +187,7 @@ pub const Gemma4Model = struct {
         }
         cur.setName("inp_scaled_mm");
 
-        // Position encoding
+        // 位置编码：使用普通位置张量（不是 multi）
         const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
 
         // Main transformer loop (identical to forward())
@@ -213,7 +212,6 @@ pub const Gemma4Model = struct {
         cur = ggml.scale(ctx, cur, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
         cur.setName("inp_scaled");
 
-        // 位置编码
         const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
 
         return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr);
@@ -271,7 +269,8 @@ pub const Gemma4Model = struct {
 
             // RoPE on Q（全注意力层使用 rope_freqs 做 proportional rope）
             const rope_freqs: ?*ggml.Tensor = if (!layer_is_swa) layer.rope_freqs else null;
-            q = ggml.ropeExt(ctx, q, pos_tensor, rope_freqs, @intCast(rope_dim), 0, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
+            // 修复: mode=2 (NEOX 风格，与 LLaMA/Gemma 3 一致)
+            q = ggml.ropeExt(ctx, q, pos_tensor, rope_freqs, @intCast(rope_dim), 2, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
 
             // --- K/V 投影 + 注意力 ---
             var attn_out: *ggml.Tensor = undefined;
@@ -301,8 +300,8 @@ pub const Gemma4Model = struct {
                 // V RMSNorm (no weight)
                 v_tensor = ggml.rmsNorm(ctx, v_tensor, p.base.norm_eps);
 
-                // RoPE on K
-                k = ggml.ropeExt(ctx, k, pos_tensor, rope_freqs, @intCast(rope_dim), 0, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
+                // RoPE on K (mode=2)
+                k = ggml.ropeExt(ctx, k, pos_tensor, rope_freqs, @intCast(rope_dim), 2, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
 
                 // Gemma 4: Q may have larger head_dim than K.
                 // Reshape Q to match K's head_dim BEFORE permute.
@@ -331,63 +330,31 @@ pub const Gemma4Model = struct {
                     .n_tokens = n_tokens_i64,
                     .cache_len = cache_len,
                     .start_pos = start_pos,
-                    .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim_k))),
+                    .scale_factor = p.f_attention_scale,
                     .attn_logit_softcap = p.attn_logit_softcapping,
                 }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
                 // Reshape attn_out back to original Q dimension
                 attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
             } else {
-                // 非 KV 层：复用前面层的 KV（来自 cache 或实时计算）
-                const kv_layer_idx = findKVLayer(w, i);
-                const kv_layer = &w.layers[kv_layer_idx];
+                // 非 KV 层：必须从 KV cache 中复用前面层的 KV
+                const kv_layer_idx = findKVLayer(p, i);
 
-                var k: *ggml.Tensor = undefined;
-                var v_tensor: *ggml.Tensor = undefined;
-                var head_dim_k_cache: i64 = undefined;
-                var n_kv_head_cache: i64 = undefined;
-
-                if (kv_cache_mgr) |cache| {
-                    k = cache.getKView(ctx, kv_layer_idx);
-                    v_tensor = cache.getVView(ctx, kv_layer_idx);
-                    head_dim_k_cache = k.ne()[0];
-                    n_kv_head_cache = k.ne()[1];
-                } else {
-                    // No KV cache: compute K/V from nearest KV layer's weights
-                    head_dim_k_cache = kv_layer.attn_k_norm_weight.ne()[0];
-                    n_kv_head_cache = if (kv_layer.attn_k_weight) |kw|
-                        @divExact(kw.ne()[1], head_dim_k_cache)
-                    else
-                        n_head;
-
-                    k = ggml.mulMat(ctx, kv_layer.attn_k_weight.?, attn_input);
-                    v_tensor = if (kv_layer.attn_v_weight) |vw|
-                        ggml.mulMat(ctx, vw, attn_input)
-                    else
-                        k;
-
-                    k = ggml.reshape3d(ctx, k, head_dim_k_cache, n_kv_head_cache, n_tokens_i64);
-                    v_tensor = ggml.reshape3d(ctx, v_tensor, head_dim_k_cache, n_kv_head_cache, n_tokens_i64);
-
-                    k = ggml.reshape2d(ctx, k, head_dim_k_cache, n_kv_head_cache * n_tokens_i64);
-                    k = ggml.rmsNorm(ctx, k, p.base.norm_eps);
-                    k = ggml.mul(ctx, k, ggml.reshape2d(ctx, kv_layer.attn_k_norm_weight, head_dim_k_cache, 1));
-                    k = ggml.reshape3d(ctx, k, head_dim_k_cache, n_kv_head_cache, n_tokens_i64);
-
-                    v_tensor = ggml.rmsNorm(ctx, v_tensor, p.base.norm_eps);
-                    k = ggml.ropeExt(ctx, k, pos_tensor, rope_freqs, @intCast(rope_dim), 0, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
-                }
+                // 共享 KV 层必须使用 KV cache
+                const cache = kv_cache_mgr orelse @panic("Shared KV layer requires KV cache");
+                const k = cache.getKView(ctx, kv_layer_idx);
+                const v_tensor = cache.getVView(ctx, kv_layer_idx);
+                const head_dim_k_cache: i64 = k.ne()[0];
+                const n_kv_head_cache: i64 = k.ne()[1];
 
                 var n_head_eff = n_head;
                 if (head_dim != head_dim_k_cache) {
+                    // Q 的 head_dim 可能大于 K 的 head_dim（例如 SWA 层与全注意力层）
                     n_head_eff = @divExact(n_head * head_dim, head_dim_k_cache);
                     q = ggml.reshape3d(ctx, q, head_dim_k_cache, n_head_eff, n_tokens_i64);
                 }
 
-                const cache_len: i64 = if (kv_cache_mgr) |cache|
-                    @as(i64, @intCast(cache.currentLen()))
-                else
-                    n_tokens_i64;
+                const cache_len: i64 = @as(i64, @intCast(cache.currentLen()));
 
                 attn_out = attention.scaledDotProductAttention(ctx, q, k, v_tensor, .{
                     .n_head = n_head_eff,
@@ -396,7 +363,7 @@ pub const Gemma4Model = struct {
                     .n_tokens = n_tokens_i64,
                     .cache_len = cache_len,
                     .start_pos = start_pos,
-                    .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim_k_cache))),
+                    .scale_factor = p.f_attention_scale,
                     .attn_logit_softcap = p.attn_logit_softcapping,
                 }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
@@ -520,13 +487,23 @@ fn gegluFFN(
     return ggml.mulMat(ctx, down_w, mul_out);
 }
 
-/// 查找指定层之前最近的有 KV 的层索引
-fn findKVLayer(w: *const Gemma4Weights, layer_idx: usize) usize {
-    var idx: usize = layer_idx;
-    while (idx > 0) {
-        idx -= 1;
-        if (w.layers[idx].has_kv) return idx;
+/// 查找非 KV 层应该复用哪个层的 KV
+/// 参考 llama.cpp gemma4 的 reuse lambda:
+///   if il >= n_layer_kv_from_start:
+///     return n_layer_kv_from_start - (is_swa ? 2 : 1)
+/// 调用者保证 layer_idx >= n_layer_kv_from_start（即该层没有自己的 KV）
+fn findKVLayer(p: *const Gemma4Params, layer_idx: usize) usize {
+    // 根据 llama.cpp 的 reuse 实现
+    if (layer_idx >= p.n_layer_kv_from_start) {
+        const is_swa = p.is_swa_layer.items[layer_idx];
+        if (is_swa and p.n_layer_kv_from_start >= 2) {
+            return p.n_layer_kv_from_start - 2;
+        } else if (p.n_layer_kv_from_start >= 1) {
+            return p.n_layer_kv_from_start - 1;
+        }
     }
+    // 理论上不应该走到这里，因为该层应该 has_kv==false
+    // 返回 0 作为 fallback（第 0 层通常有 KV）
     return 0;
 }
 
@@ -702,8 +679,12 @@ fn loadWeights(
         allocator.free(layers);
     }
 
-    // Gemma 4: rope_freqs is global, shared across all full-attention layers
-    const global_rope_freqs = findOrCreateTensor(ctx, gguf_file, "rope_freqs.weight") catch null;
+    // Gemma 4: rope_freqs is per-layer (blk.0.rope_freqs.weight), shared
+    // across all full-attention layers (llama.cpp uses TENSOR_DUPLICATED).
+    var global_rope_freqs = findOrCreateTensor(ctx, gguf_file, "blk.0.rope_freqs.weight") catch null;
+    if (global_rope_freqs == null) {
+        global_rope_freqs = findOrCreateTensor(ctx, gguf_file, "rope_freqs.weight") catch null;
+    }
 
     for (0..n_layer) |i| {
         const prefix = try std.fmt.allocPrint(allocator, "blk.{d}", .{i});
@@ -730,7 +711,6 @@ fn loadWeights(
             loadLayerWeight(ctx, gguf_file, prefix, "attn_k_norm.weight") catch null
         else
             null;
-
 
         const out_scale = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "layer_output_scale.weight") catch null;
 
