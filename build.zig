@@ -222,6 +222,14 @@ pub fn build(b: *std.Build) void {
     });
     sampler_mod.addImport("ggml", ggml_mod);
 
+    const chat_template_mod = b.createModule(.{
+        .root_source_file = b.path("src/chat_template.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    chat_template_mod.addImport("model", model_mod);
+
     // ======================================================================
 
     // --- 多模态模块 ---
@@ -323,6 +331,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("stb_image", stb_image_mod);
     exe_mod.addImport("pooling", pooling_mod);
     exe_mod.addImport("engine_common", engine_common_mod);
+    exe_mod.addImport("chat_template", chat_template_mod);
 
 
     const exe = b.addExecutable(.{
@@ -374,6 +383,7 @@ pub fn build(b: *std.Build) void {
     simple_mod.addImport("graph_context", graph_context_mod);
     simple_mod.addImport("mm", mm_manager_mod);
     simple_mod.addImport("preprocess", mm_preprocess_mod);
+    simple_mod.addImport("chat_template", chat_template_mod);
     const simple_exe = b.addExecutable(.{
         .name = "zllama-simple",
         .root_module = simple_mod,

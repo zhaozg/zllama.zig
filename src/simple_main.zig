@@ -10,45 +10,31 @@ const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
 const kv_cache = @import("kv_cache");
 const engine_common = @import("engine_common");
+const chat_template = @import("chat_template");
 
 const logger = std.log.scoped(.simple);
 
 pub const std_options: std.Options = .{
-    .log_level = .debug,
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .tokenizer, .level = .warn },
-        .{ .scope = .simple, .level = .debug },
-        .{ .scope = .ggml, .level = .warn },
-        .{ .scope = .qwen, .level = .warn },
-        .{ .scope = .llama, .level = .warn },
-        .{ .scope = .model, .level = .warn },
-        .{ .scope = .registry, .level = .warn },
-        .{ .scope = .kv_cache, .level = .warn },
-        .{ .scope = .gemma4, .level = .debug },
-    },
+    .log_level = .info,
     .logFn = engine_common.logFilter,
 };
 
 fn printUsage(argv0: []const u8) void {
     std.debug.print(
-        \\usage: {s} [options] [prompt]
+        \\Usage: {s} [options] [prompt]
         \\
-        \\The simple program generates text using a given model.
-        \\It needs a model file and a prompt, and optionally other flags
-        \\to control the generation process.
-        \\
-        \\    The possible options are:
-        \\
-        \\    -h, --help                           print this help and exit
-        \\    -m MODEL_PATH, --model MODEL_PATH    path to model.
-        \\    -n N, --max-tokens N                 maximum number of tokens to generate (default: 32)
-        \\    -t F, --temperature F                temperature for sampling (default: 0.7)
-        \\    -k N, --top-k N                     top-k sampling (default: 40)
-        \\    -tp F, --top-p F                    top-p sampling (default: 0.9)
-        \\    -th N, --threads N                  number of threads (default: auto)
-        \\    -v, --verbose                        verbose output
-        \\    -d, --debug                          debug output
-        \\    --benchmark                          benchmark mode (only show speed stats)
+        \\Options:
+        \\  -h, --help             Show this help
+        \\  -m, --model <path>     Model file path (GGUF)
+        \\  -n, --max-tokens <N>   Max tokens to generate (default: 32)
+        \\  -t, --temperature <T>  Temperature (default: 0.7)
+        \\  -k, --top-k <K>        Top-K sampling (default: 40)
+        \\  -tp, --top-p <P>       Top-P sampling (default: 0.9)
+        \\  -th, --threads <N>     Number of threads (default: auto)
+        \\  -v, --verbose          Verbose output
+        \\  -d, --debug            Debug output
+        \\  --benchmark            Benchmark mode
+        \\  --info                 Print model info and exit
         \\
     , .{argv0});
 }
@@ -66,6 +52,10 @@ const CliArgs = struct {
     help: bool = false,
     benchmark: bool = false,
     info: bool = false,
+    // Chat template
+    chat_template_name: []const u8 = "",
+    system_prompt: []const u8 = "",
+    no_chat_template: bool = false,
 
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
@@ -95,6 +85,12 @@ const CliArgs = struct {
             } else if (std.mem.eql(u8, arg, "--info")) {
                 result.info = true;
                 logger.warn("unknown argument '{s}'", .{arg});
+            } else if (std.mem.eql(u8, arg, "--chat-template")) {
+                result.chat_template_name = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--system-prompt")) {
+                result.system_prompt = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--no-chat-template")) {
+                result.no_chat_template = true;
             } else {
                 result.prompt = arg;
             }
@@ -119,6 +115,10 @@ const SimpleEngine = struct {
 
     inc_ctx: graph_context.IncContext,
     benchmark: bool,
+
+    // Chat template
+    chat_template_source: ?chat_template.TemplateSource = null,
+    system_prompt: []const u8 = "",
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: []const u8, cli_args: *const CliArgs) !SimpleEngine {
         logger.info("Loading model: {s}", .{model_path});
@@ -215,6 +215,28 @@ const SimpleEngine = struct {
         const inc_ctx_size = 512 * 1024 * 1024; // 512MB for incremental
         const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
 
+        // Resolve chat template source
+        var chat_template_source: ?chat_template.TemplateSource = null;
+        var system_prompt: []const u8 = "";
+        if (cli_args.system_prompt.len > 0) {
+            system_prompt = try allocator.dupe(u8, cli_args.system_prompt);
+        }
+        if (cli_args.no_chat_template) {
+            // Disabled - no template
+            chat_template_source = null;
+        } else if (cli_args.chat_template_name.len > 0) {
+            if (chat_template.TemplateKind.fromString(cli_args.chat_template_name)) |kind| {
+                chat_template_source = chat_template.TemplateSource{ .preset = kind };
+                logger.info("Chat template: {s} (from --chat-template)", .{cli_args.chat_template_name});
+            } else {
+                logger.warn("Unknown chat template '{s}', falling back to arch default", .{cli_args.chat_template_name});
+            }
+        } else if (gguf_file.getString("tokenizer.chat_template")) |tmpl_str| {
+            const owned = try allocator.dupe(u8, tmpl_str);
+            chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
+            logger.info("Chat template: from GGUF metadata", .{});
+        }
+
         return SimpleEngine{
             .allocator = allocator,
             .ctx_weights = ctx_weights,
@@ -229,6 +251,8 @@ const SimpleEngine = struct {
             .gguf_data = gguf_data,
             .inc_ctx = inc_ctx,
             .benchmark = cli_args.benchmark,
+            .chat_template_source = chat_template_source,
+            .system_prompt = system_prompt,
         };
     }
 
@@ -246,6 +270,29 @@ const SimpleEngine = struct {
         self.allocator.free(self.gguf_data);
     }
 
+    /// Apply chat template to the user prompt.
+    /// Returns the formatted prompt (caller owns memory).
+    fn applyChatTemplate(self: *SimpleEngine, user_prompt: []const u8) ![]const u8 {
+        // If --no-chat-template is set, pass through raw prompt
+        if (self.chat_template_source == null and self.system_prompt.len == 0) {
+            return self.allocator.dupe(u8, user_prompt);
+        }
+
+        // Resolve template source
+        const source = self.chat_template_source orelse
+            chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
+
+        var tmpl = try chat_template.resolve(self.allocator, source, self.arch);
+        defer tmpl.deinit(self.allocator);
+
+        const messages = [_]chat_template.ChatMessage{
+            chat_template.ChatMessage.init("user", user_prompt),
+        };
+
+        const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+        return tmpl.apply(self.allocator, &messages, system, true);
+    }
+
     /// Decode a single token and write to stdout
     fn decodeAndPrintToken(self: *SimpleEngine, io: std.Io, token_id: u32) !void {
         var buf: [128]u8 = undefined;
@@ -256,7 +303,11 @@ const SimpleEngine = struct {
         }
     }
     pub fn generate(self: *SimpleEngine, io: std.Io, prompt: []const u8, max_tokens: u32) !void {
-        var input_tokens = try self.tok.encode(prompt, true);
+        // Apply chat template
+        const formatted_prompt = try self.applyChatTemplate(prompt);
+        defer self.allocator.free(formatted_prompt);
+
+        var input_tokens = try self.tok.encode(formatted_prompt, true);
         defer input_tokens.deinit(self.allocator);
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
 

@@ -27,6 +27,7 @@ const kv_cache = @import("kv_cache");
 const mm = @import("mm");
 const preprocess = @import("preprocess");
 const engine_common = @import("engine_common");
+const chat_template = @import("chat_template");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -66,6 +67,10 @@ const CliArgs = struct {
     mmproj_path: [:0]const u8 = "",
     image_path: [:0]const u8 = "",
     audio_path: [:0]const u8 = "",
+    // Chat template
+    chat_template_name: []const u8 = "",
+    system_prompt: []const u8 = "",
+    no_chat_template: bool = false,
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
         _ = args_it.next();
@@ -105,6 +110,12 @@ const CliArgs = struct {
             } else if (std.mem.eql(u8, arg, "--embd-normalize")) {
                 const val = args_it.next() orelse return error.InvalidArgs;
                 result.embed_normalize = std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
+            } else if (std.mem.eql(u8, arg, "--chat-template")) {
+                result.chat_template_name = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--system-prompt")) {
+                result.system_prompt = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--no-chat-template")) {
+                result.no_chat_template = true;
             } else {
                 logger.warn("unknown argument '{s}'", .{arg});
             }
@@ -127,6 +138,11 @@ const CliArgs = struct {
             \\  -d, --debug           调试日志输出 (debug 级别)
             \\  --benchmark           benchmark 模式
             \\  -c, --chat            交互式聊天模式
+            \\
+            \\对话模板选项:
+            \\  --chat-template <名称> 指定对话模板 (chatml | llama3 | gemma)
+            \\  --system-prompt <文本> 指定系统提示词
+            \\  --no-chat-template     禁用对话模板，原始 prompt 透传
             \\
             \\嵌入模式选项:
             \\  --embed               启用嵌入向量生成模式
@@ -163,6 +179,10 @@ const InferenceEngine = struct {
     // Multimodal support
     mm_manager: ?mm.MultiModalManager = null,
     capabilities: model_if.ModelCapabilities = .{},
+
+    // Chat template
+    chat_template_source: ?chat_template.TemplateSource = null,
+    system_prompt: []const u8 = "",
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
         const cwd = std.Io.Dir.cwd();
@@ -257,6 +277,32 @@ const InferenceEngine = struct {
             logger.warn("  Use --mmproj <path> to load vision/audio encoder weights", .{});
         }
 
+        // Resolve chat template source
+        // Priority: --chat-template > --no-chat-template > GGUF built-in > arch default
+        var chat_template_source: ?chat_template.TemplateSource = null;
+        var system_prompt: []const u8 = "";
+        if (cli_args.system_prompt.len > 0) {
+            system_prompt = try allocator.dupe(u8, cli_args.system_prompt);
+        }
+        if (cli_args.no_chat_template) {
+            // Disabled - no template
+            chat_template_source = null;
+        } else if (cli_args.chat_template_name.len > 0) {
+            // User-specified preset
+            if (chat_template.TemplateKind.fromString(cli_args.chat_template_name)) |kind| {
+                chat_template_source = chat_template.TemplateSource{ .preset = kind };
+                logger.info("Chat template: {s} (from --chat-template)", .{cli_args.chat_template_name});
+            } else {
+                logger.warn("Unknown chat template '{s}', falling back to arch default", .{cli_args.chat_template_name});
+            }
+        } else if (gguf_file.getString("tokenizer.chat_template")) |tmpl_str| {
+            // GGUF built-in template
+            const owned = try allocator.dupe(u8, tmpl_str);
+            chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
+            logger.info("Chat template: from GGUF metadata", .{});
+        }
+        // If no source resolved, will use arch default in generate()
+
 
         const sampler_state = sampler.Sampler.init(.{
             .temperature = cli_args.temperature,
@@ -282,6 +328,8 @@ const InferenceEngine = struct {
             .inc_ctx = inc_ctx,
             .mm_manager = mm_manager,
             .capabilities = capabilities,
+            .chat_template_source = chat_template_source,
+            .system_prompt = system_prompt,
         };
     }
 
@@ -302,9 +350,36 @@ const InferenceEngine = struct {
         self.kv_cache_mgr.deinit(self.allocator);
     }
 
+    /// Apply chat template to the user prompt.
+    /// Returns the formatted prompt (caller owns memory).
+    fn applyChatTemplate(self: *InferenceEngine, user_prompt: []const u8) ![]const u8 {
+        // If --no-chat-template is set, pass through raw prompt
+        if (self.chat_template_source == null and self.system_prompt.len == 0) {
+            return self.allocator.dupe(u8, user_prompt);
+        }
+
+        // Resolve template source
+        const source = self.chat_template_source orelse
+            chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
+
+        var tmpl = try chat_template.resolve(self.allocator, source, self.arch);
+        defer tmpl.deinit(self.allocator);
+
+        const messages = [_]chat_template.ChatMessage{
+            chat_template.ChatMessage.init("user", user_prompt),
+        };
+
+        const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+        return tmpl.apply(self.allocator, &messages, system, true);
+    }
+
     pub fn generate(self: *InferenceEngine, io: std.Io, prompt: []const u8, max_tokens: u32) !void {
+        // Apply chat template
+        const formatted_prompt = try self.applyChatTemplate(prompt);
+        defer self.allocator.free(formatted_prompt);
+
         // Encode prompt, adding special tokens (BOS/EOS)
-        var input_tokens = try self.tok.encode(prompt, true);
+        var input_tokens = try self.tok.encode(formatted_prompt, true);
         defer input_tokens.deinit(self.allocator);
 
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
@@ -507,7 +582,7 @@ const InferenceEngine = struct {
         return result;
     }
 
-        /// 交互式聊天循环
+    /// Interactive chat loop with multi-turn context
     pub fn chatLoop(self: *InferenceEngine, io: std.Io) !void {
         const stdin = std.Io.File.stdin();
         const stdout = std.Io.File.stdout();
@@ -521,6 +596,10 @@ const InferenceEngine = struct {
             for (history.items) |item| self.allocator.free(item);
             history.deinit(self.allocator);
         }
+
+        // Multi-turn conversation history
+        var chat_history = std.ArrayListUnmanaged(chat_template.ChatMessage){ .items = &.{}, .capacity = 0 };
+        defer chat_history.deinit(self.allocator);
 
         while (true) {
             try stdout.writeStreamingAll(io, ">>> ");
@@ -552,22 +631,125 @@ const InferenceEngine = struct {
                     try stdout.writeStreamingAll(io, "  /clear    Clear screen\n");
                     try stdout.writeStreamingAll(io, "  /exit     Quit\n");
                     try stdout.writeStreamingAll(io, "  /reset    Reset KV cache\n");
+                    try stdout.writeStreamingAll(io, "  /new      Start new conversation (clear history)\n");
                 } else if (std.mem.eql(u8, line, "/clear")) {
                     try stdout.writeStreamingAll(io, "\x1b[2J\x1b[H");
                 } else if (std.mem.eql(u8, line, "/reset")) {
                     self.kv_cache_mgr.reset();
                     try stdout.writeStreamingAll(io, "KV cache reset.\n");
+                } else if (std.mem.eql(u8, line, "/new")) {
+                    chat_history.clearAndFree(self.allocator);
+                    self.kv_cache_mgr.reset();
+                    try stdout.writeStreamingAll(io, "New conversation started.\n");
                 } else {
                     try stdout.writeStreamingAll(io, "Unknown command. Try /help.\n");
                 }
                 continue;
             }
 
-            try stdout.writeStreamingAll(io, ">>> ");
-            self.generate(io, line, 512) catch |err| {
-                logger.err("Generation failed: {}\n", .{err});
-            };
+            // Add user message to chat history
+            try chat_history.append(self.allocator, chat_template.ChatMessage.init("user", line));
+
+            // Format with multi-turn template
+            const source = self.chat_template_source orelse
+                chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
+            var tmpl = try chat_template.resolve(self.allocator, source, self.arch);
+            defer tmpl.deinit(self.allocator);
+
+            const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+            const formatted_prompt = try tmpl.apply(self.allocator, chat_history.items, system, true);
+            defer self.allocator.free(formatted_prompt);
+
+            // Reset KV cache for each turn (full prompt processing)
+            self.kv_cache_mgr.reset();
+
+            // Encode and generate
+            var input_tokens = try self.tok.encode(formatted_prompt, true);
+            defer input_tokens.deinit(self.allocator);
+
+            const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
+
+            // --- Prompt processing ---
+            self.ctx_graph.setNoAlloc(false);
+            const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
+            self.ctx_graph.setNoAlloc(true);
+
+            var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
+            var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, &self.params, self.allocator);
+            const logits = try self.model.buildGraph(&builder, input_tensor, n_prompt_tokens, @ptrCast(&self.kv_cache_mgr), 0);
+
+            const buft = ggml.backendCpuBufferType();
+            var galloc = try ggml.Gallocr.init(buft);
+            defer galloc.free();
+
+            if (!galloc.allocGraph(graph)) {
+                logger.err("Failed to allocate graph memory", .{});
+                return error.GraphAllocFailed;
+            }
+
+            {
+                const data = input_tensor.dataBytes();
+                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
+                for (input_tokens.items, 0..) |token, j| {
+                    slice[j] = @as(i32, @intCast(token));
+                }
+            }
+
+            try graph.compute(self.n_threads);
+            var current_token = sampler.Sampler.sampleGreedy(logits);
+            var pos: i32 = n_prompt_tokens;
+            var gen_count: u32 = 0;
+
+            // Collect generated tokens for history
+            var output_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
+            defer output_tokens.deinit(self.allocator);
+
+            // --- Incremental decoding ---
+            while (gen_count < 512) {
+                if (self.tok.isEog(@intCast(current_token))) break;
+
+                // Stream output
+                var buf: [128]u8 = undefined;
+                const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
+                if (n > 0) {
+                    try stdout.writeStreamingAll(io, buf[0..n]);
+                }
+
+                try output_tokens.append(self.allocator, @intCast(current_token));
+
+                const step = try self.inc_ctx.beginStep();
+                step.setToken(current_token);
+
+                var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+                const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
+
+                if (!step.galloc.allocGraph(step.graph)) {
+                    logger.err("Failed to allocate incremental graph memory", .{});
+                    return error.GraphAllocFailed;
+                }
+
+                try step.graph.compute(self.n_threads);
+
+                current_token = sampler.Sampler.sampleGreedy(inc_logits);
+                pos += 1;
+                gen_count += 1;
+            }
+
             try stdout.writeStreamingAll(io, "\n");
+
+            // Decode assistant response and add to chat history
+            if (output_tokens.items.len > 0) {
+                var response_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+                defer response_buf.deinit(self.allocator);
+                for (output_tokens.items) |token_id| {
+                    var buf: [128]u8 = undefined;
+                    const n = try self.tok.decodeSingle(token_id, &buf);
+                    if (n > 0) {
+                        try response_buf.appendSlice(self.allocator, buf[0..n]);
+                    }
+                }
+                try chat_history.append(self.allocator, chat_template.ChatMessage.init("assistant", response_buf.items));
+            }
         }
     }
 
