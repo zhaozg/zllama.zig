@@ -374,10 +374,11 @@ const InferenceEngine = struct {
 
         // Resolve template source: use GGUF built-in, --chat-template preset,
         // or fall back to architecture default (e.g. ChatML for Qwen)
+        const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
         const source = self.chat_template_source orelse
-            chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
+            chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
 
-        var tmpl = try chat_template.resolve(self.allocator, source, self.arch);
+        var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
         defer tmpl.deinit(self.allocator);
 
         const messages = [_]chat_template.ChatMessage{
@@ -711,9 +712,10 @@ const InferenceEngine = struct {
             const formatted_prompt = if (self.no_chat_template) blk: {
                 break :blk try self.allocator.dupe(u8, line);
             } else blk: {
+                const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
                 const source = self.chat_template_source orelse
-                    chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
-                var tmpl = try chat_template.resolve(self.allocator, source, self.arch);
+                    chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
+                var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
                 defer tmpl.deinit(self.allocator);
                 const system = if (self.system_prompt.len > 0) self.system_prompt else null;
                 break :blk try tmpl.apply(self.allocator, chat_history.items, system, true);

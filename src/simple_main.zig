@@ -294,10 +294,11 @@ const SimpleEngine = struct {
 
         // Resolve template source: use GGUF built-in, --chat-template preset,
         // or fall back to architecture default (e.g. ChatML for Qwen)
+        const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
         const source = self.chat_template_source orelse
-            chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
+            chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
 
-        var tmpl = try chat_template.resolve(self.allocator, source, self.arch);
+        var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
         defer tmpl.deinit(self.allocator);
 
         const messages = [_]chat_template.ChatMessage{
