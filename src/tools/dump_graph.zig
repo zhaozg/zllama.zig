@@ -94,10 +94,10 @@ pub const GraphDumper = struct {
             while (d < n_dims) : (d += 1) {
                 if (d > 0) try out.appendSlice(allocator, ", ");
                 {
-                var num_buf: [32]u8 = undefined;
-                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{ne[@intCast(d)]});
-                try out.appendSlice(allocator, num_str);
-            }
+                    var num_buf: [32]u8 = undefined;
+                    const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{ne[@intCast(d)]});
+                    try out.appendSlice(allocator, num_str);
+                }
             }
             try out.appendSlice(allocator, ")");
 
@@ -217,10 +217,10 @@ pub const GraphDumper = struct {
             while (d < n_dims) : (d += 1) {
                 if (d > 0) try out.appendSlice(allocator, ", ");
                 {
-                var num_buf: [32]u8 = undefined;
-                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{ne[@intCast(d)]});
-                try out.appendSlice(allocator, num_str);
-            }
+                    var num_buf: [32]u8 = undefined;
+                    const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{ne[@intCast(d)]});
+                    try out.appendSlice(allocator, num_str);
+                }
             }
             try out.appendSlice(allocator, "]\n");
 
@@ -283,7 +283,6 @@ pub fn buildInferenceGraph(
     return graph;
 }
 
-// ============================================================================
 // ============================================================================
 // 命令行入口
 // ============================================================================

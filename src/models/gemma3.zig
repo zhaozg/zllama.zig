@@ -432,7 +432,6 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Gemma
     p.base.tokenizer_name = gguf_file.getString("tokenizer.ggml.model") orelse "gemma";
 
     // Gemma 3 特定参数
-    // Gemma 3 特定参数
     // 尝试从 gemma3. 前缀读取
     const n_swa = gguf_file.getU32("gemma3.attention.sliding_window") orelse 0;
     if (n_swa > 0) {

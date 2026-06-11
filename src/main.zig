@@ -1259,7 +1259,7 @@ pub fn main(init: std.process.Init) !void {
         };
         logger.info("--- Done ---", .{});
     }
-    }
+}
 
 const testing = std.testing;
 

@@ -106,7 +106,6 @@ pub const Tokenizer = struct {
         }
 
         // 读取词表
-        // 读取词表
         if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
             for (val.array_val, 0..) |v, i| {
                 const token_str = v.asString() orelse continue;

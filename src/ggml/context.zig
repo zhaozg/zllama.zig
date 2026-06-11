@@ -44,7 +44,6 @@ pub const Context = opaque {
         c.ggml_free(@ptrCast(self));
     }
 
-
     /// 重置 ggml context（释放所有张量，重用内存池）
     pub fn reset(self: *Context) void {
         c.ggml_reset(@ptrCast(self));

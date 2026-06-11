@@ -247,7 +247,6 @@ pub const GGUFFile = struct {
     }
 
     /// 按 key 获取元数据字符串值
-    /// 按 key 获取元数据字符串值
     pub fn getString(self: *const GGUFFile, key: []const u8) ?[]const u8 {
         const val = self.metadata.get(key) orelse return null;
         return val.asString();

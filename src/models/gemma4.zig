@@ -245,7 +245,6 @@ pub const Gemma4Model = struct {
             const n_layer_i64: i64 = @intCast(p.base.n_layer);
 
             // Lookup per-layer token embeddings
-            // Lookup per-layer token embeddings
             var inp_pl = ggml.getRows(ctx, w.per_layer_token_embd.?, input_tokens.?);
             // reshape: [n_embd_per_layer*n_layer, n_tokens] -> [n_embd_per_layer, n_layer, n_tokens]
             inp_pl = ggml.reshape3d(ctx, inp_pl, n_embd_pl, n_layer_i64, n_tokens_i64);
