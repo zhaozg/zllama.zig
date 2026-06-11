@@ -152,7 +152,7 @@ pub const Tokenizer = struct {
         // 构建 EOG (End-of-Generation) token ID 集合
         // 与 llama.cpp 的 special_eog_ids 逻辑保持一致
         {
-            try tok.eog_ids.ensureTotalCapacity(allocator, 16);
+            try tok.eog_ids.ensureTotalCapacity(allocator, 32);
 
             // 从 GGUF 元数据收集
             if (gguf_file.getU32("tokenizer.ggml.eos_token_id")) |eos_id| {
@@ -175,9 +175,12 @@ pub const Tokenizer = struct {
             }
 
             // 通过名称匹配收集 EOG tokens（与 llama.cpp 保持一致）
+            // 注意：Qwen3.5 的 tokenizer.ggml.eos_token_id 通常指向 <|endoftext|>，
+            // 但对话结束标记是 <|im_end|>，必须通过名称匹配加入
             const eog_names = [_][]const u8{
                 "<|endoftext|>",
                 "<|im_end|>",
+                "<|im_start|>",  // Qwen 系列：<|im_start|> 也可能作为分隔符
                 "<|fim_pad|>",
                 "<|repo_name|>",
                 "<|file_sep|>",
@@ -220,6 +223,16 @@ pub const Tokenizer = struct {
             // 确保 special.eos 在集合中
             if (tok.special.eos != 0 and !tok.eog_ids.contains(tok.special.eos)) {
                 tok.eog_ids.put(allocator, tok.special.eos, {}) catch {};
+            }
+
+            // 确保 special.eot 在集合中
+            if (tok.special.eot != 0 and !tok.eog_ids.contains(tok.special.eot)) {
+                tok.eog_ids.put(allocator, tok.special.eot, {}) catch {};
+            }
+
+            // 确保 special.eom 在集合中
+            if (tok.special.eom != 0 and !tok.eog_ids.contains(tok.special.eom)) {
+                tok.eog_ids.put(allocator, tok.special.eom, {}) catch {};
             }
 
             log.info("Tokenizer: {d} EOG tokens", .{tok.eog_ids.count()});
@@ -373,6 +386,28 @@ pub const Tokenizer = struct {
     /// 与 llama.cpp 的 llama_vocab_is_eog() 对应
     pub fn isEog(self: *const Tokenizer, token_id: u32) bool {
         return self.eog_ids.contains(token_id);
+    }
+
+    /// EOG token 名称列表（用于文本匹配）
+    const eog_token_names = [_][]const u8{
+        "<|endoftext|>",
+        "<|im_end|>",
+        "<|eot_id|>",
+        "<|eom_id|>",
+        "<|end|>",
+        "<end_of_turn>",
+        "</s>",
+        "<｜end▁of▁sentence｜>",
+    };
+
+    /// 检查解码后的文本是否包含 EOG token 字符串。
+    /// 用于处理模型生成 EOG token 的子 token 序列的情况。
+    pub fn isEogText(self: *const Tokenizer, text: []const u8) bool {
+        _ = self;
+        for (eog_token_names) |name| {
+            if (std.mem.indexOf(u8, text, name) != null) return true;
+        }
+        return false;
     }
     pub fn byteToTokenId(self: *const Tokenizer, byte: u8) u32 {
         if (self.byte_to_token_id[byte]) |tid| return tid;

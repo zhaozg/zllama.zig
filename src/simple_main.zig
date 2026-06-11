@@ -119,6 +119,7 @@ const SimpleEngine = struct {
     // Chat template
     chat_template_source: ?chat_template.TemplateSource = null,
     system_prompt: []const u8 = "",
+    no_chat_template: bool = false,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: []const u8, cli_args: *const CliArgs) !SimpleEngine {
         logger.info("Loading model: {s}", .{model_path});
@@ -253,6 +254,7 @@ const SimpleEngine = struct {
             .benchmark = cli_args.benchmark,
             .chat_template_source = chat_template_source,
             .system_prompt = system_prompt,
+            .no_chat_template = cli_args.no_chat_template,
         };
     }
 
@@ -274,11 +276,12 @@ const SimpleEngine = struct {
     /// Returns the formatted prompt (caller owns memory).
     fn applyChatTemplate(self: *SimpleEngine, user_prompt: []const u8) ![]const u8 {
         // If --no-chat-template is set, pass through raw prompt
-        if (self.chat_template_source == null and self.system_prompt.len == 0) {
+        if (self.no_chat_template) {
             return self.allocator.dupe(u8, user_prompt);
         }
 
-        // Resolve template source
+        // Resolve template source: use GGUF built-in, --chat-template preset,
+        // or fall back to architecture default (e.g. ChatML for Qwen)
         const source = self.chat_template_source orelse
             chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
 
@@ -356,6 +359,10 @@ const SimpleEngine = struct {
         // Text generation timing
         const t_tg_start = engine_common.currentTimeUs();
 
+        // Buffer for EOG text detection (accumulates decoded output)
+        var eog_detect_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        defer eog_detect_buf.deinit(self.allocator);
+
         // --- Incremental decoding (uses inc_ctx with graph structure reuse) ---
         while (n_decode < max_tokens) {
             // Check for EOG token
@@ -364,10 +371,31 @@ const SimpleEngine = struct {
                 break;
             }
 
-            // Decode and print (skip output in benchmark mode)
+            // Decode token
+            var buf: [128]u8 = undefined;
+            const n = try self.tok.decodeSingle(@intCast(new_token_id), &buf);
+            const decoded = buf[0..n];
+
+            // Check if decoded text contains EOG token string
+            // (handles models that generate EOG token as sub-token sequence)
+            if (n > 0) {
+                try eog_detect_buf.appendSlice(self.allocator, decoded);
+                if (self.tok.isEogText(eog_detect_buf.items)) {
+                    logger.debug("EOG text detected, stopping", .{});
+                    // Stream the current token before stopping
+                    if (!self.benchmark) {
+                        const stdout_file = std.Io.File.stdout();
+                        try stdout_file.writeStreamingAll(io, decoded);
+                    }
+                    break;
+                }
+            }
+
+            // Print output (skip in benchmark mode)
             logger.debug("decoding token {d}", .{new_token_id});
-            if (!self.benchmark) {
-                try self.decodeAndPrintToken(io, @intCast(new_token_id));
+            if (!self.benchmark and n > 0) {
+                const stdout_file = std.Io.File.stdout();
+                try stdout_file.writeStreamingAll(io, decoded);
             }
 
             // Prepare next batch: IncContext reuses input tensor + graph + gallocr

@@ -183,6 +183,7 @@ const InferenceEngine = struct {
     // Chat template
     chat_template_source: ?chat_template.TemplateSource = null,
     system_prompt: []const u8 = "",
+    no_chat_template: bool = false,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
         const cwd = std.Io.Dir.cwd();
@@ -330,6 +331,7 @@ const InferenceEngine = struct {
             .capabilities = capabilities,
             .chat_template_source = chat_template_source,
             .system_prompt = system_prompt,
+            .no_chat_template = cli_args.no_chat_template,
         };
     }
 
@@ -354,11 +356,12 @@ const InferenceEngine = struct {
     /// Returns the formatted prompt (caller owns memory).
     fn applyChatTemplate(self: *InferenceEngine, user_prompt: []const u8) ![]const u8 {
         // If --no-chat-template is set, pass through raw prompt
-        if (self.chat_template_source == null and self.system_prompt.len == 0) {
+        if (self.no_chat_template) {
             return self.allocator.dupe(u8, user_prompt);
         }
 
-        // Resolve template source
+        // Resolve template source: use GGUF built-in, --chat-template preset,
+        // or fall back to architecture default (e.g. ChatML for Qwen)
         const source = self.chat_template_source orelse
             chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
 
@@ -436,18 +439,37 @@ const InferenceEngine = struct {
         // Text generation timing
         const t_tg_start = engine_common.currentTimeMs();
 
+        // Buffer for EOG text detection (accumulates decoded output)
+        var eog_detect_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        defer eog_detect_buf.deinit(self.allocator);
+
         // --- Incremental decoding ---
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
 
-            // Stream output immediately (skip in benchmark mode)
-            if (!self.benchmark) {
-                var buf: [128]u8 = undefined;
-                const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
-                if (n > 0) {
-                    const stdout_file = std.Io.File.stdout();
-                    try stdout_file.writeStreamingAll(io, buf[0..n]);
+            // Decode token
+            var buf: [128]u8 = undefined;
+            const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
+            const decoded = buf[0..n];
+
+            // Check if decoded text contains EOG token string
+            // (handles models that generate EOG token as sub-token sequence)
+            if (n > 0) {
+                try eog_detect_buf.appendSlice(self.allocator, decoded);
+                if (self.tok.isEogText(eog_detect_buf.items)) {
+                    // Stream the current token before stopping
+                    if (!self.benchmark) {
+                        const stdout_file = std.Io.File.stdout();
+                        try stdout_file.writeStreamingAll(io, decoded);
+                    }
+                    break;
                 }
+            }
+
+            // Stream output immediately (skip in benchmark mode)
+            if (!self.benchmark and n > 0) {
+                const stdout_file = std.Io.File.stdout();
+                try stdout_file.writeStreamingAll(io, decoded);
             }
 
             const step = try self.inc_ctx.beginStep();
@@ -650,14 +672,17 @@ const InferenceEngine = struct {
             // Add user message to chat history
             try chat_history.append(self.allocator, chat_template.ChatMessage.init("user", line));
 
-            // Format with multi-turn template
-            const source = self.chat_template_source orelse
-                chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
-            var tmpl = try chat_template.resolve(self.allocator, source, self.arch);
-            defer tmpl.deinit(self.allocator);
-
-            const system = if (self.system_prompt.len > 0) self.system_prompt else null;
-            const formatted_prompt = try tmpl.apply(self.allocator, chat_history.items, system, true);
+            // Format with multi-turn template (or raw prompt if --no-chat-template)
+            const formatted_prompt = if (self.no_chat_template) blk: {
+                break :blk try self.allocator.dupe(u8, line);
+            } else blk: {
+                const source = self.chat_template_source orelse
+                    chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch) };
+                var tmpl = try chat_template.resolve(self.allocator, source, self.arch);
+                defer tmpl.deinit(self.allocator);
+                const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+                break :blk try tmpl.apply(self.allocator, chat_history.items, system, true);
+            };
             defer self.allocator.free(formatted_prompt);
 
             // Reset KV cache for each turn (full prompt processing)
