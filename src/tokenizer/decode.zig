@@ -7,7 +7,7 @@
 //! 1. 遍历 token ID 列表
 //! 2. 跳过特殊 token（BOS, EOS, UNK, PAD, CONTROL 等）
 //! 3. 根据 token 类型选择解码路径：
-//!    - NORMAL: 替换空格标记（▁/Ġ）为普通空格，或解码字节编码
+//!    - NORMAL: 替换空格标记（▁/Ġ）为普通空格，或解码字节编码（<0xXX>）
 //!    - BYTE: 输出单个字节
 //! 4. 清理空格（clean_spaces 后处理）
 
@@ -53,7 +53,7 @@ pub fn decode(
                 if (config.model == .tiktoken) {
                     try decodeTiktokenToken(ts, &result, allocator);
                 } else {
-                    // LLaMA/GPT2: 将空格标记替换为实际空格
+                    // LLaMA/GPT2: 替换空格标记为实际空格，同时处理 <0xXX> 字节模式
                     try decodeNormalToken(ts, config, &result, allocator);
                 }
             },
@@ -92,21 +92,49 @@ fn isSpecialToken(token_id: u32, config: *const DecodeConfig) bool {
 /// 解码普通 token，将 LLaMA/GPT2 的空格标记替换为实际空格（U+0020）
 /// LLaMA (SentencePiece): ▁ (U+2581, UTF-8: E2 96 81)
 /// GPT-2: Ġ (U+0120, UTF-8: C4 A0)
+///
+/// 对于所有模型类型，同时处理 <0xXX> 字节模式：
+/// 某些 SPM 模型的词表中，部分 token 使用 <0xXX> 格式表示原始字节。
+/// 这些 token 虽然标记为 .normal 类型，但其内容需要解码为原始字节。
 fn decodeNormalToken(
     token_str: []const u8,
     config: *const DecodeConfig,
     result: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
 ) !void {
-    if (!config.escape_whitespaces and config.unicode_to_byte != null) {
+    if (config.model == .gpt2 and config.unicode_to_byte != null) {
         // GPT-2 风格：字节编码，需要解码
         try decodeGPT2Token(token_str, config.unicode_to_byte.?, result, allocator);
         return;
     }
 
-    // SPM 风格：替换 ▁ 为空格
+    // SPM / Llama 风格：替换 ▁ 为空格，同时处理 <0xXX> 字节模式
     var i: usize = 0;
     while (i < token_str.len) {
+        // 检查是否是 <0xXX> 字节模式（tiktoken 格式的字节 token）
+        if (token_str[i] == '<' and i + 3 < token_str.len and
+            token_str[i + 1] == '0' and token_str[i + 2] == 'x')
+        {
+            const end = std.mem.indexOfScalar(u8, token_str[i + 1 ..], '>') orelse {
+                try result.append(allocator, token_str[i]);
+                i += 1;
+                continue;
+            };
+            const hex_start = i + 3; // skip '<0x'
+            const hex_end = i + 1 + end;
+            const hex_str = token_str[hex_start..hex_end];
+            if (hex_str.len == 2) {
+                if (std.fmt.parseInt(u8, hex_str, 16)) |byte| {
+                    try result.append(allocator, byte);
+                    i = i + 1 + end + 1; // skip past '>'
+                    continue;
+                } else |_| {}
+            }
+            try result.append(allocator, token_str[i]);
+            i += 1;
+            continue;
+        }
+
         // 检查是否是 U+2581 (▁) 的 UTF-8 序列 (LLaMA/SentencePiece)
         if (i + 2 < token_str.len and
             token_str[i] == 0xE2 and

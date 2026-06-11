@@ -56,6 +56,7 @@ pub const TokenizerModel = enum {
     gpt2,
     tiktoken,
     replit,
+    spm,
     unknown,
 
     pub fn fromString(s: []const u8) TokenizerModel {
@@ -63,6 +64,9 @@ pub const TokenizerModel = enum {
         if (std.ascii.eqlIgnoreCase(s, "gpt2")) return .gpt2;
         if (std.ascii.eqlIgnoreCase(s, "tiktoken")) return .tiktoken;
         if (std.ascii.eqlIgnoreCase(s, "replit")) return .replit;
+        if (std.ascii.eqlIgnoreCase(s, "spm")) return .spm;
+        // Gemma 4 uses SentencePiece tokenization (same as SPM)
+        if (std.ascii.eqlIgnoreCase(s, "gemma4")) return .spm;
         return .unknown;
     }
 
@@ -72,6 +76,7 @@ pub const TokenizerModel = enum {
             .gpt2 => "gpt2",
             .tiktoken => "tiktoken",
             .replit => "replit",
+            .spm => "spm",
             .unknown => "unknown",
         };
     }
@@ -282,11 +287,17 @@ pub const TokenizerConfig = struct {
             .model = model,
             .pre_type = pre_type,
         };
-
-        // 根据模型类型设置默认值（与 llama.cpp 保持一致）
         switch (model) {
-            .llama => {
+            .llama, .spm => {
                 // SPM 模型
+                // 注意：对于 SPM 模型，add_space_prefix 必须为 true，
+                // 因为 SPM 词表中的 token 使用 ▁ (U+2581) 作为词边界标记。
+                // 即使 GGUF 元数据中 tokenizer.ggml.add_space_prefix = false，
+                // 我们也不能将其设为 false，否则 Trie 无法匹配 ▁ 前缀的 token，
+                // 导致回退到字节编码，产生错误的 token ID 序列。
+                // llama.cpp 在 add_space_prefix=false 时使用不同的预分词策略
+                // （直接传入原始文本而非按空白分割），但我们目前统一使用 GPT-2
+                // 风格预分词，因此必须保持 add_space_prefix=true。
                 config.add_space_prefix = true;
                 config.clean_spaces = false;
                 config.add_bos = true;
@@ -330,7 +341,11 @@ pub const TokenizerConfig = struct {
         }
 
         // 从 GGUF 元数据覆盖默认值
-        if (gguf_file.getBool("tokenizer.ggml.add_space_prefix")) |v| config.add_space_prefix = v;
+        // 注意：对于 SPM 模型 (.llama, .spm)，我们忽略 GGUF 中的 add_space_prefix 设置，
+        // 因为它与我们当前的预分词策略不兼容。详见上方 SPM 分支的注释。
+        if (model != .llama and model != .spm) {
+            if (gguf_file.getBool("tokenizer.ggml.add_space_prefix")) |v| config.add_space_prefix = v;
+        }
         if (gguf_file.getBool("tokenizer.ggml.add_bos")) |v| config.add_bos = v;
         if (gguf_file.getBool("tokenizer.ggml.add_eos")) |v| config.add_eos = v;
         if (gguf_file.getBool("tokenizer.ggml.add_sep")) |v| config.add_sep = v;

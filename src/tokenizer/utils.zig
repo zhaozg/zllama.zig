@@ -64,7 +64,7 @@ pub fn generateBytesToUnicode(allocator: std.mem.Allocator) ![]u32 {
 /// - replit: b'<0xE4>' 格式
 pub fn extractByteFromToken(token: []const u8, model: types.TokenizerModel) !u8 {
     switch (model) {
-        .llama, .gpt2 => {
+        .llama, .gpt2, .spm => {
             if (token.len == 1) return token[0];
             return error.InvalidByteToken;
         },

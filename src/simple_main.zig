@@ -270,6 +270,18 @@ const SimpleEngine = struct {
             self.allocator.free(self.params.model_name);
         }
         self.allocator.free(self.gguf_data);
+        // Free chat template source (gguf_builtin variant owns allocated string)
+        if (self.chat_template_source) |src| {
+            switch (src) {
+                .gguf_builtin => |s| self.allocator.free(s),
+                .custom => |s| self.allocator.free(s),
+                .preset => {},
+            }
+        }
+        // Free system prompt if allocated
+        if (self.system_prompt.len > 0) {
+            self.allocator.free(self.system_prompt);
+        }
     }
 
     /// Apply chat template to the user prompt.
@@ -369,6 +381,29 @@ const SimpleEngine = struct {
             if (self.tok.isEog(@intCast(new_token_id))) {
                 logger.debug("EOG token {d} stopping", .{new_token_id});
                 break;
+            }
+
+            // Skip control tokens (e.g. <|channel|>, <|channel>) that should
+            // be filtered from output but don't stop generation.
+            if (self.tok.isSkipToken(@intCast(new_token_id))) {
+                // Prepare next batch: IncContext reuses input tensor + graph + gallocr
+                const step = try self.inc_ctx.beginStep();
+                step.setToken(new_token_id);
+
+                var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+                const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), @intCast(pos));
+
+                if (!step.galloc.allocGraph(step.graph)) {
+                    logger.err("Failed to allocate incremental graph memory", .{});
+                    return error.GraphAllocFailed;
+                }
+
+                try step.graph.compute(self.n_threads);
+
+                new_token_id = sampler.Sampler.sampleGreedy(inc_logits);
+                pos += 1;
+                n_decode += 1;
+                continue;
             }
 
             // Decode token

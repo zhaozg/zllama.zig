@@ -559,17 +559,26 @@ fn gegluFFN(
 /// 查找非 KV 层应该复用哪个层的 KV
 /// 参考 llama.cpp gemma4 的 reuse lambda:
 ///   if il >= n_layer_kv_from_start:
-///     return n_layer_kv_from_start - (is_swa ? 2 : 1)
+///     // Find the last KV layer that matches the SWA/non-SWA pattern
+///     for (int j = n_layer_kv_from_start - 1; j >= 0; j--) {
+///         if (is_swa_layer[il] == is_swa_layer[j]) return j;
+///     }
+///     return n_layer_kv_from_start - 1;
 /// 调用者保证 layer_idx >= n_layer_kv_from_start（即该层没有自己的 KV）
 fn findKVLayer(p: *const Gemma4Params, layer_idx: usize) usize {
-    // 根据 llama.cpp 的 reuse 实现
-    if (layer_idx >= p.n_layer_kv_from_start) {
+    if (layer_idx >= p.n_layer_kv_from_start and p.n_layer_kv_from_start > 0) {
         const is_swa = p.is_swa_layer.items[layer_idx];
-        if (is_swa and p.n_layer_kv_from_start >= 2) {
-            return p.n_layer_kv_from_start - 2;
-        } else if (p.n_layer_kv_from_start >= 1) {
-            return p.n_layer_kv_from_start - 1;
+        // 从最后一个 KV 层向前搜索，找到与当前层 SWA 类型匹配的层
+        var j: usize = p.n_layer_kv_from_start - 1;
+        while (true) {
+            if (p.is_swa_layer.items[j] == is_swa) {
+                return j;
+            }
+            if (j == 0) break;
+            j -= 1;
         }
+        // Fallback: 返回最后一个 KV 层
+        return p.n_layer_kv_from_start - 1;
     }
     // 理论上不应该走到这里，因为该层应该 has_kv==false
     // 返回 0 作为 fallback（第 0 层通常有 KV）
@@ -786,9 +795,18 @@ fn loadWeights(
 
     // Gemma 4: rope_freqs is per-layer (blk.0.rope_freqs.weight), shared
     // across all full-attention layers (llama.cpp uses TENSOR_DUPLICATED).
+    // Try multiple possible names for rope_freqs.
     var global_rope_freqs = findOrCreateTensor(ctx, gguf_file, "blk.0.rope_freqs.weight") catch null;
     if (global_rope_freqs == null) {
         global_rope_freqs = findOrCreateTensor(ctx, gguf_file, "rope_freqs.weight") catch null;
+    }
+    if (global_rope_freqs == null) {
+        global_rope_freqs = findOrCreateTensor(ctx, gguf_file, "blk.0.rope_freqs") catch null;
+    }
+    if (global_rope_freqs) |_| {
+        log.info("Gemma4: global_rope_freqs loaded successfully", .{});
+    } else {
+        log.warn("Gemma4: global_rope_freqs not found, full-attention layers will use standard RoPE", .{});
     }
 
     // Derive n_ff from first layer's FFN gate weight shape
@@ -797,9 +815,13 @@ fn loadWeights(
     for (0..n_layer) |i| {
         const prefix = try std.fmt.allocPrint(allocator, "blk.{d}", .{i});
 
-        // Detect has_kv: check if attn_k.weight exists for this layer
-        const k_weight = loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch null;
-        const has_kv: bool = k_weight != null;
+        // Detect has_kv: use n_layer_kv_from_start to determine which layers have their own KV.
+        // Do NOT rely on attn_k.weight existence in GGUF, as E2B models may store it for all layers.
+        const has_kv: bool = i < params.n_layer_kv_from_start;
+        const k_weight = if (has_kv)
+            loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch null
+        else
+            null;
         const v_weight = if (has_kv)
             loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight") catch null
         else

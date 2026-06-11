@@ -41,7 +41,9 @@ pub const Gemma3Params = struct {
     /// SWA 模式周期
     swa_period: u32 = 1,
     /// SWA 的 RoPE base frequency
-    rope_freq_base_swa: f32 = 0.0,
+    rope_freq_base_swa: f32 = 10000.0,
+    /// RoPE frequency scale (= 1.0 / rope_scaling_factor)
+    rope_freq_scale: f32 = 1.0,
     /// 注意力缩放因子
     f_attention_scale: f32 = 1.0,
     /// 是否使用 SWA
@@ -156,11 +158,15 @@ pub const Gemma3Model = struct {
             // 确定该层的 RoPE base frequency
             // SWA 层可能使用不同的 freq_base
             const layer_is_swa = isSWALayer(p, i);
-            const freq_base_l: f32 = if (layer_is_swa and p.rope_freq_base_swa > 0)
+            const freq_base_l: f32 = if (layer_is_swa and p.use_swa)
                 p.rope_freq_base_swa
             else
                 p.base.rope_theta;
-            const freq_scale_l: f32 = 1.0;
+            // SWA layers use freq_scale=1.0, non-SWA layers use rope_freq_scale
+            const freq_scale_l: f32 = if (layer_is_swa and p.use_swa)
+                1.0
+            else
+                p.rope_freq_scale;
             const attn_scale = p.f_attention_scale;
 
             // --- Pre-attention RMSNorm ---
@@ -200,8 +206,9 @@ pub const Gemma3Model = struct {
             k = ggml.reshape3d(ctx, k, head_dim_k, n_kv_head, n_tokens_i64);
 
             // --- RoPE (使用 rope_dim，与 head_dim_k 可能不同) ---
-            q = ggml.ropeExt(ctx, q, pos_tensor, null, @intCast(rope_dim), 0, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
-            k = ggml.ropeExt(ctx, k, pos_tensor, null, @intCast(rope_dim), 0, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
+            // Gemma3 uses NEOX-style RoPE (mode=2), same as LLaMA
+            q = ggml.ropeExt(ctx, q, pos_tensor, null, @intCast(rope_dim), 2, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
+            k = ggml.ropeExt(ctx, k, pos_tensor, null, @intCast(rope_dim), 2, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
 
             // 应用注意力缩放到 Q（在进入 attention 之前）
             q = ggml.scale(ctx, q, attn_scale);
@@ -229,7 +236,7 @@ pub const Gemma3Model = struct {
                 .cache_len = cache_len,
                 .start_pos = start_pos,
                 .scale_factor = 1.0, // 已经通过 ggml_scale 应用了
-            }, null); // Gemma 3: no SWA mask, sliding window handled via RoPE frequency
+            }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null); // SWA mask for sliding window layers
 
             // 输出投影
             attn_out = ggml.mulMat(ctx, layer.attn_output_weight, attn_out);
@@ -400,22 +407,29 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Gemma
         p.base.n_head_dim = p.base.n_embd / p.base.n_head;
     }
 
-    p.base.max_seq_len = gguf_file.getU32("gemma3.context_length") orelse
-        gguf_file.getU32("llama.context_length") orelse 4096;
-    p.base.rope_theta = gguf_file.getF32("gemma3.rope.freq_base") orelse
-        gguf_file.getF32("llama.rope.freq_base") orelse 10000.0;
-    p.base.rope_dim = gguf_file.getU32("gemma3.rope.dimension_count") orelse
-        gguf_file.getU32("llama.rope.dimension_count") orelse
-        @divExact(p.base.n_head_dim, @as(u32, 2));
-    p.base.norm_eps = gguf_file.getF32("gemma3.attention.layer_norm_rms_epsilon") orelse
-        gguf_file.getF32("llama.attention.layer_norm_rms_epsilon") orelse 1e-6;
-    p.base.model_name = gguf_file.getString("general.name") orelse "";
-    p.base.tokenizer_name = gguf_file.getString("tokenizer.ggml.model") orelse "gemma";
     // Gemma3 特有的 head dim（key_length / value_length）
+    // 必须在 rope_dim 之前读取，因为 rope_dim 的回退逻辑依赖 n_head_dim_k
     p.base.n_head_dim_k = gguf_file.getU32("gemma3.attention.key_length") orelse
         gguf_file.getU32("gemma3.attention.head_dim_k") orelse p.base.n_head_dim;
     p.base.n_head_dim_v = gguf_file.getU32("gemma3.attention.value_length") orelse
         gguf_file.getU32("gemma3.attention.head_dim_v") orelse p.base.n_head_dim;
+
+    p.base.max_seq_len = gguf_file.getU32("gemma3.context_length") orelse
+        gguf_file.getU32("llama.context_length") orelse 4096;
+    p.base.rope_theta = gguf_file.getF32("gemma3.rope.freq_base") orelse
+        gguf_file.getF32("llama.rope.freq_base") orelse 10000.0;
+    // RoPE dimension: Gemma 3 applies RoPE to all key/query dimensions (head_dim_k)
+    // Standard LLaMA models use llama.rope.dimension_count or full head_dim
+    p.base.rope_dim = gguf_file.getU32("gemma3.rope.dimension_count") orelse
+        gguf_file.getU32("llama.rope.dimension_count") orelse
+        if (p.base.n_head_dim_k > 0 and p.base.n_head_dim_k != p.base.n_head_dim)
+            p.base.n_head_dim_k // Gemma 3 style: RoPE on full key length
+        else
+            p.base.n_head_dim; // Standard: RoPE on full head dim
+    p.base.norm_eps = gguf_file.getF32("gemma3.attention.layer_norm_rms_epsilon") orelse
+        gguf_file.getF32("llama.attention.layer_norm_rms_epsilon") orelse 1e-6;
+    p.base.model_name = gguf_file.getString("general.name") orelse "";
+    p.base.tokenizer_name = gguf_file.getString("tokenizer.ggml.model") orelse "gemma";
 
     // Gemma 3 特定参数
     // Gemma 3 特定参数
@@ -425,14 +439,24 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Gemma
         p.n_swa = n_swa;
         p.use_swa = true;
         p.swa_period = gguf_file.getU32("gemma3.attention.sliding_window_pattern") orelse 6;
-        p.rope_freq_base_swa = gguf_file.getF32("gemma3.rope.freq_base_swa") orelse p.base.rope_theta;
+        // SWA freq_base: GGUF override or Gemma default 10000.0
+        p.rope_freq_base_swa = gguf_file.getF32("gemma3.rope.freq_base_swa") orelse 10000.0;
     }
 
     p.final_logit_softcapping = gguf_file.getF32("gemma3.final_logit_softcapping") orelse 0.0;
 
+    // RoPE frequency scale = 1.0 / rope_scaling_factor (for linear scaling)
+    const rope_scaling_factor = gguf_file.getF32("gemma3.rope.scaling.factor") orelse 1.0;
+    if (rope_scaling_factor != 1.0) {
+        p.rope_freq_scale = 1.0 / rope_scaling_factor;
+    }
+
     // 注意力缩放因子
+    // Gemma 3 使用 key_length (head_dim_k) 而非 n_embd/n_head 计算缩放
     // 参考: https://github.com/google/gemma_pytorch/blob/main/gemma/config.py
-    p.f_attention_scale = if (p.base.n_head_dim > 0)
+    p.f_attention_scale = if (p.base.n_head_dim_k > 0)
+        1.0 / @sqrt(@as(f32, @floatFromInt(p.base.n_head_dim_k)))
+    else if (p.base.n_head_dim > 0)
         1.0 / @sqrt(@as(f32, @floatFromInt(p.base.n_head_dim)))
     else
         1.0;
@@ -445,6 +469,12 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Gemma
     log.info("Gemma3: vocab={d}, embd={d}, heads={d}, kv_heads={d}, layers={d}, ff={d}, swa={d}, softcap={d}", .{
         p.base.n_vocab, p.base.n_embd, p.base.n_head, p.base.n_kv_head,
         p.base.n_layer, p.base.n_ff, p.n_swa, p.final_logit_softcapping,
+    });
+    log.info("Gemma3: head_dim={d}, head_dim_k={d}, head_dim_v={d}, rope_dim={d}", .{
+        p.base.n_head_dim, p.base.n_head_dim_k, p.base.n_head_dim_v, p.base.rope_dim,
+    });
+    log.info("Gemma3: rope_theta={d:.1}, freq_scale={d:.4}, freq_base_swa={d:.1}, attn_scale={d:.4}", .{
+        p.base.rope_theta, p.rope_freq_scale, p.rope_freq_base_swa, p.f_attention_scale,
     });
 
     return p;

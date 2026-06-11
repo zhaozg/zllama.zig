@@ -409,6 +409,29 @@ pub const Tokenizer = struct {
         }
         return false;
     }
+
+    /// 应被过滤（跳过）的 token 名称列表。
+    /// 这些 token 是控制/特殊 token，不应出现在输出中，
+    /// 但生成不应停止（与 EOG 不同）。
+    const skip_token_names = [_][]const u8{
+        "<|channel|>",
+        "<|channel>",
+        "<channel|>",
+        "<start_of_turn>",
+        "<end_of_turn>",
+    };
+
+    /// 检查 token 是否为应被过滤的 skip token。
+    /// 这些 token 会被从输出中移除，但生成继续。
+    pub fn isSkipToken(self: *const Tokenizer, token_id: u32) bool {
+        if (token_id >= self.vocab.items.len) return false;
+        const entry = self.vocab.items[token_id];
+        if (entry != .normal) return false;
+        for (skip_token_names) |name| {
+            if (std.mem.eql(u8, entry.normal, name)) return true;
+        }
+        return false;
+    }
     pub fn byteToTokenId(self: *const Tokenizer, byte: u8) u32 {
         if (self.byte_to_token_id[byte]) |tid| return tid;
         return self.special.unk;
@@ -462,7 +485,7 @@ pub const Tokenizer = struct {
                         written += 1;
                         rem = rem[1..];
                     }
-                } else if (!self.config.escape_whitespaces and self.unicode_to_byte.count() > 0) {
+                } else if (self.config.model == .gpt2) {
                     // GPT-2 风格：字节编码
                     var i: usize = 0;
                     while (i < ts.len and written < buf.len) {
@@ -494,9 +517,33 @@ pub const Tokenizer = struct {
                         i += cp_len;
                     }
                 } else {
-                    // SPM 风格：替换 ▁ 或 Ġ 为空格
+                    // SPM 风格：替换 ▁ 或 Ġ 为空格，同时处理 <0xXX> 字节模式
                     var i: usize = 0;
                     while (i < ts.len and written < buf.len) {
+                        // 检查 <0xXX> 字节模式（某些 SPM 词表的 token 使用此格式）
+                        if (ts[i] == '<' and i + 3 < ts.len and
+                            ts[i + 1] == '0' and ts[i + 2] == 'x')
+                        {
+                            const end = std.mem.indexOfScalar(u8, ts[i + 1 ..], '>') orelse {
+                                buf[written] = ts[i];
+                                written += 1;
+                                i += 1;
+                                continue;
+                            };
+                            const hex_str = ts[i + 3 .. i + 1 + end];
+                            if (hex_str.len == 2) {
+                                if (std.fmt.parseInt(u8, hex_str, 16)) |byte| {
+                                    buf[written] = byte;
+                                    written += 1;
+                                    i = i + 1 + end + 1;
+                                    continue;
+                                } else |_| {}
+                            }
+                            buf[written] = ts[i];
+                            written += 1;
+                            i += 1;
+                            continue;
+                        }
                         // U+2581 (▁) UTF-8: E2 96 81
                         if (i + 2 < ts.len and ts[i] == 0xE2 and ts[i+1] == 0x96 and ts[i+2] == 0x81) {
                             buf[written] = ' ';

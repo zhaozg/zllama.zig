@@ -350,6 +350,18 @@ const InferenceEngine = struct {
         self.allocator.free(self.gguf_data);
         self.tok.deinit();
         self.kv_cache_mgr.deinit(self.allocator);
+        // Free chat template source (gguf_builtin variant owns allocated string)
+        if (self.chat_template_source) |src| {
+            switch (src) {
+                .gguf_builtin => |s| self.allocator.free(s),
+                .custom => |s| self.allocator.free(s),
+                .preset => {},
+            }
+        }
+        // Free system prompt if allocated
+        if (self.system_prompt.len > 0) {
+            self.allocator.free(self.system_prompt);
+        }
     }
 
     /// Apply chat template to the user prompt.
@@ -446,6 +458,29 @@ const InferenceEngine = struct {
         // --- Incremental decoding ---
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
+
+
+            // Skip control tokens (e.g. <|channel|>, <|channel>) that should
+            // be filtered from output but don't stop generation.
+            if (self.tok.isSkipToken(@intCast(current_token))) {
+                const step = try self.inc_ctx.beginStep();
+                step.setToken(current_token);
+
+                var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+                const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
+
+                if (!step.galloc.allocGraph(step.graph)) {
+                    logger.err("Failed to allocate incremental graph memory", .{});
+                    return error.GraphAllocFailed;
+                }
+
+                try step.graph.compute(self.n_threads);
+
+                current_token = sampler.Sampler.sampleGreedy(inc_logits);
+                pos += 1;
+                gen_count += 1;
+                continue;
+            }
 
             // Decode token
             var buf: [128]u8 = undefined;

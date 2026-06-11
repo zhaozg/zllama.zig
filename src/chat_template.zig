@@ -35,6 +35,7 @@ pub const TemplateKind = enum {
     llama3,
     llama4,
     gemma,
+    gemma4,
     mistral_v7,
     phi4,
     deepseek3,
@@ -45,6 +46,7 @@ pub const TemplateKind = enum {
         if (std.mem.eql(u8, s, "llama3")) return .llama3;
         if (std.mem.eql(u8, s, "llama4")) return .llama4;
         if (std.mem.eql(u8, s, "gemma")) return .gemma;
+        if (std.mem.eql(u8, s, "gemma4")) return .gemma4;
         if (std.mem.eql(u8, s, "mistral-v7") or std.mem.eql(u8, s, "mistral")) return .mistral_v7;
         if (std.mem.eql(u8, s, "phi4") or std.mem.eql(u8, s, "phi-4")) return .phi4;
         if (std.mem.eql(u8, s, "deepseek3") or std.mem.eql(u8, s, "deepseek-v3")) return .deepseek3;
@@ -80,6 +82,7 @@ pub const Template = struct {
             .llama3 => return applyLlama3(allocator, messages, system_prompt, add_generation_prompt),
             .llama4 => return applyLlama4(allocator, messages, system_prompt, add_generation_prompt),
             .gemma => return applyGemma(allocator, messages, system_prompt, add_generation_prompt),
+            .gemma4 => return applyGemma4(allocator, messages, system_prompt, add_generation_prompt),
             .mistral_v7 => return applyMistralV7(allocator, messages, system_prompt, add_generation_prompt),
             .phi4 => return applyPhi4(allocator, messages, system_prompt, add_generation_prompt),
             .deepseek3 => return applyDeepSeekV3(allocator, messages, system_prompt, add_generation_prompt),
@@ -94,15 +97,16 @@ pub const Template = struct {
             },
         }
     }
-
     pub fn deinit(self: *Template, allocator: std.mem.Allocator) void {
-        switch (self.source) {
-            .gguf_builtin => |s| allocator.free(s),
-            .preset => {},
-            .custom => |s| allocator.free(s),
-        }
+        _ = allocator;
+        // Template does NOT own the source strings — they are borrowed from
+        // the caller (InferenceEngine). The caller is responsible for freeing
+        // them via chat_template_source / custom template storage.
+        _ = self;
     }
 };
+
+
 
 // ============================================================================
 // Template resolution
@@ -119,6 +123,8 @@ pub fn detectKind(tmpl_src: []const u8) TemplateKind {
     if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<|start_header_id|>")) return .llama3;
     if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<|header_start|>")) return .llama4;
     if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<start_of_turn>")) return .gemma;
+    // Gemma 4 uses <|turn> format (different from Gemma 3's <start_of_turn>)
+    if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<|turn>")) return .gemma4;
     if (std.mem.containsAtLeast(u8, tmpl_src, 1, "[INST]")) return .mistral_v7;
     // DeepSeek V3 uses UTF-8 characters: <｜Assistant｜>
     if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<｜Assistant｜>") or
@@ -129,15 +135,16 @@ pub fn detectKind(tmpl_src: []const u8) TemplateKind {
     }
     return .unknown;
 }
-
 /// Resolve template kind from architecture (default mapping).
 pub fn kindForArchitecture(arch: model.Architecture) TemplateKind {
     return switch (arch) {
         .qwen2, .qwen35, .embedding_qwen2 => .chatml,
         .llama => .llama3,
-        .gemma3, .gemma4 => .gemma,
+        .gemma3 => .gemma,
+        .gemma4 => .gemma4,
     };
 }
+
 
 /// Resolve a template source to a concrete Template.
 /// Priority: custom > gguf_builtin > preset_name > architecture default
@@ -431,6 +438,78 @@ fn applyGemma(
     return buf.toOwnedSlice(allocator);
 }
 
+
+// ============================================================================
+// Gemma 4
+// Format: <|turn>user\n{user}<turn|>\n
+//         <|turn>model\n{assistant}<turn|>\n
+//         <|turn>model\n   ← generation prompt
+//
+// Note: Gemma 4 uses <|turn> instead of <start_of_turn>.
+//       The model uses <|channel>thought\n<channel|> for internal reasoning.
+// ============================================================================
+fn applyGemma4(
+    allocator: std.mem.Allocator,
+    messages: []const ChatMessage,
+    system_prompt: ?[]const u8,
+    add_generation_prompt: bool,
+) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    // Collect system content (either from explicit system_prompt or from messages)
+    var system_content: std.ArrayListUnmanaged(u8) = .empty;
+    defer system_content.deinit(allocator);
+
+    if (system_prompt) |sp| {
+        if (sp.len > 0) {
+            try system_content.appendSlice(allocator, sp);
+        }
+    }
+
+    var system_merged = false;
+
+    for (messages) |msg| {
+        if (std.mem.eql(u8, msg.role, "system")) {
+            if (system_content.items.len > 0) {
+                try system_content.appendSlice(allocator, "\n\n");
+            }
+            try system_content.appendSlice(allocator, msg.content);
+            continue;
+        }
+
+        const role_tag = if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model"))
+            "model"
+        else
+            msg.role;
+
+        try buf.appendSlice(allocator, "<|turn>");
+        try buf.appendSlice(allocator, role_tag);
+        try buf.appendSlice(allocator, "\n");
+
+        // Merge system content into the first non-system, non-model message
+        if (!system_merged and
+            !std.mem.eql(u8, msg.role, "assistant") and
+            !std.mem.eql(u8, msg.role, "model") and
+            system_content.items.len > 0)
+        {
+            try buf.appendSlice(allocator, system_content.items);
+            try buf.appendSlice(allocator, "\n\n");
+            system_merged = true;
+        }
+
+        try buf.appendSlice(allocator, msg.content);
+        try buf.appendSlice(allocator, "<turn|>\n");
+    }
+
+    // Generation prompt
+    if (add_generation_prompt) {
+        try buf.appendSlice(allocator, "<|turn>model\n");
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
 // ============================================================================
 // Mistral v7
 // Format: [INST] {user} [/INST]
@@ -671,7 +750,7 @@ test "kindForArchitecture" {
     try testing.expectEqual(TemplateKind.chatml, kindForArchitecture(.qwen35));
     try testing.expectEqual(TemplateKind.llama3, kindForArchitecture(.llama));
     try testing.expectEqual(TemplateKind.gemma, kindForArchitecture(.gemma3));
-    try testing.expectEqual(TemplateKind.gemma, kindForArchitecture(.gemma4));
+    try testing.expectEqual(TemplateKind.gemma4, kindForArchitecture(.gemma4));
 }
 
 test "resolve: preset" {

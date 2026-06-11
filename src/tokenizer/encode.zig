@@ -65,6 +65,66 @@ pub fn preTokenize(text: []const u8, pre_type: types.PreTokenizerType, allocator
     return result;
 }
 
+/// SPM 风格预分词：基于 Unicode 脚本分割，不分割 < 和 > 等特殊字符
+/// 用于 SPM 模型（tokenizer.ggml.model = "llama"），避免特殊 token 被拆解
+pub fn preTokenizeSPM(text: []const u8, allocator: std.mem.Allocator) !PreTokenized {
+    var result = PreTokenized{
+        .words = .empty,
+        .allocator = allocator,
+    };
+
+    var start: usize = 0;
+    var i: usize = 0;
+
+    while (i < text.len) {
+        // 检测特殊 token 边界：<...> 形式的 token 保持完整
+        if (text[i] == '<') {
+            // 输出前面的部分
+            if (i > start) {
+                const word = try allocator.dupe(u8, text[start..i]);
+                try result.words.append(allocator, word);
+            }
+            // 查找匹配的 >
+            const close = std.mem.indexOfScalarPos(u8, text, i + 1, '>') orelse {
+                // 没有匹配的 >，继续
+                i += 1;
+                continue;
+            };
+            // 输出完整的 <...> token
+            const word = try allocator.dupe(u8, text[i .. close + 1]);
+            try result.words.append(allocator, word);
+            i = close + 1;
+            start = i;
+        } else if (isWhitespace(text[i])) {
+            // 输出前面的非空白部分
+            if (i > start) {
+                const word = try allocator.dupe(u8, text[start..i]);
+                try result.words.append(allocator, word);
+            }
+            // 收集连续的空白
+            start = i;
+            while (i < text.len and isWhitespace(text[i])) {
+                i += 1;
+            }
+            if (i > start) {
+                const word = try allocator.dupe(u8, text[start..i]);
+                try result.words.append(allocator, word);
+            }
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+
+    // 输出剩余部分
+    if (i > start) {
+        const word = try allocator.dupe(u8, text[start..i]);
+        try result.words.append(allocator, word);
+    }
+
+    return result;
+}
+
 /// GPT-2 风格预分词
 /// 使用简化的正则表达式模式分割文本
 fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
@@ -136,6 +196,13 @@ fn isPunctuation(c: u8) bool {
     };
 }
 
+fn isAllWhitespace(s: []const u8) bool {
+    for (s) |c| {
+        if (!isWhitespace(c)) return false;
+    }
+    return true;
+}
+
 // ============================================================================
 // GPT-2 字节编码转换
 // ============================================================================
@@ -166,7 +233,7 @@ pub fn toGpt2ByteEncoding(text: []const u8, bytesToUnicodeFn: *const fn (byte: u
 
 /// 编码：将文本转换为 token ID 列表
 /// 完整的编码流程：
-/// 1. 预分词
+/// 1. 预分词（SPM 模型使用 SPM 风格预分词，避免特殊 token 被拆解）
 /// 2. 添加空格前缀（如果配置需要）
 /// 3. 逐词编码（Trie 贪婪匹配 + BPE 合并）
 /// 4. 添加特殊 token（BOS/EOS）
@@ -190,12 +257,27 @@ pub fn encode(
         return tokens;
     }
 
+    const is_spm_model = config.model == .llama or config.model == .spm;
+
     // 1. 预分词
-    var pre_tok = try preTokenize(text, config.pre_type, config.allocator);
+    // 对于 SPM 模型，使用 SPM 风格预分词（不分割 < 和 > 等特殊字符），
+    // 避免特殊 token（如 <start_of_turn>、<end_of_turn>）被拆解。
+    // 对于其他模型，使用标准预分词。
+    var pre_tok = if (is_spm_model)
+        try preTokenizeSPM(text, config.allocator)
+    else
+        try preTokenize(text, config.pre_type, config.allocator);
     defer pre_tok.deinit();
 
     // 2. 对每个词进行编码
     for (pre_tok.words.items) |word| {
+        // 对于 SPM 模型且 add_space_prefix=true 时，跳过纯空白词。
+        // 因为 SPM 使用 ▁ 前缀标记词边界，空白已经在 ▁ 中编码了，
+        // 单独编码空白会导致多余的空格。
+        if (is_spm_model and add_space_prefix and isAllWhitespace(word)) {
+            continue;
+        }
+
         var word_tokens = try encodeWord(word, add_space_prefix, ignore_merges, config);
         defer word_tokens.deinit(config.allocator);
         try tokens.appendSlice(config.allocator, word_tokens.items);
@@ -209,6 +291,12 @@ pub fn encode(
 }
 
 /// 编码单个词
+///
+/// SPM 模型（model = .llama / .spm）使用 ▁ 前缀，BPE 模型（model = .gpt2）使用普通空格前缀。
+/// 
+/// 关键：对于 SPM 模型，空白片段（GPT-2 预分词产出的纯空白）加 ▁ 前缀后变为 "▁ "，
+/// 这在标准 SPM 词表中通常不存在。因此，如果整个 token（前缀+word）在 trie 中无匹配，
+/// 我们会回退到逐字节编码，以兼容这类边界情况。
 fn encodeWord(
     word: []const u8,
     add_space_prefix: bool,
@@ -217,18 +305,23 @@ fn encodeWord(
 ) !std.ArrayListUnmanaged(u32) {
     var tokens: std.ArrayListUnmanaged(u32) = .empty;
 
-    // 确定要编码的文本
-    // 对于 SPM 模型（tokenizer.ggml.model = "llama"），空格前缀使用 ▁ (U+2581)
-    // 因为 Trie 中存储的 token 字符串包含 ▁ 作为空格标记
-    // 对于 BPE 模型（tokenizer.ggml.model = "gpt2"），空格前缀使用普通空格
-    //
-    // 注意：需要先处理 GPT-2 字节编码，再添加空格前缀（或反之），
-    // 但必须确保每个分配只释放一次，避免 double free。
+    const is_spm_model = config.model == .llama or config.model == .spm;
 
     // 步骤 1：确定基础文本（可能添加空格前缀）
     const base_text = if (add_space_prefix) blk: {
         // SPM 模型使用 ▁ 作为空格标记，BPE 模型使用普通空格
-        if (config.model == .llama) {
+        if (is_spm_model) {
+            // 如果 word 本身以空白开头（GPT-2 预分词将空白单独分离出来），
+            // 用 ▁ 替换前导空白，避免产生无意义的 "▁ " 组合
+            if (word.len > 0 and isWhitespace(word[0])) {
+                var ws_end: usize = 1;
+                while (ws_end < word.len and isWhitespace(word[ws_end])) ws_end += 1;
+                if (ws_end < word.len) {
+                    // 有非空白内容：用 ▁ 替换前导空白
+                    break :blk try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] });
+                }
+                // 纯空白片段：不加前缀，直接回退到字节编码
+            }
             break :blk try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word });
         } else {
             break :blk try std.fmt.allocPrint(config.allocator, " {s}", .{word});
@@ -243,7 +336,7 @@ fn encodeWord(
 
     // 步骤 2：对基础文本进行 GPT-2 字节编码（如果需要）
     // 注意：SPM 模型不使用 GPT-2 字节编码，只有 BPE 模型使用
-    const use_gpt2_encoding = config.bytesToUnicodeFn != null and config.model != .llama;
+    const use_gpt2_encoding = config.bytesToUnicodeFn != null and config.model == .gpt2;
 
     const final_text: []const u8 = if (use_gpt2_encoding) blk: {
         const encoded = try toGpt2ByteEncoding(base_text, config.bytesToUnicodeFn.?, config.ctx, config.allocator);
