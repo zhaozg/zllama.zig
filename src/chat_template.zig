@@ -33,13 +33,21 @@ pub const ChatMessage = struct {
 pub const TemplateKind = enum {
     chatml,
     llama3,
+    llama4,
     gemma,
+    mistral_v7,
+    phi4,
+    deepseek3,
     unknown,
 
     pub fn fromString(s: []const u8) ?TemplateKind {
         if (std.mem.eql(u8, s, "chatml")) return .chatml;
         if (std.mem.eql(u8, s, "llama3")) return .llama3;
+        if (std.mem.eql(u8, s, "llama4")) return .llama4;
         if (std.mem.eql(u8, s, "gemma")) return .gemma;
+        if (std.mem.eql(u8, s, "mistral-v7") or std.mem.eql(u8, s, "mistral")) return .mistral_v7;
+        if (std.mem.eql(u8, s, "phi4") or std.mem.eql(u8, s, "phi-4")) return .phi4;
+        if (std.mem.eql(u8, s, "deepseek3") or std.mem.eql(u8, s, "deepseek-v3")) return .deepseek3;
         return null;
     }
 };
@@ -70,7 +78,11 @@ pub const Template = struct {
         switch (self.kind) {
             .chatml => return applyChatml(allocator, messages, system_prompt, add_generation_prompt),
             .llama3 => return applyLlama3(allocator, messages, system_prompt, add_generation_prompt),
+            .llama4 => return applyLlama4(allocator, messages, system_prompt, add_generation_prompt),
             .gemma => return applyGemma(allocator, messages, system_prompt, add_generation_prompt),
+            .mistral_v7 => return applyMistralV7(allocator, messages, system_prompt, add_generation_prompt),
+            .phi4 => return applyPhi4(allocator, messages, system_prompt, add_generation_prompt),
+            .deepseek3 => return applyDeepSeekV3(allocator, messages, system_prompt, add_generation_prompt),
             .unknown => {
                 // Fallback: treat as raw prompt (no template)
                 if (messages.len == 1 and std.mem.eql(u8, messages[0].role, "user")) {
@@ -100,13 +112,20 @@ pub const Template = struct {
 /// Reference: llama.cpp llm_chat_detect_template()
 pub fn detectKind(tmpl_src: []const u8) TemplateKind {
     if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<|im_start|>")) {
+        // Phi-4 uses <|im_start|> + <|im_sep|>
+        if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<|im_sep|>")) return .phi4;
         return .chatml;
     }
-    if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<|start_header_id|>")) {
-        return .llama3;
-    }
-    if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<start_of_turn>")) {
-        return .gemma;
+    if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<|start_header_id|>")) return .llama3;
+    if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<|header_start|>")) return .llama4;
+    if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<start_of_turn>")) return .gemma;
+    if (std.mem.containsAtLeast(u8, tmpl_src, 1, "[INST]")) return .mistral_v7;
+    // DeepSeek V3 uses UTF-8 characters: <｜Assistant｜>
+    if (std.mem.containsAtLeast(u8, tmpl_src, 1, "<｜Assistant｜>") or
+        std.mem.containsAtLeast(u8, tmpl_src, 1, "<｜assistant｜>") or
+        std.mem.containsAtLeast(u8, tmpl_src, 1, "<｜User｜>"))
+    {
+        return .deepseek3;
     }
     return .unknown;
 }
@@ -288,6 +307,59 @@ fn applyLlama3(
 }
 
 // ============================================================================
+// Llama 4
+// Format: <|begin_of_text|><|header_start|>system<|header_end|>\n\n{system}<|eom_id|>
+//         <|header_start|>user<|header_end|>\n\n{user}<|eom_id|>
+//         <|header_start|>assistant<|header_end|>\n\n{assistant}<|eom_id|>
+//         <|header_start|>assistant<|header_end|>\n\n   ← generation prompt
+//
+// Note: Llama 4 uses <|header_start|>/<|header_end|> instead of
+//       <|start_header_id|>/<|end_header_id|>, and <|eom_id|> instead of <|eot_id|>.
+// ============================================================================
+fn applyLlama4(
+    allocator: std.mem.Allocator,
+    messages: []const ChatMessage,
+    system_prompt: ?[]const u8,
+    add_generation_prompt: bool,
+) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    // BOS token
+    try buf.appendSlice(allocator, "<|begin_of_text|>");
+
+    // System message
+    if (system_prompt) |sp| {
+        if (sp.len > 0) {
+            try buf.appendSlice(allocator, "<|header_start|>system<|header_end|>\n\n");
+            try buf.appendSlice(allocator, sp);
+            try buf.appendSlice(allocator, "<|eom_id|>");
+        }
+    }
+
+    // Messages
+    for (messages) |msg| {
+        const role_tag = if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model"))
+            "assistant"
+        else
+            msg.role;
+
+        try buf.appendSlice(allocator, "<|header_start|>");
+        try buf.appendSlice(allocator, role_tag);
+        try buf.appendSlice(allocator, "<|header_end|>\n\n");
+        try buf.appendSlice(allocator, msg.content);
+        try buf.appendSlice(allocator, "<|eom_id|>");
+    }
+
+    // Generation prompt
+    if (add_generation_prompt) {
+        try buf.appendSlice(allocator, "<|header_start|>assistant<|header_end|>\n\n");
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
+// ============================================================================
 // Gemma (Gemma 3 / Gemma 4)
 // Format: <start_of_turn>user\n{user}<end_of_turn>\n
 //         <start_of_turn>model\n{assistant}<end_of_turn>\n
@@ -360,6 +432,203 @@ fn applyGemma(
 }
 
 // ============================================================================
+// Mistral v7
+// Format: [INST] {user} [/INST]
+//         [INST] {system}\n\n{user} [/INST]
+//         {assistant}</s>
+//         [INST] {user} [/INST]
+//         ← generation prompt (no special marker, just empty)
+//
+// Note: Mistral v7 uses [INST] tags for user messages.
+//       Assistant responses are plain text followed by </s>.
+//       System prompt is prepended to the first user message.
+// ============================================================================
+fn applyMistralV7(
+    allocator: std.mem.Allocator,
+    messages: []const ChatMessage,
+    system_prompt: ?[]const u8,
+    add_generation_prompt: bool,
+) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    // Collect system content
+    var system_content: std.ArrayListUnmanaged(u8) = .empty;
+    defer system_content.deinit(allocator);
+
+    if (system_prompt) |sp| {
+        if (sp.len > 0) {
+            try system_content.appendSlice(allocator, sp);
+        }
+    }
+
+    var system_merged = false;
+
+    for (messages) |msg| {
+        if (std.mem.eql(u8, msg.role, "system")) {
+            if (system_content.items.len > 0) {
+                try system_content.appendSlice(allocator, "\n\n");
+            }
+            try system_content.appendSlice(allocator, msg.content);
+            continue;
+        }
+
+        if (std.mem.eql(u8, msg.role, "user")) {
+            try buf.appendSlice(allocator, "[INST] ");
+
+            // Merge system content into the first user message
+            if (!system_merged and system_content.items.len > 0) {
+                try buf.appendSlice(allocator, system_content.items);
+                try buf.appendSlice(allocator, "\n\n");
+                system_merged = true;
+            }
+
+            try buf.appendSlice(allocator, msg.content);
+            try buf.appendSlice(allocator, " [/INST]");
+        } else if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model")) {
+            try buf.appendSlice(allocator, msg.content);
+            try buf.appendSlice(allocator, "</s>");
+        }
+    }
+
+    // Generation prompt: Mistral doesn't have a special generation marker,
+    // but we add a space to indicate the assistant should start speaking
+    if (add_generation_prompt) {
+        try buf.appendSlice(allocator, " ");
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
+// ============================================================================
+// Phi-4
+// Format: <|im_start|>system\n{system}<|im_end|>\n
+//         <|im_start|>user\n{user}<|im_sep|>\n
+//         <|im_start|>assistant\n{assistant}<|im_end|>\n
+//         <|im_start|>assistant\n   ← generation prompt
+//
+// Note: Phi-4 is similar to ChatML but uses <|im_sep|> instead of <|im_end|>
+//       for user messages. This allows the model to distinguish between
+//       user input boundaries and assistant output boundaries.
+// ============================================================================
+fn applyPhi4(
+    allocator: std.mem.Allocator,
+    messages: []const ChatMessage,
+    system_prompt: ?[]const u8,
+    add_generation_prompt: bool,
+) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    // System message
+    if (system_prompt) |sp| {
+        if (sp.len > 0) {
+            try buf.appendSlice(allocator, "<|im_start|>system\n");
+            try buf.appendSlice(allocator, sp);
+            try buf.appendSlice(allocator, "<|im_end|>\n");
+        }
+    }
+
+    // Messages
+    for (messages) |msg| {
+        if (std.mem.eql(u8, msg.role, "system")) {
+            try buf.appendSlice(allocator, "<|im_start|>system\n");
+            try buf.appendSlice(allocator, msg.content);
+            try buf.appendSlice(allocator, "<|im_end|>\n");
+        } else if (std.mem.eql(u8, msg.role, "user")) {
+            try buf.appendSlice(allocator, "<|im_start|>user\n");
+            try buf.appendSlice(allocator, msg.content);
+            try buf.appendSlice(allocator, "<|im_sep|>\n");
+        } else if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model")) {
+            try buf.appendSlice(allocator, "<|im_start|>assistant\n");
+            try buf.appendSlice(allocator, msg.content);
+            try buf.appendSlice(allocator, "<|im_end|>\n");
+        }
+    }
+
+    // Generation prompt
+    if (add_generation_prompt) {
+        try buf.appendSlice(allocator, "<|im_start|>assistant\n");
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
+// ============================================================================
+// DeepSeek V3
+// Format: <｜User｜>{user}<｜Assistant｜>
+//         <｜User｜>{user}<｜Assistant｜>{assistant}<｜end▁of▁sentence｜>
+//         <｜User｜>{user}<｜Assistant｜>   ← generation prompt
+//
+// Note: DeepSeek V3 uses UTF-8 full-width angle brackets and special
+//       Unicode characters for its tags. The tags are:
+//       - <｜User｜>  (U+FF5C full-width vertical bar)
+//       - <｜Assistant｜>
+//       - <｜end▁of▁sentence｜>
+// ============================================================================
+fn applyDeepSeekV3(
+    allocator: std.mem.Allocator,
+    messages: []const ChatMessage,
+    system_prompt: ?[]const u8,
+    add_generation_prompt: bool,
+) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    // System message: DeepSeek V3 doesn't have a separate system role.
+    // If system prompt is provided, prepend it to the first user message.
+    var system_content: std.ArrayListUnmanaged(u8) = .empty;
+    defer system_content.deinit(allocator);
+
+    if (system_prompt) |sp| {
+        if (sp.len > 0) {
+            try system_content.appendSlice(allocator, sp);
+            try system_content.appendSlice(allocator, "\n\n");
+        }
+    }
+
+    var system_merged = false;
+
+    for (messages) |msg| {
+        if (std.mem.eql(u8, msg.role, "system")) {
+            if (system_content.items.len > 0) {
+                try system_content.appendSlice(allocator, "\n\n");
+            }
+            try system_content.appendSlice(allocator, msg.content);
+            continue;
+        }
+
+        if (std.mem.eql(u8, msg.role, "user")) {
+            try buf.appendSlice(allocator, "<｜User｜>");
+
+            // Merge system content into the first user message
+            if (!system_merged and system_content.items.len > 0) {
+                try buf.appendSlice(allocator, system_content.items);
+                system_merged = true;
+            }
+
+            try buf.appendSlice(allocator, msg.content);
+            try buf.appendSlice(allocator, "<｜Assistant｜>");
+        } else if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model")) {
+            try buf.appendSlice(allocator, msg.content);
+            try buf.appendSlice(allocator, "<｜end▁of▁sentence｜>");
+        }
+    }
+
+    // Generation prompt: already ends with <｜Assistant｜> from the last user message
+    // If there are no user messages, add the generation prompt marker
+    if (add_generation_prompt) {
+        // Check if we already ended with <｜Assistant｜>
+        const ends_with_assistant = std.mem.endsWith(u8, buf.items, "<｜Assistant｜>");
+        if (!ends_with_assistant) {
+            try buf.appendSlice(allocator, "<｜Assistant｜>");
+        }
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -373,8 +642,24 @@ test "detectKind: llama3" {
     try testing.expectEqual(TemplateKind.llama3, detectKind("<|start_header_id|>user<|end_header_id|>"));
 }
 
+test "detectKind: llama4" {
+    try testing.expectEqual(TemplateKind.llama4, detectKind("<|header_start|>user<|header_end|>"));
+}
+
 test "detectKind: gemma" {
     try testing.expectEqual(TemplateKind.gemma, detectKind("<start_of_turn>user\nHello<end_of_turn>"));
+}
+
+test "detectKind: mistral_v7" {
+    try testing.expectEqual(TemplateKind.mistral_v7, detectKind("[INST] Hello [/INST]"));
+}
+
+test "detectKind: phi4" {
+    try testing.expectEqual(TemplateKind.phi4, detectKind("<|im_start|>user\nHello<|im_sep|>\n"));
+}
+
+test "detectKind: deepseek3" {
+    try testing.expectEqual(TemplateKind.deepseek3, detectKind("<｜User｜>Hello<｜Assistant｜>"));
 }
 
 test "detectKind: unknown" {
@@ -441,6 +726,20 @@ test "Template.apply: llama3" {
     );
 }
 
+test "Template.apply: llama4" {
+    const source = TemplateSource{ .preset = .llama4 };
+    var tmpl = try resolve(testing.allocator, source, .llama);
+    defer tmpl.deinit(testing.allocator);
+
+    const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
+    const result = try tmpl.apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "<|begin_of_text|><|header_start|>user<|header_end|>\n\nHello<|eom_id|><|header_start|>assistant<|header_end|>\n\n",
+        result,
+    );
+}
+
 test "Template.apply: gemma" {
     const source = TemplateSource{ .preset = .gemma };
     var tmpl = try resolve(testing.allocator, source, .gemma3);
@@ -451,6 +750,48 @@ test "Template.apply: gemma" {
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
         "<start_of_turn>user\n1+1=?<end_of_turn>\n<start_of_turn>model\n",
+        result,
+    );
+}
+
+test "Template.apply: mistral_v7" {
+    const source = TemplateSource{ .preset = .mistral_v7 };
+    var tmpl = try resolve(testing.allocator, source, .llama);
+    defer tmpl.deinit(testing.allocator);
+
+    const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
+    const result = try tmpl.apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "[INST] Hello [/INST] ",
+        result,
+    );
+}
+
+test "Template.apply: phi4" {
+    const source = TemplateSource{ .preset = .phi4 };
+    var tmpl = try resolve(testing.allocator, source, .qwen2);
+    defer tmpl.deinit(testing.allocator);
+
+    const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
+    const result = try tmpl.apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "<|im_start|>user\nHello<|im_sep|>\n<|im_start|>assistant\n",
+        result,
+    );
+}
+
+test "Template.apply: deepseek3" {
+    const source = TemplateSource{ .preset = .deepseek3 };
+    var tmpl = try resolve(testing.allocator, source, .qwen2);
+    defer tmpl.deinit(testing.allocator);
+
+    const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
+    const result = try tmpl.apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "<｜User｜>Hello<｜Assistant｜>",
         result,
     );
 }
@@ -517,6 +858,101 @@ test "Template.apply: gemma with system merged" {
         "<start_of_turn>user\nYou are a helpful assistant.\n\nHello<end_of_turn>\n<start_of_turn>model\n",
         result,
     );
+}
+
+test "Template.apply: multi-turn mistral_v7" {
+    const source = TemplateSource{ .preset = .mistral_v7 };
+    var tmpl = try resolve(testing.allocator, source, .llama);
+    defer tmpl.deinit(testing.allocator);
+
+    const messages = [_]ChatMessage{
+        .{ .role = "user", .content = "Hi" },
+        .{ .role = "assistant", .content = "Hello!" },
+        .{ .role = "user", .content = "How are you?" },
+    };
+    const result = try tmpl.apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "[INST] Hi [/INST]Hello!</s>[INST] How are you? [/INST] ",
+        result,
+    );
+}
+
+test "Template.apply: multi-turn deepseek3" {
+    const source = TemplateSource{ .preset = .deepseek3 };
+    var tmpl = try resolve(testing.allocator, source, .qwen2);
+    defer tmpl.deinit(testing.allocator);
+
+    const messages = [_]ChatMessage{
+        .{ .role = "user", .content = "Hi" },
+        .{ .role = "assistant", .content = "Hello!" },
+        .{ .role = "user", .content = "How are you?" },
+    };
+    const result = try tmpl.apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "<｜User｜>Hi<｜Assistant｜>Hello!<｜end▁of▁sentence｜><｜User｜>How are you?<｜Assistant｜>",
+        result,
+    );
+}
+
+test "Template.apply: mistral_v7 with system" {
+    const source = TemplateSource{ .preset = .mistral_v7 };
+    var tmpl = try resolve(testing.allocator, source, .llama);
+    defer tmpl.deinit(testing.allocator);
+
+    const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
+    const result = try tmpl.apply(testing.allocator, &messages, "You are helpful.", true);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "[INST] You are helpful.\n\nHello [/INST] ",
+        result,
+    );
+}
+
+test "Template.apply: phi4 with system" {
+    const source = TemplateSource{ .preset = .phi4 };
+    var tmpl = try resolve(testing.allocator, source, .qwen2);
+    defer tmpl.deinit(testing.allocator);
+
+    const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
+    const result = try tmpl.apply(testing.allocator, &messages, "You are helpful.", true);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "<|im_start|>system\nYou are helpful.<|im_end|>\n<|im_start|>user\nHello<|im_sep|>\n<|im_start|>assistant\n",
+        result,
+    );
+}
+
+test "Template.apply: deepseek3 with system" {
+    const source = TemplateSource{ .preset = .deepseek3 };
+    var tmpl = try resolve(testing.allocator, source, .qwen2);
+    defer tmpl.deinit(testing.allocator);
+
+    const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
+    const result = try tmpl.apply(testing.allocator, &messages, "You are helpful.", true);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "<｜User｜>You are helpful.\n\nHello<｜Assistant｜>",
+        result,
+    );
+}
+
+test "fromString: valid names" {
+    try testing.expectEqual(TemplateKind.chatml, TemplateKind.fromString("chatml").?);
+    try testing.expectEqual(TemplateKind.llama3, TemplateKind.fromString("llama3").?);
+    try testing.expectEqual(TemplateKind.llama4, TemplateKind.fromString("llama4").?);
+    try testing.expectEqual(TemplateKind.gemma, TemplateKind.fromString("gemma").?);
+    try testing.expectEqual(TemplateKind.mistral_v7, TemplateKind.fromString("mistral-v7").?);
+    try testing.expectEqual(TemplateKind.mistral_v7, TemplateKind.fromString("mistral").?);
+    try testing.expectEqual(TemplateKind.phi4, TemplateKind.fromString("phi4").?);
+    try testing.expectEqual(TemplateKind.phi4, TemplateKind.fromString("phi-4").?);
+    try testing.expectEqual(TemplateKind.deepseek3, TemplateKind.fromString("deepseek3").?);
+    try testing.expectEqual(TemplateKind.deepseek3, TemplateKind.fromString("deepseek-v3").?);
+}
+
+test "fromString: invalid name" {
+    try testing.expectEqual(@as(?TemplateKind, null), TemplateKind.fromString("nonexistent"));
 }
 
 test "applySingleTurn: backward compat" {
