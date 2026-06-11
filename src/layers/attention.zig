@@ -147,6 +147,8 @@ fn buildAttentionMask(
     const inf: f32 = -std.math.inf(f32);
 
     // Fill mask: mask[cache_pos][query_idx]
+    // ggml uses column-major layout: for 2D tensor [cache_len, n_tokens],
+    // element (cache_pos, query_idx) is at data[query_idx * cache_len + cache_pos]
     for (0..@as(usize, @intCast(cache_len))) |ci| {
         const cache_pos: i64 = @intCast(ci);
         for (0..@as(usize, @intCast(n_tokens))) |qi| {
@@ -154,9 +156,9 @@ fn buildAttentionMask(
             const dist: i64 = query_pos - cache_pos;
             // Allowed: causal (dist >= 0) and within window (dist < window_size)
             if (dist >= 0 and dist < window_size) {
-                data[ci * @as(usize, @intCast(n_tokens)) + qi] = 0.0;
+                data[qi * @as(usize, @intCast(cache_len)) + ci] = 0.0;
             } else {
-                data[ci * @as(usize, @intCast(n_tokens)) + qi] = inf;
+                data[qi * @as(usize, @intCast(cache_len)) + ci] = inf;
             }
         }
     }
