@@ -260,7 +260,6 @@ pub const AudioEncoder = struct {
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
             if (w.sscp_conv_w[i]) |conv_w| {
-                // Conv2D: [OH, OW, OC, N] = conv2d(input, kernel, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w)
                 cur = cur.conv2d(ctx, conv_w, 2, 2, 1, 1, 1, 1);
                 if (w.sscp_conv_b[i]) |conv_b| {
                     cur = cur.add(ctx, conv_b);
@@ -290,6 +289,27 @@ pub const AudioEncoder = struct {
         }
 
         const n_pos = cur.ne()[1];
+
+        // Chunked local attention parameters (matching llama.cpp gemma4a.cpp)
+        const C: i64 = 12; // chunk_size
+        const P: i64 = 12; // max_past_horizon (context_left - 1)
+        const S: i64 = C + P; // context_size = 24
+        const R: i64 = P + 1; // RPE positions = 13
+        const B: i64 = @divTrunc((n_pos + C - 1), C); // num_blocks
+        const Np: i64 = B * C; // padded sequence length
+        const pad_seq: i64 = Np - n_pos;
+
+        // Create input tensors for RPE and mask (filled with data, matching C++ set_input)
+        // Ensure allocations are enabled before creating tensors that we'll write into
+        ctx.setNoAlloc(false);
+        const pos_emb = try ctx.newTensor2d(ggml.Type.f32, p.n_embd, @intCast(R));
+        pos_emb.setName("pos_emb");
+        fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.n_embd), @intCast(P));
+
+        const kq_mask = try ctx.newTensor3d(ggml.Type.f32, @intCast(S), @intCast(C), @intCast(B));
+        kq_mask.setName("kq_mask");
+        fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos));
+        ctx.setNoAlloc(true);
 
         // 3. Conformer Blocks
         for (w.layers, 0..) |*layer, il| {
@@ -342,27 +362,20 @@ pub const AudioEncoder = struct {
                     Kcur = Kcur.mul(ctx, pks.reshape3d(ctx, d_head_i, 1, 1));
                 }
 
-                // Chunked attention parameters
-                const C: i64 = 12; // chunk_size
-                const P: i64 = 12; // max_past_horizon
-                const S: i64 = C + P; // context_size = 24
-                const B: i64 = @divTrunc((n_pos_i + C - 1), C); // num_blocks
-                const Np: i64 = B * C; // padded sequence length
-                const pad_seq: i64 = Np - n_pos_i;
-                const R: i64 = P + 1; // RPE positions
-
-                // Q blocking: pad to Np, reshape to [D, H, C, B], then permute
-                Qcur = Qcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_seq)), 0);
-                Qcur = Qcur.reshape4d(ctx, d_head_i, n_head_i, C, B);
+                // Q blocking: [D, H, N] -> pad to Np -> reshape [D, H, C, B]
+                // ggml permute: ne[ax_i] = src->ne[i], so (0,3,1,2) sends H->3, C->1, B->2
+                Qcur = Qcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_seq)), 0); // [D, H, Np]
+                Qcur = Qcur.reshape4d(ctx, d_head_i, n_head_i, C, B); // [D, H, C, B]
                 Qcur = Qcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, C, B, H]
 
-                // K/V: extract overlapping blocks
+                // K/V block context extraction via overlapping view (matching C++ extract_blocks lambda)
                 const pad_kv: i64 = S * B - n_pos_i;
                 Kcur = Kcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0); // [D, H, S*B]
                 Kcur = Kcur.roll(ctx, 0, 0, P, 0); // left-pad by P
-                Kcur = Kcur.cont(ctx);
+                Kcur = Kcur.cont(ctx); // materialize roll
+                // Overlapping view: stride for B dim is C positions, not S
                 Kcur = Kcur.view4d(ctx, d_head_i, n_head_i, S, B, Kcur.nb()[1], Kcur.nb()[2], @as(usize, @intCast(C)) * Kcur.nb()[2], 0);
-                Kcur = Kcur.cont(ctx);
+                Kcur = Kcur.cont(ctx); // materialize overlapping windows
                 var Kblk = Kcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, S, B, H]
 
                 Vcur = Vcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0);
@@ -373,49 +386,46 @@ pub const AudioEncoder = struct {
                 var Vblk = Vcur.permute(ctx, 1, 3, 0, 2).cont(ctx); // [S, D, B, H]
 
                 // Content attention: Q @ K^T
-                var scores = Kblk.mulMat(ctx, Qcur); // [S, C, B, H]
+                // Kblk=[D,S,B,H], Qcur=[D,C,B,H] -> mul_mat contracts on D -> [S,C,B,H]
+                var scores = Kblk.mulMat(ctx, Qcur);
 
                 // Relative position attention
                 if (layer.attn_k_rel_w) |k_rel| {
-                    // Create and fill position embedding with sinusoidal encodings [n_embd, R]
-                    var pos_emb = try ctx.newTensor2d(ggml.Type.f32, d_head_i * n_head_i, R);
-                    pos_emb.setName("pos_emb");
-                    fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.d_head * p.n_head));
-                    // RPE projection
-                    var p_rpe = k_rel.mulMat(ctx, pos_emb); // [n_embd, R]
+                    // RPE: [n_embd, R] -> project -> [D, H, R] -> [D, R, H]
+                    var p_rpe = k_rel.mulMat(ctx, pos_emb);
                     p_rpe = p_rpe.reshape3d(ctx, d_head_i, n_head_i, R);
                     p_rpe = p_rpe.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, R, H]
 
-                    // Q_flat @ RPE^T
+                    // Q_flat @ RPE^T: [D, C*B, H] @ [D, R, H] -> [R, C*B, H]
                     const Q_flat = Qcur.reshape3d(ctx, d_head_i, C * B, n_head_i);
                     var matrix_bd = p_rpe.mulMat(ctx, Q_flat); // [R, C*B, H]
                     matrix_bd = matrix_bd.reshape4d(ctx, R, C, B, n_head_i); // [R, C, B, H]
 
-                    // Blocked relative shift
-                    matrix_bd = matrix_bd.pad(ctx, S + 1 - R, 0, 0, 0);
+                    // Blocked relative shift (appendix B of Transformer-XL)
+                    matrix_bd = matrix_bd.pad(ctx, S + 1 - R, 0, 0, 0); // [S+1, C, B, H]
                     matrix_bd = matrix_bd.reshape3d(ctx, (S + 1) * C, B, n_head_i);
                     matrix_bd = matrix_bd.view3d(ctx, C * S, B, n_head_i, matrix_bd.nb()[1], matrix_bd.nb()[2], 0);
-                    matrix_bd = matrix_bd.cont(ctx);
-                    matrix_bd = matrix_bd.reshape4d(ctx, S, C, B, n_head_i);
+                    matrix_bd = matrix_bd.cont(ctx); // [C*S, B, H]
+                    matrix_bd = matrix_bd.reshape4d(ctx, S, C, B, n_head_i); // [S, C, B, H]
 
                     scores = scores.add(ctx, matrix_bd);
                 }
 
-                // Softcap + mask + softmax
+                // Softcap
                 scores = scores.scale(ctx, 1.0 / softcap);
                 scores = scores.tanh(ctx);
                 scores = scores.scale(ctx, softcap);
 
-                // Create and fill causal attention mask
-                var kq_mask = try ctx.newTensor3d(ggml.Type.f32, S, C, B);
-                kq_mask.setName("kq_mask");
-                fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos_i));
+                // Blocked attention mask: [S, C, B] broadcasts over H
                 scores = scores.add(ctx, kq_mask);
+
                 const attn = scores.softMax(ctx);
 
-                // attn @ V
-                var x = Vblk.mulMat(ctx, attn); // [D, C, B, H]
-                x = x.permute(ctx, 0, 2, 3, 1).cont(ctx); // [D, H, C, B]
+                // attn @ V: [S,C,B,H] @ [S,D,B,H] -> [D,C,B,H]
+                var x = Vblk.mulMat(ctx, attn);
+
+                // [D,C,B,H] -> [D,H,C,B] via permute(0,2,3,1) -> flatten -> trim
+                x = x.permute(ctx, 0, 2, 3, 1).cont(ctx);
                 x = x.cont2d(ctx, d_head_i * n_head_i, C * B);
                 if (pad_seq > 0) {
                     x = x.view2d(ctx, d_head_i * n_head_i, n_pos_i, x.nb()[1], 0);
@@ -596,27 +606,30 @@ fn ffnSilu(ctx: *ggml.Context, x: *ggml.Tensor, up_w: *ggml.Tensor, down_w: *ggm
 
 /// Fill a 2D tensor [n_embd, n_pos] with sinusoidal position encodings.
 /// Used for Relative Position Encoding (RPE) in Conformer attention.
-/// Matrix layout: data[pos * n_embd + dim] encodes position `pos` at dimension `dim`.
-fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize) void {
+/// Matches llama.cpp clip.cpp: positions are in DESCENDING order (max_past, max_past-1, ..., 0).
+/// Matrix layout: data[p * n_embd + dim] encodes position `max_past - p` at dimension `dim`.
+fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_past: usize) void {
     const data = tensor.dataF32();
-    const theta: f32 = 10000.0;
+    const num_timescales = n_embd / 2;
+    const log_timescale_increment = @log(10000.0) / @max(@as(f32, @floatFromInt(num_timescales - 1)), 1.0);
 
-    for (0..n_pos) |pos| {
-        const pos_f: f32 = @floatFromInt(pos);
-        var i: usize = 0;
-        while (i < n_embd) : (i += 2) {
-            const freq: f32 = 1.0 / std.math.pow(f32, theta, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n_embd)));
-            const angle: f32 = pos_f * freq;
-            data[pos * n_embd + i] = @sin(angle);
-            if (i + 1 < n_embd) {
-                data[pos * n_embd + i + 1] = @cos(angle);
-            }
+    for (0..n_pos) |p| {
+        // Position in DESCENDING order: max_past, max_past-1, ..., 0
+        // This matches llama.cpp clip.cpp line 4255:
+        //   float position = (float)(max_past - p);
+        const position: f32 = @floatFromInt(max_past - p);
+        for (0..num_timescales) |i| {
+            const inv_ts: f32 = @exp(-@as(f32, @floatFromInt(i)) * log_timescale_increment);
+            const scaled: f32 = position * inv_ts;
+            data[p * n_embd + i] = @sin(scaled);
+            data[p * n_embd + i + num_timescales] = @cos(scaled);
         }
     }
 }
 
-
 /// Fill a 3D attention mask tensor [S, C, B] for chunked self-attention.
+/// Matches llama.cpp clip.cpp lines 4244-4263.
+/// Uses -1e9 (not -inf) for masked positions, matching C++ initialization.
 fn fillChunkedAttentionMask(
     tensor: *ggml.Tensor,
     n_ctx: usize,
@@ -626,27 +639,23 @@ fn fillChunkedAttentionMask(
     n_pos: usize,
 ) void {
     const data = tensor.dataF32();
-    const neg_inf: f32 = -std.math.inf(f32);
+    const neg_val: f32 = -1e9; // Use -1e9 instead of -inf, matching C++ code
     const S = n_ctx;
     const C = chunk_size;
-    const past_i64: i64 = @intCast(past);
-    const n_pos_i64: i64 = @intCast(n_pos);
 
     for (0..n_blocks) |b| {
         const bC: i64 = @intCast(b * C);
         for (0..C) |c| {
-            const query_pos: i64 = @intCast(b * C + c);
-            const query_valid = b * C + c < n_pos;
+            const gq: i64 = @intCast(b * C + c); // global query position
             for (0..S) |s| {
                 const s_i64: i64 = @intCast(s);
-                const key_pos: i64 = s_i64 + bC - past_i64;
-                const key_valid = key_pos >= 0 and key_pos < n_pos_i64;
-                const causal = key_pos <= query_pos;
+                const gk: i64 = s_i64 + bC - @as(i64, @intCast(past)); // global key position
                 const idx = s + c * S + b * S * C;
-                if (query_valid and key_valid and causal) {
+                // Condition matching C++: gq < n_pos && gk >= 0 && gk < n_pos && gk <= gq && (gq - gk) < past
+                if (gq < n_pos and gk >= 0 and gk < n_pos and gk <= gq and (gq - gk) < past) {
                     data[idx] = 0.0;
                 } else {
-                    data[idx] = neg_inf;
+                    data[idx] = neg_val;
                 }
             }
         }

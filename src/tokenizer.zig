@@ -586,8 +586,9 @@ pub const Tokenizer = struct {
         return self.bytes_to_unicode[byte];
     }
 
-    /// 将 token 字符串转换为 token ID
-    fn textToToken(self: *const Tokenizer, text: []const u8) ?u32 {
+    /// 通过 token 名称（字符串）查找对应的 token ID。
+    /// 用于查找特殊 token（如音频/视觉占位符）的 ID。
+    pub fn textToToken(self: *const Tokenizer, text: []const u8) ?u32 {
         // 先在 Trie 中查找
         const match = trie.longestMatch(&self.trie_root, text, 0);
         if (match) |m| {

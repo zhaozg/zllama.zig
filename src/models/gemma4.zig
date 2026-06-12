@@ -177,6 +177,14 @@ pub const Gemma4Model = struct {
         const n_override: i64 = embd_override.ne()[1];
         const n_text: i64 = n_tokens_i64 - n_override;
         const n_embd_i64: i64 = @intCast(p.base.n_embd);
+        const override_embd_dim: i64 = embd_override.ne()[0];
+
+        // Validate dimensions: audio embedding dim must match model n_embd
+        if (override_embd_dim != n_embd_i64) {
+            std.log.err("Dimension mismatch: audio embeddings have dim={d} but model n_embd={d}", .{ override_embd_dim, n_embd_i64 });
+            std.log.err("  This may indicate the mmproj file doesn't match the model.", .{});
+            return error.EmbeddingDimensionMismatch;
+        }
 
         // Mixed embeddings: first n_override from override, rest from token embeddings
         var cur: *ggml.Tensor = undefined;
@@ -184,11 +192,14 @@ pub const Gemma4Model = struct {
             // Get embeddings for ALL tokens, then replace first n_override positions
             var all_embd = embed.tokenEmbedding(ctx, w.base.token_embd, input_tokens);
             all_embd = ggml.scale(ctx, all_embd, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+            // Scale audio embeddings to match text embedding magnitude
+            const scaled_override = ggml.scale(ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
             // Extract text-only portion: [n_embd, n_text]
             const text_embd = all_embd.view2d(ctx, n_embd_i64, n_text, all_embd.nb()[1], @as(usize, @intCast(n_override)) * @sizeOf(f32) * @as(usize, @intCast(n_embd_i64)));
-            cur = ggml.concat(ctx, embd_override, ggml.cont(ctx, text_embd), 1);
+            cur = ggml.concat(ctx, scaled_override, ggml.cont(ctx, text_embd), 1);
         } else {
-            cur = embd_override;
+            // Scale audio-only embeddings consistently
+            cur = ggml.scale(ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
         }
         cur.setName("inp_scaled_mm");
 

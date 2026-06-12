@@ -232,19 +232,9 @@ const InferenceEngine = struct {
         }
 
 
-        // Detect and log model capabilities
+        // Detect and log model capabilities (from main GGUF metadata only)
+        // Full capabilities are determined after mmproj loading below
         var capabilities = registry.detectCapabilities(&gguf_file, arch);
-        if (capabilities.has_vision or capabilities.has_audio) {
-            logger.info("Multi-modal: yes", .{});
-        } else {
-            logger.info("Multi-modal: no (text-only)", .{});
-        }
-        if (capabilities.has_vision) {
-            logger.info("  Vision: yes ({s})", .{capabilities.vision_encoder_type});
-        }
-        if (capabilities.has_audio) {
-            logger.info("  Audio : yes ({s}, {d} Hz)", .{ capabilities.audio_encoder_type, capabilities.audio_sample_rate });
-        }
         var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
         errdefer tok.deinit();
         logger.info("Tokenizer: {d} tokens", .{tok.vocabSize()});
@@ -273,6 +263,16 @@ const InferenceEngine = struct {
         if (cli_args.mmproj_path.len > 0) {
             mm_manager = try loadMMProj(io, allocator, cli_args.mmproj_path, &capabilities);
             logger.info("Multimodal encoder loaded from: {s}", .{cli_args.mmproj_path});
+            // Re-check capabilities after mmproj load (updates has_audio/has_vision)
+            if (capabilities.has_vision or capabilities.has_audio) {
+                logger.info("Multi-modal: yes", .{});
+                if (capabilities.has_vision) {
+                    logger.info("  Vision: yes ({s})", .{capabilities.vision_encoder_type});
+                }
+                if (capabilities.has_audio) {
+                    logger.info("  Audio : yes ({s}, {d} Hz)", .{ capabilities.audio_encoder_type, capabilities.audio_sample_rate });
+                }
+            }
         } else if (capabilities.has_vision or capabilities.has_audio) {
             logger.warn("Model has multimodal capabilities but no --mmproj file provided", .{});
             logger.warn("  Use --mmproj <path> to load vision/audio encoder weights", .{});
@@ -852,29 +852,79 @@ const InferenceEngine = struct {
         });
         self.ctx_graph.setNoAlloc(true);
 
-        // Allocate and compute vision encoder graph
+        // Allocate and compute vision encoder graph.
+        // IMPORTANT: v_galloc must stay alive until the LLM graph compute
+        // completes, because vision_embeddings tensor data is in gallocr memory.
         const buft = ggml.backendCpuBufferType();
-        {
-            var v_galloc = try ggml.Gallocr.init(buft);
-            defer v_galloc.free();
-            if (!v_galloc.allocGraph(vision_graph)) {
-                return error.GraphAllocFailed;
-            }
-            try vision_graph.compute(self.n_threads);
+        var v_galloc = try ggml.Gallocr.init(buft);
+        defer v_galloc.free();
+        if (!v_galloc.allocGraph(vision_graph)) {
+            return error.GraphAllocFailed;
         }
+        try vision_graph.compute(self.n_threads);
 
         // Log vision encoding results
         const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
         logger.info("Vision encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd_val, n_vision_tokens });
 
-        // Step 3: Tokenize prompt text
-        var input_tokens = try self.tok.encode(prompt, true);
+        // Step 3: Tokenize prompt text (with chat template for consistency)
+        const formatted_prompt = if (self.no_chat_template) blk: {
+            break :blk try self.allocator.dupe(u8, prompt);
+        } else blk: {
+            const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
+            const source = self.chat_template_source orelse
+                chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
+            var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
+            defer tmpl.deinit(self.allocator);
+            const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+            const messages = [_]chat_template.ChatMessage{
+                chat_template.ChatMessage.init("user", prompt),
+            };
+            break :blk try tmpl.apply(self.allocator, &messages, system, true);
+        };
+        defer self.allocator.free(formatted_prompt);
+
+        var input_tokens = try self.tok.encode(formatted_prompt, true);
         defer input_tokens.deinit(self.allocator);
         const n_text_tokens: i32 = @intCast(input_tokens.items.len);
         const n_total_tokens: i32 = n_vision_tokens + n_text_tokens;
 
-        // Step 4: Create input token tensor (vision positions = PAD, text positions = real tokens)
+        logger.info("Vision tokens={d}, text tokens={d} (prompt_len={d}), total={d}", .{
+            n_vision_tokens, n_text_tokens, formatted_prompt.len, n_total_tokens,
+        });
+
+        // Look up vision placeholder token ID from vocabulary
+        const vision_placeholder_id: i32 = blk: {
+            const candidates = [_][]const u8{
+                "<|vision|>",
+                "<vision>",
+                "<|vision_place|>",
+                "<|vision_embeddings|>",
+            };
+            for (candidates) |name| {
+                if (self.tok.textToToken(name)) |id| {
+                    logger.info("Vision placeholder token '{s}' -> id={d}", .{ name, id });
+                    break :blk @as(i32, @intCast(id));
+                }
+            }
+            logger.warn("No standard vision placeholder token found; scanning vocabulary...", .{});
+            var fallback_id: ?i32 = null;
+            for (self.tok.vocab.items, 0..) |entry, id| {
+                if (entry == .normal and std.mem.containsAtLeast(u8, entry.normal, 1, "vision")) {
+                    fallback_id = @as(i32, @intCast(id));
+                    logger.warn("Using token '{s}' (id={d}) as vision placeholder", .{ entry.normal, id });
+                    break;
+                }
+            }
+            if (fallback_id) |fid| {
+                break :blk fid;
+            }
+            logger.err("No vision placeholder token found in vocabulary! Using 0 (<unk>) as fallback.", .{});
+            break :blk @as(i32, 0);
+        };
+
+        // Step 4: Create input token tensor (vision positions = placeholder, text positions = real tokens)
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
         self.ctx_graph.setNoAlloc(true);
@@ -882,7 +932,7 @@ const InferenceEngine = struct {
             const data = input_tensor.dataBytes();
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
             for (0..@as(usize, @intCast(n_vision_tokens))) |j| {
-                slice[j] = 0;
+                slice[j] = vision_placeholder_id;
             }
             for (input_tokens.items, 0..) |token, j| {
                 slice[@as(usize, @intCast(n_vision_tokens)) + j] = @as(i32, @intCast(token));
@@ -910,10 +960,17 @@ const InferenceEngine = struct {
         const t_end = engine_common.currentTimeMs();
         const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
 
-        // Step 6: Sample first token and generate
+        // Step 9: Sample first token and generate
         var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
         var pos: i32 = n_total_tokens;
         var gen_count: u32 = 0;
+
+        // Debug: log the first generated token
+        logger.info("First generated token (vision): id={d}, is_eog={}, pp_time={d:.3}s", .{
+            current_token,
+            self.tok.isEog(@intCast(current_token)),
+            pp_time_s,
+        });
 
         const t_tg_start = engine_common.currentTimeMs();
 
@@ -964,7 +1021,8 @@ const InferenceEngine = struct {
     /// 1. Load WAV audio file
     /// 2. Compute Mel spectrogram
     /// 3. Run Conformer audio encoder to get audio embeddings
-    /// 4. Log dimensions and fall back to text-only (LLM token integration TODO)
+    /// 4. Format prompt with chat template and inject audio placeholder tokens
+    /// 5. Run LLM with mixed embeddings (audio + text)
     pub fn generateWithAudio(self: *InferenceEngine, io: std.Io, prompt: []const u8, audio_path: [:0]const u8, max_tokens: u32) !void {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_audio) return error.AudioNotSupported;
@@ -1008,44 +1066,101 @@ const InferenceEngine = struct {
         });
         self.ctx_graph.setNoAlloc(true);
 
-        // Allocate and compute audio encoder graph
+        // Allocate and compute audio encoder graph.
+        // IMPORTANT: a_galloc must stay alive until the LLM graph compute
+        // completes, because audio_embeddings tensor data is in gallocr memory.
         const buft = ggml.backendCpuBufferType();
-        {
-            var a_galloc = try ggml.Gallocr.init(buft);
-            defer a_galloc.free();
-            if (!a_galloc.allocGraph(audio_graph)) {
-                return error.GraphAllocFailed;
-            }
-            try audio_graph.compute(self.n_threads);
+        var a_galloc = try ggml.Gallocr.init(buft);
+        defer a_galloc.free();
+        if (!a_galloc.allocGraph(audio_graph)) {
+            return error.GraphAllocFailed;
         }
+        try audio_graph.compute(self.n_threads);
 
         // Log audio encoding results
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
         logger.info("Audio encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd_val, n_audio_tokens });
 
-        // Step 4: Tokenize prompt text
-        var input_tokens = try self.tok.encode(prompt, true);
+        // Step 4: Look up audio placeholder token ID from vocabulary.
+        // Gemma4 uses <|audio|> as the audio placeholder token. We try multiple
+        // possible formats and fall back to a warning if none is found.
+        const audio_placeholder_id: i32 = blk: {
+            // Try common Gemma audio placeholder token names
+            const candidates = [_][]const u8{
+                "<|audio|>",
+                "<audio>",
+                "<|audio_place|>",
+                "<|audio_embeddings|>",
+            };
+            for (candidates) |name| {
+                if (self.tok.textToToken(name)) |id| {
+                    logger.info("Audio placeholder token '{s}' -> id={d}", .{ name, id });
+                    break :blk @as(i32, @intCast(id));
+                }
+            }
+            // Fallback: scan vocabulary for any token containing "audio"
+            logger.warn("No standard audio placeholder token found; scanning vocabulary for 'audio'...", .{});
+            var fallback_id: ?i32 = null;
+            for (self.tok.vocab.items, 0..) |entry, id| {
+                if (entry == .normal and std.mem.containsAtLeast(u8, entry.normal, 1, "audio")) {
+                    fallback_id = @as(i32, @intCast(id));
+                    logger.warn("Using token '{s}' (id={d}) as audio placeholder", .{ entry.normal, id });
+                    break;
+                }
+            }
+            if (fallback_id) |fid| {
+                break :blk fid;
+            }
+            logger.err("No audio placeholder token found in vocabulary! Using 0 (<unk>) as fallback.", .{});
+            break :blk @as(i32, 0);
+        };
+
+        // Step 5: Format prompt with chat template (matching text-only generate behavior)
+        const formatted_prompt = if (self.no_chat_template) blk: {
+            break :blk try self.allocator.dupe(u8, prompt);
+        } else blk: {
+            const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
+            const source = self.chat_template_source orelse
+                chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
+            var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
+            defer tmpl.deinit(self.allocator);
+            const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+            const messages = [_]chat_template.ChatMessage{
+                chat_template.ChatMessage.init("user", prompt),
+            };
+            break :blk try tmpl.apply(self.allocator, &messages, system, true);
+        };
+        defer self.allocator.free(formatted_prompt);
+
+        // Step 6: Tokenize the formatted text prompt
+        var input_tokens = try self.tok.encode(formatted_prompt, true);
         defer input_tokens.deinit(self.allocator);
         const n_text_tokens: i32 = @intCast(input_tokens.items.len);
         const n_total_tokens: i32 = n_audio_tokens + n_text_tokens;
 
-        // Step 5: Create input token tensor (audio positions = PAD, text positions = real tokens)
+        logger.info("Audio tokens={d}, text tokens={d} (prompt_len={d}), total={d}", .{
+            n_audio_tokens, n_text_tokens, formatted_prompt.len, n_total_tokens,
+        });
+
+        // Step 7: Create input token tensor with audio placeholder tokens
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
         self.ctx_graph.setNoAlloc(true);
         {
             const data = input_tensor.dataBytes();
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
+            // Fill audio positions with the correct placeholder token ID
             for (0..@as(usize, @intCast(n_audio_tokens))) |j| {
-                slice[j] = 0;
+                slice[j] = audio_placeholder_id;
             }
+            // Fill text positions with the tokenized prompt
             for (input_tokens.items, 0..) |token, j| {
                 slice[@as(usize, @intCast(n_audio_tokens)) + j] = @as(i32, @intCast(token));
             }
         }
 
-        // Step 6: Build LLM graph with audio embedding override
+        // Step 8: Build LLM graph with audio embedding override
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const start_pos: i32 = 0;
         const logits = try gemma4_model.forwardWithEmbdOverride(
@@ -1066,10 +1181,17 @@ const InferenceEngine = struct {
         const t_end = engine_common.currentTimeMs();
         const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
 
-        // Step 7: Sample first token and generate
+        // Step 9: Sample first token and generate
         var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
         var pos: i32 = n_total_tokens;
         var gen_count: u32 = 0;
+
+        // Debug: log the first generated token
+        logger.info("First generated token: id={d}, is_eog={}, pp_time={d:.3}s", .{
+            current_token,
+            self.tok.isEog(@intCast(current_token)),
+            pp_time_s,
+        });
 
         const t_tg_start = engine_common.currentTimeMs();
 
