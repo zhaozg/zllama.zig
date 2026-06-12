@@ -363,10 +363,10 @@ pub const AudioEncoder = struct {
                 }
 
                 // Q blocking: [D, H, N] -> pad to Np -> reshape [D, H, C, B]
-                // ggml permute: ne[ax_i] = src->ne[i], so (0,3,1,2) sends H->3, C->1, B->2
+                // ggml_permute: ne[axis_i] = old.ne[i]. permute(0,2,1,3): ne[0]=D, ne[2]=H, ne[1]=C, ne[3]=B → [D,C,H,B]
                 Qcur = Qcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_seq)), 0); // [D, H, Np]
                 Qcur = Qcur.reshape4d(ctx, d_head_i, n_head_i, C, B); // [D, H, C, B]
-                Qcur = Qcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, C, B, H]
+                Qcur = Qcur.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, C, H, B]
 
                 // K/V block context extraction via overlapping view (matching C++ extract_blocks lambda)
                 const pad_kv: i64 = S * B - n_pos_i;
@@ -376,37 +376,39 @@ pub const AudioEncoder = struct {
                 // Overlapping view: stride for B dim is C positions, not S
                 Kcur = Kcur.view4d(ctx, d_head_i, n_head_i, S, B, Kcur.nb()[1], Kcur.nb()[2], @as(usize, @intCast(C)) * Kcur.nb()[2], 0);
                 Kcur = Kcur.cont(ctx); // materialize overlapping windows
-                var Kblk = Kcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, S, B, H]
+                // permute(0,2,1,3): ne[0]=D, ne[2]=H, ne[1]=S, ne[3]=B → [D,S,H,B]
+                var Kblk = Kcur.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, S, H, B]
 
                 Vcur = Vcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0);
                 Vcur = Vcur.roll(ctx, 0, 0, P, 0);
                 Vcur = Vcur.cont(ctx);
                 Vcur = Vcur.view4d(ctx, d_head_i, n_head_i, S, B, Vcur.nb()[1], Vcur.nb()[2], @as(usize, @intCast(C)) * Vcur.nb()[2], 0);
                 Vcur = Vcur.cont(ctx);
-                var Vblk = Vcur.permute(ctx, 1, 3, 0, 2).cont(ctx); // [S, D, B, H]
+                // permute(1,2,3,0): ne[1]=D, ne[2]=H, ne[3]=S, ne[0]=B → [B,D,H,S]
+                var Vblk = Vcur.permute(ctx, 1, 2, 3, 0).cont(ctx); // [B, D, H, S]
 
-                // Content attention: Q @ K^T
-                // Kblk=[D,S,B,H], Qcur=[D,C,B,H] -> mul_mat contracts on D -> [S,C,B,H]
-                var scores = Kblk.mulMat(ctx, Qcur);
+                // Content attention: Kblk=[D,S,H,B] @ Qcur=[D,C,H,B] → contracts on D → [S, C, H, B]
+                var scores = Kblk.mulMat(ctx, Qcur); // [S, C, H, B]
 
                 // Relative position attention
                 if (layer.attn_k_rel_w) |k_rel| {
-                    // RPE: [n_embd, R] -> project -> [D, H, R] -> [D, R, H]
+                    // RPE: k_rel=[n_embd,n_embd] @ pos_emb=[D,R] → [n_embd,R] → reshape [D,H,R] → permute to [D,R,H]
                     var p_rpe = k_rel.mulMat(ctx, pos_emb);
                     p_rpe = p_rpe.reshape3d(ctx, d_head_i, n_head_i, R);
                     p_rpe = p_rpe.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, R, H]
 
-                    // Q_flat @ RPE^T: [D, C*B, H] @ [D, R, H] -> [R, C*B, H]
+                    // Q_flat @ RPE^T: Qcur=[D,C,H,B] → flatten to [D, C*B, H]
+                    // p_rpe=[D,R,H] @ Q_flat=[D,C*B,H] → [R, C*B, H]
                     const Q_flat = Qcur.reshape3d(ctx, d_head_i, C * B, n_head_i);
                     var matrix_bd = p_rpe.mulMat(ctx, Q_flat); // [R, C*B, H]
                     matrix_bd = matrix_bd.reshape4d(ctx, R, C, B, n_head_i); // [R, C, B, H]
 
-                    // Blocked relative shift (appendix B of Transformer-XL)
+                    // Blocked relative shift (appendix B of Transformer-XL): produce [S, C, H, B]
                     matrix_bd = matrix_bd.pad(ctx, S + 1 - R, 0, 0, 0); // [S+1, C, B, H]
                     matrix_bd = matrix_bd.reshape3d(ctx, (S + 1) * C, B, n_head_i);
                     matrix_bd = matrix_bd.view3d(ctx, C * S, B, n_head_i, matrix_bd.nb()[1], matrix_bd.nb()[2], 0);
                     matrix_bd = matrix_bd.cont(ctx); // [C*S, B, H]
-                    matrix_bd = matrix_bd.reshape4d(ctx, S, C, B, n_head_i); // [S, C, B, H]
+                    matrix_bd = matrix_bd.reshape4d(ctx, S, C, n_head_i, B); // [S, C, H, B] matches scores
 
                     scores = scores.add(ctx, matrix_bd);
                 }
@@ -416,17 +418,21 @@ pub const AudioEncoder = struct {
                 scores = scores.tanh(ctx);
                 scores = scores.scale(ctx, softcap);
 
-                // Blocked attention mask: [S, C, B] broadcasts over H
+                // Blocked attention mask: [S, C, B] broadcasts to [S, C, H, B] (ggml pads trailing dims with 1)
                 scores = scores.add(ctx, kq_mask);
 
-                const attn = scores.softMax(ctx);
+                const attn = scores.softMax(ctx); // [S, C, H, B]
 
-                // attn @ V: [S,C,B,H] @ [S,D,B,H] -> [D,C,B,H]
-                var x = Vblk.mulMat(ctx, attn);
+                // attn @ V: attn=[S,C,H,B], Vblk=[B,D,H,S]
+                // Vt = Vblk.permute(3,2,1,0) → [S,H,D,B]: ne[0]=S, ne[2]=D%H=0, ne[3]=B%B=0
+                // attn @ Vt → [C, H, D, B] then permute(1,3,0,2) → [D, C, B, H]
+                const Vt = Vblk.permute(ctx, 3, 2, 1, 0).cont(ctx); // [B,D,H,S] → [S,H,D,B]
+                var x = attn.mulMat(ctx, Vt); // [C, H, D, B]
+                x = x.permute(ctx, 1, 3, 0, 2).cont(ctx); // [C,H,D,B] → [D,C,B,H]
 
-                // [D,C,B,H] -> [D,H,C,B] via permute(0,2,3,1) -> flatten -> trim
-                x = x.permute(ctx, 0, 2, 3, 1).cont(ctx);
-                x = x.cont2d(ctx, d_head_i * n_head_i, C * B);
+                // [D,C,B,H] -> [D,H,C,B] via permute(0,3,1,2) -> flatten -> trim
+                x = x.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, H, C, B]
+                x = x.cont2d(ctx, d_head_i * n_head_i, C * B); // [D*H, C*B]
                 if (pad_seq > 0) {
                     x = x.view2d(ctx, d_head_i * n_head_i, n_pos_i, x.nb()[1], 0);
                     x = x.cont(ctx);
