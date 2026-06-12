@@ -168,8 +168,8 @@ pub fn ssmScan(ctx: *Context, s: *Tensor, x: *Tensor, dt: *Tensor, A: *Tensor, B
     return @as(*Tensor, @ptrCast(c.ggml_ssm_scan(@ptrCast(ctx), @ptrCast(@alignCast(s)), @ptrCast(@alignCast(x)), @ptrCast(@alignCast(dt)), @ptrCast(@alignCast(A)), @ptrCast(@alignCast(B)), @ptrCast(@alignCast(C)), @ptrCast(@alignCast(ids)))));
 }
 
-pub fn gatedDeltaNet(ctx: *Context, q: *Tensor, k: *Tensor, v: *Tensor, g: *Tensor, beta: *Tensor, state: *Tensor) *Tensor {
-    return @as(*Tensor, @ptrCast(c.ggml_gated_delta_net(@ptrCast(ctx), @ptrCast(@alignCast(q)), @ptrCast(@alignCast(k)), @ptrCast(@alignCast(v)), @ptrCast(@alignCast(g)), @ptrCast(@alignCast(beta)), @ptrCast(@alignCast(state)))));
+pub fn gatedDeltaNet(ctx: *Context, q: *Tensor, k: *Tensor, v: *Tensor, g: *Tensor, beta: *Tensor, state: *Tensor, K: i64) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_gated_delta_net(@ptrCast(ctx), @ptrCast(@alignCast(q)), @ptrCast(@alignCast(k)), @ptrCast(@alignCast(v)), @ptrCast(@alignCast(g)), @ptrCast(@alignCast(beta)), @ptrCast(@alignCast(state)), K)));
 }
 
 // ============================================================================

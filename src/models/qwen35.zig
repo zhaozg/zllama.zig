@@ -423,9 +423,8 @@ pub const QwenModel = struct {
         if (self.ssm_states[layer_idx].ssm_state == null) {
             const alloc_ctx = if (self.ctx_kv_cache) |kv_ctx| kv_ctx else ctx;
             alloc_ctx.setNoAlloc(false);
-            // state: [S_v*S_v*H, K, n_seqs] where K=1 for autoregressive
-            const state_size = head_v_dim * head_v_dim * num_v_heads;
-            self.ssm_states[layer_idx].ssm_state = try alloc_ctx.newTensor3d(.f32, state_size, 1, n_seqs);
+            // state: [S_v, S_v, H_v, n_seqs] (4D)
+            self.ssm_states[layer_idx].ssm_state = try alloc_ctx.newTensor4d(.f32, head_v_dim, head_v_dim, num_v_heads, n_seqs);
             alloc_ctx.setNoAlloc(true);
             self.ssm_states[layer_idx].ssm_state.?.setZero();
             {
@@ -438,10 +437,10 @@ pub const QwenModel = struct {
 
         const ssm_state = self.ssm_states[layer_idx].ssm_state.?;
 
-        // ggml_gatedDeltaNet expects state: [S_v*S_v*H, K, n_seqs]
-        // Output: [S_v*H, n_tokens*n_seqs + state_rows, 1, 1]
-        // where state_rows = K * S_v * n_seqs
-        const gdn_output = ggml.gatedDeltaNet(ctx, q_conv, k_conv, v_conv, gate, beta, ssm_state);
+        // ggml_gatedDeltaNet expects state: [S_v, S_v, H_v, n_seqs]
+        // Output: flat tensor with attention scores [S_v, H_v, n_tokens, n_seqs]
+        // followed by K state snapshots [S_v, S_v, H_v, n_seqs] each
+        const gdn_output = ggml.gatedDeltaNet(ctx, q_conv, k_conv, v_conv, gate, beta, ssm_state, 1);
         gdn_output.setName("ssm_gdn_output");
 
         // Extract attention output from gdn_output
@@ -462,16 +461,13 @@ pub const QwenModel = struct {
         attn_output.setName("ssm_attn_output");
 
         // Extract new state from gdn_output and copy to persistent state
-        // new state starts at offset = S_v * H_v * n_tokens * n_seqs * sizeof(f32)
+        // new state snapshot starts at offset = S_v * H_v * n_tokens * n_seqs * sizeof(f32)
+        // state snapshot layout: [S_v, S_v, H_v, n_seqs] (4D)
         const state_offset = @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * n_seqs * @sizeOf(f32)));
-        // The state is laid out as [S_v*S_v, H_v, n_seqs] in the output:
-        //   for each seq: for each head: S_v*S_v values
-        // We view it as 3D [S_v*S_v*H_v, 1, n_seqs] to match the persistent state shape.
-        // nb1 = S_v*S_v*H_v * sizeof(f32) (all heads for one seq)
-        // nb2 = S_v*S_v*H_v * sizeof(f32) (same, since ne1=1)
-        const new_state = ctx.view3d(gdn_output,
-            head_v_dim * head_v_dim * num_v_heads, 1, n_seqs,
-            @as(usize, @intCast(head_v_dim * head_v_dim * num_v_heads * @sizeOf(f32))),
+        const new_state = ctx.view4d(gdn_output,
+            head_v_dim, head_v_dim, num_v_heads, n_seqs,
+            @as(usize, @intCast(head_v_dim * @sizeOf(f32))),
+            @as(usize, @intCast(head_v_dim * head_v_dim * @sizeOf(f32))),
             @as(usize, @intCast(head_v_dim * head_v_dim * num_v_heads * @sizeOf(f32))),
             state_offset);
         const state_cpy = ggml.cpy(ctx, new_state, ssm_state);
