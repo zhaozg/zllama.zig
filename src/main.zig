@@ -1148,6 +1148,36 @@ const InferenceEngine = struct {
         }
         logger.info("Audio embedding dimension check: {d} == model n_embd {d} ✓", .{ n_embd_val, model_n_embd });
 
+        // Debug: compute audio embedding statistics (mean, variance, min, max)
+        {
+            const emb_data = audio_embeddings.dataF32();
+            const n_vals: usize = @as(usize, @intCast(n_audio_tokens)) * n_embd_val;
+            if (n_vals > 0) {
+                var sum: f64 = 0.0;
+                var min_val: f32 = emb_data[0];
+                var max_val: f32 = emb_data[0];
+                for (emb_data[0..n_vals]) |v| {
+                    sum += @as(f64, @floatCast(v));
+                    if (v < min_val) min_val = v;
+                    if (v > max_val) max_val = v;
+                }
+                const mean = @as(f32, @floatCast(sum / @as(f64, @floatFromInt(n_vals))));
+                var variance: f64 = 0.0;
+                for (emb_data[0..n_vals]) |v| {
+                    const diff = @as(f64, @floatCast(v - mean));
+                    variance += diff * diff;
+                }
+                variance /= @as(f64, @floatFromInt(n_vals));
+                logger.info("Audio embedding stats: mean={d:.4}, var={d:.4}, std={d:.4}, min={d:.4}, max={d:.4}", .{
+                    mean, @as(f32, @floatCast(variance)), @sqrt(@as(f32, @floatCast(variance))), min_val, max_val,
+                });
+                // Warn if embeddings look degenerate (all zeros or extreme values)
+                if (@abs(mean) < 1e-10 and @abs(variance) < 1e-10) {
+                    logger.warn("Audio embeddings are near-zero! Encoder may not be producing output.", .{});
+                }
+            }
+        }
+
         // Step 4: Look up the <|audio|> special token ID from vocabulary
         const audio_token_id: i32 = blk: {
             if (self.tok.textToToken("<|audio|>")) |id| {
@@ -1251,6 +1281,18 @@ const InferenceEngine = struct {
             }
             for (all_tokens.items, 0..) |token, j| {
                 slice[n_audio_slots + j] = @as(i32, @intCast(token));
+            }
+        }
+
+        // Debug: print first and last few token IDs to verify sequence construction
+        {
+            const data = input_tensor.dataBytes();
+            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
+            const num_preview = @min(@as(usize, 10), @as(usize, @intCast(n_total_tokens)));
+            logger.info("Input tokens (first {d}): {any}", .{ num_preview, slice[0..num_preview] });
+            if (n_total_tokens > 10) {
+                const tail_start: usize = @as(usize, @intCast(n_total_tokens)) - @min(@as(usize, 5), @as(usize, @intCast(n_total_tokens)));
+                logger.info("Input tokens (last {d}): {any}", .{ @as(usize, @intCast(n_total_tokens)) - tail_start, slice[tail_start..@as(usize, @intCast(n_total_tokens))] });
             }
         }
 

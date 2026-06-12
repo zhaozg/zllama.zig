@@ -24,8 +24,8 @@ const log = std.log.scoped(.mm_preprocess);
 
 /// 默认音频采样率 (Gemma4 E2B)
 pub const AUDIO_SAMPLE_RATE: u32 = 16000;
-/// STFT 帧长 (20ms @ 16kHz)
-pub const AUDIO_FRAME_LENGTH: u32 = 320;
+/// STFT 帧长 (25ms @ 16kHz, matches llama.cpp gemma4a win_length=400)
+pub const AUDIO_FRAME_LENGTH: u32 = 400;
 /// STFT 帧移 (10ms @ 16kHz)
 pub const AUDIO_HOP_LENGTH: u32 = 160;
 /// FFT 点数（2 的幂）
