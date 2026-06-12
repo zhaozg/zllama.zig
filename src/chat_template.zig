@@ -30,6 +30,10 @@ pub const expandPlaceholders = multimodal.expandPlaceholders;
 pub const containsPlaceholder = multimodal.containsPlaceholder;
 pub const ensurePlaceholderInContent = multimodal.ensurePlaceholderInContent;
 
+pub const tokenizeWithPlaceholders = multimodal.tokenizeWithPlaceholders;
+pub const placeholderTokenOffset = multimodal.placeholderTokenOffset;
+pub const TokenizedSegments = multimodal.TokenizedSegments;
+
 const log = std.log.scoped(.chat_template);
 
 // ============================================================================

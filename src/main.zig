@@ -39,11 +39,19 @@ pub const std_options: std.Options = .{
         .{ .scope = .llama, .level = .info },
         .{ .scope = .model, .level = .info },
         .{ .scope = .main, .level = .info },
-        .{ .scope = .sampler, .level = .info },
     }
 };
 
 const logger = std.log.scoped(.main);
+
+/// Tokenize a text segment for multimodal placeholder expansion.
+/// Used as callback for tokenizeWithPlaceholders.
+fn tokenizeTextSegment(ctx: ?*anyopaque, text: []const u8, alloc: std.mem.Allocator) ![]u32 {
+    const tok: *tokenizer.Tokenizer = @ptrCast(@alignCast(ctx orelse return error.NullCtx));
+    var result = try tok.encode(text, false);
+    defer result.deinit(alloc);
+    return try result.toOwnedSlice(alloc);
+}
 
 const CliArgs = struct {
     model_path: [:0]const u8 = "",
@@ -944,14 +952,14 @@ const InferenceEngine = struct {
             };
             break :blk try tmpl.apply(self.allocator, &messages, system, true);
         };
-        defer self.allocator.free(formatted_prompt);
-
         logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
 
-        // 使用 expandPlaceholders 展开占位符
-        var expanded = try chat_template.expandPlaceholders(
+        // 使用 tokenizeWithPlaceholders 分段 tokenize + 展开占位符
+        var expanded = try chat_template.tokenizeWithPlaceholders(
             self.allocator,
             formatted_prompt,
+            @ptrCast(&self.tok),
+            tokenizeTextSegment,
             image_token_id,
             0, // audio_token_id (unused for vision)
             @intCast(n_vision_tokens),
@@ -1153,11 +1161,12 @@ const InferenceEngine = struct {
         defer self.allocator.free(formatted_prompt);
 
         logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
-
-        // 使用 expandPlaceholders 展开占位符
-        var expanded = try chat_template.expandPlaceholders(
+        // 使用 tokenizeWithPlaceholders 分段 tokenize + 展开占位符
+        var expanded = try chat_template.tokenizeWithPlaceholders(
             self.allocator,
             formatted_prompt,
+            @ptrCast(&self.tok),
+            tokenizeTextSegment,
             0, // image_token_id (unused for audio)
             audio_token_id,
             0, // image_token_count (unused for audio)
@@ -1168,15 +1177,10 @@ const InferenceEngine = struct {
         const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
         const audio_marker_count: u32 = @intCast(expanded.offsets.len);
 
-        // 计算嵌入偏移（第一个音频占位符的位置）
-        const embd_offset: i32 = if (expanded.offsets.len > 0) blk: {
-            var offset: i32 = 0;
-            for (expanded.offsets, 0..) |ph, i| {
-                if (i == 0) break;
-                offset += @as(i32, @intCast(ph.token_count));
-            }
-            break :blk offset;
-        } else 0;
+        // 使用 placeholderTokenOffset 计算第一个音频占位符的偏移
+        const embd_offset: i32 = if (expanded.offsets.len > 0)
+            @as(i32, @intCast(chat_template.placeholderTokenOffset(expanded.offsets, 0)))
+        else 0;
 
         logger.info("Audio tokens={d}, audio markers={d}, total={d}, embd_offset={d}", .{
             n_audio_tokens, audio_marker_count, n_total_tokens, embd_offset,

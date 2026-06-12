@@ -56,28 +56,7 @@
 
 ## 2. llama.cpp 参考架构
 
-### 2.1 整体分层
-| **多模态模板支持** | |
-| 占位符标记识别（`<|image|>`, `<|audio|>`）| ✅ 已完成 |
-| 占位符展开为多 token 序列 | ✅ 已完成 |
-| 与媒体编码器集成（mm.zig） | ✅ 已完成 |
-| 安全处理用户输入中的占位符（输入标记） | ✅ 已完成 |
-| ChatMessage 扩展（media 字段） | ✅ 已完成 |
-| 交互式聊天中动态媒体附加（/image, /audio 命令） | ✅ 已完成 |
-| Jinja 模板引擎 | ❌ 缺失 |
-| 工具调用模板（tool_use） | ❌ 缺失 |
-├──────────────────────────────────────────────────┤
-│  预设模板检测与回退                                │
-│  src/llama-chat.cpp :: llm_chat_detect_template() │
-│  src/llama-chat.cpp :: llm_chat_apply_template()  │
-├──────────────────────────────────────────────────┤
-│  GGUF 元数据读取                                   │
-│  src/llama-model.cpp :: llama_model_chat_template()│
-│  读取 key: tokenizer.chat_template                 │
-└──────────────────────────────────────────────────┘
-```
-
-### 2.2 模板来源优先级
+### 2.1 模板来源优先级
 
 llama.cpp 的模板获取优先级：
 
@@ -86,7 +65,7 @@ llama.cpp 的模板获取优先级：
 3. **GGUF 内置** `tokenizer.chat_template.tool_use` 元数据字段（工具调用模板）
 4. **默认回退** ChatML 模板（`<|im_start|>` 格式）
 
-### 2.3 双路径执行
+### 2.2 双路径执行
 
 llama.cpp 有两条模板执行路径：
 
@@ -95,7 +74,7 @@ llama.cpp 有两条模板执行路径：
 | **路径 A：硬编码** | `llm_chat_apply_template()` | `--no-jinja` 标志 或 Jinja 解析失败 | ~50 种预设模板，通过启发式匹配 |
 | **路径 B：Jinja** | `common_chat_template_direct_apply()` | 默认（GGUF 内置 Jinja 模板） | 完整 Jinja 语法支持，输入标记安全 |
 
-### 2.4 Jinja 引擎核心组件
+### 2.3 Jinja 引擎核心组件
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
@@ -106,7 +85,7 @@ llama.cpp 有两条模板执行路径：
 | String | `jinja/string.cpp` | 带 `is_input` 标记的安全字符串 |
 | Caps | `jinja/caps.cpp` | 模板能力检测（是否需要 tools, add_generation_prompt 等） |
 
-### 2.5 输入标记（Input Marking）
+### 2.4 输入标记（Input Marking）
 
 用户输入可能包含特殊标记字符串（如 `<|im_end|>`），不加防护会导致 prompt 注入：
 
@@ -506,13 +485,13 @@ zllama 将采用第一种方案：**只有通过 `--image` / `--audio` 传入的
     └──────────┬──────────────────┘
          是    │    否
           ▼    │    ▼
-   使用指定名称  │  GGUF 是否包含 tokenizer.chat_template？
-   的预设模板    │
-                ├── 是 → 尝试 Jinja 解析
-                │        ├── 成功 → 使用 Jinja 执行
-                │        └── 失败 → detectTemplate() + 回退预设
-                │
-                └── 否 → 使用 Architecture 默认模板
+   使用指定名称│  GGUF 是否包含 tokenizer.chat_template？
+   的预设模板  │
+               ├── 是 → 尝试 Jinja 解析
+               │        ├── 成功 → 使用 Jinja 执行
+               │        └── 失败 → detectTemplate() + 回退预设
+               │
+               └── 否 → 使用 Architecture 默认模板
                          qwen* → ChatML
                          llama → Llama3
                          gemma → Gemma
