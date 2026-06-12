@@ -1109,9 +1109,11 @@ const InferenceEngine = struct {
             wav_info.num_channels,
         });
 
-        // Step 2: Compute Mel spectrogram using n_mel_bins from audio encoder params
-        const n_mel_bins: u32 = if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else preprocess.AUDIO_N_MEL_BINS;
-        var mel = try preprocess.computeMelSpectrogram(self.allocator, wav_samples, wav_info.sample_rate, n_mel_bins);
+        // Step 2: Compute Mel spectrogram using params from audio encoder
+        const preprocess_params = preprocess.AudioPreprocessParams.fromAudioEncoder(
+            if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else preprocess.AUDIO_N_MEL_BINS,
+        );
+        var mel = try preprocess.computeMelSpectrogram(self.allocator, wav_samples, wav_info.sample_rate, preprocess_params);
         defer mel.deinit();
         logger.info("Mel spectrogram: {d} frames x {d} bins", .{ mel.n_frames, mel.n_mel_bins });
 

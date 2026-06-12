@@ -46,8 +46,8 @@ pub const AudioEncoderParams = struct {
     sample_rate: u32 = 16000,
     /// 最大音频长度（秒）
     max_audio_length_sec: f32 = 30.0,
-    /// 归一化 epsilon
-    norm_eps: f32 = 1e-6,
+    /// 归一化 epsilon (loaded from GGUF: clip.audio.attention.layer_norm_epsilon)
+    norm_eps: f32 = 1e-5,
 };
 
 // ============================================================================
@@ -147,10 +147,11 @@ pub const AudioEncoder = struct {
         if (gguf_file.getU32("clip.audio.feed_forward_length")) |v| params.n_ff = v;
         if (gguf_file.getU32("gemma4.audio.sample_rate")) |v| params.sample_rate = v;
         if (gguf_file.getU32("clip.audio.num_mel_bins")) |v| params.n_mel_bins = v;
+        if (gguf_file.getF32("clip.audio.attention.layer_norm_epsilon")) |v| params.norm_eps = v;
         params.d_head = params.n_embd / params.n_head;
 
-        log.info("Loading audio encoder: embd={d}, heads={d}, d_head={d}, layers={d}, ff={d}, mel_bins={d}", .{
-            params.n_embd, params.n_head, params.d_head, params.n_layer, params.n_ff, params.n_mel_bins,
+        log.info("Loading audio encoder: embd={d}, heads={d}, d_head={d}, layers={d}, ff={d}, mel_bins={d}, norm_eps={e}", .{
+            params.n_embd, params.n_head, params.d_head, params.n_layer, params.n_ff, params.n_mel_bins, params.norm_eps,
         });
 
         // 加载子采样卷积权重

@@ -41,6 +41,24 @@ pub const AUDIO_PRE_EMPHASIS: f32 = 0.97;
 /// 对数偏移（防止 log(0)）
 pub const AUDIO_LOG_OFFSET: f32 = 1e-6;
 
+/// 音频预处理参数（可从 GGUF 元数据加载）
+pub const AudioPreprocessParams = struct {
+    sample_rate: u32 = AUDIO_SAMPLE_RATE,
+    frame_length: u32 = AUDIO_FRAME_LENGTH,
+    hop_length: u32 = AUDIO_HOP_LENGTH,
+    n_fft: u32 = AUDIO_N_FFT,
+    n_mel_bins: u32 = AUDIO_N_MEL_BINS,
+    mel_f_min: f32 = AUDIO_MEL_F_MIN,
+    mel_f_max: f32 = AUDIO_MEL_F_MAX,
+    pre_emphasis: f32 = AUDIO_PRE_EMPHASIS,
+    log_offset: f32 = AUDIO_LOG_OFFSET,
+
+    /// 从音频编码器参数构建（部分参数从 GGUF 元数据加载）
+    pub fn fromAudioEncoder(n_mel_bins: u32) AudioPreprocessParams {
+        return .{ .n_mel_bins = n_mel_bins };
+    }
+};
+
 // ============================================================================
 // 图像预处理
 // ============================================================================
@@ -595,23 +613,26 @@ pub fn computeMelSpectrogram(
     allocator: std.mem.Allocator,
     audio_data: []const f32,
     sample_rate: u32,
-    n_mel_bins: u32,
+    params: AudioPreprocessParams,
 ) !ProcessedAudio {
     if (audio_data.len == 0) return error.EmptyAudioData;
 
-    const n_fft: u32 = AUDIO_N_FFT;
-    const f_min: f32 = AUDIO_MEL_F_MIN;
-    const f_max: f32 = AUDIO_MEL_F_MAX;
-    const frame_length: u32 = AUDIO_FRAME_LENGTH;
-    const hop_length: u32 = AUDIO_HOP_LENGTH;
+    const n_fft: u32 = params.n_fft;
+    const f_min: f32 = params.mel_f_min;
+    const f_max: f32 = params.mel_f_max;
+    const frame_length: u32 = params.frame_length;
+    const hop_length: u32 = params.hop_length;
     const n_freqs: u32 = n_fft / 2 + 1;
+    const n_mel_bins: u32 = params.n_mel_bins;
+    const pre_emphasis: f32 = params.pre_emphasis;
+    const log_offset: f32 = params.log_offset;
 
     // Step 1: 预加重
     var pre_emph = try allocator.alloc(f32, audio_data.len);
     defer allocator.free(pre_emph);
     pre_emph[0] = audio_data[0];
     for (1..audio_data.len) |i| {
-        pre_emph[i] = audio_data[i] - AUDIO_PRE_EMPHASIS * audio_data[i - 1];
+        pre_emph[i] = audio_data[i] - pre_emphasis * audio_data[i - 1];
     }
 
     // 初始化 Accelerate FFT 引擎（Hann 窗 + 重用缓冲区）
@@ -656,7 +677,7 @@ pub fn computeMelSpectrogram(
                 mel_val += row[k] * spectrum[k];
             }
             // Step 4: log10 压缩
-            mel_out[m * @as(usize, n_frames) + fi] = math.log10(@max(mel_val, AUDIO_LOG_OFFSET));
+            mel_out[m * @as(usize, n_frames) + fi] = math.log10(@max(mel_val, log_offset));
         }
     }
 
