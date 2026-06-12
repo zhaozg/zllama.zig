@@ -34,20 +34,13 @@
 
 ### 前置条件
 
-- Zig 0.16.0（推荐通过 [zigup](https://github.com/marler8997/zigup) 安装）
-- Git（用于拉取 ggml submodule）
+- **Benchmark 模式**：`--benchmark` 输出 PP/TG 分离的性能数据
 - （可选）CUDA 12.0+ / Metal 支持的 macOS
 
-### 构建
-
-```bash
-git clone https://github.com/zhaozg/zllama.zig.git
-cd zllama.zig
-git submodule update --init --recursive
-zig build -Doptimize=ReleaseFast
-```
-
-构建产物位于 `zig-out/bin/zllama`。
+- **多模态支持**（🚧 进行中）：
+  - ✅ 音频：Conformer 编码器 + Mel 频谱 → LLM（Gemma 4 E2B 已验证）
+  - 🚧 视觉：ViT 图像编码器 → LLM（pipeline 就绪，输出内容待验证）
+  - WAV/PPM 预处理（加载 + Resize + 标准化）
 
 ### 运行推理
 
@@ -82,9 +75,10 @@ zllama.zig/
 │   ├── ggml.zig           # ggml C API 安全封装 + Tensor 方法式算子
 │   ├── gguf.zig           # GGUF v2/v3 解析器
 │   ├── model.zig          # 模型抽象接口定义
-│   ├── kv_cache.zig       # KV Cache 管理（per-layer 可变维度）
-│   ├── tokenizer.zig      # BPE 分词器
-│   ├── sampler.zig        # 采样算法
+# 多模态图像（需要 --mmproj 投影器文件）
+./zig-out/bin/zllama -m model.gguf --mmproj /path/to/mmproj.gguf --image input.ppm -p "描述这张图片"
+# 多模态音频（WAV 格式）
+./zig-out/bin/zllama -m model.gguf --mmproj /path/to/mmproj.gguf --audio input.wav -p "转录这段音频"
 │   ├── layers/            # 通用层实现（算子库）
 │   │   ├── rms_norm.zig
 │   │   ├── rope.zig

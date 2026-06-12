@@ -2,7 +2,7 @@
 
 > **项目名称：** zllama.zig — 纯 Zig 实现的多模型本地推理引擎
 
-## 📋 当前状态（2026-06-10）
+## 📋 当前状态（2026-06-12）
 
 | 模块 | 状态 |
 |------|------|
@@ -23,6 +23,13 @@
 | `-Dbundle-ggml` 源码构建 | ✅ 已完成 |
 | Tensor 方法式算子（mulMat/add/permute/ropeExt/pool2d/im2col/ssmConv/concat 等） | ✅ 已完成 |
 | 嵌入模型生成（`--embed`，Qwen3-Embedding mean/cls/last pooling + L2 归一化） | ✅ 已完成 |
+| `n_head_dim` 修复：解析 `key_length` 覆盖 `n_embd/n_head`（Qwen3-Embedding 等差异化 head dim 模型） | ✅ 已完成 |
+| 多模态预处理（PPM 加载/Resize/图像标准化/音频 WAV 解码 + Mel 频谱） | 🚧 进行中 |
+| 多模态 CLI 集成（--mmproj / --image / --audio） | 🚧 进行中 |
+| 音频端到端推理（Conformer → LLM，Gemma 4 E2B） | ✅ 已完成 |
+| 视觉端到端推理（ViT → LLM，Gemma 4 E2B） | 🚧 进行中 |
+| Metal / CUDA 后端 | ⬜ 待完成 |
+| CI / 性能基准 / 生态工具 | ⬜ 待完成 |
 | `n_head_dim` 修复：解析 `key_length` 覆盖 `n_embd/n_head`（Qwen3-Embedding 等差异化 head dim 模型） | ✅ 已完成 |
 | 多模态预处理（PPM 加载/Resize/图像标准化/音频 Mel 占位） | 🚧 进行中 |
 | 多模态 CLI 集成（--mmproj / --image / --audio） | 🚧 进行中 |
@@ -50,17 +57,17 @@ Gemma 3 推理已验证 → Gemma 4 推理已验证 (E2B Q4_K_M)
 `build.zig` 添加 `-Dcuda` → CUDA 编译宏 → 后端初始化 → `--backend cuda`
 
 ### P10：性能优化 ✅
-Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 → `ggml_graph_plan` + 线程池 → `--benchmark` 模式 → 与 llama.cpp 对比 → 更多量化格式
-
-### P11：生态工具 ⬜
-流式 CLI → CI（GitHub Actions）→ 文档完善 → 预编译发布
-
 ### 多模态支持 🚧
 - ✅ 音频编码器集成（Conformer + ChunkedAttention，位于 `src/mm/audio.zig`）
 - ✅ 图像编码器集成（ViT + 2D RoPE，位于 `src/mm/vision.zig`）
 - ✅ 多模态管理器（`src/mm/manager.zig`，MMProj GGUF 加载与调度）
 - ✅ 图像预处理（`src/mm/preprocess.zig`：PPM 加载、双线性 Resize、F32 张量标准化）
-- ⬜ 音频预处理（Mel 频谱 FFT/滤波器组实现，当前为占位）
+- ✅ 音频预处理（WAV 解码 + Mel 频谱，位于 `src/mm/preprocess.zig`）
+- ✅ CLI 图像/音频输入端到端联调（`--image` / `--audio` 已添加）
+- ✅ Audio → Conformer → LLM 端到端（Gemma 4 E2B，已验证："The audio does not contain any speech."）
+- 🚧 Vision → ViT → LLM 端到端（forwardWithEmbdOverride 混合嵌入 pipeline 已就绪，视觉输出内容待验证）
+- ⬜ 多模态输入缓存与图优化
+- ⬜ 与更多模型架构联调
 - ⬜ 多模态输入缓存与图优化
 - ⬜ CLI 图像/音频输入端到端联调（`--image` / `--audio` 已添加，vision/audio to LLM token 集成待完成）
 - ⬜ 与现有模型架构（Gemma 4 E2B）联调
@@ -135,16 +142,17 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - ✅ CLI 多模态参数（`--mmproj <path>` / `--image <path>` / `--audio <path>`）
 - ✅ MMProj GGUF 文件加载（`loadMMProj` 辅助函数）
 
-### 推理验证
-- ✅ tinyllama 推理正确
-- ✅ Llama-3.2-3B 推理正确
-- ✅ Qwen3.5 SSM 层推理正确性
-- ✅ Gemma 3 270m Q8_0 推理正确
-- ✅ Gemma 4 E2B Q4_K_M 推理正确（内存估算修复后加载成功）
-- ✅ 三模型快速冒烟测试全部通过（Llama-3.2 / Qwen3.5 / tinyllama，无内存泄漏）
-
-### 测试覆盖
-- ✅ GGUF 解析测试
+### 多模态
+- ✅ `src/mm/` 目录结构（`manager.zig` / `audio.zig` / `vision.zig` / `preprocess.zig`）
+- ✅ Conformer 音频编码器（ChunkedAttention + Relative Position Attention + SSM Conv）
+- ✅ Vision Transformer 编码器（gemma4v / gemma4uv，2D RoPE + im2col + pooling）
+- ✅ 图像预处理管线（PPM 解析 → 双线性 Resize → F32 张量标准化）
+- ✅ 音频预处理管线（WAV 解码 → Mel 频谱 → F32 张量）
+- ✅ CLI 多模态参数（`--mmproj <path>` / `--image <path>` / `--audio <path>`）
+- ✅ MMProj GGUF 文件加载（`loadMMProj` 辅助函数）
+- ✅ Audio → Conformer → LLM 端到端推理（Gemma 4 E2B，forwardWithEmbdOverride 混合嵌入）
+- ✅ generateWithAudio/generateWithVision 循环中的 isSkipToken 控制 token 转发
+- ✅ Conformer norm_eps 从 GGUF 元数据加载（避免硬编码不匹配）
 - ✅ 架构检测测试（30+ 用例）
 - ✅ 算子层数值测试（RMSNorm, RoPE, SwiGLU, Attention）
 - ✅ KV Cache 功能测试（含 per-layer 维度验证）
@@ -177,14 +185,9 @@ Gallocr 复用 + 增量上下文分离 → 输入张量缓存 + 图结构复用 
 - 性能基准测试
 - 预编译发布
 
----
-
-## 验证体系
-
-### 测试金字塔
-
-```
-         ┌────────┐
+- ✅ Gemma 4 E2B Q4_K_M 推理正确（内存估算修复后加载成功）
+- ✅ Gemma 4 E2B 多模态（音频）推理正确（端到端：WAV → Conformer → LLM）
+- ✅ 三模型快速冒烟测试全部通过（Llama-3.2 / Qwen3.5 / tinyllama，无内存泄漏）
          │ 端到端 │  真实模型推理（手动）
         ┌┴────────┴┐
         │ 架构前向 │  随机权重 + NMSE 对比（CI）
@@ -232,7 +235,7 @@ zig-out/bin/zllama -v -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf
 
 ## 近期优先级
 
-1. ⬜ Metal / CUDA 后端
-2. 🚧 多模态端到端联调（vision/audio → LLM）
+1. 🚧 多模态视觉端到端联调（ViT → LLM，Gemma 4 E2B）
+2. ⬜ Metal / CUDA 后端
 3. ⬜ CI + 生态工具
 4. ⬜ 线程池（待 ggml 升级）
