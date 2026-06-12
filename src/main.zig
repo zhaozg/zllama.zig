@@ -1113,7 +1113,6 @@ const InferenceEngine = struct {
         const n_mel_bins: u32 = if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else preprocess.AUDIO_N_MEL_BINS;
         var mel = try preprocess.computeMelSpectrogram(self.allocator, wav_samples, wav_info.sample_rate, n_mel_bins);
         defer mel.deinit();
-
         logger.info("Mel spectrogram: {d} frames x {d} bins", .{ mel.n_frames, mel.n_mel_bins });
 
         // Step 3: Run Conformer audio encoder
@@ -1129,9 +1128,6 @@ const InferenceEngine = struct {
         });
         self.ctx_graph.setNoAlloc(true);
 
-        // Allocate and compute audio encoder graph.
-        // IMPORTANT: a_galloc must stay alive until the LLM graph compute
-        // completes, because audio_embeddings tensor data is in gallocr memory.
         const buft = ggml.backendCpuBufferType();
         var a_galloc = try ggml.Gallocr.init(buft);
         defer a_galloc.free();
@@ -1140,48 +1136,43 @@ const InferenceEngine = struct {
         }
         try audio_graph.compute(self.n_threads);
 
-        // Log audio encoding results
+        // Audio shape verification
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
         logger.info("Audio encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd_val, n_audio_tokens });
 
-        // Step 4: Look up audio placeholder token ID from vocabulary.
-        // Gemma4 uses <|audio|> as the audio placeholder token. We try multiple
-        // possible formats and fall back to a warning if none is found.
-        const audio_placeholder_id: i32 = blk: {
-            // Try common Gemma audio placeholder token names
-            const candidates = [_][]const u8{
-                "<|audio|>",
-                "<audio>",
-                "<|audio_place|>",
-                "<|audio_embeddings|>",
-            };
-            for (candidates) |name| {
-                if (self.tok.textToToken(name)) |id| {
-                    logger.info("Audio placeholder token '{s}' -> id={d}", .{ name, id });
-                    break :blk @as(i32, @intCast(id));
-                }
+        const model_n_embd: usize = @intCast(self.params.n_embd);
+        if (n_embd_val != model_n_embd) {
+            logger.err("Audio encoder output dim {d} != model n_embd {d}!", .{ n_embd_val, model_n_embd });
+            return error.EmbeddingDimensionMismatch;
+        }
+        logger.info("Audio embedding dimension check: {d} == model n_embd {d} ✓", .{ n_embd_val, model_n_embd });
+
+        // Step 4: Look up the <|audio|> special token ID from vocabulary
+        const audio_token_id: i32 = blk: {
+            if (self.tok.textToToken("<|audio|>")) |id| {
+                logger.info("Audio placeholder token '<|audio|>' -> id={d}", .{id});
+                break :blk @as(i32, @intCast(id));
             }
-            // Fallback: scan vocabulary for any token containing "audio"
-            logger.warn("No standard audio placeholder token found; scanning vocabulary for 'audio'...", .{});
-            var fallback_id: ?i32 = null;
-            for (self.tok.vocab.items, 0..) |entry, id| {
-                if (entry == .normal and std.mem.containsAtLeast(u8, entry.normal, 1, "audio")) {
-                    fallback_id = @as(i32, @intCast(id));
-                    logger.warn("Using token '{s}' (id={d}) as audio placeholder", .{ entry.normal, id });
-                    break;
-                }
+            if (self.tok.textToToken("<audio>")) |id| {
+                logger.info("Audio placeholder token '<audio>' -> id={d}", .{id});
+                break :blk @as(i32, @intCast(id));
             }
-            if (fallback_id) |fid| {
-                break :blk fid;
-            }
-            logger.err("No audio placeholder token found in vocabulary! Using 0 (<unk>) as fallback.", .{});
-            break :blk @as(i32, 0);
+            logger.err("No <|audio|> or <audio> token in vocabulary!", .{});
+            return error.NoAudioPlaceholderToken;
         };
 
-        // Step 5: Format prompt with chat template (matching text-only generate behavior)
+        // Step 5: Build prompt with <|audio|> and apply chat template
+        const prompt_with_marker = if (std.mem.indexOf(u8, prompt, "<|audio|>") != null or
+            std.mem.indexOf(u8, prompt, "<audio>") != null)
+            prompt
+        else blk: {
+            break :blk try std.fmt.allocPrint(self.allocator, "<|audio|>{s}", .{prompt});
+        };
+        defer if (prompt_with_marker.ptr != prompt.ptr) self.allocator.free(prompt_with_marker);
+
         const formatted_prompt = if (self.no_chat_template) blk: {
-            break :blk try self.allocator.dupe(u8, prompt);
+            break :blk try self.allocator.dupe(u8, prompt_with_marker);
         } else blk: {
             const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
             const source = self.chat_template_source orelse
@@ -1190,40 +1181,80 @@ const InferenceEngine = struct {
             defer tmpl.deinit(self.allocator);
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
             const messages = [_]chat_template.ChatMessage{
-                chat_template.ChatMessage.init("user", prompt),
+                chat_template.ChatMessage.init("user", prompt_with_marker),
             };
             break :blk try tmpl.apply(self.allocator, &messages, system, true);
         };
         defer self.allocator.free(formatted_prompt);
 
-        // Step 6: Tokenize the formatted text prompt
-        var input_tokens = try self.tok.encode(formatted_prompt, true);
-        defer input_tokens.deinit(self.allocator);
-        const n_text_tokens: i32 = @intCast(input_tokens.items.len);
-        const n_total_tokens: i32 = n_audio_tokens + n_text_tokens;
+        logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
 
-        logger.info("Audio tokens={d}, text tokens={d} (prompt_len={d}), total={d}", .{
-            n_audio_tokens, n_text_tokens, formatted_prompt.len, n_total_tokens,
+        // Tokenize with special token handling: split on <|audio|>, encode segments, interleave
+        var all_tokens = try std.ArrayListUnmanaged(u32).initCapacity(self.allocator, 128);
+        defer all_tokens.deinit(self.allocator);
+        var audio_marker_count: u32 = 0;
+
+        {
+            var remaining = formatted_prompt;
+            var is_first_segment = true;
+            while (remaining.len > 0) {
+                const next_audio = std.mem.indexOf(u8, remaining, "<|audio|>");
+                const next_audio_alt = std.mem.indexOf(u8, remaining, "<audio>");
+
+                const next_pos = blk: {
+                    if (next_audio != null and next_audio_alt != null) {
+                        break :blk @min(next_audio.?, next_audio_alt.?);
+                    }
+                    break :blk next_audio orelse next_audio_alt;
+                };
+
+                if (next_pos) |pos| {
+                    const marker_len: usize = if (next_audio != null and next_audio.? == pos) "<|audio|>".len else "<audio>".len;
+
+                    if (pos > 0) {
+                        var text_tokens = try self.tok.encode(remaining[0..pos], is_first_segment);
+                        defer text_tokens.deinit(self.allocator);
+                        try all_tokens.appendSlice(self.allocator, text_tokens.items);
+                    }
+
+                    try all_tokens.append(self.allocator, @intCast(audio_token_id));
+                    audio_marker_count += 1;
+
+                    remaining = remaining[pos + marker_len ..];
+                    is_first_segment = false;
+                } else {
+                    var text_tokens = try self.tok.encode(remaining, is_first_segment);
+                    defer text_tokens.deinit(self.allocator);
+                    try all_tokens.appendSlice(self.allocator, text_tokens.items);
+                    break;
+                }
+            }
+        }
+
+        const n_text_tokens: i32 = @intCast(all_tokens.items.len);
+        const n_total_tokens: i32 = n_audio_tokens * @as(i32, @intCast(audio_marker_count)) + n_text_tokens;
+
+        logger.info("Audio tokens={d}, audio markers={d}, text tokens={d}, total={d}", .{
+            n_audio_tokens, audio_marker_count, n_text_tokens, n_total_tokens,
         });
 
-        // Step 7: Create input token tensor with audio placeholder tokens
+        // Step 6: Build input token tensor
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
         self.ctx_graph.setNoAlloc(true);
         {
             const data = input_tensor.dataBytes();
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            // Fill audio positions with the correct placeholder token ID
-            for (0..@as(usize, @intCast(n_audio_tokens))) |j| {
-                slice[j] = audio_placeholder_id;
+            const n_audio_slots: usize = @as(usize, @intCast(n_audio_tokens)) * @as(usize, @intCast(audio_marker_count));
+            for (0..n_audio_slots) |j| {
+                slice[j] = audio_token_id;
             }
-            // Fill text positions with the tokenized prompt
-            for (input_tokens.items, 0..) |token, j| {
-                slice[@as(usize, @intCast(n_audio_tokens)) + j] = @as(i32, @intCast(token));
+            for (all_tokens.items, 0..) |token, j| {
+                slice[n_audio_slots + j] = @as(i32, @intCast(token));
             }
         }
 
-        // Step 8: Build LLM graph with audio embedding override
+        // Step 7: Build LLM graph with audio embedding override
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const start_pos: i32 = 0;
         const logits = try gemma4_model.forwardWithEmbdOverride(
@@ -1231,7 +1262,6 @@ const InferenceEngine = struct {
             @ptrCast(&self.kv_cache_mgr), start_pos, audio_embeddings,
         );
 
-        // Allocate and compute LLM graph
         var galloc = try ggml.Gallocr.init(buft);
         defer galloc.free();
         if (!galloc.allocGraph(graph)) {
@@ -1239,18 +1269,18 @@ const InferenceEngine = struct {
             return error.GraphAllocFailed;
         }
 
+        // Phase 5.1: Mixed prefill
         const t_start = engine_common.currentTimeMs();
         try graph.compute(self.n_threads);
         const t_end = engine_common.currentTimeMs();
         const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
 
-        // Step 9: Sample first token and generate
+        // Sample and generate
         var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
         var pos: i32 = n_total_tokens;
         var gen_count: u32 = 0;
 
-        // Debug: log the first generated token
-        logger.info("First generated token: id={d}, is_eog={}, pp_time={d:.3}s", .{
+        logger.info("First generated token (audio): id={d}, is_eog={}, pp_time={d:.3}s", .{
             current_token,
             self.tok.isEog(@intCast(current_token)),
             pp_time_s,

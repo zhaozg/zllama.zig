@@ -219,9 +219,13 @@ CLI 参数 `--mmproj`、`--image`、`--audio` 已添加，`main.zig` 中存在 `
 ### Phase 5：音频端到端联调
 
 ```
-[ ] 5.1 WAV → Mel → Conformer → LLM 联调
-     - 已在 generateWithAudio() 中完成骨架
-     - 需与真实音频文件 + 模型联调
+[x] 5.1 WAV → Mel → Conformer → LLM 联调
+     - generateWithAudio() 端到端调通
+     - <|audio|> token 在词汇表中找到 (id=258881)
+     - 预分词拆分方案：BPE 编码前拆分 <|audio|> 标记
+     - Audio encoder: [1536, 20] tokens for 0.8s WAV
+     - 形状验证通过（1536 == model n_embd）
+     - 端到端生成成功，pp_time ~2.3s
 
 [ ] 5.2 跨平台 FFT
      - Linux: 纯 Zig 实现或集成 kissfft
