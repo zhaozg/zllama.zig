@@ -170,12 +170,15 @@ pub const Gemma4Model = struct {
         kv_cache_mgr: ?*kv_cache.KVCache,
         start_pos: i32,
         embd_override: *ggml.Tensor,
+        embd_offset: i32,
     ) !*ggml.Tensor {
         const p = &self.params;
         const w = &self.weights;
         const n_tokens_i64: i64 = n_tokens;
         const n_override: i64 = embd_override.ne()[1];
-        const n_text: i64 = n_tokens_i64 - n_override;
+        const override_offset: i64 = @intCast(embd_offset);
+        const n_text_pre: i64 = override_offset;
+        const n_text_post: i64 = n_tokens_i64 - n_override - override_offset;
         const n_embd_i64: i64 = @intCast(p.base.n_embd);
         const override_embd_dim: i64 = embd_override.ne()[0];
 
@@ -186,20 +189,33 @@ pub const Gemma4Model = struct {
             return error.EmbeddingDimensionMismatch;
         }
 
-        // Mixed embeddings: first n_override from override, rest from token embeddings
+        // Mixed embeddings with position-aware injection
         var cur: *ggml.Tensor = undefined;
-        if (n_text > 0) {
-            // Get embeddings for ALL tokens, then replace first n_override positions
-            var all_embd = embed.tokenEmbedding(ctx, w.base.token_embd, input_tokens);
-            all_embd = ggml.scale(ctx, all_embd, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
-            // Scale audio embeddings to match text embedding magnitude
-            const scaled_override = ggml.scale(ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
-            // Extract text-only portion: [n_embd, n_text]
-            const text_embd = all_embd.view2d(ctx, n_embd_i64, n_text, all_embd.nb()[1], @as(usize, @intCast(n_override)) * @sizeOf(f32) * @as(usize, @intCast(n_embd_i64)));
-            cur = ggml.concat(ctx, scaled_override, ggml.cont(ctx, text_embd), 1);
+
+        // Get embeddings for ALL tokens, scale
+        var all_embd = embed.tokenEmbedding(ctx, w.base.token_embd, input_tokens);
+        all_embd = ggml.scale(ctx, all_embd, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+        const scaled_override = ggml.scale(ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+
+        if (n_text_pre > 0 and n_text_post > 0) {
+            // Split: [text_prefix | override | text_suffix]
+            const prefix_embd = all_embd.view2d(ctx, n_embd_i64, n_text_pre, all_embd.nb()[1], 0);
+            const suffix_offset: usize = @as(usize, @intCast(override_offset + n_override)) * @sizeOf(f32) * @as(usize, @intCast(n_embd_i64));
+            const suffix_embd = all_embd.view2d(ctx, n_embd_i64, n_text_post, all_embd.nb()[1], suffix_offset);
+            const mid = ggml.concat(ctx, ggml.cont(ctx, prefix_embd), scaled_override, 1);
+            cur = ggml.concat(ctx, mid, ggml.cont(ctx, suffix_embd), 1);
+        } else if (n_text_pre > 0) {
+            // Text prefix + override (no suffix)
+            const prefix_embd = all_embd.view2d(ctx, n_embd_i64, n_text_pre, all_embd.nb()[1], 0);
+            cur = ggml.concat(ctx, ggml.cont(ctx, prefix_embd), scaled_override, 1);
+        } else if (n_text_post > 0) {
+            // Override at start + text suffix
+            const suffix_offset: usize = @as(usize, @intCast(override_offset + n_override)) * @sizeOf(f32) * @as(usize, @intCast(n_embd_i64));
+            const suffix_embd = all_embd.view2d(ctx, n_embd_i64, n_text_post, all_embd.nb()[1], suffix_offset);
+            cur = ggml.concat(ctx, scaled_override, ggml.cont(ctx, suffix_embd), 1);
         } else {
-            // Scale audio-only embeddings consistently
-            cur = ggml.scale(ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+            // Override only
+            cur = scaled_override;
         }
         cur.setName("inp_scaled_mm");
 

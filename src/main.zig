@@ -1008,7 +1008,7 @@ const InferenceEngine = struct {
         const start_pos: i32 = 0;
         const logits = try gemma4_model.forwardWithEmbdOverride(
             self.ctx_graph, graph, input_tensor, n_total_tokens,
-            @ptrCast(&self.kv_cache_mgr), start_pos, vision_embeddings,
+            @ptrCast(&self.kv_cache_mgr), start_pos, vision_embeddings, 0,
         );
 
         // Allocate and compute LLM graph (Phase 3.4: Mixed Prefill)
@@ -1219,10 +1219,12 @@ const InferenceEngine = struct {
 
         logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
 
-        // Tokenize with special token handling: split on <|audio|>, encode segments, interleave
+        // Tokenize with special token handling: split on <|audio|>, interleave n_audio_tokens placeholders
         var all_tokens = try std.ArrayListUnmanaged(u32).initCapacity(self.allocator, 128);
         defer all_tokens.deinit(self.allocator);
         var audio_marker_count: u32 = 0;
+        var embd_offset: i32 = -1; // position where first audio embedding should be injected
+        var embd_offset_set = false;
 
         {
             var remaining = formatted_prompt;
@@ -1247,7 +1249,16 @@ const InferenceEngine = struct {
                         try all_tokens.appendSlice(self.allocator, text_tokens.items);
                     }
 
-                    try all_tokens.append(self.allocator, @intCast(audio_token_id));
+                    // Record the embedding offset (position in token sequence where audio starts)
+                    if (!embd_offset_set) {
+                        embd_offset = @as(i32, @intCast(all_tokens.items.len));
+                        embd_offset_set = true;
+                    }
+
+                    // Insert n_audio_tokens placeholder tokens for the audio marker
+                    for (0..@as(usize, @intCast(n_audio_tokens))) |_| {
+                        try all_tokens.append(self.allocator, @intCast(audio_token_id));
+                    }
                     audio_marker_count += 1;
 
                     remaining = remaining[pos + marker_len ..];
@@ -1261,47 +1272,38 @@ const InferenceEngine = struct {
             }
         }
 
-        const n_text_tokens: i32 = @intCast(all_tokens.items.len);
-        const n_total_tokens: i32 = n_audio_tokens * @as(i32, @intCast(audio_marker_count)) + n_text_tokens;
+        const n_total_tokens: i32 = @intCast(all_tokens.items.len);
 
-        logger.info("Audio tokens={d}, audio markers={d}, text tokens={d}, total={d}", .{
-            n_audio_tokens, audio_marker_count, n_text_tokens, n_total_tokens,
+        logger.info("Audio tokens={d}, audio markers={d}, total={d}, embd_offset={d}", .{
+            n_audio_tokens, audio_marker_count, n_total_tokens, embd_offset,
         });
 
-        // Step 6: Build input token tensor
+        // Step 6: Build input token tensor (all_tokens already has correct layout)
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
         self.ctx_graph.setNoAlloc(true);
         {
             const data = input_tensor.dataBytes();
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            const n_audio_slots: usize = @as(usize, @intCast(n_audio_tokens)) * @as(usize, @intCast(audio_marker_count));
-            for (0..n_audio_slots) |j| {
-                slice[j] = audio_token_id;
-            }
             for (all_tokens.items, 0..) |token, j| {
-                slice[n_audio_slots + j] = @as(i32, @intCast(token));
+                slice[j] = @as(i32, @intCast(token));
             }
-        }
 
-        // Debug: print first and last few token IDs to verify sequence construction
-        {
-            const data = input_tensor.dataBytes();
-            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            const num_preview = @min(@as(usize, 10), @as(usize, @intCast(n_total_tokens)));
-            logger.info("Input tokens (first {d}): {any}", .{ num_preview, slice[0..num_preview] });
+            // Debug: print first and last few token IDs to verify sequence construction
+            logger.info("Input tokens (first 10): {any}", .{slice[0..@min(@as(usize, 10), @as(usize, @intCast(n_total_tokens)))]});
+            logger.info("Input tokens around offset {d}: {any}", .{ embd_offset, slice[@as(usize, @intCast(embd_offset))..@min(@as(usize, @intCast(embd_offset)) + 10, @as(usize, @intCast(n_total_tokens)))] });
             if (n_total_tokens > 10) {
                 const tail_start: usize = @as(usize, @intCast(n_total_tokens)) - @min(@as(usize, 5), @as(usize, @intCast(n_total_tokens)));
                 logger.info("Input tokens (last {d}): {any}", .{ @as(usize, @intCast(n_total_tokens)) - tail_start, slice[tail_start..@as(usize, @intCast(n_total_tokens))] });
             }
         }
 
-        // Step 7: Build LLM graph with audio embedding override
+        // Step 7: Build LLM graph with audio embedding override at computed offset
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const start_pos: i32 = 0;
         const logits = try gemma4_model.forwardWithEmbdOverride(
             self.ctx_graph, graph, input_tensor, n_total_tokens,
-            @ptrCast(&self.kv_cache_mgr), start_pos, audio_embeddings,
+            @ptrCast(&self.kv_cache_mgr), start_pos, audio_embeddings, embd_offset,
         );
 
         var galloc = try ggml.Gallocr.init(buft);
