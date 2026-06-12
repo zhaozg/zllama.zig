@@ -837,7 +837,6 @@ const InferenceEngine = struct {
         const target_size: u32 = 896;
         var img = try preprocess.loadImage(self.allocator, io, image_path, target_size, .auto);
         defer img.deinit();
-
         logger.info("Loaded image: {d}x{d} -> {d}x{d}", .{ img.width, img.height, target_size, target_size });
 
         // Step 2: Run vision encoder
@@ -852,9 +851,6 @@ const InferenceEngine = struct {
         });
         self.ctx_graph.setNoAlloc(true);
 
-        // Allocate and compute vision encoder graph.
-        // IMPORTANT: v_galloc must stay alive until the LLM graph compute
-        // completes, because vision_embeddings tensor data is in gallocr memory.
         const buft = ggml.backendCpuBufferType();
         var v_galloc = try ggml.Gallocr.init(buft);
         defer v_galloc.free();
@@ -863,14 +859,56 @@ const InferenceEngine = struct {
         }
         try vision_graph.compute(self.n_threads);
 
-        // Log vision encoding results
+        // Phase 3.2: Vision shape verification
         const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
         logger.info("Vision encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd_val, n_vision_tokens });
 
-        // Step 3: Tokenize prompt text (with chat template for consistency)
+        const model_n_embd: usize = @intCast(self.params.n_embd);
+        if (n_embd_val != model_n_embd) {
+            logger.err("Vision encoder output dim {d} != model n_embd {d}!", .{ n_embd_val, model_n_embd });
+            return error.EmbeddingDimensionMismatch;
+        }
+        logger.info("Vision embedding dimension check: {d} == model n_embd {d} ✓", .{ n_embd_val, model_n_embd });
+
+        // Phase 3.2: Verify expected vision token count
+        const expected_tokens: i32 = @intCast(@divTrunc(
+            (@as(u32, @intCast(@divTrunc(target_size, 14))) * @as(u32, @intCast(@divTrunc(target_size, 14)))),
+            4,
+        ));
+        if (n_vision_tokens != expected_tokens) {
+            logger.info("Vision tokens={d} (expected ~{d} for {d}x{d}); mmproj may use different pooling", .{ n_vision_tokens, expected_tokens, target_size, target_size });
+        } else {
+            logger.info("Vision token count: {d} == expected {d} ✓", .{ n_vision_tokens, expected_tokens });
+        }
+
+        // Step 3: Look up the <|image|> special token ID from vocabulary
+        const image_token_id: i32 = blk: {
+            if (self.tok.textToToken("<|image|>")) |id| {
+                logger.info("Image placeholder token '<|image|>' -> id={d}", .{id});
+                break :blk @as(i32, @intCast(id));
+            }
+            // Try <image> as fallback
+            if (self.tok.textToToken("<image>")) |id| {
+                logger.info("Image placeholder token '<image>' -> id={d}", .{id});
+                break :blk @as(i32, @intCast(id));
+            }
+            logger.err("No <|image|> or <image> token in vocabulary!", .{});
+            return error.NoImagePlaceholderToken;
+        };
+
+        // Step 4: Build prompt with <|image|> and apply chat template
+        // Gemma 4 format: <|turn>user\n<|image|>Describe this image<turn|>\n<|turn>model\n
+        const prompt_with_marker = if (std.mem.indexOf(u8, prompt, "<|image|>") != null or
+            std.mem.indexOf(u8, prompt, "<image>") != null)
+            prompt
+        else blk: {
+            break :blk try std.fmt.allocPrint(self.allocator, "<|image|>{s}", .{prompt});
+        };
+        defer if (prompt_with_marker.ptr != prompt.ptr) self.allocator.free(prompt_with_marker);
+
         const formatted_prompt = if (self.no_chat_template) blk: {
-            break :blk try self.allocator.dupe(u8, prompt);
+            break :blk try self.allocator.dupe(u8, prompt_with_marker);
         } else blk: {
             const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
             const source = self.chat_template_source orelse
@@ -879,67 +917,93 @@ const InferenceEngine = struct {
             defer tmpl.deinit(self.allocator);
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
             const messages = [_]chat_template.ChatMessage{
-                chat_template.ChatMessage.init("user", prompt),
+                chat_template.ChatMessage.init("user", prompt_with_marker),
             };
             break :blk try tmpl.apply(self.allocator, &messages, system, true);
         };
         defer self.allocator.free(formatted_prompt);
 
-        var input_tokens = try self.tok.encode(formatted_prompt, true);
-        defer input_tokens.deinit(self.allocator);
-        const n_text_tokens: i32 = @intCast(input_tokens.items.len);
-        const n_total_tokens: i32 = n_vision_tokens + n_text_tokens;
+        logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
 
-        logger.info("Vision tokens={d}, text tokens={d} (prompt_len={d}), total={d}", .{
-            n_vision_tokens, n_text_tokens, formatted_prompt.len, n_total_tokens,
-        });
+        // Phase 3.3: Tokenize with special token handling.
+        // BPE tokenizers split <|image|> into subwords, so we pre-process the text:
+        // split on "<|image|>", tokenize each text segment, interleave with image_token_id.
+        var all_tokens = try std.ArrayListUnmanaged(u32).initCapacity(self.allocator, 128);
+        defer all_tokens.deinit(self.allocator);
+        var image_marker_count: u32 = 0;
 
-        // Look up vision placeholder token ID from vocabulary
-        const vision_placeholder_id: i32 = blk: {
-            const candidates = [_][]const u8{
-                "<|vision|>",
-                "<vision>",
-                "<|vision_place|>",
-                "<|vision_embeddings|>",
-            };
-            for (candidates) |name| {
-                if (self.tok.textToToken(name)) |id| {
-                    logger.info("Vision placeholder token '{s}' -> id={d}", .{ name, id });
-                    break :blk @as(i32, @intCast(id));
-                }
-            }
-            logger.warn("No standard vision placeholder token found; scanning vocabulary...", .{});
-            var fallback_id: ?i32 = null;
-            for (self.tok.vocab.items, 0..) |entry, id| {
-                if (entry == .normal and std.mem.containsAtLeast(u8, entry.normal, 1, "vision")) {
-                    fallback_id = @as(i32, @intCast(id));
-                    logger.warn("Using token '{s}' (id={d}) as vision placeholder", .{ entry.normal, id });
+        // Pre-process: split text on "<|image|>" and "<image>" markers
+        {
+            var remaining = formatted_prompt;
+            var is_first_segment = true;
+            while (remaining.len > 0) {
+                // Find next image marker
+                const next_image = std.mem.indexOf(u8, remaining, "<|image|>");
+                const next_image_alt = std.mem.indexOf(u8, remaining, "<image>");
+
+                const next_pos = blk: {
+                    if (next_image != null and next_image_alt != null) {
+                        break :blk @min(next_image.?, next_image_alt.?);
+                    }
+                    break :blk next_image orelse next_image_alt;
+                };
+
+                if (next_pos) |pos| {
+                    // Determine which marker was found
+                    const marker_len: usize = if (next_image != null and next_image.? == pos) "<|image|>".len else "<image>".len;
+
+                    // Tokenize text before the marker
+                    if (pos > 0) {
+                        var text_tokens = try self.tok.encode(remaining[0..pos], is_first_segment);
+                        defer text_tokens.deinit(self.allocator);
+                        try all_tokens.appendSlice(self.allocator, text_tokens.items);
+                    }
+
+                    // Insert the special <|image|> token
+                    try all_tokens.append(self.allocator, @intCast(image_token_id));
+                    image_marker_count += 1;
+
+                    remaining = remaining[pos + marker_len ..];
+                    is_first_segment = false;
+                } else {
+                    // No more markers, tokenize remaining text
+                    var text_tokens = try self.tok.encode(remaining, is_first_segment);
+                    defer text_tokens.deinit(self.allocator);
+                    try all_tokens.appendSlice(self.allocator, text_tokens.items);
                     break;
                 }
             }
-            if (fallback_id) |fid| {
-                break :blk fid;
-            }
-            logger.err("No vision placeholder token found in vocabulary! Using 0 (<unk>) as fallback.", .{});
-            break :blk @as(i32, 0);
-        };
+        }
 
-        // Step 4: Create input token tensor (vision positions = placeholder, text positions = real tokens)
+        const n_text_tokens: i32 = @intCast(all_tokens.items.len);
+        const n_total_tokens: i32 = n_vision_tokens * @as(i32, @intCast(image_marker_count)) + n_text_tokens;
+
+        logger.info("Vision tokens={d}, image markers={d}, text tokens={d}, total={d}", .{
+            n_vision_tokens, image_marker_count, n_text_tokens, n_total_tokens,
+        });
+
+        // Step 5: Build input token tensor.
+        // Layout: [vision_placeholder_id x N_vision] ++ [text_tokens_with_image_marker]
+        // forwardWithEmbdOverride replaces first (n_vision_tokens * image_marker_count) positions
+        // with vision embeddings. The <|image|> marker tokens in text get replaced too.
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
         self.ctx_graph.setNoAlloc(true);
         {
             const data = input_tensor.dataBytes();
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            for (0..@as(usize, @intCast(n_vision_tokens))) |j| {
-                slice[j] = vision_placeholder_id;
+            // Vision placeholder positions (replaced by vision embeddings in forwardWithEmbdOverride)
+            const n_vision_slots: usize = @as(usize, @intCast(n_vision_tokens)) * @as(usize, @intCast(image_marker_count));
+            for (0..n_vision_slots) |j| {
+                slice[j] = image_token_id; // These will be replaced by vision embeddings
             }
-            for (input_tokens.items, 0..) |token, j| {
-                slice[@as(usize, @intCast(n_vision_tokens)) + j] = @as(i32, @intCast(token));
+            // Text tokens follow
+            for (all_tokens.items, 0..) |token, j| {
+                slice[n_vision_slots + j] = @as(i32, @intCast(token));
             }
         }
 
-        // Step 5: Build LLM graph with vision embedding override
+        // Step 6: Build LLM graph with vision embedding override
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const start_pos: i32 = 0;
         const logits = try gemma4_model.forwardWithEmbdOverride(
@@ -947,7 +1011,7 @@ const InferenceEngine = struct {
             @ptrCast(&self.kv_cache_mgr), start_pos, vision_embeddings,
         );
 
-        // Allocate and compute LLM graph
+        // Allocate and compute LLM graph (Phase 3.4: Mixed Prefill)
         var galloc = try ggml.Gallocr.init(buft);
         defer galloc.free();
         if (!galloc.allocGraph(graph)) {
@@ -960,12 +1024,11 @@ const InferenceEngine = struct {
         const t_end = engine_common.currentTimeMs();
         const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
 
-        // Step 9: Sample first token and generate
+        // Step 7: Sample and generate (Phase 3.4: Incremental Decode)
         var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
         var pos: i32 = n_total_tokens;
         var gen_count: u32 = 0;
 
-        // Debug: log the first generated token
         logger.info("First generated token (vision): id={d}, is_eog={}, pp_time={d:.3}s", .{
             current_token,
             self.tok.isEog(@intCast(current_token)),

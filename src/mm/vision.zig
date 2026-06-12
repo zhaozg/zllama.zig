@@ -493,11 +493,12 @@ fn loadViTLayer(
     layer.ff_down_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch null;
     return layer;
 }
-/// Reshape a 1D weight tensor [n] to [1, n] for broadcasting with [m, n] tensors.
-/// ggml broadcasting: [n] vs [m, n] -> ne[0]: n vs m (fail); [1, n] vs [m, n] -> ne[0]: 1 vs m (ok)
+/// Reshape a 1D weight tensor [n] to [n, 1] for broadcasting with [n_embd, n_patches] tensors.
+/// Vision encoder uses column-major [n_embd, n_patches] layout.
+/// ggml broadcasting: b=[n, 1] vs a=[n_embd, n_patches] -> ne[0]: n==n_embd (ok), ne[1]: 1<=n_patches (ok)
 fn reshapeForBroadcast(ctx: *ggml.Context, t: *ggml.Tensor) *ggml.Tensor {
     const n = t.ne()[0];
-    return ctx.view2d(t, 1, n, ggml.Type.rowSize(t.dataType(), n), 0);
+    return ctx.view2d(t, n, 1, ggml.Type.rowSize(t.dataType(), n), 0);
 }
 fn findLayerWeight(
     ctx: *ggml.Context,
