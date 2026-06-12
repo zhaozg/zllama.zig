@@ -230,6 +230,26 @@ pub fn build(b: *std.Build) void {
     });
     chat_template_mod.addImport("model", model_mod);
 
+    // 注册 chat_template 子模块
+    const chat_template_types_mod = b.createModule(.{
+        .root_source_file = b.path("src/chat_template/types.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const chat_template_multimodal_mod = b.createModule(.{
+        .root_source_file = b.path("src/chat_template/multimodal.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    chat_template_multimodal_mod.addImport("types", chat_template_types_mod);
+
+    // 让 chat_template 模块可以导入子模块
+    chat_template_mod.addImport("types", chat_template_types_mod);
+    chat_template_mod.addImport("multimodal", chat_template_multimodal_mod);
+
     // ======================================================================
 
     // --- 多模态模块 ---

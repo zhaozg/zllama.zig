@@ -7,27 +7,34 @@
 //!   Phase 1: Hardcoded presets + GGUF metadata reading + CLI flags
 //!   Phase 2: Extended preset templates + auto-detection
 //!   Phase 3: Jinja subset engine (for GGUF built-in templates)
+//!   Phase 4: Multimodal placeholder support (expandPlaceholders, Media types)
 //!
 //! Reference: llama.cpp src/llama-chat.cpp, common/chat.cpp, docs/DIALOG_TEMPLATE.md
-
 const std = @import("std");
 const model = @import("model");
+
+// 导入子模块
+const types = @import("types");
+const multimodal = @import("multimodal");
+
+// 重新导出子模块类型（保持向后兼容）
+pub const ChatMessage = types.ChatMessage;
+pub const Media = types.Media;
+pub const MediaType = types.MediaType;
+pub const PlaceholderInfo = types.PlaceholderInfo;
+pub const ExpandedPlaceholders = types.ExpandedPlaceholders;
+
+// 重新导出多模态辅助函数
+pub const scanPlaceholders = multimodal.scanPlaceholders;
+pub const expandPlaceholders = multimodal.expandPlaceholders;
+pub const containsPlaceholder = multimodal.containsPlaceholder;
+pub const ensurePlaceholderInContent = multimodal.ensurePlaceholderInContent;
 
 const log = std.log.scoped(.chat_template);
 
 // ============================================================================
-// Types
+// Template Format
 // ============================================================================
-
-/// A single chat message with role and content.
-pub const ChatMessage = struct {
-    role: []const u8,
-    content: []const u8,
-
-    pub fn init(role: []const u8, content: []const u8) ChatMessage {
-        return .{ .role = role, .content = content };
-    }
-};
 
 /// Known template format kinds.
 pub const TemplateKind = enum {

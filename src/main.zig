@@ -367,13 +367,15 @@ const InferenceEngine = struct {
     /// Apply chat template to the user prompt.
     /// Returns the formatted prompt (caller owns memory).
     fn applyChatTemplate(self: *InferenceEngine, user_prompt: []const u8) ![]const u8 {
-        // If --no-chat-template is set, pass through raw prompt
+        return self.applyChatTemplateWithMedia(user_prompt, null);
+    }
+
+    /// 应用聊天模板，支持可选的媒体数据
+    fn applyChatTemplateWithMedia(self: *InferenceEngine, user_prompt: []const u8, media: ?chat_template.Media) ![]const u8 {
         if (self.no_chat_template) {
             return self.allocator.dupe(u8, user_prompt);
         }
 
-        // Resolve template source: use GGUF built-in, --chat-template preset,
-        // or fall back to architecture default (e.g. ChatML for Qwen)
         const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
         const source = self.chat_template_source orelse
             chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
@@ -381,7 +383,9 @@ const InferenceEngine = struct {
         var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
         defer tmpl.deinit(self.allocator);
 
-        const messages = [_]chat_template.ChatMessage{
+        const messages = if (media) |m| [_]chat_template.ChatMessage{
+            chat_template.ChatMessage.withMedia("user", user_prompt, m),
+        } else [_]chat_template.ChatMessage{
             chat_template.ChatMessage.init("user", user_prompt),
         };
 
@@ -655,7 +659,6 @@ const InferenceEngine = struct {
             history.deinit(self.allocator);
         }
 
-        // Multi-turn conversation history
         var chat_history = std.ArrayListUnmanaged(chat_template.ChatMessage){ .items = &.{}, .capacity = 0 };
         defer chat_history.deinit(self.allocator);
 
@@ -690,6 +693,8 @@ const InferenceEngine = struct {
                     try stdout.writeStreamingAll(io, "  /exit     Quit\n");
                     try stdout.writeStreamingAll(io, "  /reset    Reset KV cache\n");
                     try stdout.writeStreamingAll(io, "  /new      Start new conversation (clear history)\n");
+                    try stdout.writeStreamingAll(io, "  /image <path> <prompt>  Attach image and prompt\n");
+                    try stdout.writeStreamingAll(io, "  /audio <path> <prompt>  Attach audio and prompt\n");
                 } else if (std.mem.eql(u8, line, "/clear")) {
                     try stdout.writeStreamingAll(io, "\x1b[2J\x1b[H");
                 } else if (std.mem.eql(u8, line, "/reset")) {
@@ -699,6 +704,36 @@ const InferenceEngine = struct {
                     chat_history.clearAndFree(self.allocator);
                     self.kv_cache_mgr.reset();
                     try stdout.writeStreamingAll(io, "New conversation started.\n");
+                } else if (std.mem.startsWith(u8, line, "/image ")) {
+                    // /image <path> <prompt>
+                    const rest = line[7..]; // skip "/image "
+                    const space_pos = std.mem.indexOf(u8, rest, " ") orelse {
+                        try stdout.writeStreamingAll(io, "Usage: /image <path> <prompt>\n");
+                        continue;
+                    };
+                    const img_path = rest[0..space_pos];
+                    const img_prompt = rest[space_pos + 1 ..];
+                    try stdout.writeStreamingAll(io, "Processing image...\n");
+                    self.generateWithImage(io, img_prompt, @ptrCast(@constCast(img_path)), 256) catch {
+                        try stdout.writeStreamingAll(io, "Image processing failed.\n");
+                    };
+                    try stdout.writeStreamingAll(io, "\n");
+                    continue;
+                } else if (std.mem.startsWith(u8, line, "/audio ")) {
+                    // /audio <path> <prompt>
+                    const rest = line[7..]; // skip "/audio "
+                    const space_pos = std.mem.indexOf(u8, rest, " ") orelse {
+                        try stdout.writeStreamingAll(io, "Usage: /audio <path> <prompt>\n");
+                        continue;
+                    };
+                    const aud_path = rest[0..space_pos];
+                    const aud_prompt = rest[space_pos + 1 ..];
+                    try stdout.writeStreamingAll(io, "Processing audio...\n");
+                    self.generateWithAudio(io, aud_prompt, @ptrCast(@constCast(aud_path)), 256) catch {
+                        try stdout.writeStreamingAll(io, "Audio processing failed.\n");
+                    };
+                    try stdout.writeStreamingAll(io, "\n");
+                    continue;
                 } else {
                     try stdout.writeStreamingAll(io, "Unknown command. Try /help.\n");
                 }
@@ -826,20 +861,17 @@ const InferenceEngine = struct {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_vision) return error.VisionNotSupported;
 
-        // Only Gemma4 supports vision currently
         if (self.arch != .gemma4) {
             logger.warn("Vision only supported for Gemma4 models. Using text-only generation.", .{});
             return self.generate(io, prompt, max_tokens);
         }
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
 
-        // Step 1: Load and preprocess image (auto-detect format: PPM/JPEG/PNG/GIF/BMP/TGA)
         const target_size: u32 = 896;
         var img = try preprocess.loadImage(self.allocator, io, image_path, target_size, .auto);
         defer img.deinit();
         logger.info("Loaded image: {d}x{d} -> {d}x{d}", .{ img.width, img.height, target_size, target_size });
 
-        // Step 2: Run vision encoder
         self.ctx_graph.setNoAlloc(false);
         var vision_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
 
@@ -859,7 +891,6 @@ const InferenceEngine = struct {
         }
         try vision_graph.compute(self.n_threads);
 
-        // Phase 3.2: Vision shape verification
         const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
         logger.info("Vision encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd_val, n_vision_tokens });
@@ -871,7 +902,6 @@ const InferenceEngine = struct {
         }
         logger.info("Vision embedding dimension check: {d} == model n_embd {d} ✓", .{ n_embd_val, model_n_embd });
 
-        // Phase 3.2: Verify expected vision token count
         const expected_tokens: i32 = @intCast(@divTrunc(
             (@as(u32, @intCast(@divTrunc(target_size, 14))) * @as(u32, @intCast(@divTrunc(target_size, 14)))),
             4,
@@ -882,33 +912,26 @@ const InferenceEngine = struct {
             logger.info("Vision token count: {d} == expected {d} ✓", .{ n_vision_tokens, expected_tokens });
         }
 
-        // Step 3: Look up the <|image|> special token ID from vocabulary
-        const image_token_id: i32 = blk: {
+        // 使用多模态 ChatMessage API
+        const image_token_id: u32 = blk: {
             if (self.tok.textToToken("<|image|>")) |id| {
                 logger.info("Image placeholder token '<|image|>' -> id={d}", .{id});
-                break :blk @as(i32, @intCast(id));
+                break :blk @as(u32, @intCast(id));
             }
-            // Try <image> as fallback
             if (self.tok.textToToken("<image>")) |id| {
                 logger.info("Image placeholder token '<image>' -> id={d}", .{id});
-                break :blk @as(i32, @intCast(id));
+                break :blk @as(u32, @intCast(id));
             }
             logger.err("No <|image|> or <image> token in vocabulary!", .{});
             return error.NoImagePlaceholderToken;
         };
 
-        // Step 4: Build prompt with <|image|> and apply chat template
-        // Gemma 4 format: <|turn>user\n<|image|>Describe this image<turn|>\n<|turn>model\n
-        const prompt_with_marker = if (std.mem.indexOf(u8, prompt, "<|image|>") != null or
-            std.mem.indexOf(u8, prompt, "<image>") != null)
-            prompt
-        else blk: {
-            break :blk try std.fmt.allocPrint(self.allocator, "<|image|>{s}", .{prompt});
-        };
-        defer if (prompt_with_marker.ptr != prompt.ptr) self.allocator.free(prompt_with_marker);
+        // 使用 ensurePlaceholderInContent 自动插入占位符
+        const content_with_placeholder = try chat_template.ensurePlaceholderInContent(prompt, .image, self.allocator);
+        defer if (content_with_placeholder.ptr != prompt.ptr) self.allocator.free(content_with_placeholder);
 
         const formatted_prompt = if (self.no_chat_template) blk: {
-            break :blk try self.allocator.dupe(u8, prompt_with_marker);
+            break :blk try self.allocator.dupe(u8, content_with_placeholder);
         } else blk: {
             const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
             const source = self.chat_template_source orelse
@@ -917,7 +940,7 @@ const InferenceEngine = struct {
             defer tmpl.deinit(self.allocator);
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
             const messages = [_]chat_template.ChatMessage{
-                chat_template.ChatMessage.init("user", prompt_with_marker),
+                chat_template.ChatMessage.init("user", content_with_placeholder),
             };
             break :blk try tmpl.apply(self.allocator, &messages, system, true);
         };
@@ -925,84 +948,35 @@ const InferenceEngine = struct {
 
         logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
 
-        // Phase 3.3: Tokenize with special token handling.
-        // BPE tokenizers split <|image|> into subwords, so we pre-process the text:
-        // split on "<|image|>", tokenize each text segment, interleave with image_token_id.
-        var all_tokens = try std.ArrayListUnmanaged(u32).initCapacity(self.allocator, 128);
-        defer all_tokens.deinit(self.allocator);
-        var image_marker_count: u32 = 0;
+        // 使用 expandPlaceholders 展开占位符
+        var expanded = try chat_template.expandPlaceholders(
+            self.allocator,
+            formatted_prompt,
+            image_token_id,
+            0, // audio_token_id (unused for vision)
+            @intCast(n_vision_tokens),
+            0, // audio_token_count (unused for vision)
+        );
+        defer expanded.deinit();
 
-        // Pre-process: split text on "<|image|>" and "<image>" markers
-        {
-            var remaining = formatted_prompt;
-            var is_first_segment = true;
-            while (remaining.len > 0) {
-                // Find next image marker
-                const next_image = std.mem.indexOf(u8, remaining, "<|image|>");
-                const next_image_alt = std.mem.indexOf(u8, remaining, "<image>");
+        const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
+        const image_marker_count: u32 = @intCast(expanded.offsets.len);
 
-                const next_pos = blk: {
-                    if (next_image != null and next_image_alt != null) {
-                        break :blk @min(next_image.?, next_image_alt.?);
-                    }
-                    break :blk next_image orelse next_image_alt;
-                };
-
-                if (next_pos) |pos| {
-                    // Determine which marker was found
-                    const marker_len: usize = if (next_image != null and next_image.? == pos) "<|image|>".len else "<image>".len;
-
-                    // Tokenize text before the marker
-                    if (pos > 0) {
-                        var text_tokens = try self.tok.encode(remaining[0..pos], is_first_segment);
-                        defer text_tokens.deinit(self.allocator);
-                        try all_tokens.appendSlice(self.allocator, text_tokens.items);
-                    }
-
-                    // Insert the special <|image|> token
-                    try all_tokens.append(self.allocator, @intCast(image_token_id));
-                    image_marker_count += 1;
-
-                    remaining = remaining[pos + marker_len ..];
-                    is_first_segment = false;
-                } else {
-                    // No more markers, tokenize remaining text
-                    var text_tokens = try self.tok.encode(remaining, is_first_segment);
-                    defer text_tokens.deinit(self.allocator);
-                    try all_tokens.appendSlice(self.allocator, text_tokens.items);
-                    break;
-                }
-            }
-        }
-
-        const n_text_tokens: i32 = @intCast(all_tokens.items.len);
-        const n_total_tokens: i32 = n_vision_tokens * @as(i32, @intCast(image_marker_count)) + n_text_tokens;
-
-        logger.info("Vision tokens={d}, image markers={d}, text tokens={d}, total={d}", .{
-            n_vision_tokens, image_marker_count, n_text_tokens, n_total_tokens,
+        logger.info("Vision tokens={d}, image markers={d}, total={d}", .{
+            n_vision_tokens, image_marker_count, n_total_tokens,
         });
 
-        // Step 5: Build input token tensor.
-        // Layout: [vision_placeholder_id x N_vision] ++ [text_tokens_with_image_marker]
-        // forwardWithEmbdOverride replaces first (n_vision_tokens * image_marker_count) positions
-        // with vision embeddings. The <|image|> marker tokens in text get replaced too.
+        // 构建输入张量
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
         self.ctx_graph.setNoAlloc(true);
         {
             const data = input_tensor.dataBytes();
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            // Vision placeholder positions (replaced by vision embeddings in forwardWithEmbdOverride)
-            const n_vision_slots: usize = @as(usize, @intCast(n_vision_tokens)) * @as(usize, @intCast(image_marker_count));
-            for (0..n_vision_slots) |j| {
-                slice[j] = image_token_id; // These will be replaced by vision embeddings
-            }
-            // Text tokens follow
-            for (all_tokens.items, 0..) |token, j| {
-                slice[n_vision_slots + j] = @as(i32, @intCast(token));
+            for (expanded.tokens.items, 0..) |token, j| {
+                slice[j] = @as(i32, @intCast(token));
             }
         }
-
         // Step 6: Build LLM graph with vision embedding override
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const start_pos: i32 = 0;
@@ -1013,7 +987,6 @@ const InferenceEngine = struct {
 
         // Allocate and compute LLM graph (Phase 3.4: Mixed Prefill)
         var galloc = try ggml.Gallocr.init(buft);
-        defer galloc.free();
         if (!galloc.allocGraph(graph)) {
             logger.err("Failed to allocate LLM graph for vision+text", .{});
             return error.GraphAllocFailed;
@@ -1090,14 +1063,12 @@ const InferenceEngine = struct {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_audio) return error.AudioNotSupported;
 
-        // Only Gemma4 supports audio currently
         if (self.arch != .gemma4) {
             logger.warn("Audio only supported for Gemma4 models. Using text-only generation.", .{});
             return self.generate(io, prompt, max_tokens);
         }
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
 
-        // Step 1: Load WAV file
         const wav_result = try preprocess.loadWav(self.allocator, io, audio_path);
         const wav_samples = wav_result.samples;
         const wav_info = wav_result.info;
@@ -1109,7 +1080,6 @@ const InferenceEngine = struct {
             wav_info.num_channels,
         });
 
-        // Step 2: Compute Mel spectrogram using params from audio encoder
         const preprocess_params = preprocess.AudioPreprocessParams.fromAudioEncoder(
             if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else preprocess.AUDIO_N_MEL_BINS,
         );
@@ -1117,7 +1087,6 @@ const InferenceEngine = struct {
         defer mel.deinit();
         logger.info("Mel spectrogram: {d} frames x {d} bins", .{ mel.n_frames, mel.n_mel_bins });
 
-        // Step 3: Run Conformer audio encoder
         self.ctx_graph.setNoAlloc(false);
         var audio_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
 
@@ -1138,7 +1107,6 @@ const InferenceEngine = struct {
         }
         try audio_graph.compute(self.n_threads);
 
-        // Audio shape verification
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
         logger.info("Audio encoder output: [{d}, {d}] (n_embd x n_tokens)", .{ n_embd_val, n_audio_tokens });
@@ -1150,61 +1118,26 @@ const InferenceEngine = struct {
         }
         logger.info("Audio embedding dimension check: {d} == model n_embd {d} ✓", .{ n_embd_val, model_n_embd });
 
-        // Debug: compute audio embedding statistics (mean, variance, min, max)
-        {
-            const emb_data = audio_embeddings.dataF32();
-            const n_vals: usize = @as(usize, @intCast(n_audio_tokens)) * n_embd_val;
-            if (n_vals > 0) {
-                var sum: f64 = 0.0;
-                var min_val: f32 = emb_data[0];
-                var max_val: f32 = emb_data[0];
-                for (emb_data[0..n_vals]) |v| {
-                    sum += @as(f64, @floatCast(v));
-                    if (v < min_val) min_val = v;
-                    if (v > max_val) max_val = v;
-                }
-                const mean = @as(f32, @floatCast(sum / @as(f64, @floatFromInt(n_vals))));
-                var variance: f64 = 0.0;
-                for (emb_data[0..n_vals]) |v| {
-                    const diff = @as(f64, @floatCast(v - mean));
-                    variance += diff * diff;
-                }
-                variance /= @as(f64, @floatFromInt(n_vals));
-                logger.info("Audio embedding stats: mean={d:.4}, var={d:.4}, std={d:.4}, min={d:.4}, max={d:.4}", .{
-                    mean, @as(f32, @floatCast(variance)), @sqrt(@as(f32, @floatCast(variance))), min_val, max_val,
-                });
-                // Warn if embeddings look degenerate (all zeros or extreme values)
-                if (@abs(mean) < 1e-10 and @abs(variance) < 1e-10) {
-                    logger.warn("Audio embeddings are near-zero! Encoder may not be producing output.", .{});
-                }
-            }
-        }
-
-        // Step 4: Look up the <|audio|> special token ID from vocabulary
-        const audio_token_id: i32 = blk: {
+        // 使用多模态 ChatMessage API
+        const audio_token_id: u32 = blk: {
             if (self.tok.textToToken("<|audio|>")) |id| {
                 logger.info("Audio placeholder token '<|audio|>' -> id={d}", .{id});
-                break :blk @as(i32, @intCast(id));
+                break :blk @as(u32, @intCast(id));
             }
             if (self.tok.textToToken("<audio>")) |id| {
                 logger.info("Audio placeholder token '<audio>' -> id={d}", .{id});
-                break :blk @as(i32, @intCast(id));
+                break :blk @as(u32, @intCast(id));
             }
             logger.err("No <|audio|> or <audio> token in vocabulary!", .{});
             return error.NoAudioPlaceholderToken;
         };
 
-        // Step 5: Build prompt with <|audio|> and apply chat template
-        const prompt_with_marker = if (std.mem.indexOf(u8, prompt, "<|audio|>") != null or
-            std.mem.indexOf(u8, prompt, "<audio>") != null)
-            prompt
-        else blk: {
-            break :blk try std.fmt.allocPrint(self.allocator, "<|audio|>{s}", .{prompt});
-        };
-        defer if (prompt_with_marker.ptr != prompt.ptr) self.allocator.free(prompt_with_marker);
+        // 使用 ensurePlaceholderInContent 自动插入占位符
+        const content_with_placeholder = try chat_template.ensurePlaceholderInContent(prompt, .audio, self.allocator);
+        defer if (content_with_placeholder.ptr != prompt.ptr) self.allocator.free(content_with_placeholder);
 
         const formatted_prompt = if (self.no_chat_template) blk: {
-            break :blk try self.allocator.dupe(u8, prompt_with_marker);
+            break :blk try self.allocator.dupe(u8, content_with_placeholder);
         } else blk: {
             const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
             const source = self.chat_template_source orelse
@@ -1213,7 +1146,7 @@ const InferenceEngine = struct {
             defer tmpl.deinit(self.allocator);
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
             const messages = [_]chat_template.ChatMessage{
-                chat_template.ChatMessage.init("user", prompt_with_marker),
+                chat_template.ChatMessage.init("user", content_with_placeholder),
             };
             break :blk try tmpl.apply(self.allocator, &messages, system, true);
         };
@@ -1221,77 +1154,44 @@ const InferenceEngine = struct {
 
         logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
 
-        // Tokenize with special token handling: split on <|audio|>, interleave n_audio_tokens placeholders
-        var all_tokens = try std.ArrayListUnmanaged(u32).initCapacity(self.allocator, 128);
-        defer all_tokens.deinit(self.allocator);
-        var audio_marker_count: u32 = 0;
-        var embd_offset: i32 = -1; // position where first audio embedding should be injected
-        var embd_offset_set = false;
+        // 使用 expandPlaceholders 展开占位符
+        var expanded = try chat_template.expandPlaceholders(
+            self.allocator,
+            formatted_prompt,
+            0, // image_token_id (unused for audio)
+            audio_token_id,
+            0, // image_token_count (unused for audio)
+            @intCast(n_audio_tokens),
+        );
+        defer expanded.deinit();
 
-        {
-            var remaining = formatted_prompt;
-            var is_first_segment = true;
-            while (remaining.len > 0) {
-                const next_audio = std.mem.indexOf(u8, remaining, "<|audio|>");
-                const next_audio_alt = std.mem.indexOf(u8, remaining, "<audio>");
+        const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
+        const audio_marker_count: u32 = @intCast(expanded.offsets.len);
 
-                const next_pos = blk: {
-                    if (next_audio != null and next_audio_alt != null) {
-                        break :blk @min(next_audio.?, next_audio_alt.?);
-                    }
-                    break :blk next_audio orelse next_audio_alt;
-                };
-
-                if (next_pos) |pos| {
-                    const marker_len: usize = if (next_audio != null and next_audio.? == pos) "<|audio|>".len else "<audio>".len;
-
-                    if (pos > 0) {
-                        var text_tokens = try self.tok.encode(remaining[0..pos], is_first_segment);
-                        defer text_tokens.deinit(self.allocator);
-                        try all_tokens.appendSlice(self.allocator, text_tokens.items);
-                    }
-
-                    // Record the embedding offset (position in token sequence where audio starts)
-                    if (!embd_offset_set) {
-                        embd_offset = @as(i32, @intCast(all_tokens.items.len));
-                        embd_offset_set = true;
-                    }
-
-                    // Insert n_audio_tokens placeholder tokens for the audio marker
-                    for (0..@as(usize, @intCast(n_audio_tokens))) |_| {
-                        try all_tokens.append(self.allocator, @intCast(audio_token_id));
-                    }
-                    audio_marker_count += 1;
-
-                    remaining = remaining[pos + marker_len ..];
-                    is_first_segment = false;
-                } else {
-                    var text_tokens = try self.tok.encode(remaining, is_first_segment);
-                    defer text_tokens.deinit(self.allocator);
-                    try all_tokens.appendSlice(self.allocator, text_tokens.items);
-                    break;
-                }
+        // 计算嵌入偏移（第一个音频占位符的位置）
+        const embd_offset: i32 = if (expanded.offsets.len > 0) blk: {
+            var offset: i32 = 0;
+            for (expanded.offsets, 0..) |ph, i| {
+                if (i == 0) break;
+                offset += @as(i32, @intCast(ph.token_count));
             }
-        }
-
-        const n_total_tokens: i32 = @intCast(all_tokens.items.len);
+            break :blk offset;
+        } else 0;
 
         logger.info("Audio tokens={d}, audio markers={d}, total={d}, embd_offset={d}", .{
             n_audio_tokens, audio_marker_count, n_total_tokens, embd_offset,
         });
-
-        // Step 6: Build input token tensor (all_tokens already has correct layout)
+        // 构建输入张量
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
         self.ctx_graph.setNoAlloc(true);
         {
             const data = input_tensor.dataBytes();
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            for (all_tokens.items, 0..) |token, j| {
+            for (expanded.tokens.items, 0..) |token, j| {
                 slice[j] = @as(i32, @intCast(token));
             }
 
-            // Debug: print first and last few token IDs to verify sequence construction
             logger.info("Input tokens (first 10): {any}", .{slice[0..@min(@as(usize, 10), @as(usize, @intCast(n_total_tokens)))]});
             logger.info("Input tokens around offset {d}: {any}", .{ embd_offset, slice[@as(usize, @intCast(embd_offset))..@min(@as(usize, @intCast(embd_offset)) + 10, @as(usize, @intCast(n_total_tokens)))] });
             if (n_total_tokens > 10) {
@@ -1300,7 +1200,7 @@ const InferenceEngine = struct {
             }
         }
 
-        // Step 7: Build LLM graph with audio embedding override at computed offset
+        // Build LLM graph with audio embedding override
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const start_pos: i32 = 0;
         const logits = try gemma4_model.forwardWithEmbdOverride(
@@ -1315,13 +1215,11 @@ const InferenceEngine = struct {
             return error.GraphAllocFailed;
         }
 
-        // Phase 5.1: Mixed prefill
         const t_start = engine_common.currentTimeMs();
         try graph.compute(self.n_threads);
         const t_end = engine_common.currentTimeMs();
         const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
 
-        // Sample and generate
         var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
         var pos: i32 = n_total_tokens;
         var gen_count: u32 = 0;

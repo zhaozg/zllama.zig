@@ -65,12 +65,10 @@ Gemma 3 推理已验证 → Gemma 4 推理已验证 (E2B Q4_K_M)
 - ✅ 音频预处理（WAV 解码 + Mel 频谱，位于 `src/mm/preprocess.zig`）
 - ✅ CLI 图像/音频输入端到端联调（`--image` / `--audio` 已添加）
 - ✅ Audio → Conformer → LLM 端到端（Gemma 4 E2B，已验证："The audio does not contain any speech."）
-- 🚧 Vision → ViT → LLM 端到端（forwardWithEmbdOverride 混合嵌入 pipeline 已就绪，视觉输出内容待验证）
-- ⬜ 多模态输入缓存与图优化
-- ⬜ 与更多模型架构联调
-- ⬜ 多模态输入缓存与图优化
-- ⬜ CLI 图像/音频输入端到端联调（`--image` / `--audio` 已添加，vision/audio to LLM token 集成待完成）
-- ⬜ 与现有模型架构（Gemma 4 E2B）联调
+| - ✅ 多模态对话模板支持（ChatMessage 扩展 + expandPlaceholders + ensurePlaceholderInContent）
+| - ✅ 交互式聊天中动态媒体附加（/image, /audio 命令）
+| - ⬜ 多模态输入缓存与图优化
+| - ⬜ 与更多模型架构联调
 
 ## 已完成功能清单
 
