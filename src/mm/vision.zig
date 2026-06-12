@@ -259,8 +259,9 @@ pub const VisionEncoder = struct {
                     n_patches_y = @divTrunc(@as(i64, @intCast(img_height)), kh);
                     n_patches = n_patches_x * n_patches_y;
                     inp = inp.conv2d(ctx, pe, kw, kh, 0, 0, 1, 1);
+                    // Reshape to [n_embd, n_patches] — matches llama.cpp convention
                     inp = inp.reshape2d(ctx, effective_n_embd, n_patches);
-                    inp = inp.permute(ctx, 1, 0, 2, 3).cont(ctx);
+                    inp = inp.cont(ctx);
                 }
             },
             .gemma4uv => {
@@ -309,7 +310,8 @@ pub const VisionEncoder = struct {
             // Position embeddings stored as [n_embd, 2*pos_size]: first half=X, second half=Y
             const tbl_x = pos_embd.view2d(ctx, effective_n_embd, pos_size, row_size, 0);
             const tbl_y = pos_embd.view2d(ctx, effective_n_embd, pos_size, row_size, @as(usize, @intCast(pos_size)) * row_size);
-            // Create and fill position index tensors
+            // Create and fill position index tensors (need alloc enabled)
+            ctx.setNoAlloc(false);
             var pos_x = try ctx.newTensor1d(ggml.Type.i32, n_patches);
             pos_x.setName("pos_x");
             var pos_y = try ctx.newTensor1d(ggml.Type.i32, n_patches);
@@ -322,9 +324,10 @@ pub const VisionEncoder = struct {
                     py[i] = @divTrunc(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
                 }
             }
-            // getRows produces [n_embd, n_patches]; transpose to match inp [n_patches, n_embd]
-            const emb_x = tbl_x.getRows(ctx, pos_x).permute(ctx, 1, 0, 2, 3).cont(ctx);
-            const emb_y = tbl_y.getRows(ctx, pos_y).permute(ctx, 1, 0, 2, 3).cont(ctx);
+            ctx.setNoAlloc(true);
+            // getRows produces [n_embd, n_patches]; matches inp format
+            const emb_x = tbl_x.getRows(ctx, pos_x);
+            const emb_y = tbl_y.getRows(ctx, pos_y);
             inp = inp.add(ctx, emb_x);
             inp = inp.add(ctx, emb_y);
             // Pos norm (Gemma4UV only)
@@ -339,7 +342,7 @@ pub const VisionEncoder = struct {
             }
         }
         // 3. ViT blocks (only for gemma4v - gemma4uv skips ViT)
-        var cur = inp;
+        var cur = inp; // [n_embd, n_patches]
         if (self.encoder_type == .gemma4v) {
             for (w.layers) |*layer| {
                 // Self-attention with RoPE
@@ -353,53 +356,33 @@ pub const VisionEncoder = struct {
                             attn_in = attn_in.add(ctx, ln1_b);
                         }
                     }
-                    // Q, K, V projections
-                    // transpose input for ggml_mul_mat: ne[0] must match
-                    var Q = attn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.q_w.?);
-                    var K = attn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.k_w.?);
-                    var V = attn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.v_w.?);
-                    // Reshape to [d_head, n_head, n_patches]
-                    Q = Q.reshape3d(ctx, d_head, effective_n_head, n_patches);
-                    K = K.reshape3d(ctx, d_head, effective_n_head, n_patches);
-                    V = V.reshape3d(ctx, d_head, effective_n_head, n_patches);
-                    // Apply 2D RoPE with filled position indices
-                    var pos_x = try ctx.newTensor1d(ggml.Type.i32, n_patches);
-                    pos_x.setName("rope_pos_x");
-                    var pos_y = try ctx.newTensor1d(ggml.Type.i32, n_patches);
-                    pos_y.setName("rope_pos_y");
-                    {
-                        const px = pos_x.dataI32();
-                        const py = pos_y.dataI32();
-                        for (0..@as(usize, @intCast(n_patches))) |i| {
-                            px[i] = @mod(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
-                            py[i] = @divTrunc(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
-                        }
-                    }
-                    // First half RoPE with pos_x (neox)
-                    const half_d = @divExact(d_head, 2);
-                    var Q_first = Q.view3d(ctx, half_d, effective_n_head, n_patches, Q.nb()[1], Q.nb()[2], 0);
-                    Q_first = Q_first.ropeExt(ctx, pos_x, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    var Q_second = Q.view3d(ctx, half_d, effective_n_head, n_patches, Q.nb()[1], Q.nb()[2], @as(usize, @intCast(half_d * @sizeOf(f32))));
-                    Q_second = Q_second.ropeExt(ctx, pos_y, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    Q = Q_first.concat(ctx, Q_second, 0);
-                    var K_first = K.view3d(ctx, half_d, effective_n_head, n_patches, K.nb()[1], K.nb()[2], 0);
-                    K_first = K_first.ropeExt(ctx, pos_x, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    var K_second = K.view3d(ctx, half_d, effective_n_head, n_patches, K.nb()[1], K.nb()[2], @as(usize, @intCast(half_d * @sizeOf(f32))));
-                    K_second = K_second.ropeExt(ctx, pos_y, null, @as(i32, @intCast(half_d)), 2, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    K = K_first.concat(ctx, K_second, 0);
-                    // K transpose: [d_head, n_head, n_patches] -> [d_head, n_patches, n_head]
-                    K = K.permute(ctx, 0, 2, 1, 3).cont(ctx);
-                    // V transpose: [d_head, n_head, n_patches] -> [n_patches, d_head, n_head]
-                    V = V.permute(ctx, 2, 0, 1, 3).cont(ctx);
-                    // Q @ K^T: [d_head, n_head, n_patches] @ [d_head, n_patches, n_head] -> [n_patches, n_head, n_head] -> [n_head, n_patches, n_patches]
-                    var scores = K.mulMat(ctx, Q);
+
+                    // Q, K, V projections: weight-first mulMat (llama.cpp convention)
+                    // attn_in is [n_embd, n_patches], weights are [n_embd, n_embd]
+                    // Result: [n_embd, n_patches] — correct layout for reshape
+                    var Q = layer.q_w.?.mulMat(ctx, attn_in);
+                    const K = layer.k_w.?.mulMat(ctx, attn_in);
+                    var V = layer.v_w.?.mulMat(ctx, attn_in);
+
+                    // Scores: Q @ K (contracts on n_embd) → [n_patches, n_patches]
+                    // Note: ggml_mul_mat with Q [n_embd, n_patches] @ K [n_embd, n_patches]
+                    // contracts on ne[0]=n_embd, producing [n_patches, n_patches]
+                    // This computes Q^T @ K (same as standard attention up to transpose)
+                    var scores = Q.mulMat(ctx, K);
                     scores = scores.scale(ctx, 1.0 / @sqrt(@as(f32, @floatFromInt(d_head))));
                     scores = scores.softMax(ctx);
-                    // attn @ V: [n_head, n_patches, n_patches] @ [n_patches, d_head, n_head] -> [n_head, n_patches, d_head]
-                    var x = V.mulMat(ctx, scores);
-                    x = x.permute(ctx, 2, 0, 1, 3).cont(ctx); // [d_head, n_head, n_patches]
-                    x = x.cont2d(ctx, effective_n_embd, n_patches);
-                    x = x.mulMat(ctx, layer.o_w.?);
+
+                    // Output: scores @ V^T
+                    // V^T = V.permute(1,0) → [n_patches, n_embd]
+                    // scores [n_patches, n_patches] @ V^T [n_patches, n_embd] → [n_patches, n_embd]
+                    const Vt = V.permute(ctx, 1, 0, 2, 3).cont(ctx);
+                    var x = scores.mulMat(ctx, Vt); // [n_patches, n_embd]
+
+                    // Output projection: o_w @ x^T
+                    // x^T = x.permute(1,0) → [n_embd, n_patches]
+                    // o_w [n_embd, n_embd] @ x^T [n_embd, n_patches] → [n_embd, n_patches]
+                    const xt = x.permute(ctx, 1, 0, 2, 3).cont(ctx);
+                    x = layer.o_w.?.mulMat(ctx, xt);
                     if (layer.o_b) |ob| {
                         x = x.add(ctx, ob);
                     }
@@ -415,12 +398,14 @@ pub const VisionEncoder = struct {
                             ffn_in = ffn_in.add(ctx, ln2_b);
                         }
                     }
-                    const h = ffn_in.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.ff_up_w.?);
+                    // ff_up_w [n_ff, n_embd] @ ffn_in [n_embd, n_patches] → [n_ff, n_patches]
+                    const h = layer.ff_up_w.?.mulMat(ctx, ffn_in);
                     const activated = switch (p.ffn_op) {
                         .silu => h.silu(ctx),
                         .gelu => h.gelu(ctx),
                     };
-                    const ffn_out = activated.permute(ctx, 1, 0, 2, 3).cont(ctx).mulMat(ctx, layer.ff_down_w.?);
+                    // ff_down_w [n_embd, n_ff] @ activated [n_ff, n_patches] → [n_embd, n_patches]
+                    const ffn_out = layer.ff_down_w.?.mulMat(ctx, activated);
                     cur = cur.add(ctx, ffn_out);
                 }
             }
@@ -451,7 +436,9 @@ pub const VisionEncoder = struct {
             cur = cur.mul(ctx, reshapeForBroadcast(ctx, sn));
         }
         if (w.mm_input_proj_w) |proj| {
-            cur = cur.mulMat(ctx, proj);
+            // weight-first mulMat: proj [n_output_embd, n_embd] @ cur [n_embd, n_tokens]
+            // → [n_output_embd, n_tokens], matching caller expectation (ne[1] = n_tokens)
+            cur = proj.mulMat(ctx, cur);
         }
         cgraph.buildForwardExpand(cur);
         return cur;
