@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     // ggml 模块（C 绑定 + 安全封装）
     // ======================================================================
     const ggml_mod = b.createModule(.{
-        .root_source_file = b.path("src/ggml.zig"),
+        .root_source_file = b.path("src/ggml/mod.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -215,7 +215,7 @@ pub fn build(b: *std.Build) void {
     registry_mod.addImport("memory", memory_mod);
 
     const tokenizer_mod = b.createModule(.{
-        .root_source_file = b.path("src/tokenizer.zig"),
+        .root_source_file = b.path("src/tokenizer/mod.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -234,7 +234,7 @@ pub fn build(b: *std.Build) void {
     sampler_mod.addImport("ggml", ggml_mod);
 
     const chat_template_mod = b.createModule(.{
-        .root_source_file = b.path("src/chat_template.zig"),
+        .root_source_file = b.path("src/chat_template/mod.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,

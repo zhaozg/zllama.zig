@@ -1,0 +1,107 @@
+//! ggml.zig - 安全封装层（模块化入口）
+//!
+//! 提供 ggml C API 的类型安全 Zig 封装。
+//! 所有分配类操作返回 `!*T` 错误联合，纯计算操作返回 `*T`。
+//! 使用 `opaque {}` 类型包装不透明指针。
+//!
+//! 模块结构：
+//! - c.zig:      原始 C API 导入和类型枚举
+//! - context.zig: ggml_context 封装
+//! - tensor.zig:  ggml_tensor 封装
+//! - graph.zig:   ggml_cgraph 封装
+//! - backend.zig: Backend 与 Gallocr 封装
+//! - ops.zig:     计算图操作函数
+//! - utils.zig:   工具函数（版本、CPU 特性等）
+
+const std = @import("std");
+
+// ============================================================================
+// 重新导出所有子模块
+// ============================================================================
+
+pub const c = @import("c.zig").c;
+pub const Type = @import("c.zig").Type;
+pub const GgufValueType = @import("c.zig").GgufValueType;
+pub const GgufValue = @import("c.zig").GgufValue;
+
+pub const Context = @import("context.zig").Context;
+pub const Tensor = @import("tensor.zig").Tensor;
+pub const CGraph = @import("graph.zig").CGraph;
+
+pub const Backend = @import("backend.zig").Backend;
+pub const BackendBufferType = @import("backend.zig").BackendBufferType;
+pub const Gallocr = @import("backend.zig").Gallocr;
+pub const backendCpuInit = @import("backend.zig").backendCpuInit;
+pub const backendCpuBufferType = @import("backend.zig").backendCpuBufferType;
+pub const backendGetDefaultBufferType = @import("backend.zig").backendGetDefaultBufferType;
+pub const backendAllocCtxTensors = @import("backend.zig").backendAllocCtxTensors;
+pub const backendAllocCtxTensorsFromBuft = @import("backend.zig").backendAllocCtxTensorsFromBuft;
+pub const backendFree = @import("backend.zig").backendFree;
+pub const loadBackends = @import("backend.zig").loadBackends;
+pub const setInput = @import("backend.zig").setInput;
+
+pub const ThreadPool = @import("threadpool.zig").ThreadPool;
+
+pub const mulMat = @import("ops.zig").mulMat;
+pub const mul = @import("ops.zig").mul;
+pub const add = @import("ops.zig").add;
+pub const neg = @import("ops.zig").neg;
+pub const exp = @import("ops.zig").exp;
+pub const cpy = @import("ops.zig").cpy;
+pub const rmsNorm = @import("ops.zig").rmsNorm;
+pub const l2Norm = @import("ops.zig").l2Norm;
+pub const ropeExt = @import("ops.zig").ropeExt;
+pub const ropeMulti = @import("ops.zig").ropeMulti;
+pub const scale = @import("ops.zig").scale;
+pub const softMax = @import("ops.zig").softMax;
+pub const softMaxExt = @import("ops.zig").softMaxExt;
+pub const diagMaskInf = @import("ops.zig").diagMaskInf;
+pub const silu = @import("ops.zig").silu;
+pub const gelu = @import("ops.zig").gelu;
+pub const tanh = @import("ops.zig").tanh;
+pub const relu = @import("ops.zig").relu;
+pub const sigmoid = @import("ops.zig").sigmoid;
+pub const softplus = @import("ops.zig").softplus;
+pub const permute = @import("ops.zig").permute;
+pub const cont = @import("ops.zig").cont;
+pub const gatedDeltaNet = @import("ops.zig").gatedDeltaNet;
+
+pub const cont2d = @import("ops.zig").cont2d;
+pub const cont4d = @import("ops.zig").cont4d;
+pub const reshape2d = @import("ops.zig").reshape2d;
+pub const reshape3d = @import("ops.zig").reshape3d;
+pub const reshape4d = @import("ops.zig").reshape4d;
+pub const repeat = @import("ops.zig").repeat;
+pub const repeat4d = @import("ops.zig").repeat4d;
+pub const transpose = @import("ops.zig").transpose;
+pub const concat = @import("ops.zig").concat;
+pub const getRows = @import("ops.zig").getRows;
+pub const conv1d = @import("ops.zig").conv1d;
+pub const ssmConv = @import("ops.zig").ssmConv;
+pub const ssmScan = @import("ops.zig").ssmScan;
+pub const sumRows = @import("ops.zig").sumRows;
+pub const setOutput = @import("ops.zig").setOutput;
+
+pub const version = @import("utils.zig").version;
+pub const cpuNThreads = @import("utils.zig").cpuNThreads;
+pub const CpuFeatures = @import("utils.zig").CpuFeatures;
+pub const recommendedThreads = @import("utils.zig").recommendedThreads;
+pub const LogLevel = @import("utils.zig").LogLevel;
+pub const logSet = @import("utils.zig").logSet;
+pub const logSetCallback = @import("utils.zig").logSetCallback;
+
+// ============================================================================
+// 测试（集成测试，需要 ggml context）
+// ============================================================================
+
+const testing = std.testing;
+
+test "ggml version" {
+    const v = version();
+    try testing.expect(v.major > 0);
+}
+
+test "ggml type sizes" {
+    try testing.expect(@sizeOf(Type) == @sizeOf(c_uint));
+    try testing.expect(@sizeOf(c.ggml_type) == @sizeOf(c_int));
+}

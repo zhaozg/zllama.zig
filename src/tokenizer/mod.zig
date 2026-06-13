@@ -8,12 +8,12 @@
 const std = @import("std");
 const gguf = @import("gguf");
 
-pub const types = @import("tokenizer/types.zig");
-pub const trie = @import("tokenizer/trie.zig");
-pub const encode_mod = @import("tokenizer/encode.zig");
-pub const decode_mod = @import("tokenizer/decode.zig");
-pub const bpe = @import("tokenizer/bpe.zig");
-pub const utils = @import("tokenizer/utils.zig");
+pub const types = @import("types.zig");
+pub const trie = @import("trie.zig");
+pub const encode_mod = @import("encode.zig");
+pub const decode_mod = @import("decode.zig");
+pub const bpe = @import("bpe.zig");
+pub const utils = @import("utils.zig");
 
 const log = std.log.scoped(.tokenizer);
 

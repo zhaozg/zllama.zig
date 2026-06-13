@@ -77,60 +77,9 @@ zllama.zig/
 │   ├── TECHNICAL_CHALLENGES.md  # 技术难重点分析
 │   ├── TEST.md                  # 测试体系文档
 │   └── QWEN35.md                # Qwen3.5 模型实现笔记
-├── src/
-│   ├── main.zig                 # 入口（Juicy Main 签名）
-│   ├── simple_main.zig          # 简化推理入口（与 llama-simple 对齐）
-│   ├── tokenize_main.zig        # 分词工具入口
-│   ├── ggml.zig                 # C 绑定 + 安全封装（模块入口，重新导出子模块）
-│   ├── gguf.zig                 # GGUF 解析器（v2/v3）
-│   ├── model.zig                # 模型抽象接口定义
-│   ├── kv_cache.zig             # KV Cache 管理
-│   ├── tokenizer.zig            # BPE 分词器
-│   ├── sampler.zig              # Top-p / Top-k 采样
-│   ├── layers/                  # 通用层实现（算子库）
-│   │   ├── rms_norm.zig         # RMSNorm 归一化
-│   │   ├── rope.zig             # RoPE 位置编码
-│   │   ├── swiglu.zig           # SwiGLU FFN
-│   │   ├── attention.zig        # 注意力（含 GQA）
-│   │   ├── linear.zig           # 线性投影
-│   │   └── embed.zig            # Token 嵌入
-│   ├── models/                  # 具体模型实现
-│   │   ├── registry.zig         # 模型注册与工厂函数
-│   │   ├── qwen2.zig            # Qwen2/Qwen2.5 标准 Transformer
-│   │   ├── qwen35.zig           # Qwen3.5 混合架构（全注意力 + SSM/GDN）
-│   │   └── llama.zig            # LLaMA 家族（2/3/3.1）
-│   ├── core/                    # 核心引擎
-│   │   ├── graph_builder.zig    # 计算图构建辅助
-│   │   ├── loader.zig           # 模型加载器
-│   │   └── memory.zig           # 内存抽象接口（MemoryContext）
-│   ├── ggml/                    # ggml 安全封装子模块
-│   │   ├── c.zig                # 原始 C API 导入（唯一 @cImport 位置）
-│   │   ├── context.zig          # ggml_context 封装
-│   │   ├── tensor.zig           # ggml_tensor 封装
-│   │   ├── graph.zig            # ggml_cgraph 封装
-│   │   ├── backend.zig          # Backend 与 Gallocr 封装
-│   │   ├── ops.zig              # 计算图操作函数
-│   │   └── utils.zig            # 工具函数
-│   ├── tokenizer/               # 分词器子模块
-│   │   ├── types.zig            # 类型定义
-│   │   ├── bpe.zig              # BPE 合并逻辑
-│   │   ├── encode.zig           # 编码逻辑
-│   │   ├── decode.zig           # 解码逻辑
-│   │   ├── trie.zig             # Trie 树
-│   │   └── utils.zig            # 工具函数
-│   ├── tests/                   # 测试模块
-│   │   ├── test_gguf.zig        # GGUF 解析测试
-│   │   ├── test_archs.zig       # 架构测试
-│   │   ├── test_kv_cache.zig    # KV Cache 测试
-│   │   ├── test_layers.zig      # 层测试
-│   │   ├── test_vocab.zig       # 词汇表测试
-│   │   ├── test_compare_logits.zig # Logits 对比测试
-│   │   └── utils.zig            # 测试工具
-│   └── tools/                   # 工具可执行文件
-│       ├── compare_logits.zig   # logits 对比工具
-│       ├── dump_graph.zig       # 计算图导出工具
-│       └── generate_reference.zig # 参考输出生成工具
-├── llama.cpp/                   # llama.cpp 相关代码（可参考）
+├── src/                         # 源码组织具体看 docs/FILE_STRUCTURE.md
+├── deps/zig-jinja/              # zig-jinja 引擎实现库
+├── deps/llama.cpp/              # llama.cpp 相关代码（可参考）
 └── deps/ggml/                   # ggml 源码（submodule 或拷贝）
 ```
 
@@ -192,11 +141,12 @@ const tokenizer = @import("tokenizer");
 5. **提交前验证**：
    - 运行 `zig build test`（如果存在测试）。
    - 确保未引入未定义行为（如数组越界、空指针解引用）。
-   - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf` works
-   - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf` works
+   - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf` works
+   - `zig-out/bin/zllama -n 5 --model ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf` works
+   - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Qwen3.5-4B-Q4_K_M.gguf` works
 6. 效果参照:
-   - `llama-simple -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好`
+   - `llama-simple -m ~/.cache/models/Qwen3.5-4B-Q4_K_M.gguf 你好`
 7. **文档同步**：修改架构或绑定设计后，需同步更新对应的 `*.md` 文件。
 
 ## 🔒 禁止事项
