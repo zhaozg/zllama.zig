@@ -43,6 +43,17 @@ pub fn build(b: *std.Build) void {
         ggml_mod.addCMacro("GGML_USE_ACCELERATE", "1");
     }
 
+
+    // ======================================================================
+    // vibe_jinja 模块（Jinja2 模板引擎）
+    // ======================================================================
+    const vibe_jinja_mod = b.createModule(.{
+        .root_source_file = b.path("deps/zig-jinja/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     // ======================================================================
     // 内部模块
     // ======================================================================
@@ -249,6 +260,20 @@ pub fn build(b: *std.Build) void {
     // 让 chat_template 模块可以导入子模块
     chat_template_mod.addImport("types", chat_template_types_mod);
     chat_template_mod.addImport("multimodal", chat_template_multimodal_mod);
+
+
+    // --- Jinja 引擎集成模块 ---
+    const chat_template_jinja_mod = b.createModule(.{
+        .root_source_file = b.path("src/chat_template/jinja.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    chat_template_jinja_mod.addImport("vibe_jinja", vibe_jinja_mod);
+    chat_template_jinja_mod.addImport("types", chat_template_types_mod);
+
+    // 让 chat_template 模块可以导入 jinja 子模块
+    chat_template_mod.addImport("jinja", chat_template_jinja_mod);
 
     // ======================================================================
 

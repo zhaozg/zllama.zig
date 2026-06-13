@@ -56,6 +56,7 @@ const CliArgs = struct {
     chat_template_name: []const u8 = "",
     system_prompt: []const u8 = "",
     no_chat_template: bool = false,
+    no_jinja: bool = false,
 
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
@@ -91,7 +92,8 @@ const CliArgs = struct {
                 result.system_prompt = args_it.next() orelse return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--no-chat-template")) {
                 result.no_chat_template = true;
-            } else {
+            } else if (std.mem.eql(u8, arg, "--no-jinja")) {
+                result.no_jinja = true;
                 result.prompt = arg;
             }
         }
@@ -120,6 +122,7 @@ const SimpleEngine = struct {
     chat_template_source: ?chat_template.TemplateSource = null,
     system_prompt: []const u8 = "",
     no_chat_template: bool = false,
+    no_jinja: bool = false,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: []const u8, cli_args: *const CliArgs) !SimpleEngine {
         logger.info("Loading model: {s}", .{model_path});
@@ -255,6 +258,7 @@ const SimpleEngine = struct {
             .chat_template_source = chat_template_source,
             .system_prompt = system_prompt,
             .no_chat_template = cli_args.no_chat_template,
+            .no_jinja = cli_args.no_jinja,
         };
     }
 
@@ -298,7 +302,7 @@ const SimpleEngine = struct {
         const source = self.chat_template_source orelse
             chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
 
-        var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
+        var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
         defer tmpl.deinit(self.allocator);
 
         const messages = [_]chat_template.ChatMessage{

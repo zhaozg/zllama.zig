@@ -79,6 +79,7 @@ const CliArgs = struct {
     chat_template_name: []const u8 = "",
     system_prompt: []const u8 = "",
     no_chat_template: bool = false,
+    no_jinja: bool = false,
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
         _ = args_it.next();
@@ -121,8 +122,10 @@ const CliArgs = struct {
             } else if (std.mem.eql(u8, arg, "--chat-template")) {
                 result.chat_template_name = args_it.next() orelse return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--system-prompt")) {
-                result.system_prompt = args_it.next() orelse return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--no-chat-template")) {
+                result.no_chat_template = true;
+            } else if (std.mem.eql(u8, arg, "--no-jinja")) {
+                result.no_jinja = true;
                 result.no_chat_template = true;
             } else {
                 logger.warn("unknown argument '{s}'", .{arg});
@@ -192,6 +195,7 @@ const InferenceEngine = struct {
     chat_template_source: ?chat_template.TemplateSource = null,
     system_prompt: []const u8 = "",
     no_chat_template: bool = false,
+    no_jinja: bool = false,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
         const cwd = std.Io.Dir.cwd();
@@ -340,9 +344,9 @@ const InferenceEngine = struct {
             .chat_template_source = chat_template_source,
             .system_prompt = system_prompt,
             .no_chat_template = cli_args.no_chat_template,
+            .no_jinja = cli_args.no_jinja,
         };
     }
-
     pub fn deinit(self: *InferenceEngine) void {
         if (self.mm_manager) |*m| {
             m.deinit();
@@ -388,7 +392,7 @@ const InferenceEngine = struct {
         const source = self.chat_template_source orelse
             chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
 
-        var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
+        var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
         defer tmpl.deinit(self.allocator);
 
         const messages = if (media) |m| [_]chat_template.ChatMessage{
@@ -758,7 +762,7 @@ const InferenceEngine = struct {
                 const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
                 const source = self.chat_template_source orelse
                     chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
-                var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
+                var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
                 defer tmpl.deinit(self.allocator);
                 const system = if (self.system_prompt.len > 0) self.system_prompt else null;
                 break :blk try tmpl.apply(self.allocator, chat_history.items, system, true);
@@ -944,7 +948,7 @@ const InferenceEngine = struct {
             const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
             const source = self.chat_template_source orelse
                 chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
-            var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
+            var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
             defer tmpl.deinit(self.allocator);
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
             const messages = [_]chat_template.ChatMessage{
@@ -1150,7 +1154,7 @@ const InferenceEngine = struct {
             const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
             const source = self.chat_template_source orelse
                 chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
-            var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name);
+            var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
             defer tmpl.deinit(self.allocator);
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
             const messages = [_]chat_template.ChatMessage{

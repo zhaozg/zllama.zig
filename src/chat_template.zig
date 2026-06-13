@@ -16,8 +16,7 @@ const model = @import("model");
 // 导入子模块
 const types = @import("types");
 const multimodal = @import("multimodal");
-
-// 重新导出子模块类型（保持向后兼容）
+const jinja_mod = @import("jinja");
 pub const ChatMessage = types.ChatMessage;
 pub const Media = types.Media;
 pub const MediaType = types.MediaType;
@@ -81,7 +80,9 @@ pub const TemplateSource = union(enum) {
 pub const Template = struct {
     kind: TemplateKind,
     source: TemplateSource,
-
+    /// Whether Jinja rendering is enabled for unknown/custom templates.
+    /// Set to false with --no-jinja flag.
+    jinja_enabled: bool = true,
     /// Apply this template to format messages.
     pub fn apply(
         self: *const Template,
@@ -101,6 +102,29 @@ pub const Template = struct {
             .deepseek3 => return applyDeepSeekV3(allocator, messages, system_prompt, add_generation_prompt),
             .tinyllama => return applyTinyLlama(allocator, messages, system_prompt, add_generation_prompt),
             .unknown => {
+                // Try Jinja rendering for GGUF built-in and custom templates
+                if (self.jinja_enabled) {
+                    const tmpl_str = switch (self.source) {
+                        .gguf_builtin => |s| s,
+                        .custom => |s| s,
+                        .preset => null,
+                    };
+                    if (tmpl_str) |src| {
+                        // Try Jinja rendering with empty BOS/EOS (template-specific)
+                        const result = jinja_mod.render(
+                            allocator,
+                            src,
+                            messages,
+                            "", // bos_token: template-specific, defaults to empty
+                            "", // eos_token: template-specific, defaults to empty
+                            add_generation_prompt,
+                        ) catch null;
+                        if (result) |rendered| {
+                            return rendered;
+                        }
+                        log.warn("Jinja rendering failed for unknown template, falling back to ChatML", .{});
+                    }
+                }
                 // Fallback: treat as raw prompt (no template)
                 if (messages.len == 1 and std.mem.eql(u8, messages[0].role, "user")) {
                     return allocator.dupe(u8, messages[0].content);
@@ -180,11 +204,13 @@ pub fn kindForArchitecture(arch: model.Architecture, model_name: ?[]const u8) Te
 /// Resolve a template source to a concrete Template.
 /// Priority: custom > gguf_builtin > preset_name > architecture default
 /// model_name is optional and used to detect TinyLlama (which reports as "llama" arch).
+/// jinja_enabled: when true, unrecognized templates are kept as .unknown for Jinja rendering.
 pub fn resolve(
     allocator: std.mem.Allocator,
     source: TemplateSource,
     arch: model.Architecture,
     model_name: ?[]const u8,
+    jinja_enabled: bool,
 ) !Template {
     _ = allocator;
     switch (source) {
@@ -196,7 +222,12 @@ pub fn resolve(
             if (kind != .unknown) {
                 return Template{ .kind = kind, .source = source };
             }
-            // If GGUF template can't be detected, fall back to arch default
+            // If Jinja is enabled, keep as .unknown so apply() can try Jinja rendering
+            if (jinja_enabled) {
+                log.info("GGUF chat template not recognized, will try Jinja rendering", .{});
+                return Template{ .kind = .unknown, .source = source, .jinja_enabled = true };
+            }
+            // If GGUF template can't be detected and Jinja is disabled, fall back to arch default
             log.warn("GGUF chat template not recognized, falling back to arch default", .{});
             const arch_kind = kindForArchitecture(arch, model_name);
             return Template{ .kind = arch_kind, .source = .{ .preset = arch_kind } };
@@ -206,9 +237,9 @@ pub fn resolve(
             if (kind != .unknown) {
                 return Template{ .kind = kind, .source = source };
             }
-            log.warn("custom chat template not recognized, falling back to arch default", .{});
-            const arch_kind = kindForArchitecture(arch, model_name);
-            return Template{ .kind = arch_kind, .source = .{ .preset = arch_kind } };
+            // For custom templates, always try Jinja rendering (user explicitly provided it)
+            log.info("custom chat template not recognized, will try Jinja rendering", .{});
+            return Template{ .kind = .unknown, .source = source, .jinja_enabled = jinja_enabled };
         },
     }
 }
@@ -226,7 +257,7 @@ pub fn applySingleTurn(
     system_prompt: ?[]const u8,
 ) ![]const u8 {
     const messages = [_]ChatMessage{
-        ChatMessage.init("user", user_prompt),
+        .{ .role = "user", .content = user_prompt },
     };
     return applyMultiTurn(allocator, arch, &messages, system_prompt, true);
 }
@@ -242,7 +273,7 @@ pub fn applyMultiTurn(
 ) ![]const u8 {
     const kind = kindForArchitecture(arch, null);
     const source = TemplateSource{ .preset = kind };
-    var tmpl = try resolve(allocator, source, arch, null);
+    var tmpl = try resolve(allocator, source, arch, null, false);
     return tmpl.apply(allocator, messages, system_prompt, add_generation_prompt);
 }
 
@@ -933,7 +964,7 @@ test "kindForArchitecture" {
 
 test "resolve: preset" {
     const source = TemplateSource{ .preset = .chatml };
-    var tmpl = try resolve(testing.allocator, source, .qwen2, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, false);
     defer tmpl.deinit(testing.allocator);
     try testing.expectEqual(TemplateKind.chatml, tmpl.kind);
 }
@@ -941,7 +972,7 @@ test "resolve: preset" {
 test "resolve: gguf_builtin" {
     const src = try testing.allocator.dupe(u8, "<|im_start|>user\nHello<|im_end|>");
     const source = TemplateSource{ .gguf_builtin = src };
-    var tmpl = try resolve(testing.allocator, source, .qwen2, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, false);
     defer tmpl.deinit(testing.allocator);
     try testing.expectEqual(TemplateKind.chatml, tmpl.kind);
 }
@@ -949,7 +980,7 @@ test "resolve: gguf_builtin" {
 test "resolve: gguf_builtin unknown" {
     const src = try testing.allocator.dupe(u8, "{{ messages }}");
     const source = TemplateSource{ .gguf_builtin = src };
-    var tmpl = try resolve(testing.allocator, source, .llama, null);
+    var tmpl = try resolve(testing.allocator, source, .llama, null, false);
     defer tmpl.deinit(testing.allocator);
     // Falls back to arch default (llama -> llama3)
     try testing.expectEqual(TemplateKind.llama3, tmpl.kind);
@@ -957,7 +988,7 @@ test "resolve: gguf_builtin unknown" {
 
 test "Template.apply: chatml" {
     const source = TemplateSource{ .preset = .chatml };
-    var tmpl = try resolve(testing.allocator, source, .qwen2, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -971,7 +1002,7 @@ test "Template.apply: chatml" {
 
 test "Template.apply: llama3" {
     const source = TemplateSource{ .preset = .llama3 };
-    var tmpl = try resolve(testing.allocator, source, .llama, null);
+    var tmpl = try resolve(testing.allocator, source, .llama, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -985,7 +1016,7 @@ test "Template.apply: llama3" {
 
 test "Template.apply: llama4" {
     const source = TemplateSource{ .preset = .llama4 };
-    var tmpl = try resolve(testing.allocator, source, .llama, null);
+    var tmpl = try resolve(testing.allocator, source, .llama, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -999,7 +1030,7 @@ test "Template.apply: llama4" {
 
 test "Template.apply: gemma" {
     const source = TemplateSource{ .preset = .gemma };
-    var tmpl = try resolve(testing.allocator, source, .gemma3, null);
+    var tmpl = try resolve(testing.allocator, source, .gemma3, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "1+1=?" }};
@@ -1013,7 +1044,7 @@ test "Template.apply: gemma" {
 
 test "Template.apply: mistral_v7" {
     const source = TemplateSource{ .preset = .mistral_v7 };
-    var tmpl = try resolve(testing.allocator, source, .llama, null);
+    var tmpl = try resolve(testing.allocator, source, .llama, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -1027,7 +1058,7 @@ test "Template.apply: mistral_v7" {
 
 test "Template.apply: phi4" {
     const source = TemplateSource{ .preset = .phi4 };
-    var tmpl = try resolve(testing.allocator, source, .qwen2, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -1041,7 +1072,7 @@ test "Template.apply: phi4" {
 
 test "Template.apply: deepseek3" {
     const source = TemplateSource{ .preset = .deepseek3 };
-    var tmpl = try resolve(testing.allocator, source, .qwen2, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -1055,7 +1086,7 @@ test "Template.apply: deepseek3" {
 
 test "Template.apply: tinyllama" {
     const source = TemplateSource{ .preset = .tinyllama };
-    var tmpl = try resolve(testing.allocator, source, .llama, null);
+    var tmpl = try resolve(testing.allocator, source, .llama, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "1+1=?" }};
@@ -1069,7 +1100,7 @@ test "Template.apply: tinyllama" {
 
 test "Template.apply: with system prompt" {
     const source = TemplateSource{ .preset = .chatml };
-    var tmpl = try resolve(testing.allocator, source, .qwen2, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -1083,7 +1114,7 @@ test "Template.apply: with system prompt" {
 
 test "Template.apply: multi-turn chatml" {
     const source = TemplateSource{ .preset = .chatml };
-    var tmpl = try resolve(testing.allocator, source, .qwen35, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen35, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{
@@ -1101,7 +1132,7 @@ test "Template.apply: multi-turn chatml" {
 
 test "Template.apply: multi-turn gemma" {
     const source = TemplateSource{ .preset = .gemma };
-    var tmpl = try resolve(testing.allocator, source, .gemma3, null);
+    var tmpl = try resolve(testing.allocator, source, .gemma3, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{
@@ -1119,7 +1150,7 @@ test "Template.apply: multi-turn gemma" {
 
 test "Template.apply: gemma with system merged" {
     const source = TemplateSource{ .preset = .gemma };
-    var tmpl = try resolve(testing.allocator, source, .gemma3, null);
+    var tmpl = try resolve(testing.allocator, source, .gemma3, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -1133,7 +1164,7 @@ test "Template.apply: gemma with system merged" {
 
 test "Template.apply: gemma4" {
     const source = TemplateSource{ .preset = .gemma4 };
-    var tmpl = try resolve(testing.allocator, source, .gemma4, null);
+    var tmpl = try resolve(testing.allocator, source, .gemma4, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "1+1=?" }};
@@ -1148,7 +1179,7 @@ test "Template.apply: gemma4" {
 
 test "Template.apply: gemma4 with system" {
     const source = TemplateSource{ .preset = .gemma4 };
-    var tmpl = try resolve(testing.allocator, source, .gemma4, null);
+    var tmpl = try resolve(testing.allocator, source, .gemma4, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -1163,7 +1194,7 @@ test "Template.apply: gemma4 with system" {
 
 test "Template.apply: gemma4 multi-turn" {
     const source = TemplateSource{ .preset = .gemma4 };
-    var tmpl = try resolve(testing.allocator, source, .gemma4, null);
+    var tmpl = try resolve(testing.allocator, source, .gemma4, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{
@@ -1181,7 +1212,7 @@ test "Template.apply: gemma4 multi-turn" {
 
 test "Template.apply: gemma4 multi-turn with system" {
     const source = TemplateSource{ .preset = .gemma4 };
-    var tmpl = try resolve(testing.allocator, source, .gemma4, null);
+    var tmpl = try resolve(testing.allocator, source, .gemma4, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{
@@ -1199,7 +1230,7 @@ test "Template.apply: gemma4 multi-turn with system" {
 
 test "Template.apply: gemma4 strip thinking" {
     const source = TemplateSource{ .preset = .gemma4 };
-    var tmpl = try resolve(testing.allocator, source, .gemma4, null);
+    var tmpl = try resolve(testing.allocator, source, .gemma4, null, false);
     defer tmpl.deinit(testing.allocator);
 
     // Model message with thinking block inside
@@ -1218,7 +1249,7 @@ test "Template.apply: gemma4 strip thinking" {
 
 test "Template.apply: gemma4 system role message" {
     const source = TemplateSource{ .preset = .gemma4 };
-    var tmpl = try resolve(testing.allocator, source, .gemma4, null);
+    var tmpl = try resolve(testing.allocator, source, .gemma4, null, false);
     defer tmpl.deinit(testing.allocator);
 
     // System role message in messages array
@@ -1236,7 +1267,7 @@ test "Template.apply: gemma4 system role message" {
 
 test "Template.apply: multi-turn mistral_v7" {
     const source = TemplateSource{ .preset = .mistral_v7 };
-    var tmpl = try resolve(testing.allocator, source, .llama, null);
+    var tmpl = try resolve(testing.allocator, source, .llama, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{
@@ -1254,7 +1285,7 @@ test "Template.apply: multi-turn mistral_v7" {
 
 test "Template.apply: multi-turn deepseek3" {
     const source = TemplateSource{ .preset = .deepseek3 };
-    var tmpl = try resolve(testing.allocator, source, .qwen2, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{
@@ -1272,7 +1303,7 @@ test "Template.apply: multi-turn deepseek3" {
 
 test "Template.apply: mistral_v7 with system" {
     const source = TemplateSource{ .preset = .mistral_v7 };
-    var tmpl = try resolve(testing.allocator, source, .llama, null);
+    var tmpl = try resolve(testing.allocator, source, .llama, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -1286,7 +1317,7 @@ test "Template.apply: mistral_v7 with system" {
 
 test "Template.apply: phi4 with system" {
     const source = TemplateSource{ .preset = .phi4 };
-    var tmpl = try resolve(testing.allocator, source, .qwen2, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -1300,7 +1331,7 @@ test "Template.apply: phi4 with system" {
 
 test "Template.apply: deepseek3 with system" {
     const source = TemplateSource{ .preset = .deepseek3 };
-    var tmpl = try resolve(testing.allocator, source, .qwen2, null);
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
@@ -1314,7 +1345,7 @@ test "Template.apply: deepseek3 with system" {
 
 test "Template.apply: tinyllama with system" {
     const source = TemplateSource{ .preset = .tinyllama };
-    var tmpl = try resolve(testing.allocator, source, .llama, null);
+    var tmpl = try resolve(testing.allocator, source, .llama, null, false);
     defer tmpl.deinit(testing.allocator);
 
     const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};

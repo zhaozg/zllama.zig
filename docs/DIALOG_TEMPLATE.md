@@ -363,9 +363,10 @@ pub fn detectKind(tmpl_src: []const u8) TemplateKind {
 - `Template.apply: mistral_v7 with system`、`Template.apply: phi4 with system`、`Template.apply: deepseek3 with system`
 - `fromString: valid names`、`fromString: invalid name`
 
-### Phase 3：精简 Jinja 引擎（长期）
+### Phase 3：集成 Jinja 引擎
 
-**目标**：实现一个精简 Jinja 子集引擎，支持 GGUF 内置模板中最常用的语法。
+**目标**：实现一个 [Jinja](deps/zig-jinja) 引擎，支持 GGUF 内置模板中的语法 可以作为命令动态附加
+deps/llama.cpp/models/templates 下的 jinja 文件处理。
 
 #### 任务 3.1：Jinja 语法子集定义
 
@@ -404,13 +405,7 @@ pub fn detectKind(tmpl_src: []const u8) TemplateKind {
 #### 任务 3.2：模块结构
 
 ```
-src/chat_template/jinja/
-├── lexer.zig       # Tokenizer: 源码 → Token 流
-├── ast.zig         # AST 节点定义
-├── parser.zig      # Parser: Token 流 → AST
-├── runtime.zig     # 执行引擎: AST + Context → String
-├── value.zig       # 运行时值类型（string, int, bool, array, object）
-└── builtins.zig    # 内置函数和过滤器
+src/chat_template/jinja.zig
 ```
 
 #### 任务 3.3：与预设模板的关系
