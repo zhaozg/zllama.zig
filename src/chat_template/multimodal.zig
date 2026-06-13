@@ -155,14 +155,20 @@ pub fn tokenizeWithPlaceholders(
 
     // 分段处理：文本段 tokenize + 占位符展开
     var remaining = formatted;
-    for (placeholders) |ph| {
+    // Track the current token offset for each placeholder
+    var current_token_offset: u32 = 0;
+    for (placeholders) |*ph| {
         // 占位符前的文本段
         const text_segment = remaining[0..ph.start];
         if (text_segment.len > 0) {
             const text_tokens = try tokenizer_fn(ctx, text_segment, allocator);
             defer allocator.free(text_tokens);
             try tokens.appendSlice(allocator, text_tokens);
+            current_token_offset += @as(u32, @intCast(text_tokens.len));
         }
+
+        // Record the token offset for this placeholder (before inserting placeholder tokens)
+        ph.token_offset = current_token_offset;
 
         // 占位符展开为多个填充 token
         const placeholder_token_id = switch (ph.media_type) {
@@ -173,6 +179,7 @@ pub fn tokenizeWithPlaceholders(
         for (0..ph.token_count) |_| {
             try tokens.append(allocator, placeholder_token_id);
         }
+        current_token_offset += ph.token_count;
 
         remaining = remaining[ph.start + ph.length ..];
     }

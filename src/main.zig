@@ -734,6 +734,12 @@ const InferenceEngine = struct {
                     const img_path = rest[0..space_pos];
                     const img_prompt = rest[space_pos + 1 ..];
                     try stdout.writeStreamingAll(io, "Processing image...\n");
+                    // Add user message with image media to chat history
+                    const img_media = chat_template.Media{
+                        .type = .image,
+                        .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
+                    };
+                    try chat_history.append(self.allocator, chat_template.ChatMessage.withMedia("user", img_prompt, img_media));
                     self.generateWithImage(io, img_prompt, @ptrCast(@constCast(img_path)), 256) catch {
                         try stdout.writeStreamingAll(io, "Image processing failed.\n");
                     };
@@ -749,6 +755,12 @@ const InferenceEngine = struct {
                     const aud_path = rest[0..space_pos];
                     const aud_prompt = rest[space_pos + 1 ..];
                     try stdout.writeStreamingAll(io, "Processing audio...\n");
+                    // Add user message with audio media to chat history
+                    const aud_media = chat_template.Media{
+                        .type = .audio,
+                        .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } },
+                    };
+                    try chat_history.append(self.allocator, chat_template.ChatMessage.withMedia("user", aud_prompt, aud_media));
                     self.generateWithAudio(io, aud_prompt, @ptrCast(@constCast(aud_path)), 256) catch {
                         try stdout.writeStreamingAll(io, "Audio processing failed.\n");
                     };
@@ -964,8 +976,13 @@ const InferenceEngine = struct {
             var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
             defer tmpl.deinit(self.allocator);
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+            // Use withMedia to pass media info to Jinja template engine
+            const media = chat_template.Media{
+                .type = .image,
+                .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
+            };
             const messages = [_]chat_template.ChatMessage{
-                chat_template.ChatMessage.init("user", content_with_placeholder),
+                chat_template.ChatMessage.withMedia("user", content_with_placeholder, media),
             };
             break :blk try tmpl.apply(self.allocator, &messages, system, true);
         };
@@ -1000,12 +1017,18 @@ const InferenceEngine = struct {
 
         self.model.resetSSMStates();
 
+        // Calculate the token offset for the image placeholder in the token sequence
+        const vision_embd_offset: i32 = if (expanded.offsets.len > 0)
+            @intCast(expanded.offsets[0].token_offset)
+        else
+            0;
+        logger.info("Vision embedding offset in token sequence: {d} (total tokens: {d})", .{ vision_embd_offset, n_total_tokens });
+
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const logits = try gemma4_model.forwardWithEmbdOverride(
             self.ctx_graph, graph, input_tensor, n_total_tokens,
-            @ptrCast(&self.kv_cache_mgr), 0, vision_embeddings, 0, false,
+            @ptrCast(&self.kv_cache_mgr), 0, vision_embeddings, vision_embd_offset, false,
         );
-        self.ctx_graph.setNoAlloc(true);
         self.ctx_graph.setNoAlloc(true);
         var galloc = try ggml.Gallocr.init(buft);
         defer galloc.free();
@@ -1171,8 +1194,13 @@ const InferenceEngine = struct {
             var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
             defer tmpl.deinit(self.allocator);
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+            // Use withMedia to pass media info to Jinja template engine
+            const media = chat_template.Media{
+                .type = .audio,
+                .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } },
+            };
             const messages = [_]chat_template.ChatMessage{
-                chat_template.ChatMessage.init("user", content_with_placeholder),
+                chat_template.ChatMessage.withMedia("user", content_with_placeholder, media),
             };
             break :blk try tmpl.apply(self.allocator, &messages, system, true);
         };
@@ -1207,10 +1235,17 @@ const InferenceEngine = struct {
 
         self.model.resetSSMStates();
 
+        // Calculate the token offset for the audio placeholder in the token sequence
+        const audio_embd_offset: i32 = if (expanded.offsets.len > 0)
+            @intCast(expanded.offsets[0].token_offset)
+        else
+            0;
+        logger.info("Audio embedding offset in token sequence: {d} (total tokens: {d})", .{ audio_embd_offset, n_total_tokens });
+
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const logits = try gemma4_model.forwardWithEmbdOverride(
             self.ctx_graph, graph, input_tensor, n_total_tokens,
-            @ptrCast(&self.kv_cache_mgr), 0, audio_embeddings, 0, false,
+            @ptrCast(&self.kv_cache_mgr), 0, audio_embeddings, audio_embd_offset, false,
         );
         self.ctx_graph.setNoAlloc(true);
 

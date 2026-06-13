@@ -15,8 +15,12 @@
 - [x] **多模态输出质量与 `llama-mtmd-cli` 交叉验证**：已创建 `tools/mtmd_ref_logits.cpp` 工具（C++，链接 libllama + libmtmd），可加载模型+mmproj+媒体文件，运行 mtmd 推理并输出 logits 到二进制文件。视觉和音频参考 logits 均已成功生成并验证（`zig build compare-mtmd-vision` / `zig build compare-mtmd-audio` 配合 `--ref-logits` 使用）
 - [ ] **混合内存输入**：实现 `build_inp_mem_hybrid` 模式，统一管理 KV Cache + SSM State（提升 Qwen3.5 混合架构效率）
 - [ ] **graph 类分离**：参考 llama.cpp 设计，将 `forward()` 拆分为独立 graph 类（便于复用和优化）
-- [ ] **Jinja 模板引擎**：纯 Zig 实现，支持 GGUF 内置 `tokenizer.chat_template` 解析（覆盖 90%+ 模型）
-- [ ] **多模态对话模板完整闭环**：Jinja 模板中的 `<|image|>`/`<|audio|>` 占位符展开 → 嵌入注入
+- [x] **多模态对话模板完整闭环**：使用 src/chat_template/jinja.zig 实现 jinja 模板中的 `<|image|>`/`<|audio|>` 占位符展开 → 嵌入注入
+  - [x] Jinja 模板引擎支持媒体消息（messagesToList 自动插入占位符）
+  - [x] tokenizeWithPlaceholders 记录占位符 token 偏移（token_offset）
+  - [x] forwardWithEmbdOverride 使用正确的 embd_offset（从 token_offset 计算）
+  - [ ] 三阶段 prefill（text prefix causal → media non-causal → text suffix causal）
+  - [ ] per_layer_embd 在媒体位置也需要 override
 - [ ] **线程池**：持久化 `ggml_threadpool`（需 ggml 升级后启用）
 - [ ] **减少 `ggml_cont` 调用**：消除不必要的内存重排
 - [ ] **预分配 SSM 状态张量**：避免运行时分配

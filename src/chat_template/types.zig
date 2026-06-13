@@ -81,7 +81,17 @@ pub const PlaceholderInfo = struct {
     media_type: MediaType,
     /// 展开后的 token 数量（由编码器决定）
     token_count: u32,
+    /// 占位符在 token 序列中的起始偏移（由 tokenizeWithPlaceholders 填充）
+    token_offset: u32 = 0,
 };
+
+/// 检查字符串中是否包含媒体占位符
+pub fn containsPlaceholder(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, IMAGE_PLACEHOLDER) != null or
+        std.mem.indexOf(u8, text, IMAGE_PLACEHOLDER_ALT) != null or
+        std.mem.indexOf(u8, text, AUDIO_PLACEHOLDER) != null or
+        std.mem.indexOf(u8, text, AUDIO_PLACEHOLDER_ALT) != null;
+}
 
 /// 占位符展开结果
 pub const ExpandedPlaceholders = struct {
@@ -127,4 +137,14 @@ test "ChatMessage hasMediaType" {
     const msg = ChatMessage.init("user", "Hello");
     try testing.expect(!msg.hasMediaType(.image));
     try testing.expect(!msg.hasMediaType(.audio));
+}
+
+test "containsPlaceholder" {
+    try testing.expect(containsPlaceholder("<|image|>"));
+    try testing.expect(containsPlaceholder("<image>"));
+    try testing.expect(containsPlaceholder("<|audio|>"));
+    try testing.expect(containsPlaceholder("<audio>"));
+    try testing.expect(!containsPlaceholder("plain text"));
+    try testing.expect(containsPlaceholder("Describe <|image|> this"));
+    try testing.expect(!containsPlaceholder(""));
 }

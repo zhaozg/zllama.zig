@@ -111,6 +111,9 @@ pub const Template = struct {
                     };
                     if (tmpl_str) |src| {
                         // Try Jinja rendering with empty BOS/EOS (template-specific)
+                        // The jinja_mod.render() now handles multimodal messages by
+                        // prepending <|image|>/<|audio|> placeholders to content when
+                        // the message has media attached.
                         const result = jinja_mod.render(
                             allocator,
                             src,

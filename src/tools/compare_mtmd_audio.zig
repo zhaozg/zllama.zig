@@ -245,8 +245,13 @@ pub const MtmdAudioComparator = struct {
         var tmpl = try chat_template.resolve(self.allocator, source, arch, null, true);
         defer tmpl.deinit(self.allocator);
 
+        // Use withMedia to pass media info to Jinja template engine
+        const media = chat_template.Media{
+            .type = .audio,
+            .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } },
+        };
         const messages = [_]chat_template.ChatMessage{
-            chat_template.ChatMessage.init("user", content_with_placeholder),
+            chat_template.ChatMessage.withMedia("user", content_with_placeholder, media),
         };
         const formatted_prompt = try tmpl.apply(self.allocator, &messages, null, true);
         defer self.allocator.free(formatted_prompt);
@@ -296,10 +301,17 @@ pub const MtmdAudioComparator = struct {
         // Access Gemma4Model directly for forwardWithEmbdOverride
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(model.ptr));
 
+        // Calculate the token offset for the audio placeholder in the token sequence
+        const audio_embd_offset: i32 = if (expanded.offsets.len > 0)
+            @intCast(expanded.offsets[0].token_offset)
+        else
+            0;
+        log.info("Audio embedding offset in token sequence: {d} (total tokens: {d})", .{ audio_embd_offset, n_total_tokens });
+
         var graph = try ggml.CGraph.initReserved(graph_ctx, 16384);
         const logits_tensor = try gemma4_model.forwardWithEmbdOverride(
             graph_ctx, graph, input_tensor, n_total_tokens,
-            @ptrCast(&kv_cache_mgr), 0, audio_embeddings, 0, false,
+            @ptrCast(&kv_cache_mgr), 0, audio_embeddings, audio_embd_offset, false,
         );
         graph_ctx.setNoAlloc(true);
 
