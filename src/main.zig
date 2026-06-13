@@ -1262,58 +1262,127 @@ const InferenceEngine = struct {
         );
         defer expanded.deinit();
 
-        const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
-        const audio_marker_count: u32 = @intCast(expanded.offsets.len);
+        // Determine text prefix and suffix around audio placeholder
+        const first_ph = expanded.offsets[0];
+        const text_before = formatted_prompt[0..first_ph.start];
+        const text_after_start = first_ph.start + first_ph.length;
+        const text_after = if (text_after_start < formatted_prompt.len)
+            formatted_prompt[text_after_start..]
+        else
+            "";
 
-        // 使用 placeholderTokenOffset 计算第一个音频占位符的偏移
-        const embd_offset: i32 = if (expanded.offsets.len > 0)
-            @as(i32, @intCast(chat_template.placeholderTokenOffset(expanded.offsets, 0)))
-        else 0;
+        var prefix_tokens_raw = try self.tok.encode(text_before, true);
+        defer prefix_tokens_raw.deinit(self.allocator);
+        var suffix_tokens_raw = try self.tok.encode(text_after, true);
+        defer suffix_tokens_raw.deinit(self.allocator);
 
-        logger.info("Audio tokens={d}, audio markers={d}, total={d}, embd_offset={d}", .{
-            n_audio_tokens, audio_marker_count, n_total_tokens, embd_offset,
+        const prefix_len: i32 = @intCast(prefix_tokens_raw.items.len);
+        const suffix_len: i32 = @intCast(suffix_tokens_raw.items.len);
+
+        logger.info("Three-pass prefill (audio): prefix={d}, audio={d}, suffix={d}", .{
+            prefix_len, n_audio_tokens, suffix_len,
         });
-        // 构建输入张量
-        self.ctx_graph.setNoAlloc(false);
-        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
-        self.ctx_graph.setNoAlloc(true);
-        {
-            const data = input_tensor.dataBytes();
-            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            for (expanded.tokens.items, 0..) |token, j| {
-                slice[j] = @as(i32, @intCast(token));
+
+        const kv_cache_ptr: ?*kv_cache.KVCache = @ptrCast(&self.kv_cache_mgr);
+        var pp_time_s: f64 = 0.0;
+
+        // Pass 1: Text prefix only (causal attention)
+        if (prefix_len > 0) {
+            self.ctx_graph.reset();
+            self.ctx_graph.setNoAlloc(false);
+            const p1_input = try self.ctx_graph.newTensor1d(.i32, prefix_len);
+            self.ctx_graph.setNoAlloc(true);
+            {
+                const data = p1_input.dataBytes();
+                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(prefix_len))];
+                for (prefix_tokens_raw.items, 0..) |t, j| {
+                    slice[j] = @as(i32, @intCast(t));
+                }
             }
 
-            logger.info("Input tokens (first 10): {any}", .{slice[0..@min(@as(usize, 10), @as(usize, @intCast(n_total_tokens)))]});
-            logger.info("Input tokens around offset {d}: {any}", .{ embd_offset, slice[@as(usize, @intCast(embd_offset))..@min(@as(usize, @intCast(embd_offset)) + 10, @as(usize, @intCast(n_total_tokens)))] });
-            if (n_total_tokens > 10) {
-                const tail_start: usize = @as(usize, @intCast(n_total_tokens)) - @min(@as(usize, 5), @as(usize, @intCast(n_total_tokens)));
-                logger.info("Input tokens (last {d}): {any}", .{ @as(usize, @intCast(n_total_tokens)) - tail_start, slice[tail_start..@as(usize, @intCast(n_total_tokens))] });
+            var p1_graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
+            var p1_builder = graph_builder.GraphBuilder.init(self.ctx_graph, p1_graph, &self.params, self.allocator);
+            _ = try self.model.buildGraph(&p1_builder, p1_input, prefix_len, kv_cache_ptr, 0);
+
+            var p1_galloc = try ggml.Gallocr.init(buft);
+            defer p1_galloc.free();
+            if (!p1_galloc.allocGraph(p1_graph)) {
+                logger.err("Graph alloc failed: audio text-prefix pass", .{});
+                return error.GraphAllocFailed;
+            }
+            try p1_graph.compute(self.n_threads);
+            logger.debug("Pass 1 (audio text prefix): {d} tokens ✓", .{prefix_len});
+        }
+
+        // Pass 2: Audio tokens only (non-causal attention)
+        {
+            self.ctx_graph.reset();
+            self.ctx_graph.setNoAlloc(false);
+            const p2_input = try self.ctx_graph.newTensor1d(.i32, n_audio_tokens);
+            self.ctx_graph.setNoAlloc(true);
+            {
+                const data = p2_input.dataBytes();
+                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_audio_tokens))];
+                @memset(slice, @as(i32, @intCast(audio_token_id)));
+            }
+
+            var p2_graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
+            _ = try gemma4_model.forwardWithEmbdOverride(
+                self.ctx_graph, p2_graph, p2_input, n_audio_tokens,
+                kv_cache_ptr, prefix_len, audio_embeddings, 0, false,
+            );
+
+            var p2_galloc = try ggml.Gallocr.init(buft);
+            defer p2_galloc.free();
+            if (!p2_galloc.allocGraph(p2_graph)) {
+                logger.err("Graph alloc failed: audio pass", .{});
+                return error.GraphAllocFailed;
+            }
+            const t2_start = engine_common.currentTimeMs();
+            try p2_graph.compute(self.n_threads);
+            const t2_end = engine_common.currentTimeMs();
+            pp_time_s += @as(f64, @floatFromInt(t2_end - t2_start)) / 1000.0;
+            logger.debug("Pass 2 (audio): {d} tokens (non-causal) ✓", .{n_audio_tokens});
+        }
+
+        // Pass 3: Text suffix only (causal attention) — sample logits from here
+        self.ctx_graph.reset();
+        self.ctx_graph.setNoAlloc(false);
+        const sfx_n: i32 = if (suffix_len > 0) suffix_len else 1;
+        const p3_input = try self.ctx_graph.newTensor1d(.i32, sfx_n);
+        self.ctx_graph.setNoAlloc(true);
+        {
+            const data = p3_input.dataBytes();
+            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(sfx_n))];
+            if (suffix_len > 0) {
+                for (suffix_tokens_raw.items, 0..) |t, j| {
+                    slice[j] = @as(i32, @intCast(t));
+                }
+            } else {
+                slice[0] = @as(i32, @intCast(audio_token_id));
             }
         }
 
-        // Build LLM graph with audio embedding override
-        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
-        const start_pos: i32 = 0;
-        const logits = try gemma4_model.forwardWithEmbdOverride(
-            self.ctx_graph, graph, input_tensor, n_total_tokens,
-            @ptrCast(&self.kv_cache_mgr), start_pos, audio_embeddings, embd_offset, false,
-        );
+        const suffix_start_pos: i32 = prefix_len + n_audio_tokens;
+        var p3_graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
+        var p3_builder = graph_builder.GraphBuilder.init(self.ctx_graph, p3_graph, &self.params, self.allocator);
+        const logits = try self.model.buildGraph(&p3_builder, p3_input, sfx_n, kv_cache_ptr, suffix_start_pos);
 
-        var galloc = try ggml.Gallocr.init(buft);
-        defer galloc.free();
-        if (!galloc.allocGraph(graph)) {
-            logger.err("Failed to allocate LLM graph for audio+text", .{});
+        var p3_galloc = try ggml.Gallocr.init(buft);
+        defer p3_galloc.free();
+        if (!p3_galloc.allocGraph(p3_graph)) {
+            logger.err("Graph alloc failed: audio text-suffix pass", .{});
             return error.GraphAllocFailed;
         }
 
-        const t_start = engine_common.currentTimeMs();
-        try graph.compute(self.n_threads);
-        const t_end = engine_common.currentTimeMs();
-        const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
+        const t3_start = engine_common.currentTimeMs();
+        try p3_graph.compute(self.n_threads);
+        const t3_end = engine_common.currentTimeMs();
+        pp_time_s += @as(f64, @floatFromInt(t3_end - t3_start)) / 1000.0;
+        logger.debug("Pass 3 (audio text suffix): {d} tokens ✓", .{sfx_n});
 
         var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
-        var pos: i32 = n_total_tokens;
+        var pos: i32 = suffix_start_pos + (if (suffix_len > 0) suffix_len else 1);
         var gen_count: u32 = 0;
 
         logger.info("First generated token (audio): id={d}, is_eog={}, pp_time={d:.3}s", .{
@@ -1321,6 +1390,7 @@ const InferenceEngine = struct {
             self.tok.isEog(@intCast(current_token)),
             pp_time_s,
         });
+
 
         const t_tg_start = engine_common.currentTimeMs();
 
