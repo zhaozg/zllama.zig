@@ -879,8 +879,10 @@ const InferenceEngine = struct {
         }
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
 
-        const target_size: u32 = 896;
+        const target_size: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.image_size else 896;
+        logger.info("Vision encoder target size: {d}x{d}", .{ target_size, target_size });
         var img = try preprocess.loadImage(self.allocator, io, image_path, target_size, .auto);
+        logger.info("Loaded image: {d}x{d}", .{ img.width, img.height });
         defer img.deinit();
         logger.info("Loaded image: {d}x{d} -> {d}x{d}", .{ img.width, img.height, target_size, target_size });
 
@@ -912,18 +914,17 @@ const InferenceEngine = struct {
             logger.err("Vision encoder output dim {d} != model n_embd {d}!", .{ n_embd_val, model_n_embd });
             return error.EmbeddingDimensionMismatch;
         }
-        logger.info("Vision embedding dimension check: {d} == model n_embd {d} ✓", .{ n_embd_val, model_n_embd });
-
+        const vision_patch_size: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.patch_size else 14;
+        const vision_n_merge: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.n_merge else 2;
         const expected_tokens: i32 = @intCast(@divTrunc(
-            (@as(u32, @intCast(@divTrunc(target_size, 14))) * @as(u32, @intCast(@divTrunc(target_size, 14)))),
-            4,
+            (@as(u32, @intCast(@divTrunc(target_size, vision_patch_size))) * @as(u32, @intCast(@divTrunc(target_size, vision_patch_size)))),
+            vision_n_merge * vision_n_merge,
         ));
         if (n_vision_tokens != expected_tokens) {
-            logger.info("Vision tokens={d} (expected ~{d} for {d}x{d}); mmproj may use different pooling", .{ n_vision_tokens, expected_tokens, target_size, target_size });
+            logger.info("Vision tokens={d} (expected ~{d} for {d}x{d}, patch={d}, merge={d}); mmproj may use different config", .{ n_vision_tokens, expected_tokens, target_size, target_size, vision_patch_size, vision_n_merge });
         } else {
             logger.info("Vision token count: {d} == expected {d} ✓", .{ n_vision_tokens, expected_tokens });
         }
-
         // 使用多模态 ChatMessage API
         const image_token_id: u32 = blk: {
             if (self.tok.textToToken("<|image|>")) |id| {
@@ -973,6 +974,12 @@ const InferenceEngine = struct {
         defer expanded.deinit();
         // Determine text prefix and suffix around image placeholder
         // expanded.offsets[0].start is the string position of the first <|image|>
+        // Validate placeholder was found
+        if (expanded.offsets.len == 0) {
+            logger.err("No <|image|> placeholder found in formatted prompt", .{});
+            return error.NoImagePlaceholderInPrompt;
+        }
+
         const first_ph = expanded.offsets[0];
         const text_before = formatted_prompt[0..first_ph.start];
         const text_after_start = first_ph.start + first_ph.length;
@@ -1263,6 +1270,12 @@ const InferenceEngine = struct {
         defer expanded.deinit();
 
         // Determine text prefix and suffix around audio placeholder
+        // Validate placeholder was found
+        if (expanded.offsets.len == 0) {
+            logger.err("No <|audio|> placeholder found in formatted prompt", .{});
+            return error.NoAudioPlaceholderInPrompt;
+        }
+        
         const first_ph = expanded.offsets[0];
         const text_before = formatted_prompt[0..first_ph.start];
         const text_after_start = first_ph.start + first_ph.length;

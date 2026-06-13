@@ -27,7 +27,7 @@
 | 多模态预处理（PPM 加载/Resize/图像标准化/音频 WAV 解码 + Mel 频谱） | 🚧 进行中 |
 | 多模态 CLI 集成（--mmproj / --image / --audio） | 🚧 进行中 |
 | 音频端到端推理（Conformer → LLM，Gemma 4 E2B） | ✅ 已完成 |
-| 视觉端到端推理（ViT → LLM，Gemma 4 E2B） | 🚧 进行中 |
+| 视觉端到端推理（ViT → LLM，Gemma 4 E2B） | ✅ 已完成 (三阶段 prefill) |
 | Metal / CUDA 后端 | ⬜ 待完成 |
 | CI / 性能基准 / 生态工具 | ⬜ 待完成 |
 | `n_head_dim` 修复：解析 `key_length` 覆盖 `n_embd/n_head`（Qwen3-Embedding 等差异化 head dim 模型） | ✅ 已完成 |

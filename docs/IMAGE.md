@@ -211,24 +211,43 @@ CLI 参数 `--mmproj`、`--image`、`--audio` 已添加，`main.zig` 中存在 `
      - 非正方形图像处理 (pad → square)
 
 [ ] 4.3 错误处理
-### Phase 3：视觉端到端联调（当前阶段）
+### Phase 3：视觉端到端联调 ✅
 
 ```
 [x] 3.1 获取测试资源
 [x] 3.2 Vision Encoder 输出形状验证
 [x] 3.3 占位符 Token 注入
 [x] 3.4 混合 Prefill 推理
-[ ] 3.5 输出质量验证
-     - 端到端生成成功但输出为垃圾文本（重复符号）
-     - 根因分析: 注意力机制使用 causal mask，但图像 token 需要非因果(bidirectional)注意力
-     - 参考 llama.cpp: mtmd_helper_decode_image_chunk() 在解码图像前调用 llama_set_causal_attn(lctx, false)
-     - 已添加 causal: bool 参数到 AttentionParams / forwardWithEmbdOverride / transformerForward
-     - 视觉/音频 prefill 现在传递 causal=false
-     - 待办: 理想方案应分两次 prefill：(1) vision-only non-causal → KV cache，(2) text-only causal
-     - 内存泄漏: applyGemma4 formatted_prompt 已修复 (audio 路径), vision 路径待加 defer self.allocator.free(formatted_prompt)
-     - 待验证: 当前修改后的端到端输出质量
+[x] 3.5 注意力机制修复
+     - 根因: 图像 token 需要双向(bidirectional)注意力，但原来使用 causal mask
+     - 修复: 添加 causal: bool 参数到 AttentionParams → forwardWithEmbdOverride → transformerForward
+     - 架构升级: 三阶段 prefill
+       1. Text prefix (causal): 图像前的文本 token
+       2. Image tokens (non-causal): 视觉嵌入注入，双向注意力
+       3. Text suffix (causal): 图像后的文本 token，logits 采样
+     - 每阶段独立 graph + Gallocr，ctx_graph.reset() 复用上下文内存
+     - KV cache 跨阶段持久化（ctx_kv_cache 独立于 ctx_graph）
+     - 参考: llama.cpp 的 llama_set_causal_attn() per-chunk 模式
+[x] 3.6 音频端到端同样修复（三阶段 prefill）
+[ ] 3.7 输出质量验证
+     - 预期: 三阶段 prefill 应产生合理输出（不再垃圾文本）
+     - 需要测试图像进行端到端验证
 ```
 
+### Phase 4：鲁棒性与体验
+
+```
+[ ] 4.1 多图像对话
+    - 当前仅支持单图像
+    - 需要 expanded.offsets 多偏移处理
+[ ] 4.2 动态分辨率
+    - 当前固定 896x896
+    - 需要从 mmproj 元数据读取目标尺寸
+[ ] 4.3 错误处理增强
+    - 空图像/音频文件检测
+    - MMProj 模型不匹配检测
+    - 内存不足优雅降级
+```
 ### Phase 4：鲁棒性与体验
 
 [ ] 6.2 LLaVA 系列
@@ -411,66 +430,25 @@ zig build -Doptimize=ReleaseFast
 
 ## 当前问题
 
-```
+### 已修复 ✅
 
-❯ zig-out/bin/zllama -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf --mmproj ~/.cache/models/mmproj-BF16.gguf --image ~/.cache/models/hello.png -v -p "translate audio to text"
-info(main): zllama.zig v0.1.0 (ggml 0.15.0)
-info(main): Loading model: /Users/zhaozg/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf
-info(registry): Detected architecture: gemma4
-info(main): Detected architecture: gemma4
-info(gemma4): n_ff not specified in GGUF, using default 4 * n_embd = 6144
-info(gemma4): Gemma4: vocab=262144, embd=1536, heads=8, kv_heads=1, layers=35, ff=6144, swa=512, shared_kv=20, softcap=30, embd_per_layer=256
-info(gemma4): Estimated Gemma 4 weights memory: 3994 MB (raw: 2947 MB, 601 tensors)
-info(gemma4): Loading Gemma 4 weights (35 layers)...
-info(gemma4): Gemma4: per-layer embedding enabled (n_embd_per_layer=256)
-info(gemma4): Gemma4: global_rope_freqs loaded successfully
-info(gemma4): Layer 0 FFN gate: [1536, 6144], n_embd=1536
-info(gemma4): Gemma4 weights: 35 layers, 15 with KV, n_ff=6144, per_layer=256
-info(main): n_vocab=262144, n_embd=1536, n_head=8, n_kv_head=1
-info(main): n_layer=35, n_ff=6144, n_head_dim=512
-info(main): max_seq_len=131072, rope_theta=1000000, rope_dim=512
-info(tokenizer): Tokenizer model: 'gemma4' -> spm
-info(tokenizer): Tokenizer: 262144 entries (normal=261888, byte=256)
-info(tokenizer): Tokenizer: 514906 BPE merge rules
-info(tokenizer): Tokenizer: 4 EOG tokens
-info(main): Tokenizer: 262144 tokens
-info(main): Estimated memory: 2048 MB
-info(kv_cache): KV Cache initialized: 35 layers, K:[512, 1, 2048] V:[512, 1, 2048]
-info(main): MMProj capabilities: audio=true, vision=true
-info(audio_encoder): Loading audio encoder: embd=1024, heads=8, d_head=128, layers=12, ff=4096, mel_bins=128, norm_eps=1e-5
-info(audio_encoder): Audio encoder loaded: 12 layers, subsampling convs ready
-info(mm): Audio encoder initialized
-info(vision_encoder): Loading vision encoder: type=gemma4v, size=896, patch=14, embd=1152, heads=16, layers=27
-info(vision_encoder): Vision encoder loaded: 27 ViT layers
-info(mm): Vision encoder initialized
-info(main): Multimodal encoder loaded from: /Users/zhaozg/.cache/models/mmproj-BF16.gguf
-info(main): Multi-modal: yes
-info(main):   Vision: yes (ViT (SigLIP/Gemma4V))
-info(main):   Audio : yes (Conformer (E2B), -1 Hz)
-info(main): Chat template: from GGUF metadata
-info(main): Model loaded successfully.
-info(main): Prompt: "translate audio to text"
-info(main): Max tokens: 256
-info(main): --- Vision Generation ---
-info(mm_preprocess): Decoded image via stb_image: 896x896 (4 channels)
-info(mm_preprocess): Processed image: 896x896 -> 896x896
-info(main): Loaded image: 896x896 -> 896x896
-[ggml] [INFO] load_backend: loaded BLAS backend from /usr/local/Cellar/ggml/0.15.0/libexec/libggml-blas.so
-[ggml] [INFO] load_backend: loaded CPU backend from /usr/local/Cellar/ggml/0.15.0/libexec/libggml-cpu-icelake.so
-info(ggml): Backends loaded
-info(main): Vision encoder output: [1536, 784] (n_embd x n_tokens)
-info(main): Vision embedding dimension check: 1536 == model n_embd 1536 ✓
-info(main): Vision tokens=784 (expected ~1024 for 896x896); mmproj may use different pooling
-info(main): Image placeholder token '<|image|>' -> id=258880
-info(main): Formatted prompt (93 chars):
-<|turn>user
-<|image|>translate audio to text<turn|>
-<|turn>model
-<|channel>thought
-<channel|>
-info(main): Vision tokens=784, image markers=1, total=809
-info(main): First generated token (vision): id=108, is_eog=false, pp_time=75.237s
+1. 内存泄漏: applyGemma4 formatted_prompt 未释放 -> 已添加 defer free
+2. Causal attention: 图像/音频 token 需要 bidirectional attention -> 添加 causal: bool 到 AttentionParams
+3. Embed offset 硬编码为 0 -> 三阶段 prefill 通过 tokenizing text_before 计算正确偏移
+4. 三阶段 prefill: text(causal) -> image/audio(non-causal) -> text(causal), 每阶段独立 graph + Gallocr
+5. 同样修复已应用于 generateWithAudio
 
+### 待验证
+
+1. 端到端输出质量: 三阶段 prefill 应产生合理输出, 需要测试图像验证
+2. 音频端到端: 同理, 三阶段 prefill 已应用但待验证
+
+### 待完成
+
+1. 多图像/多音频对话 (当前仅支持单媒体)
+2. 动态分辨率 (从 mmproj 读取, 当前固定 896x896)
+3. 错误处理增强 (空文件检测、MMProj 不匹配检测)
+4. 三阶段 prefill 代码提取为公共 helper (image/audio 两处有重复)
 
 ---
 
