@@ -78,6 +78,9 @@ zllama.zig/
 │   ├── TEST.md                  # 测试体系文档
 │   └── QWEN35.md                # Qwen3.5 模型实现笔记
 ├── src/                         # 源码组织具体看 docs/FILE_STRUCTURE.md
+├── models/                      # 模型辅助工具
+│   ├── ...
+│   └── templates/               # jinja file for models
 ├── deps/zig-jinja/              # zig-jinja 引擎实现库
 ├── deps/llama.cpp/              # llama.cpp 相关代码（可参考）
 └── deps/ggml/                   # ggml 源码（submodule 或拷贝）

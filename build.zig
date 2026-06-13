@@ -348,8 +348,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    stb_image_mod.addIncludePath(b.path("vendor/stb"));
-    stb_image_mod.addCSourceFile(.{ .file = b.path("vendor/stb/stb_image.c") });
+    stb_image_mod.addIncludePath(b.path("src/vendor/stb"));
+    stb_image_mod.addCSourceFile(.{ .file = b.path("src/vendor/stb/stb_image.c") });
 
     mm_preprocess_mod.addImport("stb_image", stb_image_mod);
 
