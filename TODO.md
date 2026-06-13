@@ -19,7 +19,8 @@
   - [x] Jinja 模板引擎支持媒体消息（messagesToList 自动插入占位符）
   - [x] tokenizeWithPlaceholders 记录占位符 token 偏移（token_offset）
   - [x] forwardWithEmbdOverride 使用正确的 embd_offset（从 token_offset 计算）
-  - [ ] 三阶段 prefill（text prefix causal → media non-causal → text suffix causal）
+  - [x] forwardMediaOnly 方法（Gemma4 媒体-only 非因果前向，跳过 per-layer embedding）
+  - [ ] 三阶段 prefill（text prefix causal → media non-causal → text suffix causal）— ggml 多图上下文冲突，需调试
   - [ ] per_layer_embd 在媒体位置也需要 override
 - [ ] **线程池**：持久化 `ggml_threadpool`（需 ggml 升级后启用）
 - [ ] **减少 `ggml_cont` 调用**：消除不必要的内存重排

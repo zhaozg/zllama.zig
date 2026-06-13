@@ -227,6 +227,34 @@ pub const Gemma4Model = struct {
         return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, causal);
     }
 
+    /// Forward pass with pre-computed embeddings only (no token embedding lookup).
+    /// Used for Stage 2 of three-stage multimodal prefill (media tokens only).
+    /// - Non-causal (bidirectional) attention within the media segment
+    /// - No per-layer embedding (media embeddings already encode all needed info)
+    /// - Writes to KV cache so subsequent text tokens can attend to media
+    pub fn forwardMediaOnly(
+        self: *Gemma4Model,
+        ctx: *ggml.Context,
+        graph: *ggml.CGraph,
+        embd_override: *ggml.Tensor,
+        n_tokens: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        start_pos: i32,
+    ) !*ggml.Tensor {
+        const p = &self.params;
+        const n_tokens_i64: i64 = n_tokens;
+
+        // Scale embeddings (same as forwardWithEmbdOverride)
+        const scaled_override = ggml.scale(ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+        scaled_override.setName("inp_media");
+
+        // Position tensor starts at start_pos
+        const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
+
+        // Non-causal attention, NO per-layer embedding (input_tokens=null)
+        return self.transformerForward(ctx, graph, scaled_override, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, null, false);
+    }
+
     pub fn forward(
         self: *Gemma4Model,
         ctx: *ggml.Context,
