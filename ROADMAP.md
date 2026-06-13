@@ -24,15 +24,15 @@
 | Tensor 方法式算子（mulMat/add/permute/ropeExt/pool2d/im2col/ssmConv/concat 等） | ✅ 已完成 |
 | 嵌入模型生成（`--embed`，Qwen3-Embedding mean/cls/last pooling + L2 归一化） | ✅ 已完成 |
 | `n_head_dim` 修复：解析 `key_length` 覆盖 `n_embd/n_head`（Qwen3-Embedding 等差异化 head dim 模型） | ✅ 已完成 |
-| 多模态预处理（PPM 加载/Resize/图像标准化/音频 WAV 解码 + Mel 频谱） | 🚧 进行中 |
-| 多模态 CLI 集成（--mmproj / --image / --audio） | 🚧 进行中 |
-| 音频端到端推理（Conformer → LLM，Gemma 4 E2B） | ✅ 已完成 |
+| 多模态预处理（PPM 加载/Resize/图像标准化/音频 WAV 解码 + Mel 频谱） | ✅ 已完成 |
+| 多模态 CLI 集成（--mmproj / --image / --audio） | ✅ 已完成 |
+| 音频端到端推理（Conformer → LLM，Gemma 4 E2B，三阶段 prefill） | ✅ 已完成 |
 | 视觉端到端推理（ViT → LLM，Gemma 4 E2B） | ✅ 已完成 (三阶段 prefill) |
 | Metal / CUDA 后端 | ⬜ 待完成 |
 | CI / 性能基准 / 生态工具 | ⬜ 待完成 |
 | `n_head_dim` 修复：解析 `key_length` 覆盖 `n_embd/n_head`（Qwen3-Embedding 等差异化 head dim 模型） | ✅ 已完成 |
-| 多模态预处理（PPM 加载/Resize/图像标准化/音频 Mel 占位） | 🚧 进行中 |
-| 多模态 CLI 集成（--mmproj / --image / --audio） | 🚧 进行中 |
+| 多模态预处理（PPM 加载/Resize/图像标准化/音频 WAV 解码 + Mel 频谱） | ✅ 已完成 |
+| 多模态 CLI 集成（--mmproj / --image / --audio） | ✅ 已完成 |
 | Metal / CUDA 后端 | ⬜ 待完成 |
 | CI / 性能基准 / 生态工具 | ⬜ 待完成 |
 
@@ -57,7 +57,7 @@ Gemma 3 推理已验证 → Gemma 4 推理已验证 (E2B Q4_K_M)
 `build.zig` 添加 `-Dcuda` → CUDA 编译宏 → 后端初始化 → `--backend cuda`
 
 ### P10：性能优化 ✅
-### 多模态支持 🚧
+### 多模态支持 ✅
 - ✅ 音频编码器集成（Conformer + ChunkedAttention，位于 `src/mm/audio.zig`）
 - ✅ 图像编码器集成（ViT + 2D RoPE，位于 `src/mm/vision.zig`）
 - ✅ 多模态管理器（`src/mm/manager.zig`，MMProj GGUF 加载与调度）
