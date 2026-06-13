@@ -882,10 +882,13 @@ const InferenceEngine = struct {
         const target_size: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.image_size else 896;
         logger.info("Vision encoder target size: {d}x{d}", .{ target_size, target_size });
         var img = try preprocess.loadImage(self.allocator, io, image_path, target_size, .auto);
-        logger.info("Loaded image: {d}x{d}", .{ img.width, img.height });
         defer img.deinit();
+        // Validate image has content
+        if (img.width == 0 or img.height == 0) {
+            logger.err("Loaded image has zero dimensions", .{});
+            return error.EmptyImage;
+        }
         logger.info("Loaded image: {d}x{d} -> {d}x{d}", .{ img.width, img.height, target_size, target_size });
-
         self.ctx_graph.setNoAlloc(false);
         var vision_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
 
@@ -1182,7 +1185,11 @@ const InferenceEngine = struct {
             wav_info.sample_rate,
             wav_info.num_channels,
         });
-
+        // Validate audio has content
+        if (wav_samples.len == 0) {
+            logger.err("Loaded audio file is empty (no samples)", .{});
+            return error.EmptyAudio;
+        }
         const preprocess_params = preprocess.AudioPreprocessParams.fromAudioEncoder(
             if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else preprocess.AUDIO_N_MEL_BINS,
         );
