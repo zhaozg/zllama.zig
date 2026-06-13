@@ -1005,7 +1005,7 @@ const InferenceEngine = struct {
 
         // Pass 1: Text prefix only (causal attention)
         if (prefix_len > 0) {
-            self.ctx_graph.reset();
+        // ctx_graph memory reused across passes (2GB alloc, enough for all three)
             self.ctx_graph.setNoAlloc(false);
             const p1_input = try self.ctx_graph.newTensor1d(.i32, prefix_len);
             self.ctx_graph.setNoAlloc(true);
@@ -1033,7 +1033,7 @@ const InferenceEngine = struct {
 
         // Pass 2: Image tokens only (non-causal attention)
         {
-            self.ctx_graph.reset();
+        // ctx_graph memory reused across passes (2GB alloc, enough for all three)
             self.ctx_graph.setNoAlloc(false);
             const p2_input = try self.ctx_graph.newTensor1d(.i32, n_vision_tokens);
             self.ctx_graph.setNoAlloc(true);
@@ -1063,7 +1063,7 @@ const InferenceEngine = struct {
         }
 
         // Pass 3: Text suffix only (causal attention) — sample logits from here
-        self.ctx_graph.reset();
+        // ctx_graph memory reused across passes (2GB alloc, enough for all three)
         self.ctx_graph.setNoAlloc(false);
         const sfx_n: i32 = if (suffix_len > 0) suffix_len else 1;
         const p3_input = try self.ctx_graph.newTensor1d(.i32, sfx_n);
@@ -1301,7 +1301,7 @@ const InferenceEngine = struct {
 
         // Pass 1: Text prefix only (causal attention)
         if (prefix_len > 0) {
-            self.ctx_graph.reset();
+        // ctx_graph memory reused across passes (2GB alloc, enough for all three)
             self.ctx_graph.setNoAlloc(false);
             const p1_input = try self.ctx_graph.newTensor1d(.i32, prefix_len);
             self.ctx_graph.setNoAlloc(true);
@@ -1329,7 +1329,7 @@ const InferenceEngine = struct {
 
         // Pass 2: Audio tokens only (non-causal attention)
         {
-            self.ctx_graph.reset();
+        // ctx_graph memory reused across passes (2GB alloc, enough for all three)
             self.ctx_graph.setNoAlloc(false);
             const p2_input = try self.ctx_graph.newTensor1d(.i32, n_audio_tokens);
             self.ctx_graph.setNoAlloc(true);
@@ -1359,7 +1359,7 @@ const InferenceEngine = struct {
         }
 
         // Pass 3: Text suffix only (causal attention) — sample logits from here
-        self.ctx_graph.reset();
+        // ctx_graph memory reused across passes (2GB alloc, enough for all three)
         self.ctx_graph.setNoAlloc(false);
         const sfx_n: i32 = if (suffix_len > 0) suffix_len else 1;
         const p3_input = try self.ctx_graph.newTensor1d(.i32, sfx_n);
