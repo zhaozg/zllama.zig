@@ -419,6 +419,9 @@ const InferenceEngine = struct {
 
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
 
+        // Reset SSM states before prefill
+        self.model.resetSSMStates();
+
         // --- Prompt processing (uses ctx_graph) ---
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
@@ -714,10 +717,12 @@ const InferenceEngine = struct {
                     try stdout.writeStreamingAll(io, "\x1b[2J\x1b[H");
                 } else if (std.mem.eql(u8, line, "/reset")) {
                     self.kv_cache_mgr.reset();
-                    try stdout.writeStreamingAll(io, "KV cache reset.\n");
+                    self.model.resetSSMStates();
+                    try stdout.writeStreamingAll(io, "KV cache and SSM states reset.\n");
                 } else if (std.mem.eql(u8, line, "/new")) {
                     chat_history.clearAndFree(self.allocator);
                     self.kv_cache_mgr.reset();
+                    self.model.resetSSMStates();
                     try stdout.writeStreamingAll(io, "New conversation started.\n");
                 } else if (std.mem.startsWith(u8, line, "/image ")) {
                     // /image <path> <prompt>
@@ -774,6 +779,7 @@ const InferenceEngine = struct {
 
             // Reset KV cache for each turn (full prompt processing)
             self.kv_cache_mgr.reset();
+            self.model.resetSSMStates();
 
             // Encode and generate
             var input_tokens = try self.tok.encode(formatted_prompt, true);
@@ -992,6 +998,8 @@ const InferenceEngine = struct {
             }
         }
 
+        self.model.resetSSMStates();
+
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const logits = try gemma4_model.forwardWithEmbdOverride(
             self.ctx_graph, graph, input_tensor, n_total_tokens,
@@ -1196,6 +1204,8 @@ const InferenceEngine = struct {
                 slice[j] = @as(i32, @intCast(token));
             }
         }
+
+        self.model.resetSSMStates();
 
         var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
         const logits = try gemma4_model.forwardWithEmbdOverride(

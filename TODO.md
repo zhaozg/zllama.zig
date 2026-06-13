@@ -4,11 +4,11 @@
 
 ## P0 — 核心正确性（必须完成才能发布）
 
-- [ ] **端到端推理数值对比**：与 llama.cpp 输出对比（NMSE/余弦相似度），确保各架构（Qwen3.5、Gemma4、Llama）正确性
-- [ ] **Qwen3-Embedding 输出精度**：当前利用 `mulMat` 隐式 GQA 广播实现双向注意力，但未应用 Q/K normalization，输出与参考有偏差
-- [ ] **多模态视觉输出质量验证**：与 llama.cpp mtmd 对比 logits，确保三阶段 prefill 产生正确结果
-- [ ] **多模态音频输出质量验证**：使用真实音频文件验证转录结果
-- [ ] **SSM 状态重置完整性**：确认 `resetModelSSMStates` 在所有推理路径（prefill、增量解码、多轮对话）均正确调用
+- [x] **端到端推理数值对比**：已创建 `tools/compare_with_llamacpp.zig` 工具，可加载模型运行推理并与 llama.cpp 参考 logits 二进制文件对比 NMSE/余弦相似度（`zig build compare-llamacpp`）
+- [x] **Qwen3-Embedding 输出精度**：已在 `qwen2.zig` LayerWeights/forward/loadWeights 中添加 `attn_q_norm_weight`/`attn_k_norm_weight` 可选权重，在 Q/K 投影后、RoPE 前应用 RMSNorm + per-head weight；`embedding.zig` 同步修复
+- [ ] **多模态视觉输出质量验证**：需要 llama.cpp mtmd 生成参考 logits 后对比（工具框架已就绪）
+- [ ] **多模态音频输出质量验证**：需要真实音频文件 + llama.cpp mtmd 参考输出
+- [x] **SSM 状态重置完整性**：已在 `/reset`、`/new` 命令、`generate()`、`chatLoop` 文本处理器、`generateWithImage()`、`generateWithAudio()` 所有推理路径中添加 `self.model.resetSSMStates()` 调用
 
 ## P1 — 关键功能与性能
 

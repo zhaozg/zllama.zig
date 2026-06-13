@@ -587,6 +587,33 @@ pub fn build(b: *std.Build) void {
         _ = b.step("gen-ref", "Run zllama-gen-ref tool");
     }
 
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tools/compare_with_llamacpp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("gguf", gguf_mod);
+        mod.addImport("model", model_mod);
+        mod.addImport("registry", registry_mod);
+        mod.addImport("graph_builder", graph_builder_mod);
+        mod.addImport("memory", memory_mod);
+        mod.addImport("tokenizer", tokenizer_mod);
+
+        const exe_tool = b.addExecutable(.{
+            .name = "zllama-compare-llamacpp",
+            .root_module = mod,
+        });
+        b.installArtifact(exe_tool);
+
+        const run_cmd = b.addRunArtifact(exe_tool);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        _ = b.step("compare-llamacpp", "Run zllama-compare-llamacpp tool");
+    }
+
     // ======================================================================
     // 安装与运行
     // ======================================================================

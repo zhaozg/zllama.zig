@@ -1,7 +1,7 @@
 //! Qwen2 系列模型实现
 //!
 //! 标准 Transformer 架构，支持 Qwen2 / Qwen2.5 / Qwen3-Embedding。
-//! 特点：QKV 投影 + RoPE + SwiGLU FFN。
+//! 特点：QKV 投影 + optional Q/K norm + RoPE + SwiGLU FFN。
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -29,7 +29,9 @@ pub const LayerWeights = struct {
     attn_norm_weight: *ggml.Tensor,
     ffn_norm_weight: *ggml.Tensor,
     attn_q_weight: *ggml.Tensor,
+    attn_q_norm_weight: ?*ggml.Tensor = null,
     attn_k_weight: *ggml.Tensor,
+    attn_k_norm_weight: ?*ggml.Tensor = null,
     attn_v_weight: *ggml.Tensor,
     attn_output_weight: *ggml.Tensor,
     ffn_gate_weight: *ggml.Tensor,
@@ -101,6 +103,23 @@ pub const Qwen2Model = struct {
             q = ggml.reshape3d(ctx, q, head_dim, n_head, n_tokens_i64);
             k = ggml.reshape3d(ctx, k, head_dim_k, n_kv_head, n_tokens_i64);
             v = ggml.reshape3d(ctx, v, head_dim_v, n_kv_head, n_tokens_i64);
+
+            // Q/K normalization (Qwen3-Embedding, etc.)
+            // Apply RMS norm + per-head normalization weight before RoPE
+            if (layer.attn_q_norm_weight) |q_norm| {
+                q = ggml.rmsNorm(ctx, q, p.norm_eps);
+                const q_norm_3d = ggml.reshape3d(ctx, q_norm, head_dim, 1, 1);
+                const q_norm_target = ctx.newTensor3d(.f32, head_dim, n_head, n_tokens_i64) catch unreachable;
+                const q_norm_rep = ggml.repeat(ctx, q_norm_3d, q_norm_target);
+                q = ggml.mul(ctx, q, q_norm_rep);
+            }
+            if (layer.attn_k_norm_weight) |k_norm| {
+                k = ggml.rmsNorm(ctx, k, p.norm_eps);
+                const k_norm_3d = ggml.reshape3d(ctx, k_norm, head_dim_k, 1, 1);
+                const k_norm_target = ctx.newTensor3d(.f32, head_dim_k, n_kv_head, n_tokens_i64) catch unreachable;
+                const k_norm_rep = ggml.repeat(ctx, k_norm_3d, k_norm_target);
+                k = ggml.mul(ctx, k, k_norm_rep);
+            }
 
             const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens_i64), start_pos);
             q = ggml.ropeExt(ctx, q, pos_tensor, null, @as(i32, @intCast(@min(rope_dim, head_dim))), 0, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
@@ -313,7 +332,9 @@ pub fn loadWeights(gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, params: 
             .attn_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_norm.weight"),
             .ffn_norm_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight"),
             .attn_q_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight"),
+            .attn_q_norm_weight = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q_norm.weight") catch null,
             .attn_k_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight"),
+            .attn_k_norm_weight = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_k_norm.weight") catch null,
             .attn_v_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight"),
             .attn_output_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_output.weight"),
             .ffn_gate_weight = try weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight"),

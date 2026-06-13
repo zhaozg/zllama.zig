@@ -3,6 +3,7 @@
 //! 基于 Qwen2 骨干，区别：
 //! - 双向注意力（无 causal mask），利用 ggml mulMat 自动 GQA 广播
 //! - 无 KV Cache（单次前向）
+//! - Q/K normalization（RMS norm + per-head weight）
 //! - 池化 + L2 归一化输出
 //! - 无 output.weight（不需要 lm_head）
 
@@ -76,6 +77,7 @@ pub const EmbeddingModel = struct {
         const n_head: i64 = @intCast(p.n_head);
         const n_kv_head: i64 = @intCast(p.n_kv_head);
         const head_dim: i64 = @intCast(p.n_head_dim);
+        const head_dim_k: i64 = if (p.n_head_dim_k > 0) @intCast(p.n_head_dim_k) else head_dim;
         const n_tokens_i64: i64 = n_tokens;
         const rope_dim: i64 = @intCast(p.rope_dim);
         const rope_n_dims: i32 = @intCast(@min(rope_dim, head_dim));
@@ -100,8 +102,24 @@ pub const EmbeddingModel = struct {
 
             // Reshape to [head_dim, n_head/kv_head, n_tokens]
             q = ggml.reshape3d(ctx, q, head_dim, n_head, n_tokens_i64);
-            k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
+            k = ggml.reshape3d(ctx, k, head_dim_k, n_kv_head, n_tokens_i64);
             v = ggml.reshape3d(ctx, v, head_dim, n_kv_head, n_tokens_i64);
+
+            // Q/K normalization (Qwen3-Embedding)
+            if (layer.attn_q_norm_weight) |q_norm| {
+                q = ggml.rmsNorm(ctx, q, p.norm_eps);
+                const q_norm_3d = ggml.reshape3d(ctx, q_norm, head_dim, 1, 1);
+                const q_norm_target = ctx.newTensor3d(.f32, head_dim, n_head, n_tokens_i64) catch unreachable;
+                const q_norm_rep = ggml.repeat(ctx, q_norm_3d, q_norm_target);
+                q = ggml.mul(ctx, q, q_norm_rep);
+            }
+            if (layer.attn_k_norm_weight) |k_norm| {
+                k = ggml.rmsNorm(ctx, k, p.norm_eps);
+                const k_norm_3d = ggml.reshape3d(ctx, k_norm, head_dim_k, 1, 1);
+                const k_norm_target = ctx.newTensor3d(.f32, head_dim_k, n_kv_head, n_tokens_i64) catch unreachable;
+                const k_norm_rep = ggml.repeat(ctx, k_norm_3d, k_norm_target);
+                k = ggml.mul(ctx, k, k_norm_rep);
+            }
 
             // RoPE
             q = ggml.ropeExt(ctx, q, pos_tensor, null, rope_n_dims, 0, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
@@ -113,7 +131,7 @@ pub const EmbeddingModel = struct {
             k = ggml.cont(ctx, ggml.permute(ctx, k, 0, 2, 1, 3));
             v = ggml.cont(ctx, ggml.permute(ctx, v, 0, 2, 1, 3));
 
-            // kq = k^T @ q : [head_dim, n_tokens, n_kv_head] @ [head_dim, n_tokens, n_head]
+            // kq = k^T @ q : [head_dim_k, n_tokens, n_kv_head] @ [head_dim, n_tokens, n_head]
             // → [n_tokens, n_tokens, n_head]  (GQA: k broadcasts from n_kv_head to n_head)
             var kq = ggml.mulMat(ctx, k, q);
             kq = ggml.scale(ctx, kq, 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))));
