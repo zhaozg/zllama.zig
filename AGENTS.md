@@ -63,6 +63,42 @@
    - 单文件模块应保持清晰的接口和实现分离，避免过度复杂化。
    - 避免文件过大，不能超过 600 行，合理拆分功能模块（如算子、模型实现、核心引擎等）。
 
+## 🔍 软件工程实践：功能对齐与早期问题发现
+
+为保证开发质量和避免后期返工，在编码前、编码中和集成阶段必须遵循以下实践：
+
+### 1. 功能对齐（Requirements Alignment）
+
+- **开发前编写设计检查清单**：针对新模型或新特性，先列出所有必须从 GGUF 读取的超参数、张量名称、特殊逻辑（如 `full_attention_interval`、`rope_sections`）。对照 llama.cpp 参考实现逐项勾选，确保无遗漏。
+- **接口契约定义**：模块之间通过 `pub const` 导出的 API 应有明确的输入/输出、错误类型和内存所有权约定。使用 Zig 的文档注释（`///`）描述契约。
+- **交叉验证**：对于关键路径（如 `forward()`、KV Cache 更新），用注释标明对应 llama.cpp 的源文件和行号，便于后续比较。
+
+### 2. 提前问题发现（Shift-Left Testing）
+
+- **单元测试先行**：每个新算子（如 `gatedDeltaNet`、`ropeMulti`）必须在 `ggml.zig` 或其测试模块中编写独立测试，使用随机输入对比简单实现或参考实现。
+- **数值偏差容忍度**：定义 NMSE（归一化均方误差）< 1e-5 或余弦相似度 > 0.999 为通过。对于量化模型可适当放宽。
+- **早期集成验证**：
+  - 新模型首次可加载后，立即运行 `zig build test-model`（若存在）或手动执行极短 prompt（如 `-n 1`），验证 `forward()` 不崩溃且输出 logits 不是全零/NaN。
+  - 使用 `tools/compare_logits.zig` 对比第一个 token 的 logits 与参考实现（llama.cpp 或已实现的正确模型）。
+- **静态分析**：启用 `zig build test -Drelease-safe`，利用 Zig 的内置安全检查（整数溢出、切片边界、可选类型解包）捕获未定义行为。
+
+### 3. 持续回归防御
+
+- **CI 自动化**：每次 PR 必须通过所有单元测试和模型快速冒烟测试（如 `tinyllama`、`Llama-3.2-3B`、`Qwen3.5-0.8B` 各跑 5 token）。
+- **基准快照**：将正确模型的 logits 样本（前 5-10 token）签入仓库（`tests/reference_logits/`），通过 CI 对比，防止回归。
+- **失败即阻断**：任何数值偏差超出阈值或崩溃应阻断合并，直到修复。
+
+### 4. 增量开发与对比
+
+- **按阶段实现**：将模型实现拆分为：① 超参数加载 + 张量加载测试；② 全注意力层前向（不集成 KV Cache）；③ 线性注意力层前向；④ 完整推理循环。每阶段独立验证。
+- **使用 `tools/generate_reference.zig`**：从正确的实现（llama.cpp）生成参考 logits，作为本项目的 Golden Master。
+- **分支对比**：在实现新功能时，创建独立分支并定期与 `main` 合并，避免偏离太久。
+
+### 5. 文档化已知差距
+
+- 对于与参考实现的故意差异（如融合算子使用、布局优化），在代码注释或 `docs/` 中明确记录原因和影响范围。
+- 维护 `docs/KNOWN_ISSUES.md`，列出未修复的数值偏差或性能问题，并标注优先级。
+
 ## 📁 项目结构（AI 应遵循）
 
 ```
@@ -127,30 +163,35 @@ const tokenizer = @import("tokenizer");
 ## 🤖 AI 工作流程
 
 1. **需求理解**：优先阅读 `AGENTS.md`、`docs/ARCHITECTURE.md`、`docs/GGML_BINDING.md`、`docs/TECHNICAL_CHALLENGES.md`。
-2. **代码生成**：
+2. **功能对齐检查**：对照新增功能的设计检查清单，确认所有超参数、张量、特殊逻辑已识别。
+3. **代码生成**：
    - 任何涉及 ggml C 调用的代码必须通过 `ggml.zig` 的封装，不可直接 `@cImport` 到业务模块。
    - 新增层或算子时，先在 `ggml.zig` 添加安全封装，再在业务中使用。
    - 新增模型时，在 `src/models/` 下创建新文件，在 `registry.zig` 注册。
    - 资源释放一律使用 `defer`，分配失败返回错误。
    - **遵循 Import 策略**：根文件之间使用模块名导入，非根文件使用相对路径导入。
-3. **约束检查**：
+4. **早期验证**：
+   - 完成超参数加载后，编写单元测试验证解析值与 GGUF 元数据一致。
+   - 完成张量加载后，运行简单图（如只做一次 embedding lookup）检查形状。
+   - 完成首次 `forward()` 后，立即用 `compare_logits` 对比参考实现。
+5. **约束检查**：
    - 确保所有阻塞 I/O 都通过传递的 `*std.Io` 参数执行。
    - 检查张量维度是否匹配（使用 `std.debug.assert`）。
    - 验证 GGUF 版本兼容性。
-4. **问题定位**：
+6. **问题定位**：
    - 善于通过 `git diff` 发现改动引入的潜在问题。
    - 必要时在对话中提问澄清约束或设计细节，避免误解导致的实现偏差。
    - 可参考 `llama.cpp` 的实现细节，但必须适配 Zig 0.16.0 的特定要求。
-5. **提交前验证**：
+7. **提交前验证**：
    - 运行 `zig build test`（如果存在测试）。
    - 确保未引入未定义行为（如数组越界、空指针解引用）。
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Qwen3.5-4B-Q4_K_M.gguf` works
-6. 效果参照:
+8. **效果参照**:
    - `llama-simple -m ~/.cache/models/Qwen3.5-4B-Q4_K_M.gguf 你好`
-7. **文档同步**：修改架构或绑定设计后，需同步更新对应的 `*.md` 文件。
+9. **文档同步**：修改架构或绑定设计后，需同步更新对应的 `*.md` 文件。
 
 ## 🔒 禁止事项
 
@@ -162,7 +203,7 @@ const tokenizer = @import("tokenizer");
 - ❌ 删除功能代码，绕开问题。
 - ❌ 在根文件中使用相对路径导入另一个根文件。
 - ❌ 在业务代码中直接导入 `ggml/` 子目录文件。
-- ❌ 参数硬编码，没有从从权重文件实际形状获取。
+- ❌ 参数硬编码，没有从权重文件实际形状获取。
 
 ## 📚 参考材料
 
@@ -173,4 +214,4 @@ const tokenizer = @import("tokenizer");
 
 ---
 
-**AI 助手应始终以"安全、可维护、高性能"为原则，优先遵循本文档约束。如有歧义，请在对话中提问澄清。**
+**AI 助手应始终以“安全、可维护、高性能”为原则，优先遵循本文档约束。如有歧义，请在对话中提问澄清。**
