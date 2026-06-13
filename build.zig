@@ -279,7 +279,7 @@ pub fn build(b: *std.Build) void {
 
     // --- 多模态模块 ---
     const mm_audio_mod = b.createModule(.{
-        .root_source_file = b.path("src/mm/audio.zig"),
+        .root_source_file = b.path("src/mtmd/audio.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -290,7 +290,7 @@ pub fn build(b: *std.Build) void {
 
 
     const mm_vision_mod = b.createModule(.{
-        .root_source_file = b.path("src/mm/vision.zig"),
+        .root_source_file = b.path("src/mtmd/vision.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -300,7 +300,7 @@ pub fn build(b: *std.Build) void {
     mm_vision_mod.addImport("weight_loader", weight_loader_mod);
 
     const fft_mod = b.createModule(.{
-        .root_source_file = b.path("src/mm/fft.zig"),
+        .root_source_file = b.path("src/mtmd/fft.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -320,7 +320,7 @@ pub fn build(b: *std.Build) void {
 
 
     const mm_manager_mod = b.createModule(.{
-        .root_source_file = b.path("src/mm/manager.zig"),
+        .root_source_file = b.path("src/mtmd/manager.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -333,7 +333,7 @@ pub fn build(b: *std.Build) void {
     mm_manager_mod.addImport("vision", mm_vision_mod);
 
     const mm_preprocess_mod = b.createModule(.{
-        .root_source_file = b.path("src/mm/preprocess.zig"),
+        .root_source_file = b.path("src/mtmd/preprocess.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,

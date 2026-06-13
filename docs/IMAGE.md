@@ -366,37 +366,7 @@ This image shows...<end_of_turn>
 
 ---
 
-## 六、关键文件清单
-
-```
-src/mm/
-├── manager.zig       # 多模态管理器 (161 行)
-├── vision.zig        # ViT + SigLIP 编码器 (509 行)
-├── audio.zig         # Conformer 音频编码器 (663 行)
-├── preprocess.zig    # 图像/音频预处理 (689 行)
-└── fft.zig           # FFT 引擎 (213 行, macOS)
-
-src/models/
-├── gemma4.zig        # Gemma 4 LLM (991 行, 含 forwardWithEmbdOverride)
-└── registry.zig      # 能力检测 detectCapabilities()
-
-src/
-├── main.zig          # CLI + InferenceEngine (含 generateWithImage/Audio)
-├── chat_template.zig # 对话模板系统
-└── stb_image.zig     # stb 图像加载绑定
-
-vendor/stb/
-├── stb_image.h       # JPEG/PNG 解码 (已 vendored)
-└── stb_image.c       # 实现
-
-docs/
-├── IMAGE.md          # 本文档
-└── DIALOG_TEMPLATE.md # 对话模板详细文档
-```
-
----
-
-## 七、性能预期
+## 性能预期
 
 | 组件 | 预估耗时 (Apple M-series) |
 |------|--------------------------|
@@ -408,7 +378,7 @@ docs/
 
 ---
 
-## 八、立即可执行的第一步
+## 立即可执行的第一步
 
 ```bash
 # 1. 确认已有模型和 mmproj 文件
@@ -451,7 +421,7 @@ zig build -Doptimize=ReleaseFast
 
 ---
 
-## 九、参考资源
+## 参考资源
 
 - [llama.cpp mtmd 实现](deps/llama.cpp/tools/mtmd/)
 - [Gemma 4 技术报告](https://ai.google.dev/gemma)
