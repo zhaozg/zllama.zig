@@ -20,6 +20,7 @@ const registry = @import("registry");
 const graph_builder = @import("graph_builder");
 const memory = @import("memory");
 const tokenizer = @import("tokenizer");
+const kv_cache = @import("kv_cache");
 const log = std.log.scoped(.compare);
 
 // ============================================================================
@@ -61,7 +62,17 @@ pub const LlamaCppComparator = struct {
         const file_size = @as(usize, @intCast(stat.size));
         const gguf_data = try self.allocator.alloc(u8, file_size);
         defer self.allocator.free(gguf_data);
-        _ = try file.readPositionalAll(io, gguf_data, 0);
+        {
+            var offset: u64 = 0;
+            const chunk_size: usize = 64 * 1024 * 1024;
+            while (offset < file_size) {
+                const end = @min(offset + chunk_size, file_size);
+                const len = end - offset;
+                const bytes_read = try file.readPositionalAll(io, gguf_data[offset..][0..len], offset);
+                if (bytes_read != len) return error.FileReadError;
+                offset += bytes_read;
+            }
+        }
 
         var gguf_file = try gguf.parse(gguf_data, self.allocator);
         defer gguf_file.deinit();
@@ -95,7 +106,6 @@ pub const LlamaCppComparator = struct {
 
         ctx.setNoAlloc(false);
         const input_tensor = try ctx.newTensor1d(.i32, n_tokens);
-        ctx.setNoAlloc(true);
 
         const data = input_tensor.dataBytes();
         const dst = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_tokens))];
@@ -103,9 +113,22 @@ pub const LlamaCppComparator = struct {
             dst[j] = @as(i32, @intCast(token));
         }
 
-        const graph = try ggml.CGraph.init(ctx);
+        const graph = try ggml.CGraph.initReserved(ctx, 32768);
         var builder = graph_builder.GraphBuilder.init(ctx, graph, params, self.allocator);
-        const logits_tensor = try model.buildGraph(&builder, input_tensor, n_tokens, null, 0);
+
+        // Create KV cache if needed (some models like Gemma4 require it)
+        const ctx_kv = try ggml.Context.initNoAlloc(512 * 1024 * 1024);
+        defer ctx_kv.deinit();
+        const max_seq_len = @min(params.max_seq_len, 2048);
+        const hdim_kv = params.n_head_dim;
+        const hdim_k = @max(params.n_head_dim, params.n_head_dim_k);
+        const hdim_v = if (params.n_head_dim_v > 0) @max(params.n_head_dim, params.n_head_dim_v) else hdim_kv;
+        var kv_mgr = try kv_cache.KVCache.initWithKVDim(ctx_kv, params.n_layer, params.n_kv_head, hdim_k, hdim_v, max_seq_len, self.allocator);
+        defer kv_mgr.deinit(self.allocator);
+        model.setKVCacheContext(ctx_kv);
+
+        const logits_tensor = try model.buildGraph(&builder, input_tensor, n_tokens, @ptrCast(&kv_mgr), 0);
+        ctx.setNoAlloc(true);
 
         const buft = ggml.backendCpuBufferType();
         var galloc = try ggml.Gallocr.init(buft);

@@ -15,6 +15,7 @@ const model_if = @import("model");
 const registry = @import("registry");
 const graph_builder = @import("graph_builder");
 const memory = @import("memory");
+const kv_cache = @import("kv_cache");
 
 const log = std.log.scoped(.gen_ref);
 
@@ -64,8 +65,17 @@ pub const ReferenceGenerator = struct {
         const file_size = @as(usize, @intCast(stat.size));
         const gguf_data = try self.allocator.alloc(u8, file_size);
         defer self.allocator.free(gguf_data);
-        const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
-        if (bytes_read != file_size) return error.FileReadError;
+        {
+            var offset: u64 = 0;
+            const chunk_size: usize = 64 * 1024 * 1024;
+            while (offset < file_size) {
+                const end = @min(offset + chunk_size, file_size);
+                const len = end - offset;
+                const bytes_read = try file.readPositionalAll(io, gguf_data[offset..][0..len], offset);
+                if (bytes_read != len) return error.FileReadError;
+                offset += bytes_read;
+            }
+        }
 
         var gguf_file = try gguf.parse(gguf_data, self.allocator);
         defer gguf_file.deinit();
@@ -104,7 +114,6 @@ pub const ReferenceGenerator = struct {
 
         ctx.setNoAlloc(false);
         const input_tensor = try ctx.newTensor1d(.i32, n_tokens);
-        ctx.setNoAlloc(true);
 
         // 复制输入 token
         const data = input_tensor.dataBytes();
@@ -114,9 +123,22 @@ pub const ReferenceGenerator = struct {
         }
 
         // 构建计算图
-        const graph = try ggml.CGraph.init(ctx);
+        const graph = try ggml.CGraph.initReserved(ctx, 32768);
         var builder = graph_builder.GraphBuilder.init(ctx, graph, params, self.allocator);
-        const logits_tensor = try model.buildGraph(&builder, input_tensor, n_tokens, null, 0);
+
+        // Create KV cache if needed (some models like Gemma4 require it)
+        const ctx_kv = try ggml.Context.initNoAlloc(512 * 1024 * 1024);
+        defer ctx_kv.deinit();
+        const max_seq_len = @min(params.max_seq_len, 2048);
+        const hdim_kv = params.n_head_dim;
+        const hdim_k = @max(params.n_head_dim, params.n_head_dim_k);
+        const hdim_v = if (params.n_head_dim_v > 0) @max(params.n_head_dim, params.n_head_dim_v) else hdim_kv;
+        var kv_mgr = try kv_cache.KVCache.initWithKVDim(ctx_kv, params.n_layer, params.n_kv_head, hdim_k, hdim_v, max_seq_len, self.allocator);
+        defer kv_mgr.deinit(self.allocator);
+        model.setKVCacheContext(ctx_kv);
+
+        const logits_tensor = try model.buildGraph(&builder, input_tensor, n_tokens, @ptrCast(&kv_mgr), 0);
+        ctx.setNoAlloc(true);
 
         // 分配并执行
         const buft = ggml.backendCpuBufferType();

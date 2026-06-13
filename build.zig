@@ -574,6 +574,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("graph_builder", graph_builder_mod);
         mod.addImport("memory", memory_mod);
         mod.addImport("tokenizer", tokenizer_mod);
+        mod.addImport("kv_cache", kv_cache_mod);
 
         const exe_tool = b.addExecutable(.{
             .name = "zllama-gen-ref",
@@ -601,6 +602,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("graph_builder", graph_builder_mod);
         mod.addImport("memory", memory_mod);
         mod.addImport("tokenizer", tokenizer_mod);
+        mod.addImport("kv_cache", kv_cache_mod);
 
         const exe_tool = b.addExecutable(.{
             .name = "zllama-compare-llamacpp",
@@ -612,6 +614,74 @@ pub fn build(b: *std.Build) void {
         run_cmd.step.dependOn(b.getInstallStep());
         if (b.args) |args| run_cmd.addArgs(args);
         _ = b.step("compare-llamacpp", "Run zllama-compare-llamacpp tool");
+    }
+
+    {
+        // zllama-compare-mtmd-vision: multimodal vision output quality validation
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tools/compare_mtmd_vision.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("gguf", gguf_mod);
+        mod.addImport("model", model_mod);
+        mod.addImport("registry", registry_mod);
+        mod.addImport("graph_builder", graph_builder_mod);
+        mod.addImport("memory", memory_mod);
+        mod.addImport("tokenizer", tokenizer_mod);
+        mod.addImport("sampler", sampler_mod);
+        mod.addImport("kv_cache", kv_cache_mod);
+        mod.addImport("mm", mm_manager_mod);
+        mod.addImport("preprocess", mm_preprocess_mod);
+        mod.addImport("chat_template", chat_template_mod);
+        mod.addImport("engine_common", engine_common_mod);
+
+        const exe_tool = b.addExecutable(.{
+            .name = "zllama-compare-mtmd-vision",
+            .root_module = mod,
+        });
+        b.installArtifact(exe_tool);
+
+        const run_cmd = b.addRunArtifact(exe_tool);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        _ = b.step("compare-mtmd-vision", "Run zllama-compare-mtmd-vision tool");
+    }
+
+    {
+        // zllama-compare-mtmd-audio: multimodal audio output quality validation
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tools/compare_mtmd_audio.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("gguf", gguf_mod);
+        mod.addImport("model", model_mod);
+        mod.addImport("registry", registry_mod);
+        mod.addImport("graph_builder", graph_builder_mod);
+        mod.addImport("memory", memory_mod);
+        mod.addImport("tokenizer", tokenizer_mod);
+        mod.addImport("sampler", sampler_mod);
+        mod.addImport("kv_cache", kv_cache_mod);
+        mod.addImport("mm", mm_manager_mod);
+        mod.addImport("preprocess", mm_preprocess_mod);
+        mod.addImport("chat_template", chat_template_mod);
+        mod.addImport("engine_common", engine_common_mod);
+
+        const exe_tool = b.addExecutable(.{
+            .name = "zllama-compare-mtmd-audio",
+            .root_module = mod,
+        });
+        b.installArtifact(exe_tool);
+
+        const run_cmd = b.addRunArtifact(exe_tool);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        _ = b.step("compare-mtmd-audio", "Run zllama-compare-mtmd-audio tool");
     }
 
     // ======================================================================

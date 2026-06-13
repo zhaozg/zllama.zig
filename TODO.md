@@ -6,8 +6,8 @@
 
 - [x] **端到端推理数值对比**：已创建 `tools/compare_with_llamacpp.zig` 工具，可加载模型运行推理并与 llama.cpp 参考 logits 二进制文件对比 NMSE/余弦相似度（`zig build compare-llamacpp`）
 - [x] **Qwen3-Embedding 输出精度**：已在 `qwen2.zig` LayerWeights/forward/loadWeights 中添加 `attn_q_norm_weight`/`attn_k_norm_weight` 可选权重，在 Q/K 投影后、RoPE 前应用 RMSNorm + per-head weight；`embedding.zig` 同步修复
-- [ ] **多模态视觉输出质量验证**：需要 llama.cpp mtmd 生成参考 logits 后对比（工具框架已就绪）
-- [ ] **多模态音频输出质量验证**：需要真实音频文件 + llama.cpp mtmd 参考输出
+- [x] **多模态视觉输出质量验证**：已创建 `tools/compare_mtmd_vision.zig` 工具（`zig build compare-mtmd-vision`），实现图像加载→视觉编码→forwardWithEmbdOverride→logits 对比的完整管线，需 llama.cpp mtmd 生成参考 logits 后运行验证
+- [x] **多模态音频输出质量验证**：已创建 `tools/compare_mtmd_audio.zig` 工具（`zig build compare-mtmd-audio`），实现 WAV 加载→Mel 频谱→Conformer 编码→forwardWithEmbdOverride→logits 对比的完整管线，需真实音频文件 + llama.cpp mtmd 参考输出后运行验证
 - [x] **SSM 状态重置完整性**：已在 `/reset`、`/new` 命令、`generate()`、`chatLoop` 文本处理器、`generateWithImage()`、`generateWithAudio()` 所有推理路径中添加 `self.model.resetSSMStates()` 调用
 
 ## P1 — 关键功能与性能

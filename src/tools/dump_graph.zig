@@ -358,9 +358,17 @@ pub fn main(init: std.process.Init) !void {
     const file_size = @as(usize, @intCast(stat.size));
     const gguf_data = try allocator.alloc(u8, file_size);
     defer allocator.free(gguf_data);
-
-    const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
-    if (bytes_read != file_size) return error.FileReadError;
+    {
+        var offset: u64 = 0;
+        const chunk_size: usize = 64 * 1024 * 1024;
+        while (offset < file_size) {
+            const end = @min(offset + chunk_size, file_size);
+            const len = end - offset;
+            const bytes_read = try file.readPositionalAll(io, gguf_data[offset..][0..len], offset);
+            if (bytes_read != len) return error.FileReadError;
+            offset += bytes_read;
+        }
+    }
 
     var gguf_file = try gguf.parse(gguf_data, allocator);
     defer gguf_file.deinit();
