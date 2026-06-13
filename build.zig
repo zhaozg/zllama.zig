@@ -201,6 +201,18 @@ pub fn build(b: *std.Build) void {
     engine_common_mod.addImport("ggml", ggml_mod);
     engine_common_mod.addImport("model", model_mod);
 
+    const prefill_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/prefill.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    prefill_mod.addImport("ggml", ggml_mod);
+    prefill_mod.addImport("graph_builder", graph_builder_mod);
+    prefill_mod.addImport("kv_cache", kv_cache_mod);
+    prefill_mod.addImport("model", model_mod);
+    prefill_mod.addImport("engine_common", engine_common_mod);
+
     const registry_mod = b.createModule(.{
 
         .root_source_file = b.path("src/models/registry.zig"),
@@ -377,6 +389,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("pooling", pooling_mod);
     exe_mod.addImport("engine_common", engine_common_mod);
     exe_mod.addImport("chat_template", chat_template_mod);
+    exe_mod.addImport("prefill", prefill_mod);
+
 
 
     const exe = b.addExecutable(.{
