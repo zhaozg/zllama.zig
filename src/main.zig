@@ -956,6 +956,7 @@ const InferenceEngine = struct {
             };
             break :blk try tmpl.apply(self.allocator, &messages, system, true);
         };
+        defer self.allocator.free(formatted_prompt);
         logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
 
         // 使用 tokenizeWithPlaceholders 分段 tokenize + 展开占位符
@@ -994,7 +995,7 @@ const InferenceEngine = struct {
         const start_pos: i32 = 0;
         const logits = try gemma4_model.forwardWithEmbdOverride(
             self.ctx_graph, graph, input_tensor, n_total_tokens,
-            @ptrCast(&self.kv_cache_mgr), start_pos, vision_embeddings, 0,
+            @ptrCast(&self.kv_cache_mgr), start_pos, vision_embeddings, 0, false,
         );
 
         // Allocate and compute LLM graph (Phase 3.4: Mixed Prefill)
@@ -1213,7 +1214,7 @@ const InferenceEngine = struct {
         const start_pos: i32 = 0;
         const logits = try gemma4_model.forwardWithEmbdOverride(
             self.ctx_graph, graph, input_tensor, n_total_tokens,
-            @ptrCast(&self.kv_cache_mgr), start_pos, audio_embeddings, embd_offset,
+            @ptrCast(&self.kv_cache_mgr), start_pos, audio_embeddings, embd_offset, false,
         );
 
         var galloc = try ggml.Gallocr.init(buft);

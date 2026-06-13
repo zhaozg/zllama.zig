@@ -171,6 +171,7 @@ pub const Gemma4Model = struct {
         start_pos: i32,
         embd_override: *ggml.Tensor,
         embd_offset: i32,
+        causal: bool,
     ) !*ggml.Tensor {
         const p = &self.params;
         const w = &self.weights;
@@ -223,7 +224,7 @@ pub const Gemma4Model = struct {
         const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
 
         // Main transformer loop (pass input_tokens for per-layer embedding if needed)
-        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens);
+        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, causal);
     }
 
     pub fn forward(
@@ -246,7 +247,7 @@ pub const Gemma4Model = struct {
 
         const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
 
-        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens);
+        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, true);
     }
 
     /// Shared transformer loop (used by both forward and forwardWithEmbdOverride).
@@ -260,6 +261,7 @@ pub const Gemma4Model = struct {
         start_pos: i32,
         kv_cache_mgr: ?*kv_cache.KVCache,
         input_tokens: ?*ggml.Tensor,
+        causal: bool,
     ) !*ggml.Tensor {
         const p = &self.params;
         const w = &self.weights;
@@ -404,6 +406,7 @@ pub const Gemma4Model = struct {
                     .start_pos = start_pos,
                     .scale_factor = p.f_attention_scale,
                     .attn_logit_softcap = p.attn_logit_softcapping,
+                    .causal = causal,
                 }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
                 // Reshape attn_out back to original Q dimension
@@ -437,6 +440,7 @@ pub const Gemma4Model = struct {
                     .start_pos = start_pos,
                     .scale_factor = p.f_attention_scale,
                     .attn_logit_softcap = p.attn_logit_softcapping,
+                    .causal = causal,
                 }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
                 // Reshape attn_out back to original Q dimension

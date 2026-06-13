@@ -32,6 +32,8 @@ pub const AttentionParams = struct {
     scale_factor: f32,
     /// Attention logit softcapping (0 = disabled). Used by Gemma 2/4.
     attn_logit_softcap: f32 = 0.0,
+    /// Whether to use causal masking. Set false for multimodal embedding prefill.
+    causal: bool = true,
 };
 
 /// 执行缩放点积注意力计算
@@ -70,10 +72,6 @@ pub fn scaledDotProductAttention(
     v_perm = ggml.cont(ctx, v_perm);
 
     // Step 2: kq = k @ q (mul_mat)
-    // ggml_mul_mat 自动处理 GQA: 当 k.ne[2] != q.ne[2] 时广播 k
-    // k_perm: [head_dim, cache_len, n_kv_head] (ne[0]=head_dim, ne[1]=cache_len, ne[2]=n_kv_head)
-    // q_perm: [head_dim, n_tokens, n_head]     (ne[0]=head_dim, ne[1]=n_tokens, ne[2]=n_head)
-    // 输出: [cache_len, n_tokens, n_head]
     var kq = ggml.mulMat(ctx, k_perm, q_perm);
 
     // Step 3: 缩放
@@ -87,8 +85,10 @@ pub fn scaledDotProductAttention(
     }
 
     // Step 4: masking + softmax
-    // kq: [cache_len, n_tokens, n_head] (3D)
-    if (swa_window) |window| {
+    if (!params.causal) {
+        // Non-causal: no mask, just softmax (for multimodal embedding prefill)
+        kq = ggml.softMax(ctx, kq);
+    } else if (swa_window) |window| {
         // SWA: build sliding-window + causal mask and use fused softmax_ext
         const mask = buildAttentionMask(ctx, params.cache_len, n_tokens, start_pos, window);
         kq = ggml.softMaxExt(ctx, kq, mask, 1.0, 0.0);
@@ -99,21 +99,14 @@ pub fn scaledDotProductAttention(
     }
 
     // Step 5: v = v^T (transpose)
-    // v_perm: [head_dim, cache_len, n_kv_head] -> transpose -> [cache_len, head_dim, n_kv_head]
-    // Use explicit cont4d to guarantee contiguous strides (avoids ggml_is_transposed edge case)
     const v_t_transposed = ggml.transpose(ctx, v_perm);
     const v_ne = v_t_transposed.ne();
     const v_t = ggml.cont4d(ctx, v_t_transposed, v_ne[0], v_ne[1], v_ne[2], v_ne[3]);
 
     // Step 6: kqv = v @ kq (mul_mat)
-    // v_t: [cache_len, head_dim, n_kv_head] (ne[0]=cache_len, ne[1]=head_dim, ne[2]=n_kv_head)
-    // kq:  [cache_len, n_tokens, n_head]    (ne[0]=cache_len, ne[1]=n_tokens, ne[2]=n_head)
-    // ggml_mul_mat 自动处理 GQA: 当 v_t.ne[2] != kq.ne[2] 时广播 v_t
-    // 输出: [head_dim, n_tokens, n_head]
     var kqv = ggml.mulMat(ctx, v_t, kq);
 
     // Step 7: permute(0,2,1,3) 恢复布局
-    // kqv: [head_dim, n_tokens, n_head] -> [head_dim, n_head, n_tokens]
     kqv = ggml.permute(ctx, kqv, 0, 2, 1, 3);
     kqv = ggml.cont(ctx, kqv);
 
@@ -124,8 +117,6 @@ pub fn scaledDotProductAttention(
 }
 
 /// 构建 SWA（滑动窗口注意力）掩码张量
-/// 返回 shape [cache_len, n_tokens] 的 f32 张量
-/// mask[i][j] = 0.0 如果允许注意 (within window & causal)，否则 = -inf
 fn buildAttentionMask(
     ctx: *ggml.Context,
     cache_len: i64,
@@ -136,7 +127,6 @@ fn buildAttentionMask(
     ctx.setNoAlloc(false);
     const mask = ctx.newTensor2d(.f32, cache_len, n_tokens) catch {
         ctx.setNoAlloc(true);
-        // Fallback: return a zero-filled mask (no SWA restriction)
         const fb = ctx.newTensor2d(.f32, 1, 1) catch unreachable;
         ctx.setNoAlloc(true);
         return fb;
@@ -146,15 +136,11 @@ fn buildAttentionMask(
     const data = mask.dataF32();
     const inf: f32 = -std.math.inf(f32);
 
-    // Fill mask: mask[cache_pos][query_idx]
-    // ggml uses column-major layout: for 2D tensor [cache_len, n_tokens],
-    // element (cache_pos, query_idx) is at data[query_idx * cache_len + cache_pos]
     for (0..@as(usize, @intCast(cache_len))) |ci| {
         const cache_pos: i64 = @intCast(ci);
         for (0..@as(usize, @intCast(n_tokens))) |qi| {
             const query_pos: i64 = @as(i64, start_pos) + @as(i64, @intCast(qi));
             const dist: i64 = query_pos - cache_pos;
-            // Allowed: causal (dist >= 0) and within window (dist < window_size)
             if (dist >= 0 and dist < window_size) {
                 data[qi * @as(usize, @intCast(cache_len)) + ci] = 0.0;
             } else {
@@ -176,7 +162,7 @@ test "AttentionParams basic" {
         .n_tokens = 1,
         .cache_len = 10,
         .start_pos = 0,
-        .scale_factor = 0.08838834764831845, // 1/sqrt(128)
+        .scale_factor = 0.08838834764831845,
     };
     try testing.expectEqual(@as(i64, 32), p.n_head);
     try testing.expectEqual(@as(i64, 8), p.n_kv_head);

@@ -41,7 +41,7 @@
 
 ```bash
 zllama --model gemma-4-E2B-it-Q4_K_M.gguf \
-       --mmproj mmproj-F16.gguf \
+       --mmproj mmproj-BF16.gguf \
        --image hello.png \
        -p "Describe this image"
 ```
@@ -169,7 +169,7 @@ CLI 参数 `--mmproj`、`--image`、`--audio` 已添加，`main.zig` 中存在 `
 ```
 [x] 3.1 获取测试资源
      - Gemma 4 E2B 模型: ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf
-     - mmproj 文件: ~/.cache/models/mmproj-F16.gguf
+     - mmproj 文件: ~/.cache/models/mmproj-BF16.gguf
      - 测试图像: ~/.cache/models/ocr.png, ~/.cache/models/hello.png
 
 [x] 3.2 Vision Encoder 输出形状验证
@@ -211,35 +211,25 @@ CLI 参数 `--mmproj`、`--image`、`--audio` 已添加，`main.zig` 中存在 `
      - 非正方形图像处理 (pad → square)
 
 [ ] 4.3 错误处理
-     - 无 mmproj 文件时的友好提示
-     - 图像格式不支持时的回退
-     - 内存不足时的 graceful degradation
-```
-
-### Phase 5：音频端到端联调
+### Phase 3：视觉端到端联调（当前阶段）
 
 ```
-[x] 5.1 WAV → Mel → Conformer → LLM 联调
-     - generateWithAudio() 端到端调通
-     - <|audio|> token 在词汇表中找到 (id=258881)
-     - 预分词拆分方案：BPE 编码前拆分 <|audio|> 标记
-     - Audio encoder: [1536, 20] tokens for 0.8s WAV
-     - 形状验证通过（1536 == model n_embd）
-     - 端到端生成成功，pp_time ~2.3s
-
-[ ] 5.2 跨平台 FFT
-     - Linux: 纯 Zig 实现或集成 kissfft
-     - Windows: 同上
-     - 可编译时选择后端 (Accelerate / Zig-native)
+[x] 3.1 获取测试资源
+[x] 3.2 Vision Encoder 输出形状验证
+[x] 3.3 占位符 Token 注入
+[x] 3.4 混合 Prefill 推理
+[ ] 3.5 输出质量验证
+     - 端到端生成成功但输出为垃圾文本（重复符号）
+     - 根因分析: 注意力机制使用 causal mask，但图像 token 需要非因果(bidirectional)注意力
+     - 参考 llama.cpp: mtmd_helper_decode_image_chunk() 在解码图像前调用 llama_set_causal_attn(lctx, false)
+     - 已添加 causal: bool 参数到 AttentionParams / forwardWithEmbdOverride / transformerForward
+     - 视觉/音频 prefill 现在传递 causal=false
+     - 待办: 理想方案应分两次 prefill：(1) vision-only non-causal → KV cache，(2) text-only causal
+     - 内存泄漏: applyGemma4 formatted_prompt 已修复 (audio 路径), vision 路径待加 defer self.allocator.free(formatted_prompt)
+     - 待验证: 当前修改后的端到端输出质量
 ```
 
-### Phase 6：扩展模型
-
-```
-[ ] 6.1 Qwen2.5-VL 视觉编码器
-     - 动态分辨率 ViT (NaViT-style)
-     - MRoPE 位置编码
-     - <|vision_start|> / <|image_pad|> / <|vision_end|> 标记处理
+### Phase 4：鲁棒性与体验
 
 [ ] 6.2 LLaVA 系列
      - CLIP ViT 编码器
@@ -383,7 +373,7 @@ This image shows...<end_of_turn>
 ```bash
 # 1. 确认已有模型和 mmproj 文件
 ls ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf
-ls ~/.cache/models/mmproj-F16.gguf  # 或类似命名的 mmproj
+ls ~/.cache/models/mmproj-BF16.gguf  # 或类似命名的 mmproj
 
 # 2. 准备测试图像
 # 任意 PNG/JPEG 图像，最好是 OCR 或简单场景图
@@ -392,7 +382,7 @@ ls ~/.cache/models/mmproj-F16.gguf  # 或类似命名的 mmproj
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zllama \
     --model ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf \
-    --mmproj ~/.cache/models/mmproj-F16.gguf \
+    --mmproj ~/.cache/models/mmproj-BF16.gguf \
     --image ~/test.png \
     -p "What is in this image?" \
     -n 50
@@ -418,6 +408,102 @@ zig build -Doptimize=ReleaseFast
    llama-mtmd -m gemma-4-E2B-it.gguf --mmproj mmproj.gguf --image test.png -p "What is this?"
    ```
    使用 `compare_logits` 工具对比 logits。
+
+## 当前问题
+
+```
+
+❯ zig-out/bin/zllama -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf --mmproj ~/.cache/models/mmproj-BF16.gguf --image ~/.cache/models/hello.png -v -p "translate audio to text"
+info(main): zllama.zig v0.1.0 (ggml 0.15.0)
+info(main): Loading model: /Users/zhaozg/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf
+info(registry): Detected architecture: gemma4
+info(main): Detected architecture: gemma4
+info(gemma4): n_ff not specified in GGUF, using default 4 * n_embd = 6144
+info(gemma4): Gemma4: vocab=262144, embd=1536, heads=8, kv_heads=1, layers=35, ff=6144, swa=512, shared_kv=20, softcap=30, embd_per_layer=256
+info(gemma4): Estimated Gemma 4 weights memory: 3994 MB (raw: 2947 MB, 601 tensors)
+info(gemma4): Loading Gemma 4 weights (35 layers)...
+info(gemma4): Gemma4: per-layer embedding enabled (n_embd_per_layer=256)
+info(gemma4): Gemma4: global_rope_freqs loaded successfully
+info(gemma4): Layer 0 FFN gate: [1536, 6144], n_embd=1536
+info(gemma4): Gemma4 weights: 35 layers, 15 with KV, n_ff=6144, per_layer=256
+info(main): n_vocab=262144, n_embd=1536, n_head=8, n_kv_head=1
+info(main): n_layer=35, n_ff=6144, n_head_dim=512
+info(main): max_seq_len=131072, rope_theta=1000000, rope_dim=512
+info(tokenizer): Tokenizer model: 'gemma4' -> spm
+info(tokenizer): Tokenizer: 262144 entries (normal=261888, byte=256)
+info(tokenizer): Tokenizer: 514906 BPE merge rules
+info(tokenizer): Tokenizer: 4 EOG tokens
+info(main): Tokenizer: 262144 tokens
+info(main): Estimated memory: 2048 MB
+info(kv_cache): KV Cache initialized: 35 layers, K:[512, 1, 2048] V:[512, 1, 2048]
+info(main): MMProj capabilities: audio=true, vision=true
+info(audio_encoder): Loading audio encoder: embd=1024, heads=8, d_head=128, layers=12, ff=4096, mel_bins=128, norm_eps=1e-5
+info(audio_encoder): Audio encoder loaded: 12 layers, subsampling convs ready
+info(mm): Audio encoder initialized
+info(vision_encoder): Loading vision encoder: type=gemma4v, size=896, patch=14, embd=1152, heads=16, layers=27
+info(vision_encoder): Vision encoder loaded: 27 ViT layers
+info(mm): Vision encoder initialized
+info(main): Multimodal encoder loaded from: /Users/zhaozg/.cache/models/mmproj-BF16.gguf
+info(main): Multi-modal: yes
+info(main):   Vision: yes (ViT (SigLIP/Gemma4V))
+info(main):   Audio : yes (Conformer (E2B), -1 Hz)
+info(main): Chat template: from GGUF metadata
+info(main): Model loaded successfully.
+info(main): Prompt: "translate audio to text"
+info(main): Max tokens: 256
+info(main): --- Vision Generation ---
+info(mm_preprocess): Decoded image via stb_image: 896x896 (4 channels)
+info(mm_preprocess): Processed image: 896x896 -> 896x896
+info(main): Loaded image: 896x896 -> 896x896
+[ggml] [INFO] load_backend: loaded BLAS backend from /usr/local/Cellar/ggml/0.15.0/libexec/libggml-blas.so
+[ggml] [INFO] load_backend: loaded CPU backend from /usr/local/Cellar/ggml/0.15.0/libexec/libggml-cpu-icelake.so
+info(ggml): Backends loaded
+info(main): Vision encoder output: [1536, 784] (n_embd x n_tokens)
+info(main): Vision embedding dimension check: 1536 == model n_embd 1536 ✓
+info(main): Vision tokens=784 (expected ~1024 for 896x896); mmproj may use different pooling
+info(main): Image placeholder token '<|image|>' -> id=258880
+info(main): Formatted prompt (93 chars):
+<|turn>user
+<|image|>translate audio to text<turn|>
+<|turn>model
+<|channel>thought
+<channel|>
+info(main): Vision tokens=784, image markers=1, total=809
+info(main): First generated token (vision): id=108, is_eog=false, pp_time=75.237s
+
+
+---
+
+** (물) : (물) : (물) : (물) : (물) : (물) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) : (ω) :
+info(main): Vision generation: 256 tokens in 105.98s (2.4 t/s)
+info(main): --- Done ---
+error(DebugAllocator): memory address 0x2dfec6680 leaked:
+/Users/zhaozg/opt/zig-x86_64-macos-0.16.0/lib/std/array_list.zig:661:52: 0x105027825 in toOwnedSlice (zllama)
+            const new_memory = try gpa.alignedAlloc(T, alignment, self.items.len);
+                                                   ^
+/Users/zhaozg/work/ai/zllama.zig/src/chat_template/mod.zig:623:28: 0x104f495ca in applyGemma4 (zllama)
+    return buf.toOwnedSlice(allocator);
+                           ^
+/Users/zhaozg/work/ai/zllama.zig/src/chat_template/mod.zig:99:42: 0x104f4d5f0 in apply (zllama)
+            .gemma4 => return applyGemma4(allocator, messages, system_prompt, add_generation_prompt),
+                                         ^
+/Users/zhaozg/work/ai/zllama.zig/src/main.zig:957:38: 0x104f59447 in generateWithImage (zllama)
+            break :blk try tmpl.apply(self.allocator, &messages, system, true);
+                                     ^
+/Users/zhaozg/work/ai/zllama.zig/src/main.zig:1409:33: 0x104f6a8ff in main (zllama)
+        engine.generateWithImage(io, args.prompt, args.image_path, args.max_tokens) catch |err| {
+                                ^
+/Users/zhaozg/opt/zig-x86_64-macos-0.16.0/lib/std/start.zig:737:30: 0x104f6b1f0 in callMain (zllama)
+    return wrapMain(root.main(.{
+                             ^
+(additional stack frames may have been skipped...)
+
+
+1. 内存泄漏: applyGemma4 的 formatted_prompt 未释放 → 已修复（vision 路径暂缺 defer，audio 路径已修复）
+2. `<|image|>` 数据嵌入质量: 核心问题是 attention 使用 causal mask，图像 token 需要 bidirectional attention
+3. 输入生成差: 非因果注意力修复后待验证（当前方案：单次 prefill 全部 non-causal，后续应分两步 prefill）
+
+---
 
 ---
 
