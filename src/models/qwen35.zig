@@ -77,7 +77,7 @@ pub const QwenWeights = struct {
 /// 每层的 SSM 状态（conv_state 和 ssm_state）
 const LayerSSMState = struct {
     conv_state: ?*ggml.Tensor, // [d_conv-1, conv_dim]
-    ssm_state: ?*ggml.Tensor,  // [S_v*S_v*H, 1, n_seqs]
+    ssm_state: ?*ggml.Tensor, // [S_v*S_v*H, 1, n_seqs]
 };
 
 pub const QwenModel = struct {
@@ -124,368 +124,341 @@ pub const QwenModel = struct {
         }
     }
 
+    // ============================================================================
+    // Qwen 3.5 图构建类
+    // ============================================================================
+    //
+    // 参考 llama.cpp 的 llm_build_context 模式：将 forward() 拆分为独立的图构建类。
+    // Qwen35Graph 将 forward 分解为 build / buildFullAttnLayer / buildSSMLayer / buildOutput。
 
+    pub const Qwen35Graph = struct {
+        ctx: *ggml.Context,
+        gf: *ggml.CGraph,
+        params: *const QwenParams,
+        weights: *const QwenWeights,
+        ssm_states: []LayerSSMState,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        start_pos: i32,
 
-    pub fn forward(self: *QwenModel, ctx: *ggml.Context, graph: *ggml.CGraph, input_tokens: *ggml.Tensor, n_tokens: i32, kv_cache_mgr: ?*kv_cache.KVCache, start_pos: i32) !*ggml.Tensor {
-        const p = &self.qwen_params;
-        const w = &self.qwen_weights;
-        const n_head: i64 = @intCast(p.base.n_head);
-        const n_kv_head: i64 = @intCast(p.base.n_kv_head);
-        const head_dim: i64 = @intCast(p.base.n_head_dim);
-        const n_tokens_i64: i64 = n_tokens;
-        const rope_dim: i64 = @intCast(p.base.rope_dim);
+        const Self = @This();
 
-        var cur = embed.tokenEmbedding(ctx, w.base.token_embd, input_tokens);
-        cur.setName("token_embd");
+        pub fn init(
+            ctx: *ggml.Context,
+            gf: *ggml.CGraph,
+            params: *const QwenParams,
+            weights: *const QwenWeights,
+            ssm_states: []LayerSSMState,
+            kv_cache_mgr: ?*kv_cache.KVCache,
+            start_pos: i32,
+        ) Self {
+            return Self{
+                .ctx = ctx,
+                .gf = gf,
+                .params = params,
+                .weights = weights,
+                .ssm_states = ssm_states,
+                .kv_cache_mgr = kv_cache_mgr,
+                .start_pos = start_pos,
+            };
+        }
 
-        for (w.layers, 0..) |*layer, i| {
-            const layer_idx: u32 = @intCast(i);
-            const is_full_attn = isFullAttentionLayer(layer_idx, p.full_attention_interval);
-            var name_buf: [128]u8 = undefined;
+        pub fn build(
+            self: *Self,
+            input_tokens: *ggml.Tensor,
+            n_tokens: i32,
+        ) !*ggml.Tensor {
+            const p = self.params;
+            const w = self.weights;
+            const n_head: i64 = @intCast(p.base.n_head);
+            const n_kv_head: i64 = @intCast(p.base.n_kv_head);
+            const head_dim: i64 = @intCast(p.base.n_head_dim);
+            const n_tokens_i64: i64 = n_tokens;
+            const rope_dim: i64 = @intCast(p.base.rope_dim);
 
-            // Pre-attention norm
-            var attn_input = rms_norm.rmsNorm(ctx, cur, layer.attn_norm_weight, p.base.norm_eps);
+            var cur = embed.tokenEmbedding(self.ctx, w.base.token_embd, input_tokens);
+            cur.setName("token_embd");
+
+            for (w.layers, 0..) |*layer, i| {
+                const layer_idx: u32 = @intCast(i);
+                const is_full_attn = isFullAttentionLayer(layer_idx, p.full_attention_interval);
+                var name_buf: [128]u8 = undefined;
+
+                var attn_input = rms_norm.rmsNorm(self.ctx, cur, layer.attn_norm_weight, p.base.norm_eps);
+                {
+                    const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_norm", .{i}) catch unreachable;
+                    name_buf[name.len] = 0;
+                    attn_input.setName(name_buf[0..name.len :0]);
+                }
+
+                if (is_full_attn) {
+                    const attn_out = try self.buildFullAttnLayer(layer, attn_input, n_tokens_i64, n_head, n_kv_head, head_dim, rope_dim, i, &name_buf);
+                    cur = ggml.add(self.ctx, cur, attn_out);
+                } else {
+                    const ssm_out = try self.buildSSMLayer(layer, attn_input, n_tokens_i64, i);
+                    cur = ggml.add(self.ctx, cur, ssm_out);
+                }
+
+                var post_attn = rms_norm.rmsNorm(self.ctx, cur, layer.post_attention_norm_weight, p.base.norm_eps);
+                {
+                    const name = std.fmt.bufPrint(&name_buf, "blk.{d}.post_attn_norm", .{i}) catch unreachable;
+                    name_buf[name.len] = 0;
+                    post_attn.setName(name_buf[0..name.len :0]);
+                }
+
+                const ffn_out = swiglu.swiGLU(self.ctx, post_attn, layer.ffn_gate_weight, layer.ffn_up_weight, layer.ffn_down_weight);
+                {
+                    const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_out", .{i}) catch unreachable;
+                    name_buf[name.len] = 0;
+                    ffn_out.setName(name_buf[0..name.len :0]);
+                }
+                cur = ggml.add(self.ctx, cur, ffn_out);
+            }
+
+            return self.buildOutput(cur);
+        }
+
+        fn buildFullAttnLayer(
+            self: *Self,
+            layer: *const LayerWeights,
+            attn_input: *ggml.Tensor,
+            n_tokens_i64: i64,
+            n_head: i64,
+            n_kv_head: i64,
+            head_dim: i64,
+            rope_dim: i64,
+            layer_idx: usize,
+            name_buf: *[128]u8,
+        ) !*ggml.Tensor {
+            const p = self.params;
+            const ctx = self.ctx;
+            const gf = self.gf;
+
+            const q_w = layer.attn_q_weight orelse return error.MissingWeight;
+            const k_w = layer.attn_k_weight orelse return error.MissingWeight;
+            const v_w = layer.attn_v_weight orelse return error.MissingWeight;
+            const o_w = layer.attn_output_weight orelse return error.MissingWeight;
+
+            const q_full = ggml.mulMat(ctx, q_w, attn_input);
+            var k = ggml.mulMat(ctx, k_w, attn_input);
+            var v = ggml.mulMat(ctx, v_w, attn_input);
+
+            var q = ctx.view3d(q_full, head_dim, n_head, n_tokens_i64, @as(usize, @intCast(head_dim * 2 * @sizeOf(f32))), @as(usize, @intCast(head_dim * 2 * n_head * @sizeOf(f32))), 0);
+            const q_gate_view = ctx.view3d(q_full, head_dim, n_head, n_tokens_i64, @as(usize, @intCast(head_dim * 2 * @sizeOf(f32))), @as(usize, @intCast(head_dim * 2 * n_head * @sizeOf(f32))), @as(usize, @intCast(head_dim * @sizeOf(f32))));
+
+            q = ggml.cont(ctx, q);
+
+            if (layer.attn_q_norm_weight) |q_norm_raw| {
+                q = ggml.rmsNorm(ctx, q, p.base.norm_eps);
+                const q_norm_3d = ggml.reshape3d(ctx, q_norm_raw, head_dim, 1, 1);
+                const q_norm_target = ctx.newTensor3d(.f32, head_dim, n_head, n_tokens_i64) catch unreachable;
+                q = ggml.mul(ctx, q, ggml.repeat(ctx, q_norm_3d, q_norm_target));
+            }
+
+            k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
+            if (layer.attn_k_norm_weight) |k_norm_raw| {
+                k = ggml.rmsNorm(ctx, k, p.base.norm_eps);
+                const k_norm_3d = ggml.reshape3d(ctx, k_norm_raw, head_dim, 1, 1);
+                const k_norm_target = ctx.newTensor3d(.f32, head_dim, n_kv_head, n_tokens_i64) catch unreachable;
+                k = ggml.mul(ctx, k, ggml.repeat(ctx, k_norm_3d, k_norm_target));
+            }
+            v = ggml.reshape3d(ctx, v, head_dim, n_kv_head, n_tokens_i64);
+
+            const pos_tensor = rope.buildMultiPositionTensor(ctx, @intCast(n_tokens_i64), self.start_pos);
+            const rope_sections = [4]i32{ 11, 11, 10, 0 };
+            q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, 40, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, 40, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+
+            if (self.kv_cache_mgr) |cache| {
+                cache.setKv(ctx, gf, layer_idx, k, v, @intCast(n_tokens_i64));
+                k = cache.getKView(ctx, layer_idx);
+                v = cache.getVView(ctx, layer_idx);
+            }
+
+            const cache_len: i64 = if (self.kv_cache_mgr) |cache| @as(i64, @intCast(cache.currentLen())) else n_tokens_i64;
+
+            var attn_out = attention.scaledDotProductAttention(ctx, q, k, v, .{
+                .n_head = n_head,
+                .n_kv_head = n_kv_head,
+                .head_dim = head_dim,
+                .n_tokens = n_tokens_i64,
+                .cache_len = cache_len,
+                .start_pos = self.start_pos,
+                .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
+            }, null);
+
+            const gate_cont = ggml.cont(ctx, q_gate_view);
+            const gate_sigmoid = ggml.sigmoid(ctx, ggml.reshape2d(ctx, gate_cont, n_head * head_dim, n_tokens_i64));
+            attn_out = ggml.mul(ctx, attn_out, gate_sigmoid);
             {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_norm", .{i}) catch unreachable;
+                const name = std.fmt.bufPrint(name_buf, "blk.{d}.attn_gated", .{layer_idx}) catch unreachable;
                 name_buf[name.len] = 0;
-                attn_input.setName(name_buf[0..name.len :0]);
+                attn_out.setName(name_buf[0..name.len :0]);
             }
 
-            if (is_full_attn) {
-                const attn_out = try self.forwardFullAttention(ctx, graph, layer, attn_input, n_tokens_i64, n_head, n_kv_head, head_dim, rope_dim, kv_cache_mgr, start_pos, i, &name_buf);
-                cur = ggml.add(ctx, cur, attn_out);
-            } else {
-                const ssm_out = try self.forwardSSM(ctx, graph, layer, attn_input, n_tokens_i64, i);
-                cur = ggml.add(ctx, cur, ssm_out);
-            }
-
-            // Post-attention norm (Qwen35 uses this instead of ffn_norm)
-            var post_attn = rms_norm.rmsNorm(ctx, cur, layer.post_attention_norm_weight, p.base.norm_eps);
+            var result = ggml.mulMat(ctx, o_w, attn_out);
             {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.post_attn_norm", .{i}) catch unreachable;
+                const name = std.fmt.bufPrint(name_buf, "blk.{d}.attn_out", .{layer_idx}) catch unreachable;
                 name_buf[name.len] = 0;
-                post_attn.setName(name_buf[0..name.len :0]);
+                result.setName(name_buf[0..name.len :0]);
             }
-
-            // SwiGLU FFN
-            const ffn_out = swiglu.swiGLU(ctx, post_attn, layer.ffn_gate_weight, layer.ffn_up_weight, layer.ffn_down_weight);
-            {
-                const name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_out", .{i}) catch unreachable;
-                name_buf[name.len] = 0;
-                ffn_out.setName(name_buf[0..name.len :0]);
-            }
-            cur = ggml.add(ctx, cur, ffn_out);
+            return result;
         }
 
-        // Output norm & projection
-        cur = rms_norm.rmsNorm(ctx, cur, w.base.output_norm_weight, p.base.norm_eps);
-        cur.setName("output_norm");
-        const out_w = w.base.output_weight orelse w.base.token_embd;
-        var logits_tensor = ggml.mulMat(ctx, out_w, cur);
-        logits_tensor.setName("logits");
-        graph.buildForwardExpand(logits_tensor);
-        return logits_tensor;
-    }
+        fn buildSSMLayer(
+            self: *Self,
+            layer: *const LayerWeights,
+            attn_input: *ggml.Tensor,
+            n_tokens_i64: i64,
+            layer_idx: usize,
+        ) !*ggml.Tensor {
+            const p = self.params;
+            const ctx = self.ctx;
+            const gf = self.gf;
+            const d_inner: i64 = @intCast(p.ssm_inner_size);
+            const d_state: i64 = @intCast(p.ssm_state_size);
+            const d_conv: i64 = @intCast(p.ssm_conv_kernel);
+            const n_group: i64 = @intCast(p.ssm_group_count);
+            const dt_rank: i64 = @intCast(p.ssm_time_step_rank);
+            const n_seqs: i64 = 1;
 
-    fn forwardFullAttention(self: *QwenModel, ctx: *ggml.Context, graph: *ggml.CGraph, layer: *const LayerWeights, attn_input: *ggml.Tensor, n_tokens_i64: i64, n_head: i64, n_kv_head: i64, head_dim: i64, rope_dim: i64, kv_cache_mgr: ?*kv_cache.KVCache, start_pos: i32, layer_idx: usize, name_buf: *[128]u8) !*ggml.Tensor {
-        const p = &self.qwen_params;
-        const q_w = layer.attn_q_weight orelse return error.MissingWeight;
-        const k_w = layer.attn_k_weight orelse return error.MissingWeight;
-        const v_w = layer.attn_v_weight orelse return error.MissingWeight;
-        const o_w = layer.attn_output_weight orelse return error.MissingWeight;
+            const head_k_dim = d_state;
+            const head_v_dim = @divExact(d_inner, dt_rank);
+            const num_k_heads = n_group;
+            const num_v_heads = dt_rank;
+            const key_dim = head_k_dim * num_k_heads;
+            const value_dim = head_v_dim * num_v_heads;
+            const conv_dim = key_dim * 2 + value_dim;
 
-        // Q projection outputs [Q, gate] combined: [n_embd_head*2*n_head, n_tokens]
-        // Qwen3.5: Q and gate are interleaved: Q[0], gate[0], Q[1], gate[1], ...
-        const q_full = ggml.mulMat(ctx, q_w, attn_input);
-        var k = ggml.mulMat(ctx, k_w, attn_input);
-        var v = ggml.mulMat(ctx, v_w, attn_input);
+            // Step 1: Input projections
+            const qkv_mixed = ggml.mulMat(ctx, layer.attn_qkv_weight.?, attn_input);
+            qkv_mixed.setName("ssm_qkv_mixed");
+            const z = ggml.mulMat(ctx, layer.attn_gate_weight.?, attn_input);
+            z.setName("ssm_z");
 
-        // View Q as 3D with interleaved stride: [head_dim, n_head, n_tokens] with stride = head_dim * 2
-        var q = ctx.view3d(q_full, head_dim, n_head, n_tokens_i64,
-            @as(usize, @intCast(head_dim * 2 * @sizeOf(f32))),
-            @as(usize, @intCast(head_dim * 2 * n_head * @sizeOf(f32))),
-            0);
-        // Gate is the same view but with offset = head_dim
-        const q_gate_view = ctx.view3d(q_full, head_dim, n_head, n_tokens_i64,
-            @as(usize, @intCast(head_dim * 2 * @sizeOf(f32))),
-            @as(usize, @intCast(head_dim * 2 * n_head * @sizeOf(f32))),
-            @as(usize, @intCast(head_dim * @sizeOf(f32))));
+            // Step 2: Beta
+            var beta = ggml.mulMat(ctx, layer.ssm_beta_weight.?, attn_input);
+            beta = ggml.reshape4d(ctx, beta, 1, num_v_heads, n_tokens_i64, n_seqs);
+            beta = ggml.sigmoid(ctx, beta);
+            beta.setName("ssm_beta");
 
-        // Make Q contiguous for norm
-        q = ggml.cont(ctx, q);
+            // Step 3: Alpha -> gate
+            var alpha = ggml.mulMat(ctx, layer.ssm_alpha_weight.?, attn_input);
+            alpha = ggml.reshape3d(ctx, alpha, num_v_heads, n_tokens_i64, n_seqs);
+            const alpha_biased = ggml.add(ctx, alpha, layer.ssm_dt_bias.?);
+            const alpha_softplus = ggml.softplus(ctx, alpha_biased);
+            var gate = ggml.mul(ctx, alpha_softplus, layer.ssm_a.?);
+            gate = ggml.reshape4d(ctx, gate, 1, num_v_heads, n_tokens_i64, n_seqs);
+            gate.setName("ssm_gate");
 
-        // Q norm: apply RMS norm + Q norm weight to Q only (not gate)
-        if (layer.attn_q_norm_weight) |q_norm_raw| {
-            q = ggml.rmsNorm(ctx, q, p.base.norm_eps);
-            // q_norm_raw: [head_dim] -> reshape to [head_dim, 1, 1] for broadcasting
-            const q_norm_3d = ggml.reshape3d(ctx, q_norm_raw, head_dim, 1, 1);
-            const q_norm_target = ctx.newTensor3d(.f32, head_dim, n_head, n_tokens_i64) catch unreachable;
-            const q_norm_rep = ggml.repeat(ctx, q_norm_3d, q_norm_target);
-            q = ggml.mul(ctx, q, q_norm_rep);
-        }
+            // Step 4: Conv1d
+            const qkv_2d = ggml.reshape2d(ctx, qkv_mixed, conv_dim, n_tokens_i64);
+            const qkv_transposed = ggml.cont(ctx, ggml.permute(ctx, qkv_2d, 1, 0, 2, 3));
 
-        // K norm: reshape K to 3D first, then apply norm (llama.cpp style)
-        k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
-        if (layer.attn_k_norm_weight) |k_norm_raw| {
-            k = ggml.rmsNorm(ctx, k, p.base.norm_eps);
-            const k_norm_3d = ggml.reshape3d(ctx, k_norm_raw, head_dim, 1, 1);
-            const k_norm_target = ctx.newTensor3d(.f32, head_dim, n_kv_head, n_tokens_i64) catch unreachable;
-            const k_norm_rep = ggml.repeat(ctx, k_norm_3d, k_norm_target);
-            k = ggml.mul(ctx, k, k_norm_rep);
-        }
-
-        // V reshape
-        v = ggml.reshape3d(ctx, v, head_dim, n_kv_head, n_tokens_i64);
-
-        // MRoPE (Multi-dimensional RoPE)
-        const pos_tensor = rope.buildMultiPositionTensor(ctx, @intCast(n_tokens_i64), start_pos);
-        const rope_sections = [4]i32{ 11, 11, 10, 0 };
-        const rope_type: i32 = 40; // GGML_ROPE_TYPE_IMROPE for Qwen 3.5
-        q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-        k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, rope_type, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-
-        // KV Cache: K/V 形状为 [head_dim, n_kv_head, n_tokens]
-        // Cache 布局: [head_dim, n_kv_head, max_seq_len]
-        // 直接存储，不需要 permute（与 cache 布局一致）
-        if (kv_cache_mgr) |cache| {
-            cache.setKv(ctx, graph, layer_idx, k, v, @intCast(n_tokens_i64));
-            k = cache.getKView(ctx, layer_idx);
-            v = cache.getVView(ctx, layer_idx);
-        }
-
-        const cache_len: i64 = if (kv_cache_mgr) |cache| @as(i64, @intCast(cache.currentLen())) else n_tokens_i64;
-
-        // Scaled dot-product attention
-        // attention.scaledDotProductAttention 期望输入:
-        //   q: [head_dim, n_head, n_tokens]
-        //   k: [head_dim, n_kv_head, cache_len]
-        //   v: [head_dim, n_kv_head, cache_len]
-        var attn_out = attention.scaledDotProductAttention(ctx, q, k, v, .{
-            .n_head = n_head,
-            .n_kv_head = n_kv_head,
-            .head_dim = head_dim,
-            .n_tokens = n_tokens_i64,
-            .cache_len = cache_len,
-            .start_pos = start_pos,
-            .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
-        }, null);
-
-        // Gate: sigmoid(gate) * attn_out
-        // Ensure gate is contiguous before sigmoid
-        // gate_view: [head_dim, n_head, n_tokens] -> reshape to [n_head*head_dim, n_tokens]
-        const gate_cont = ggml.cont(ctx, q_gate_view);
-        const gate_2d = ggml.reshape2d(ctx, gate_cont, n_head * head_dim, n_tokens_i64);
-        const gate_sigmoid = ggml.sigmoid(ctx, gate_2d);
-        attn_out = ggml.mul(ctx, attn_out, gate_sigmoid);
-        {
-            const name = std.fmt.bufPrint(name_buf, "blk.{d}.attn_gated", .{layer_idx}) catch unreachable;
-            name_buf[name.len] = 0;
-            attn_out.setName(name_buf[0..name.len :0]);
-        }
-
-        // Output projection
-        var result = ggml.mulMat(ctx, o_w, attn_out);
-        {
-            const name = std.fmt.bufPrint(name_buf, "blk.{d}.attn_out", .{layer_idx}) catch unreachable;
-            name_buf[name.len] = 0;
-            result.setName(name_buf[0..name.len :0]);
-        }
-        return result;
-    }
-
-    fn forwardSSM(self: *QwenModel, ctx: *ggml.Context, graph: *ggml.CGraph, layer: *const LayerWeights, attn_input: *ggml.Tensor, n_tokens_i64: i64, layer_idx: usize) !*ggml.Tensor {
-        const p = &self.qwen_params;
-        const d_inner: i64 = @intCast(p.ssm_inner_size);
-        const d_state: i64 = @intCast(p.ssm_state_size);
-        const d_conv: i64 = @intCast(p.ssm_conv_kernel);
-        const n_group: i64 = @intCast(p.ssm_group_count);
-        const dt_rank: i64 = @intCast(p.ssm_time_step_rank);
-        const n_seqs: i64 = 1;
-
-        const head_k_dim = d_state;
-        const head_v_dim = @divExact(d_inner, dt_rank);
-        const num_k_heads = n_group;
-        const num_v_heads = dt_rank;
-        const key_dim = head_k_dim * num_k_heads;
-        const value_dim = head_v_dim * num_v_heads;
-        const conv_dim = key_dim * 2 + value_dim;
-
-        // === Step 1: Input projections (QKV mixed + Z gate) ===
-        const qkv_mixed = ggml.mulMat(ctx, layer.attn_qkv_weight.?, attn_input);
-        qkv_mixed.setName("ssm_qkv_mixed");
-        const z = ggml.mulMat(ctx, layer.attn_gate_weight.?, attn_input);
-        z.setName("ssm_z");
-
-        // === Step 2: Beta (sigmoid) ===
-        var beta = ggml.mulMat(ctx, layer.ssm_beta_weight.?, attn_input);
-        beta = ggml.reshape4d(ctx, beta, 1, num_v_heads, n_tokens_i64, n_seqs);
-        beta = ggml.sigmoid(ctx, beta);
-        beta.setName("ssm_beta");
-
-        // === Step 3: Alpha -> gate (softplus(alpha + dt_bias) * A) ===
-        var alpha = ggml.mulMat(ctx, layer.ssm_alpha_weight.?, attn_input);
-        alpha = ggml.reshape3d(ctx, alpha, num_v_heads, n_tokens_i64, n_seqs);
-        alpha.setName("ssm_alpha");
-
-        const alpha_biased = ggml.add(ctx, alpha, layer.ssm_dt_bias.?);
-        var alpha_softplus = ggml.softplus(ctx, alpha_biased);
-        alpha_softplus.setName("ssm_alpha_softplus");
-
-        var gate = ggml.mul(ctx, alpha_softplus, layer.ssm_a.?);
-        gate = ggml.reshape4d(ctx, gate, 1, num_v_heads, n_tokens_i64, n_seqs);
-        gate.setName("ssm_gate");
-
-        // === Step 4: Conv1d processing ===
-        // Build conv input: [conv_state | qkv_mixed]
-        // ggml_ssm_conv expects sx: 3D [d_conv-1+n_t, d_inner, n_s]
-        const qkv_2d = ggml.reshape2d(ctx, qkv_mixed, conv_dim, n_tokens_i64);
-        const qkv_transposed = ggml.cont(ctx, ggml.permute(ctx, qkv_2d, 1, 0, 2, 3));
-
-        // Get or create conv state for this layer
-        if (self.ssm_states[layer_idx].conv_state == null) {
-            if (self.ctx_kv_cache) |kv_ctx| {
-                kv_ctx.setNoAlloc(false);
-                self.ssm_states[layer_idx].conv_state = try kv_ctx.newTensor2d(.f32, d_conv - 1, conv_dim);
-                kv_ctx.setNoAlloc(true);
-            } else {
+            // Lazy-init conv state
+            if (self.ssm_states[layer_idx].conv_state == null) {
                 ctx.setNoAlloc(false);
                 self.ssm_states[layer_idx].conv_state = try ctx.newTensor2d(.f32, d_conv - 1, conv_dim);
                 ctx.setNoAlloc(true);
-            }
-            self.ssm_states[layer_idx].conv_state.?.setZero();
-            {
+                self.ssm_states[layer_idx].conv_state.?.setZero();
                 var buf: [64]u8 = undefined;
-                const slice = try std.fmt.bufPrint(&buf, "ssm_conv_state.{d}", .{layer_idx});
-                buf[slice.len] = 0;
-                self.ssm_states[layer_idx].conv_state.?.setName(buf[0..slice.len :0]);
+                const sl = try std.fmt.bufPrint(&buf, "ssm_conv_state.{d}", .{layer_idx});
+                buf[sl.len] = 0;
+                self.ssm_states[layer_idx].conv_state.?.setName(buf[0..sl.len :0]);
             }
-        }
 
-        const conv_state = self.ssm_states[layer_idx].conv_state.?;
+            const conv_state = self.ssm_states[layer_idx].conv_state.?;
+            const concat_result = ggml.concat(ctx, conv_state, qkv_transposed, 0);
+            const concat_cont = ggml.cont(ctx, concat_result);
 
-        // Concat conv_state and qkv_mixed along dim 0
-        const concat_result = ggml.concat(ctx, conv_state, qkv_transposed, 0);
-        const concat_cont = ggml.cont(ctx, concat_result);
+            const sx_3d = ctx.view3d(concat_cont, d_conv - 1 + n_tokens_i64, conv_dim, 1, @as(usize, @intCast((d_conv - 1 + n_tokens_i64) * @sizeOf(f32))), @as(usize, @intCast((d_conv - 1 + n_tokens_i64) * @sizeOf(f32) * conv_dim)), 0);
 
-        // View as 3D for ggml_ssm_conv: [d_conv-1+n_t, conv_dim, 1]
-        const sx_3d = ctx.view3d(concat_cont, d_conv - 1 + n_tokens_i64, conv_dim, 1,
-            @as(usize, @intCast((d_conv - 1 + n_tokens_i64) * @sizeOf(f32))),
-            @as(usize, @intCast((d_conv - 1 + n_tokens_i64) * @sizeOf(f32) * conv_dim)),
-            0);
-        sx_3d.setName("ssm_conv_sx");
+            const conv_output = ggml.ssmConv(ctx, sx_3d, layer.ssm_conv1d_weight.?);
+            var conv_silu = ggml.silu(ctx, conv_output);
+            conv_silu.setName("ssm_conv_silu");
 
-        // Apply conv1d
-        var conv_output = ggml.ssmConv(ctx, sx_3d, layer.ssm_conv1d_weight.?);
-        conv_output.setName("ssm_conv_output");
-        var conv_silu = ggml.silu(ctx, conv_output);
-        conv_silu.setName("ssm_conv_silu");
-        // Update conv state: extract last (d_conv-1) rows from concat for next iteration
-        // concat_cont: [d_conv-1+n_tokens, conv_dim], last d_conv-1 rows become new conv_state
-        const row_stride = @as(usize, @intCast(@as(usize, @intCast(d_conv - 1 + n_tokens_i64)) * @sizeOf(f32)));
-        const conv_state_update = ctx.view2d(concat_cont, d_conv - 1, conv_dim,
-            row_stride,
-            @as(usize, @intCast(@as(usize, @intCast(n_tokens_i64)) * @sizeOf(f32))));
-        const conv_state_cpy = ggml.cpy(ctx, conv_state_update, conv_state);
-        graph.buildForwardExpand(conv_state_cpy);
+            // Update conv state
+            const row_stride = @as(usize, @intCast(@as(usize, @intCast(d_conv - 1 + n_tokens_i64)) * @sizeOf(f32)));
+            const conv_state_update = ctx.view2d(concat_cont, d_conv - 1, conv_dim, row_stride, @as(usize, @intCast(@as(usize, @intCast(n_tokens_i64)) * @sizeOf(f32))));
+            const conv_state_cpy = ggml.cpy(ctx, conv_state_update, conv_state);
+            gf.buildForwardExpand(conv_state_cpy);
 
-        // === Step 5: Extract Q, K, V from conv output ===
-        // conv_silu: [conv_dim, n_tokens, n_seqs] (after ggml_ssm_conv)
-        // Layout: [Q | K | V] along dim 0
-        const qkv_stride = conv_silu.strides()[1];
-        var q_conv = ctx.view2d(conv_silu, head_k_dim * num_k_heads, n_tokens_i64, qkv_stride, 0);
-        var k_conv = ctx.view2d(conv_silu, head_k_dim * num_k_heads, n_tokens_i64, qkv_stride,
-            @intCast(head_k_dim * num_k_heads * @sizeOf(f32)));
-        var v_conv = ctx.view2d(conv_silu, head_v_dim * num_v_heads, n_tokens_i64, qkv_stride,
-            @intCast(2 * head_k_dim * num_k_heads * @sizeOf(f32)));
-        // Reshape to 4D: [head_dim, n_heads, n_tokens, n_seqs]
-        // Need contiguous for reshape
-        q_conv = ggml.cont(ctx, q_conv);
-        k_conv = ggml.cont(ctx, k_conv);
-        v_conv = ggml.cont(ctx, v_conv);
-        q_conv = ggml.reshape4d(ctx, q_conv, head_k_dim, num_k_heads, n_tokens_i64, n_seqs);
-        k_conv = ggml.reshape4d(ctx, k_conv, head_k_dim, num_k_heads, n_tokens_i64, n_seqs);
-        v_conv = ggml.reshape4d(ctx, v_conv, head_v_dim, num_v_heads, n_tokens_i64, n_seqs);
+            // Step 5: Extract Q, K, V
+            const qkv_stride = conv_silu.strides()[1];
+            var q_conv = ctx.view2d(conv_silu, key_dim, n_tokens_i64, qkv_stride, 0);
+            var k_conv = ctx.view2d(conv_silu, key_dim, n_tokens_i64, qkv_stride, @intCast(key_dim * @sizeOf(f32)));
+            var v_conv = ctx.view2d(conv_silu, value_dim, n_tokens_i64, qkv_stride, @intCast(2 * key_dim * @sizeOf(f32)));
 
-        // L2 normalize Q and K
-        q_conv = ggml.l2Norm(ctx, q_conv, p.base.norm_eps);
-        k_conv = ggml.l2Norm(ctx, k_conv, p.base.norm_eps);
-        q_conv.setName("ssm_q_norm");
-        k_conv.setName("ssm_k_norm");
+            q_conv = ggml.cont(ctx, q_conv);
+            k_conv = ggml.cont(ctx, k_conv);
+            v_conv = ggml.cont(ctx, v_conv);
+            q_conv = ggml.reshape4d(ctx, q_conv, head_k_dim, num_k_heads, n_tokens_i64, n_seqs);
+            k_conv = ggml.reshape4d(ctx, k_conv, head_k_dim, num_k_heads, n_tokens_i64, n_seqs);
+            v_conv = ggml.reshape4d(ctx, v_conv, head_v_dim, num_v_heads, n_tokens_i64, n_seqs);
 
-        // Repeat heads if num_k_heads != num_v_heads
-        if (num_k_heads != num_v_heads) {
-            q_conv = ggml.repeat4d(ctx, q_conv, head_k_dim, num_v_heads, n_tokens_i64, n_seqs);
-            k_conv = ggml.repeat4d(ctx, k_conv, head_k_dim, num_v_heads, n_tokens_i64, n_seqs);
-        }
+            q_conv = ggml.l2Norm(ctx, q_conv, p.base.norm_eps);
+            k_conv = ggml.l2Norm(ctx, k_conv, p.base.norm_eps);
 
-        // === Step 6: Gated Delta Net ===
-        // Get or create SSM state for this layer
-        if (self.ssm_states[layer_idx].ssm_state == null) {
-            const alloc_ctx = if (self.ctx_kv_cache) |kv_ctx| kv_ctx else ctx;
-            alloc_ctx.setNoAlloc(false);
-            // state: [S_v, S_v, H_v, n_seqs] (4D)
-            self.ssm_states[layer_idx].ssm_state = try alloc_ctx.newTensor4d(.f32, head_v_dim, head_v_dim, num_v_heads, n_seqs);
-            alloc_ctx.setNoAlloc(true);
-            self.ssm_states[layer_idx].ssm_state.?.setZero();
-            {
+            if (num_k_heads != num_v_heads) {
+                q_conv = ggml.repeat4d(ctx, q_conv, head_k_dim, num_v_heads, n_tokens_i64, n_seqs);
+                k_conv = ggml.repeat4d(ctx, k_conv, head_k_dim, num_v_heads, n_tokens_i64, n_seqs);
+            }
+
+            // Step 6: Gated Delta Net
+            if (self.ssm_states[layer_idx].ssm_state == null) {
+                ctx.setNoAlloc(false);
+                self.ssm_states[layer_idx].ssm_state = try ctx.newTensor4d(.f32, head_v_dim, head_v_dim, num_v_heads, n_seqs);
+                ctx.setNoAlloc(true);
+                self.ssm_states[layer_idx].ssm_state.?.setZero();
                 var buf: [64]u8 = undefined;
-                const slice = try std.fmt.bufPrint(&buf, "ssm_state.{d}", .{layer_idx});
-                buf[slice.len] = 0;
-                self.ssm_states[layer_idx].ssm_state.?.setName(buf[0..slice.len :0]);
+                const sl = try std.fmt.bufPrint(&buf, "ssm_state.{d}", .{layer_idx});
+                buf[sl.len] = 0;
+                self.ssm_states[layer_idx].ssm_state.?.setName(buf[0..sl.len :0]);
             }
+            const ssm_state = self.ssm_states[layer_idx].ssm_state.?;
+
+            const gdn_output = ggml.gatedDeltaNet(ctx, q_conv, k_conv, v_conv, gate, beta, ssm_state, 1);
+            gdn_output.setName("ssm_gdn_output");
+
+            const attn_output = ctx.view4d(gdn_output, head_v_dim, num_v_heads, n_tokens_i64, n_seqs, @as(usize, @intCast(head_v_dim * @sizeOf(f32))), @as(usize, @intCast(head_v_dim * num_v_heads * @sizeOf(f32))), @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * @sizeOf(f32))), 0);
+
+            const state_offset = @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * n_seqs * @sizeOf(f32)));
+            const new_state = ctx.view4d(gdn_output, head_v_dim, head_v_dim, num_v_heads, n_seqs, @as(usize, @intCast(head_v_dim * @sizeOf(f32))), @as(usize, @intCast(head_v_dim * head_v_dim * @sizeOf(f32))), @as(usize, @intCast(head_v_dim * head_v_dim * num_v_heads * @sizeOf(f32))), state_offset);
+            const state_cpy = ggml.cpy(ctx, new_state, ssm_state);
+            gf.buildForwardExpand(state_cpy);
+
+            // Step 7: Gated normalization
+            const z_4d = ggml.reshape4d(ctx, z, head_v_dim, num_v_heads, n_tokens_i64, n_seqs);
+            const attn_out_norm = ggml.rmsNorm(ctx, attn_output, p.base.norm_eps);
+            const z_silu = ggml.silu(ctx, z_4d);
+            const gated = ggml.mul(ctx, attn_out_norm, z_silu);
+
+            // Step 8: Output projection
+            const final_output = ggml.reshape3d(ctx, gated, head_v_dim * num_v_heads, n_tokens_i64, n_seqs);
+            var result = ggml.mulMat(ctx, layer.ssm_out_weight.?, final_output);
+            result.setName("ssm_out");
+            return ggml.reshape2d(ctx, result, p.base.n_embd, n_tokens_i64);
         }
 
-        const ssm_state = self.ssm_states[layer_idx].ssm_state.?;
+        fn buildOutput(self: *Self, cur: *ggml.Tensor) *ggml.Tensor {
+            const p = self.params;
+            const w = self.weights;
+            const ctx = self.ctx;
+            const gf = self.gf;
 
-        // ggml_gatedDeltaNet expects state: [S_v, S_v, H_v, n_seqs]
-        // Output: flat tensor with attention scores [S_v, H_v, n_tokens, n_seqs]
-        // followed by K state snapshots [S_v, S_v, H_v, n_seqs] each
-        const gdn_output = ggml.gatedDeltaNet(ctx, q_conv, k_conv, v_conv, gate, beta, ssm_state, 1);
-        gdn_output.setName("ssm_gdn_output");
+            var c = rms_norm.rmsNorm(ctx, cur, w.base.output_norm_weight, p.base.norm_eps);
+            c.setName("output_norm");
+            const out_w = w.base.output_weight orelse w.base.token_embd;
+            var logits_tensor = ggml.mulMat(ctx, out_w, c);
+            logits_tensor.setName("logits");
+            gf.buildForwardExpand(logits_tensor);
+            return logits_tensor;
+        }
+    };
 
-        // Extract attention output from gdn_output
-        // gdn_output layout: [S_v*H, n_tokens*n_seqs + state_rows, 1, 1]
-        // First S_v*H*n_tokens*n_seqs elements are the attention output
-        // The data is laid out as [S_v, H, n_tokens, n_seqs] in column-major order:
-        //   for each seq: for each token: for each head: S_v values
-        // So the correct strides for a [S_v, H_v, n_tokens, n_seqs] view are:
-        //   nb1 = S_v * sizeof(f32)  (stride between heads)
-        //   nb2 = S_v * H_v * sizeof(f32)  (stride between tokens)
-        //   nb3 = S_v * H_v * n_tokens * sizeof(f32)  (stride between sequences)
-        const attn_output = ctx.view4d(gdn_output,
-            head_v_dim, num_v_heads, n_tokens_i64, n_seqs,
-            @as(usize, @intCast(head_v_dim * @sizeOf(f32))),
-            @as(usize, @intCast(head_v_dim * num_v_heads * @sizeOf(f32))),
-            @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * @sizeOf(f32))),
-            0);
-        attn_output.setName("ssm_attn_output");
-
-        // Extract new state from gdn_output and copy to persistent state
-        // new state snapshot starts at offset = S_v * H_v * n_tokens * n_seqs * sizeof(f32)
-        // state snapshot layout: [S_v, S_v, H_v, n_seqs] (4D)
-        const state_offset = @as(usize, @intCast(head_v_dim * num_v_heads * n_tokens_i64 * n_seqs * @sizeOf(f32)));
-        const new_state = ctx.view4d(gdn_output,
-            head_v_dim, head_v_dim, num_v_heads, n_seqs,
-            @as(usize, @intCast(head_v_dim * @sizeOf(f32))),
-            @as(usize, @intCast(head_v_dim * head_v_dim * @sizeOf(f32))),
-            @as(usize, @intCast(head_v_dim * head_v_dim * num_v_heads * @sizeOf(f32))),
-            state_offset);
-        const state_cpy = ggml.cpy(ctx, new_state, ssm_state);
-        graph.buildForwardExpand(state_cpy);
-
-        // === Step 7: Gated normalization (norm(attn_out, z) ===
-        const z_4d = ggml.reshape4d(ctx, z, head_v_dim, num_v_heads, n_tokens_i64, n_seqs);
-        const attn_out_norm = ggml.rmsNorm(ctx, attn_output, p.base.norm_eps);
-        const z_silu = ggml.silu(ctx, z_4d);
-        const gated = ggml.mul(ctx, attn_out_norm, z_silu);
-        gated.setName("ssm_gated_norm");
-
-        // === Step 8: Output projection ===
-        const final_output = ggml.reshape3d(ctx, gated, head_v_dim * num_v_heads, n_tokens_i64, n_seqs);
-        var result = ggml.mulMat(ctx, layer.ssm_out_weight.?, final_output);
-        result.setName("ssm_out");
-        result = ggml.reshape2d(ctx, result, p.base.n_embd, n_tokens_i64);
-        return result;
+    /// Thin delegate to Qwen35Graph.
+    pub fn forward(self: *QwenModel, ctx: *ggml.Context, graph: *ggml.CGraph, input_tokens: *ggml.Tensor, n_tokens: i32, kv_cache_mgr: ?*kv_cache.KVCache, start_pos: i32) !*ggml.Tensor {
+        var g = Qwen35Graph.init(ctx, graph, &self.qwen_params, &self.qwen_weights, self.ssm_states, kv_cache_mgr, start_pos);
+        return try g.build(input_tokens, n_tokens);
     }
 
     /// 适配 buildGraph 接口（通过 GraphBuilder 调用）
@@ -674,7 +647,6 @@ pub fn loadWeights(gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, params: 
         .layers = layers,
     };
 }
-
 
 const testing = std.testing;
 

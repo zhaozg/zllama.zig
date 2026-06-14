@@ -125,6 +125,457 @@ pub const Gemma4Weights = struct {
 };
 
 // ============================================================================
+// Gemma 4 图构建类
+// ============================================================================
+//
+// 参考 llama.cpp 的 llm_build_context 模式：将 forward() 拆分为独立的图构建类。
+// Gemma4Graph 持有图构建过程中所有中间张量引用，并将 transformerForward 分解为
+// buildPerLayerInputs / buildLayer / buildAttention / buildOutput 等命名方法。
+// Gemma4Model 的 forward 方法变为 thin wrapper，委托给 Gemma4Graph。
+
+pub const Gemma4Graph = struct {
+    ctx: *ggml.Context,
+    gf: *ggml.CGraph,
+    params: *const Gemma4Params,
+    weights: *const Gemma4Weights,
+
+    // ------ 中间张量（一次 forward 有效）------
+    cur: *ggml.Tensor,
+    pos_tensor: *ggml.Tensor,
+    inp_per_layer: ?*ggml.Tensor,
+
+    const Self = @This();
+
+    /// 初始化图构建器
+    pub fn init(
+        ctx: *ggml.Context,
+        gf: *ggml.CGraph,
+        params: *const Gemma4Params,
+        weights: *const Gemma4Weights,
+        inp_embd: *ggml.Tensor,
+        pos_tensor: *ggml.Tensor,
+    ) Self {
+        return Self{
+            .ctx = ctx,
+            .gf = gf,
+            .params = params,
+            .weights = weights,
+            .cur = inp_embd,
+            .pos_tensor = pos_tensor,
+            .inp_per_layer = null,
+        };
+    }
+
+    // ====================================================================
+    // 公共构建入口
+    // ====================================================================
+
+    /// 纯文本 forward：查表嵌入 → transformer 层 → logits
+    pub fn build(
+        self: *Self,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        start_pos: i32,
+    ) !*ggml.Tensor {
+        const p = self.params;
+        const w = self.weights;
+        const n_tokens_i64: i64 = n_tokens;
+
+        var embd = embed.tokenEmbedding(self.ctx, w.base.token_embd, input_tokens);
+        embd = ggml.scale(self.ctx, embd, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+        embd.setName("inp_scaled");
+
+        const pos_tensor = rope.buildPositionTensor(self.ctx, @intCast(n_tokens), start_pos);
+
+        var g = Self.init(self.ctx, self.gf, p, w, embd, pos_tensor);
+        return try g.transformerForward(n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, true);
+    }
+
+    /// 混合文本+媒体 forward：在指定位置注入预计算嵌入
+    pub fn buildWithEmbd(
+        self: *Self,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        start_pos: i32,
+        embd_override: *ggml.Tensor,
+        embd_offset: i32,
+        causal: bool,
+    ) !*ggml.Tensor {
+        const p = self.params;
+        const w = self.weights;
+        const n_tokens_i64: i64 = n_tokens;
+        const n_override: i64 = embd_override.ne()[1];
+        const override_offset: i64 = @intCast(embd_offset);
+        const n_text_pre: i64 = override_offset;
+        const n_text_post: i64 = n_tokens_i64 - n_override - override_offset;
+        const n_embd_i64: i64 = @intCast(p.base.n_embd);
+        const override_embd_dim: i64 = embd_override.ne()[0];
+
+        if (override_embd_dim != n_embd_i64) {
+            std.log.err("Dimension mismatch: embeddings dim={d} but model n_embd={d}", .{ override_embd_dim, n_embd_i64 });
+            return error.EmbeddingDimensionMismatch;
+        }
+
+        var all_embd = embed.tokenEmbedding(self.ctx, w.base.token_embd, input_tokens);
+        all_embd = ggml.scale(self.ctx, all_embd, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+        const scaled_override = ggml.scale(self.ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+
+        var cur: *ggml.Tensor = undefined;
+        if (n_text_pre > 0 and n_text_post > 0) {
+            const prefix_embd = all_embd.view2d(self.ctx, n_embd_i64, n_text_pre, all_embd.nb()[1], 0);
+            const suffix_off: usize = @as(usize, @intCast(override_offset + n_override)) * @sizeOf(f32) * @as(usize, @intCast(n_embd_i64));
+            const suffix_embd = all_embd.view2d(self.ctx, n_embd_i64, n_text_post, all_embd.nb()[1], suffix_off);
+            const mid = ggml.concat(self.ctx, ggml.cont(self.ctx, prefix_embd), scaled_override, 1);
+            cur = ggml.concat(self.ctx, mid, ggml.cont(self.ctx, suffix_embd), 1);
+        } else if (n_text_pre > 0) {
+            const prefix_embd = all_embd.view2d(self.ctx, n_embd_i64, n_text_pre, all_embd.nb()[1], 0);
+            cur = ggml.concat(self.ctx, ggml.cont(self.ctx, prefix_embd), scaled_override, 1);
+        } else if (n_text_post > 0) {
+            const suffix_off: usize = @as(usize, @intCast(override_offset + n_override)) * @sizeOf(f32) * @as(usize, @intCast(n_embd_i64));
+            const suffix_embd = all_embd.view2d(self.ctx, n_embd_i64, n_text_post, all_embd.nb()[1], suffix_off);
+            cur = ggml.concat(self.ctx, scaled_override, ggml.cont(self.ctx, suffix_embd), 1);
+        } else {
+            cur = scaled_override;
+        }
+        cur.setName("inp_scaled_mm");
+
+        const pos_tensor = rope.buildPositionTensor(self.ctx, @intCast(n_tokens), start_pos);
+
+        var g = Self.init(self.ctx, self.gf, p, w, cur, pos_tensor);
+        return try g.transformerForward(n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, causal);
+    }
+
+    /// 纯媒体 forward：使用预计算嵌入，不做 token 查表。非因果注意力。
+    pub fn buildMediaOnly(
+        self: *Self,
+        embd_override: *ggml.Tensor,
+        n_tokens: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        start_pos: i32,
+        input_tokens: *ggml.Tensor,
+    ) !*ggml.Tensor {
+        const p = self.params;
+        const w = self.weights;
+        const n_tokens_i64: i64 = n_tokens;
+
+        const scaled = ggml.scale(self.ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+        scaled.setName("inp_media");
+
+        const pos_tensor = rope.buildPositionTensor(self.ctx, @intCast(n_tokens), start_pos);
+
+        var g = Self.init(self.ctx, self.gf, p, w, scaled, pos_tensor);
+        return try g.transformerForward(n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, false);
+    }
+
+    // ====================================================================
+    // Transformer 主循环
+    // ====================================================================
+
+    fn transformerForward(
+        self: *Self,
+        n_tokens_i64: i64,
+        start_pos: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        input_tokens: ?*ggml.Tensor,
+        causal: bool,
+    ) !*ggml.Tensor {
+        // --- Per-layer embedding 预计算 ---
+        self.inp_per_layer = try self.buildPerLayerInputs(self.cur, input_tokens, n_tokens_i64);
+
+        // --- 逐层计算 ---
+        for (self.weights.layers, 0..) |*layer, i| {
+            self.cur = try self.buildLayer(layer, i, n_tokens_i64, start_pos, kv_cache_mgr, causal);
+        }
+
+        // --- 输出投影 ---
+        return self.buildOutput();
+    }
+
+    // ====================================================================
+    // Per-layer embedding 预计算
+    // ====================================================================
+
+    fn buildPerLayerInputs(
+        self: *Self,
+        cur_in: *ggml.Tensor,
+        input_tokens: ?*ggml.Tensor,
+        n_tokens_i64: i64,
+    ) !?*ggml.Tensor {
+        const p = self.params;
+        const w = self.weights;
+
+        if (p.n_embd_per_layer == 0 or input_tokens == null) return null;
+
+        const n_embd_pl: i64 = @intCast(p.n_embd_per_layer);
+        const n_layer_i64: i64 = @intCast(p.base.n_layer);
+        const ctx = self.ctx;
+        const gf = self.gf;
+
+        var inp_pl = ggml.getRows(ctx, w.per_layer_token_embd.?, input_tokens.?);
+        inp_pl = ggml.reshape3d(ctx, inp_pl, n_embd_pl, n_layer_i64, n_tokens_i64);
+        inp_pl = ggml.scale(ctx, inp_pl, @sqrt(@as(f32, @floatFromInt(p.n_embd_per_layer))));
+
+        var proj = ggml.mulMat(ctx, w.per_layer_model_proj.?, cur_in);
+        proj = ggml.scale(ctx, proj, 1.0 / @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+        proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
+        proj = ggml.reshape2d(ctx, proj, n_embd_pl, n_layer_i64 * n_tokens_i64);
+        proj = ggml.rmsNorm(ctx, proj, p.base.norm_eps);
+        proj = ggml.mul(ctx, proj, ggml.reshape2d(ctx, w.per_layer_proj_norm.?, n_embd_pl, 1));
+        proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
+
+        inp_pl = ggml.add(ctx, proj, inp_pl);
+        inp_pl = ggml.scale(ctx, inp_pl, 1.0 / @sqrt(2.0));
+
+        inp_pl = ggml.cont(ctx, ggml.permute(ctx, inp_pl, 0, 2, 1, 3));
+        inp_pl.setName("inp_per_layer");
+
+        gf.buildForwardExpand(inp_pl);
+        return inp_pl;
+    }
+
+    // ====================================================================
+    // 单层计算
+    // ====================================================================
+
+    fn buildLayer(
+        self: *Self,
+        layer: *const LayerWeights,
+        il: usize,
+        n_tokens_i64: i64,
+        start_pos: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        causal: bool,
+    ) !*ggml.Tensor {
+        const p = self.params;
+        const ctx = self.ctx;
+
+        const head_dim: i64 = layer.attn_q_norm_weight.ne()[0];
+        const n_head: i64 = @divExact(layer.attn_q_weight.ne()[1], head_dim);
+        const layer_is_swa = p.is_swa_layer.items[il];
+
+        const freq_base_l: f32 = if (layer_is_swa and p.rope_freq_base_swa > 0) p.rope_freq_base_swa else p.base.rope_theta;
+        const rope_dim_full: u32 = if (p.rope_dim_swa > 0 and layer_is_swa)
+            @min(p.rope_dim_swa, @as(u32, @intCast(head_dim)))
+        else
+            @min(p.base.rope_dim, @as(u32, @intCast(head_dim)));
+        const rope_dim: i64 = @intCast(rope_dim_full);
+
+        log.debug("Layer {d}: is_swa={}, has_kv={}, head_dim={d}", .{ il, layer_is_swa, layer.has_kv, head_dim });
+
+        // --- Pre-attention RMSNorm ---
+        const attn_input = rms_norm.rmsNorm(ctx, self.cur, layer.attn_norm_weight, p.base.norm_eps);
+
+        // --- Q 投影 + pre-norm + RoPE ---
+        var q = ggml.mulMat(ctx, layer.attn_q_weight, attn_input);
+        q = ggml.reshape3d(ctx, q, head_dim, n_head, n_tokens_i64);
+        q = ggml.reshape2d(ctx, q, head_dim, n_head * n_tokens_i64);
+        q = ggml.rmsNorm(ctx, q, p.base.norm_eps);
+        q = ggml.mul(ctx, q, ggml.reshape2d(ctx, layer.attn_q_norm_weight, head_dim, 1));
+        q = ggml.reshape3d(ctx, q, head_dim, n_head, n_tokens_i64);
+
+        const rope_freqs: ?*ggml.Tensor = if (!layer_is_swa) layer.rope_freqs else null;
+        q = ggml.ropeExt(ctx, q, self.pos_tensor, rope_freqs, @intCast(rope_dim), 2, 0, freq_base_l, 1.0, 0.0, 1.0, 0.0, 0.0);
+
+        // --- K/V 投影 + 注意力 ---
+        const attn_out = try self.buildAttention(
+            layer,
+            il,
+            q,
+            attn_input,
+            n_head,
+            head_dim,
+            layer_is_swa,
+            n_tokens_i64,
+            start_pos,
+            kv_cache_mgr,
+            causal,
+            freq_base_l,
+            rope_freqs,
+            rope_dim,
+        );
+
+        // 残差
+        var cur = ggml.add(ctx, self.cur, attn_out);
+
+        // --- FFN ---
+        const ffn_input = rms_norm.rmsNorm(ctx, cur, layer.ffn_norm_weight, p.base.norm_eps);
+        const ffn_out = gegluFFN(ctx, ffn_input, layer.ffn_gate_weight, layer.ffn_up_weight, layer.ffn_down_weight);
+        const ffn_normed = rms_norm.rmsNorm(ctx, ffn_out, layer.ffn_post_norm_weight, p.base.norm_eps);
+        cur = ggml.add(ctx, cur, ffn_normed);
+
+        // --- Per-layer embedding ---
+        if (self.inp_per_layer) |inp_pl| {
+            if (layer.per_layer_inp_gate) |pl_gate| {
+                _ = pl_gate;
+                cur = buildPerLayerInjection(ctx, p, layer, cur, inp_pl, il, n_tokens_i64);
+            }
+        }
+
+        // --- 层输出缩放 ---
+        if (layer.out_scale) |scale| {
+            cur = ggml.mul(ctx, cur, scale);
+        }
+
+        return cur;
+    }
+
+    // ====================================================================
+    // 注意力子图
+    // ====================================================================
+
+    fn buildAttention(
+        self: *Self,
+        layer: *const LayerWeights,
+        il: usize,
+        q: *ggml.Tensor,
+        attn_input: *ggml.Tensor,
+        n_head: i64,
+        head_dim: i64,
+        layer_is_swa: bool,
+        n_tokens_i64: i64,
+        start_pos: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        causal: bool,
+        freq_base_l: f32,
+        rope_freqs: ?*ggml.Tensor,
+        rope_dim: i64,
+    ) !*ggml.Tensor {
+        const p = self.params;
+        const ctx = self.ctx;
+        const gf = self.gf;
+
+        var attn_out: *ggml.Tensor = undefined;
+
+        if (layer.has_kv) {
+            const head_dim_k: i64 = layer.attn_k_norm_weight.ne()[0];
+            const n_kv_head: i64 = if (layer.attn_k_weight) |kw|
+                @divExact(kw.ne()[1], head_dim_k)
+            else
+                n_head;
+
+            var k = ggml.mulMat(ctx, layer.attn_k_weight.?, attn_input);
+            var v_tensor: *ggml.Tensor = if (layer.attn_v_weight) |vw|
+                ggml.mulMat(ctx, vw, attn_input)
+            else
+                k;
+
+            k = ggml.reshape3d(ctx, k, head_dim_k, n_kv_head, n_tokens_i64);
+            v_tensor = ggml.reshape3d(ctx, v_tensor, head_dim_k, n_kv_head, n_tokens_i64);
+
+            // K pre-norm
+            k = ggml.reshape2d(ctx, k, head_dim_k, n_kv_head * n_tokens_i64);
+            k = ggml.rmsNorm(ctx, k, p.base.norm_eps);
+            k = ggml.mul(ctx, k, ggml.reshape2d(ctx, layer.attn_k_norm_weight, head_dim_k, 1));
+            k = ggml.reshape3d(ctx, k, head_dim_k, n_kv_head, n_tokens_i64);
+
+            // V RMSNorm
+            v_tensor = ggml.rmsNorm(ctx, v_tensor, p.base.norm_eps);
+
+            // RoPE on K
+            k = ggml.ropeExt(ctx, k, self.pos_tensor, rope_freqs, @intCast(rope_dim), 2, 0, freq_base_l, 1.0, 0.0, 1.0, 0.0, 0.0);
+
+            // Q reshape for head_dim match
+            var n_head_eff = n_head;
+            var q_use = q;
+            if (head_dim != head_dim_k) {
+                n_head_eff = @divExact(n_head * head_dim, head_dim_k);
+                q_use = ggml.reshape3d(ctx, q, head_dim_k, n_head_eff, n_tokens_i64);
+            }
+
+            // KV Cache
+            var k_attn = k;
+            var v_attn = v_tensor;
+            if (kv_cache_mgr) |cache| {
+                cache.setKv(ctx, gf, il, k, v_tensor, @intCast(n_tokens_i64));
+                k_attn = cache.getKView(ctx, il);
+                v_attn = cache.getVView(ctx, il);
+            }
+
+            const cache_len: i64 = if (kv_cache_mgr) |cache| @as(i64, @intCast(cache.currentLen())) else n_tokens_i64;
+
+            attn_out = attention.scaledDotProductAttention(ctx, q_use, k_attn, v_attn, .{
+                .n_head = n_head_eff,
+                .n_kv_head = n_kv_head,
+                .head_dim = head_dim_k,
+                .n_tokens = n_tokens_i64,
+                .cache_len = cache_len,
+                .start_pos = start_pos,
+                .scale_factor = p.f_attention_scale,
+                .attn_logit_softcap = p.attn_logit_softcapping,
+                .causal = causal,
+            }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
+
+            attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
+        } else {
+            const kv_layer_idx = findKVLayer(p, il);
+            const cache = kv_cache_mgr orelse @panic("Shared KV layer requires KV cache");
+            const k_cache = cache.getKView(ctx, kv_layer_idx);
+            const v_cache = cache.getVView(ctx, kv_layer_idx);
+            const head_dim_k_cache: i64 = k_cache.ne()[0];
+            const n_kv_head_cache: i64 = k_cache.ne()[1];
+
+            var n_head_eff = n_head;
+            var q_use = q;
+            if (head_dim != head_dim_k_cache) {
+                n_head_eff = @divExact(n_head * head_dim, head_dim_k_cache);
+                q_use = ggml.reshape3d(ctx, q, head_dim_k_cache, n_head_eff, n_tokens_i64);
+            }
+
+            const cache_len: i64 = @as(i64, @intCast(cache.currentLen()));
+
+            attn_out = attention.scaledDotProductAttention(ctx, q_use, k_cache, v_cache, .{
+                .n_head = n_head_eff,
+                .n_kv_head = n_kv_head_cache,
+                .head_dim = head_dim_k_cache,
+                .n_tokens = n_tokens_i64,
+                .cache_len = cache_len,
+                .start_pos = start_pos,
+                .scale_factor = p.f_attention_scale,
+                .attn_logit_softcap = p.attn_logit_softcapping,
+                .causal = causal,
+            }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
+
+            attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
+        }
+
+        // Output projection + post-norm
+        attn_out = ggml.mulMat(ctx, layer.attn_output_weight, attn_out);
+        attn_out = rms_norm.rmsNorm(ctx, attn_out, layer.attn_post_norm_weight, p.base.norm_eps);
+        return attn_out;
+    }
+
+    // ====================================================================
+    // 输出投影
+    // ====================================================================
+
+    fn buildOutput(self: *Self) *ggml.Tensor {
+        const p = self.params;
+        const w = self.weights;
+        const ctx = self.ctx;
+        const gf = self.gf;
+
+        var cur = rms_norm.rmsNorm(ctx, self.cur, w.base.output_norm_weight, p.base.norm_eps);
+        cur.setName("output_norm");
+
+        const out_w = w.base.output_weight orelse w.base.token_embd;
+        var logits_tensor = ggml.mulMat(ctx, out_w, cur);
+
+        if (p.final_logit_softcapping > 0.0) {
+            const cap = p.final_logit_softcapping;
+            logits_tensor = ggml.scale(ctx, logits_tensor, 1.0 / cap);
+            logits_tensor = ggml.tanh(ctx, logits_tensor);
+            logits_tensor = ggml.scale(ctx, logits_tensor, cap);
+        }
+        logits_tensor.setName("logits");
+
+        gf.buildForwardExpand(logits_tensor);
+        return logits_tensor;
+    }
+};
+
+// ============================================================================
 // Gemma 4 模型
 // ============================================================================
 
@@ -157,10 +608,11 @@ pub const Gemma4Model = struct {
         return &self.weights.base;
     }
 
-    /// Forward pass with pre-computed embedding override (for multimodal input).
-    /// When embd_override is non-null, the first embd_override.ne()[1] token positions
-    /// use the override embeddings instead of looking up token embeddings.
-    /// Text tokens (from input_tokens) follow after the override positions.
+    // ====================================================================
+    // Forward 方法 — 委托给 Gemma4Graph
+    // ====================================================================
+
+    /// Forward with embedding override (multimodal).  Delegates to Gemma4Graph.
     pub fn forwardWithEmbdOverride(
         self: *Gemma4Model,
         ctx: *ggml.Context,
@@ -173,65 +625,19 @@ pub const Gemma4Model = struct {
         embd_offset: i32,
         causal: bool,
     ) !*ggml.Tensor {
-        const p = &self.params;
-        const w = &self.weights;
-        const n_tokens_i64: i64 = n_tokens;
-        const n_override: i64 = embd_override.ne()[1];
-        const override_offset: i64 = @intCast(embd_offset);
-        const n_text_pre: i64 = override_offset;
-        const n_text_post: i64 = n_tokens_i64 - n_override - override_offset;
-        const n_embd_i64: i64 = @intCast(p.base.n_embd);
-        const override_embd_dim: i64 = embd_override.ne()[0];
-
-        // Validate dimensions: audio embedding dim must match model n_embd
-        if (override_embd_dim != n_embd_i64) {
-            std.log.err("Dimension mismatch: audio embeddings have dim={d} but model n_embd={d}", .{ override_embd_dim, n_embd_i64 });
-            std.log.err("  This may indicate the mmproj file doesn't match the model.", .{});
-            return error.EmbeddingDimensionMismatch;
-        }
-
-        // Mixed embeddings with position-aware injection
-        var cur: *ggml.Tensor = undefined;
-
-        // Get embeddings for ALL tokens, scale
-        var all_embd = embed.tokenEmbedding(ctx, w.base.token_embd, input_tokens);
-        all_embd = ggml.scale(ctx, all_embd, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
-        const scaled_override = ggml.scale(ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
-
-        if (n_text_pre > 0 and n_text_post > 0) {
-            // Split: [text_prefix | override | text_suffix]
-            const prefix_embd = all_embd.view2d(ctx, n_embd_i64, n_text_pre, all_embd.nb()[1], 0);
-            const suffix_offset: usize = @as(usize, @intCast(override_offset + n_override)) * @sizeOf(f32) * @as(usize, @intCast(n_embd_i64));
-            const suffix_embd = all_embd.view2d(ctx, n_embd_i64, n_text_post, all_embd.nb()[1], suffix_offset);
-            const mid = ggml.concat(ctx, ggml.cont(ctx, prefix_embd), scaled_override, 1);
-            cur = ggml.concat(ctx, mid, ggml.cont(ctx, suffix_embd), 1);
-        } else if (n_text_pre > 0) {
-            // Text prefix + override (no suffix)
-            const prefix_embd = all_embd.view2d(ctx, n_embd_i64, n_text_pre, all_embd.nb()[1], 0);
-            cur = ggml.concat(ctx, ggml.cont(ctx, prefix_embd), scaled_override, 1);
-        } else if (n_text_post > 0) {
-            // Override at start + text suffix
-            const suffix_offset: usize = @as(usize, @intCast(override_offset + n_override)) * @sizeOf(f32) * @as(usize, @intCast(n_embd_i64));
-            const suffix_embd = all_embd.view2d(ctx, n_embd_i64, n_text_post, all_embd.nb()[1], suffix_offset);
-            cur = ggml.concat(ctx, scaled_override, ggml.cont(ctx, suffix_embd), 1);
-        } else {
-            // Override only
-            cur = scaled_override;
-        }
-        cur.setName("inp_scaled_mm");
-
-        // 位置编码：使用普通位置张量（不是 multi）
-        const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
-
-        // Main transformer loop (pass input_tokens for per-layer embedding if needed)
-        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, causal);
+        var g = Gemma4Graph{
+            .ctx = ctx,
+            .gf = graph,
+            .params = &self.params,
+            .weights = &self.weights,
+            .cur = undefined,
+            .pos_tensor = undefined,
+            .inp_per_layer = null,
+        };
+        return try g.buildWithEmbd(input_tokens, n_tokens, kv_cache_mgr, start_pos, embd_override, embd_offset, causal);
     }
 
-    /// Forward pass with pre-computed embeddings only (no token embedding lookup).
-    /// Used for Stage 2 of three-stage multimodal prefill (media tokens only).
-    /// - Non-causal (bidirectional) attention within the media segment
-    /// - Per-layer embedding via input_tokens (placeholder token IDs)
-    /// - Writes to KV cache so subsequent text tokens can attend to media
+    /// Media-only forward.  Delegates to Gemma4Graph.
     pub fn forwardMediaOnly(
         self: *Gemma4Model,
         ctx: *ggml.Context,
@@ -242,22 +648,19 @@ pub const Gemma4Model = struct {
         start_pos: i32,
         input_tokens: *ggml.Tensor,
     ) !*ggml.Tensor {
-        const p = &self.params;
-        const n_tokens_i64: i64 = n_tokens;
-
-        // Scale embeddings (same as forwardWithEmbdOverride)
-        const scaled_override = ggml.scale(ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
-        scaled_override.setName("inp_media");
-
-        // Position tensor starts at start_pos
-        const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
-
-        // Non-causal attention, with per-layer embedding via input_tokens
-        return self.transformerForward(ctx, graph, scaled_override, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, false);
+        var g = Gemma4Graph{
+            .ctx = ctx,
+            .gf = graph,
+            .params = &self.params,
+            .weights = &self.weights,
+            .cur = undefined,
+            .pos_tensor = undefined,
+            .inp_per_layer = null,
+        };
+        return try g.buildMediaOnly(embd_override, n_tokens, kv_cache_mgr, start_pos, input_tokens);
     }
 
-    /// Media forward wrapper matching MediaForwardFn signature.
-    /// Used by threeStagePrefill for Pass 2 (media tokens, non-causal).
+    /// Media forward adapter (MediaForwardFn signature).  Delegates to Gemma4Graph.
     pub fn mediaForward(
         self: *Gemma4Model,
         ctx: *ggml.Context,
@@ -270,11 +673,21 @@ pub const Gemma4Model = struct {
         embd_offset: i32,
         causal: bool,
     ) !*ggml.Tensor {
-        _ = embd_offset; // Not needed: media embeddings replace all tokens
-        _ = causal; // Always non-causal for media
-        return self.forwardMediaOnly(ctx, graph, embd_override, n_tokens, kv_cache_mgr, start_pos, input_tokens);
+        _ = embd_offset;
+        _ = causal;
+        var g = Gemma4Graph{
+            .ctx = ctx,
+            .gf = graph,
+            .params = &self.params,
+            .weights = &self.weights,
+            .cur = undefined,
+            .pos_tensor = undefined,
+            .inp_per_layer = null,
+        };
+        return try g.buildMediaOnly(embd_override, n_tokens, kv_cache_mgr, start_pos, input_tokens);
     }
 
+    /// Pure text forward.  Delegates to Gemma4Graph.
     pub fn forward(
         self: *Gemma4Model,
         ctx: *ggml.Context,
@@ -284,287 +697,16 @@ pub const Gemma4Model = struct {
         kv_cache_mgr: ?*kv_cache.KVCache,
         start_pos: i32,
     ) !*ggml.Tensor {
-        const p = &self.params;
-        const w = &self.weights;
-        const n_tokens_i64: i64 = n_tokens;
-
-        // Token 嵌入 + 缩放
-        var cur = embed.tokenEmbedding(ctx, w.base.token_embd, input_tokens);
-        cur = ggml.scale(ctx, cur, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
-        cur.setName("inp_scaled");
-
-        const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
-
-        return self.transformerForward(ctx, graph, cur, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, true);
-    }
-
-    /// Shared transformer loop (used by both forward and forwardWithEmbdOverride).
-    fn transformerForward(
-        self: *Gemma4Model,
-        ctx: *ggml.Context,
-        graph: *ggml.CGraph,
-        cur_in: *ggml.Tensor,
-        pos_tensor: *ggml.Tensor,
-        n_tokens_i64: i64,
-        start_pos: i32,
-        kv_cache_mgr: ?*kv_cache.KVCache,
-        input_tokens: ?*ggml.Tensor,
-        causal: bool,
-    ) !*ggml.Tensor {
-        const p = &self.params;
-        const w = &self.weights;
-        var cur = cur_in;
-
-        // --- Per-layer embedding: pre-compute inp_per_layer before layer loop ---
-        // Matches llama.cpp project_per_layer_inputs() in gemma4.cpp.
-        const inp_per_layer: ?*ggml.Tensor = if (p.n_embd_per_layer > 0 and input_tokens != null) blk: {
-            const n_embd_pl: i64 = @intCast(p.n_embd_per_layer);
-            const n_layer_i64: i64 = @intCast(p.base.n_layer);
-
-            // Lookup per-layer token embeddings
-            var inp_pl = ggml.getRows(ctx, w.per_layer_token_embd.?, input_tokens.?);
-            // reshape: [n_embd_per_layer*n_layer, n_tokens] -> [n_embd_per_layer, n_layer, n_tokens]
-            inp_pl = ggml.reshape3d(ctx, inp_pl, n_embd_pl, n_layer_i64, n_tokens_i64);
-            inp_pl = ggml.scale(ctx, inp_pl, @sqrt(@as(f32, @floatFromInt(p.n_embd_per_layer))));
-
-            // Project input through per_layer_model_proj
-            var proj = ggml.mulMat(ctx, w.per_layer_model_proj.?, cur_in);
-            proj = ggml.scale(ctx, proj, 1.0 / @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
-            proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
-            // RMSNorm on per-layer projection (norm weight is [n_embd_per_layer])
-            proj = ggml.reshape2d(ctx, proj, n_embd_pl, n_layer_i64 * n_tokens_i64);
-            proj = ggml.rmsNorm(ctx, proj, p.base.norm_eps);
-            proj = ggml.mul(ctx, proj, ggml.reshape2d(ctx, w.per_layer_proj_norm.?, n_embd_pl, 1));
-            proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
-
-            // Combine: proj + token_embd
-            inp_pl = ggml.add(ctx, proj, inp_pl);
-            inp_pl = ggml.scale(ctx, inp_pl, 1.0 / @sqrt(2.0));
-
-            // Permute to [n_embd_per_layer, n_tokens, n_layer] for per-layer slice access
-            inp_pl = ggml.cont(ctx, ggml.permute(ctx, inp_pl, 0, 2, 1, 3));
-            inp_pl.setName("inp_per_layer");
-
-            graph.buildForwardExpand(inp_pl);
-            break :blk inp_pl;
-        } else null;
-
-        for (w.layers, 0..) |*layer, i| {
-            // Gemma 4: head_dim 由 attn_q_norm 维度决定（per-layer，与 llama.cpp n_embd_head_k(il) 一致）
-            // llama.cpp 使用 n_embd_head = hparams.n_embd_head_k(il) 同时作为 Q 和 K 的 head_dim
-            const head_dim: i64 = layer.attn_q_norm_weight.ne()[0];
-            // Per-layer n_head from Q weight shape: attn_q_weight [n_embd, n_head * head_dim]
-            const n_head: i64 = @divExact(layer.attn_q_weight.ne()[1], head_dim);
-
-            // RoPE 参数
-            const layer_is_swa = p.is_swa_layer.items[i];
-
-            // Per-layer dimensions for shared KV debugging (set log level to debug to see)
-            log.debug("Layer {d}: is_swa={}, has_kv={}, head_dim={d}, head_dim_k={d}", .{
-                i, layer_is_swa, layer.has_kv, head_dim, if (layer.has_kv) layer.attn_k_norm_weight.ne()[0] else @as(i64, 0),
-            });
-
-            const freq_base_l: f32 = if (layer_is_swa and p.rope_freq_base_swa > 0)
-                p.rope_freq_base_swa
-            else
-                p.base.rope_theta;
-            const freq_scale_l: f32 = 1.0;
-            // 同时确保 rope_dim 不超过 head_dim（防止 ggml_rope 断言 n_dims <= ne0）
-            const rope_dim_full: u32 = if (p.rope_dim_swa > 0 and layer_is_swa)
-                @min(p.rope_dim_swa, @as(u32, @intCast(head_dim)))
-            else
-                @min(p.base.rope_dim, @as(u32, @intCast(head_dim)));
-            const rope_dim: i64 = @intCast(rope_dim_full);
-
-            // --- Pre-attention RMSNorm ---
-            const attn_input = rms_norm.rmsNorm(ctx, cur, layer.attn_norm_weight, p.base.norm_eps);
-
-            // --- Q 投影（所有层都需要） ---
-            var q = ggml.mulMat(ctx, layer.attn_q_weight, attn_input);
-            q = ggml.reshape3d(ctx, q, head_dim, n_head, n_tokens_i64);
-
-            // Q Pre-norm
-            q = ggml.reshape2d(ctx, q, head_dim, n_head * n_tokens_i64);
-            q = ggml.rmsNorm(ctx, q, p.base.norm_eps);
-            q = ggml.mul(ctx, q, ggml.reshape2d(ctx, layer.attn_q_norm_weight, head_dim, 1));
-            q = ggml.reshape3d(ctx, q, head_dim, n_head, n_tokens_i64);
-
-            // RoPE on Q（全注意力层使用 rope_freqs 做 proportional rope）
-            const rope_freqs: ?*ggml.Tensor = if (!layer_is_swa) layer.rope_freqs else null;
-            // 修复: mode=2 (NEOX 风格，与 LLaMA/Gemma 3 一致)
-            q = ggml.ropeExt(ctx, q, pos_tensor, rope_freqs, @intCast(rope_dim), 2, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
-
-            // --- K/V 投影 + 注意力 ---
-            var attn_out: *ggml.Tensor = undefined;
-            if (layer.has_kv) {
-                // head_dim_k from K norm weight (all layers use 256 for Gemma 4)
-                const head_dim_k: i64 = layer.attn_k_norm_weight.ne()[0];
-                const n_kv_head: i64 = if (layer.attn_k_weight) |kw|
-                    @divExact(kw.ne()[1], head_dim_k)
-                else
-                    n_head;
-
-                var k = ggml.mulMat(ctx, layer.attn_k_weight.?, attn_input);
-                var v_tensor: *ggml.Tensor = if (layer.attn_v_weight) |vw|
-                    ggml.mulMat(ctx, vw, attn_input)
-                else
-                    k; // 共享 K/V
-
-                k = ggml.reshape3d(ctx, k, head_dim_k, n_kv_head, n_tokens_i64);
-                v_tensor = ggml.reshape3d(ctx, v_tensor, head_dim_k, n_kv_head, n_tokens_i64);
-
-                // K Pre-norm
-                k = ggml.reshape2d(ctx, k, head_dim_k, n_kv_head * n_tokens_i64);
-                k = ggml.rmsNorm(ctx, k, p.base.norm_eps);
-                k = ggml.mul(ctx, k, ggml.reshape2d(ctx, layer.attn_k_norm_weight, head_dim_k, 1));
-                k = ggml.reshape3d(ctx, k, head_dim_k, n_kv_head, n_tokens_i64);
-
-                // V RMSNorm (no weight)
-                v_tensor = ggml.rmsNorm(ctx, v_tensor, p.base.norm_eps);
-
-                // RoPE on K (mode=2)
-                k = ggml.ropeExt(ctx, k, pos_tensor, rope_freqs, @intCast(rope_dim), 2, 0, freq_base_l, freq_scale_l, 0.0, 1.0, 0.0, 0.0);
-
-                // Gemma 4: Q may have larger head_dim than K.
-                // Reshape Q to match K's head_dim BEFORE permute.
-                var n_head_eff = n_head;
-                if (head_dim != head_dim_k) {
-                    n_head_eff = @divExact(n_head * head_dim, head_dim_k);
-                    q = ggml.reshape3d(ctx, q, head_dim_k, n_head_eff, n_tokens_i64);
-                    log.debug("Layer {d}: reshape Q from [{d},{d}] -> [{d},{d}]", .{ i, head_dim, n_head, head_dim_k, n_head_eff });
-                }
-                // KV Cache: store K/V, then read back full cache for attention across all tokens
-                if (kv_cache_mgr) |cache| {
-                    cache.setKv(ctx, graph, i, k, v_tensor, @intCast(n_tokens_i64));
-                    k = cache.getKView(ctx, i);
-                    v_tensor = cache.getVView(ctx, i);
-                }
-
-                const cache_len: i64 = if (kv_cache_mgr) |cache|
-                    @as(i64, @intCast(cache.currentLen()))
-                else
-                    n_tokens_i64;
-
-                attn_out = attention.scaledDotProductAttention(ctx, q, k, v_tensor, .{
-                    .n_head = n_head_eff,
-                    .n_kv_head = n_kv_head,
-                    .head_dim = head_dim_k,
-                    .n_tokens = n_tokens_i64,
-                    .cache_len = cache_len,
-                    .start_pos = start_pos,
-                    .scale_factor = p.f_attention_scale,
-                    .attn_logit_softcap = p.attn_logit_softcapping,
-                    .causal = causal,
-                }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
-
-                // Reshape attn_out back to original Q dimension
-                attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
-            } else {
-                // 非 KV 层：必须从 KV cache 中复用前面层的 KV
-                const kv_layer_idx = findKVLayer(p, i);
-
-                // 共享 KV 层必须使用 KV cache
-                const cache = kv_cache_mgr orelse @panic("Shared KV layer requires KV cache");
-                const k = cache.getKView(ctx, kv_layer_idx);
-                const v_tensor = cache.getVView(ctx, kv_layer_idx);
-                const head_dim_k_cache: i64 = k.ne()[0];
-                const n_kv_head_cache: i64 = k.ne()[1];
-
-                var n_head_eff = n_head;
-                if (head_dim != head_dim_k_cache) {
-                    // Q 的 head_dim 可能大于 K 的 head_dim（例如 SWA 层与全注意力层）
-                    n_head_eff = @divExact(n_head * head_dim, head_dim_k_cache);
-                    q = ggml.reshape3d(ctx, q, head_dim_k_cache, n_head_eff, n_tokens_i64);
-                }
-
-                const cache_len: i64 = @as(i64, @intCast(cache.currentLen()));
-
-                attn_out = attention.scaledDotProductAttention(ctx, q, k, v_tensor, .{
-                    .n_head = n_head_eff,
-                    .n_kv_head = n_kv_head_cache,
-                    .head_dim = head_dim_k_cache,
-                    .n_tokens = n_tokens_i64,
-                    .cache_len = cache_len,
-                    .start_pos = start_pos,
-                    .scale_factor = p.f_attention_scale,
-                    .attn_logit_softcap = p.attn_logit_softcapping,
-                    .causal = causal,
-                }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
-
-                // Reshape attn_out back to original Q dimension
-                attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
-            }
-
-            // 输出投影
-            attn_out = ggml.mulMat(ctx, layer.attn_output_weight, attn_out);
-
-            // --- Attention Post-norm ---
-            attn_out = rms_norm.rmsNorm(ctx, attn_out, layer.attn_post_norm_weight, p.base.norm_eps);
-
-            // 残差连接
-            cur = ggml.add(ctx, cur, attn_out);
-
-            // --- FFN ---
-            const ffn_input = rms_norm.rmsNorm(ctx, cur, layer.ffn_norm_weight, p.base.norm_eps);
-            const ffn_out = gegluFFN(ctx, ffn_input, layer.ffn_gate_weight, layer.ffn_up_weight, layer.ffn_down_weight);
-
-            // --- FFN Post-norm ---
-            const ffn_normed = rms_norm.rmsNorm(ctx, ffn_out, layer.ffn_post_norm_weight, p.base.norm_eps);
-
-            // 残差连接
-            cur = ggml.add(ctx, cur, ffn_normed);
-
-            // --- Per-layer embedding (matches llama.cpp gemma4.cpp order) ---
-            if (inp_per_layer) |inp_pl| {
-                if (layer.per_layer_inp_gate) |pl_gate| {
-                    const n_embd_pl: i64 = @intCast(p.n_embd_per_layer);
-                    const pe_in = cur; // save for residual
-
-                    // Gate projection: [n_embd, n_tokens] -> [n_embd_per_layer, n_tokens]
-                    cur = ggml.mulMat(ctx, pl_gate, cur);
-                    cur = ggml.gelu(ctx, cur);
-
-                    // Slice inp_per_layer[il]: view2d of [n_embd_per_layer, n_tokens, n_layer]
-                    const elem_size = @sizeOf(f32); // inp_per_layer is F32 after cont
-                    const slice_offset: usize = @as(usize, @intCast(i)) * @as(usize, @intCast(n_embd_pl)) * @as(usize, @intCast(n_tokens_i64)) * elem_size;
-                    const inp_this = ctx.view2d(inp_pl, n_embd_pl, n_tokens_i64, inp_pl.nb()[1], slice_offset);
-
-                    cur = ggml.mul(ctx, cur, inp_this);
-
-                    // Project back: [n_embd_per_layer, n_tokens] -> [n_embd, n_tokens]
-                    cur = ggml.mulMat(ctx, layer.per_layer_proj.?, cur);
-
-                    // Post-norm
-                    cur = rms_norm.rmsNorm(ctx, cur, layer.per_layer_post_norm.?, p.base.norm_eps);
-
-                    // Residual connection
-                    cur = ggml.add(ctx, pe_in, cur);
-                }
-            }
-
-            // --- Layer output scale（可选） ---
-            if (layer.out_scale) |scale| {
-                cur = ggml.mul(ctx, cur, scale);
-            }
-        }
-        cur = rms_norm.rmsNorm(ctx, cur, w.base.output_norm_weight, p.base.norm_eps);
-        cur.setName("output_norm");
-
-        // --- 输出投影 ---
-        const out_w = w.base.output_weight orelse w.base.token_embd;
-        var logits_tensor = ggml.mulMat(ctx, out_w, cur);
-
-        // --- Final logit softcapping ---
-        if (p.final_logit_softcapping > 0.0) {
-            const cap = p.final_logit_softcapping;
-            logits_tensor = ggml.scale(ctx, logits_tensor, 1.0 / cap);
-            logits_tensor = ggml.tanh(ctx, logits_tensor);
-            logits_tensor = ggml.scale(ctx, logits_tensor, cap);
-        }
-        logits_tensor.setName("logits");
-
-        graph.buildForwardExpand(logits_tensor);
-        return logits_tensor;
+        var g = Gemma4Graph{
+            .ctx = ctx,
+            .gf = graph,
+            .params = &self.params,
+            .weights = &self.weights,
+            .cur = undefined,
+            .pos_tensor = undefined,
+            .inp_per_layer = null,
+        };
+        return try g.build(input_tokens, n_tokens, kv_cache_mgr, start_pos);
     }
 
     pub fn buildGraph(
@@ -661,6 +803,34 @@ fn findKVLayer(p: *const Gemma4Params, layer_idx: usize) usize {
     // 理论上不应该走到这里，因为该层应该 has_kv==false
     // 返回 0 作为 fallback（第 0 层通常有 KV）
     return 0;
+}
+
+/// Per-layer embedding injection at position `il` in the transformer layer.
+/// Used by Gemma4Graph.buildLayer.
+fn buildPerLayerInjection(
+    ctx: *ggml.Context,
+    p: *const Gemma4Params,
+    layer: *const LayerWeights,
+    cur: *ggml.Tensor,
+    inp_pl: *ggml.Tensor,
+    il: usize,
+    n_tokens_i64: i64,
+) *ggml.Tensor {
+    const n_embd_pl: i64 = @intCast(p.n_embd_per_layer);
+    const pe_in = cur;
+
+    var c = ggml.mulMat(ctx, layer.per_layer_inp_gate.?, cur);
+    c = ggml.gelu(ctx, c);
+
+    const elem_size = @sizeOf(f32);
+    const slice_offset: usize = @as(usize, @intCast(il)) * @as(usize, @intCast(n_embd_pl)) * @as(usize, @intCast(n_tokens_i64)) * elem_size;
+    const inp_this = ctx.view2d(inp_pl, n_embd_pl, n_tokens_i64, inp_pl.nb()[1], slice_offset);
+
+    c = ggml.mul(ctx, c, inp_this);
+    c = ggml.mulMat(ctx, layer.per_layer_proj.?, c);
+    c = rms_norm.rmsNorm(ctx, c, layer.per_layer_post_norm.?, p.base.norm_eps);
+
+    return ggml.add(ctx, pe_in, c);
 }
 
 // ============================================================================
