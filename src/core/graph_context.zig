@@ -12,6 +12,16 @@
 //! - CGraph 每步新建（极轻量，仅 ~100 字节 struct 分配）
 //! - 中间张量随 buildGraph 自然累积，超过阈值自动回收
 //!
+//! Gallocr 预规划（Pre-reservation）：
+//! 为防止 ggml_gallocr_needs_realloc 的重复分配循环（deps/guide.md），
+//! 在增量解码循环开始前必须调用 reserveGallocrForDecode() 构建 worst-case 图
+//! 并调用 ggml_gallocr_reserve 一次。这样后续每次 allocGraph 都复用同一份
+//! 缓冲区规划，不再触发重新分配。
+//!
+//! 关键约束：gallocr 内部使用张量指针作为哈希键，因此 pre-reservation 后
+//! **不得**调用 resetFull() 销毁上下文。如需回收内存，必须同时重建 gallocr
+//! 并重新执行预规划。
+//!
 //! 参考：llama.cpp 的 llm_graph_input_i 模式 — 缓存输入张量指针，避免重复创建
 
 const std = @import("std");
@@ -64,6 +74,10 @@ pub const IncContext = struct {
     /// 是否已初始化 Gallocr
     galloc_ready: bool = false,
 
+    /// Gallocr 是否已完成预规划（reserve）
+    /// 预规划后不能调用 resetFull()，否则张量指针失效
+    galloc_reserved: bool = false,
+
     /// 上下文内存大小
     ctx_size: usize,
 
@@ -109,6 +123,27 @@ pub const IncContext = struct {
         return g;
     }
 
+    /// 使用 worst-case 计算图预分配 Gallocr 缓冲区。
+    /// 必须在所有 beginStep() 调用之前调用，且只需调用一次。
+    ///
+    /// 预规划后，后续 decode 循环中的 allocGraph 将不再触发重新分配，
+    /// 从而实现"一次规划，反复执行"的高效内存管理。
+    ///
+    /// **重要**：调用后不得调用 resetFull()，否则 gallocr 内部哈希表
+    /// 中缓存的张量指针全部失效，导致每次 allocGraph 都触发重新分配。
+    pub fn reserveGallocr(self: *IncContext, max_graph: *ggml.CGraph) !void {
+        const g = try self.getGallocr();
+        if (!g.reserve(max_graph)) {
+            log.err("Gallocr reserve failed — worst-case graph too large for buffer", .{});
+            return error.GallocrReserveFailed;
+        }
+        self.galloc_reserved = true;
+        const buf_size = g.getBufferSize(0);
+        log.info("IncContext: gallocr reserved with {d:.1} MB compute buffer", .{
+            @as(f64, @floatFromInt(buf_size)) / (1024.0 * 1024.0),
+        });
+    }
+
     /// 检查是否需要内存回收
     fn needsRecycle(self: *const IncContext) bool {
         const used = self.ctx_inc.usedMem();
@@ -119,13 +154,21 @@ pub const IncContext = struct {
     }
 
     /// 完整重置（回收所有上下文内存）
-    /// 当上下文接近满时自动调用，也支持手动调用
+    /// 当上下文接近满时自动调用，也支持手动调用。
+    ///
+    /// **警告**：如果 gallocr 已完成预规划（galloc_reserved == true），
+    /// 调用此方法会使 gallocr 的预规划失效。调用者必须在 reset 后
+    /// 重新调用 reserveGallocr() 进行预规划。
     pub fn resetFull(self: *IncContext) void {
+        if (self.galloc_reserved) {
+            log.warn("IncContext: resetFull with gallocr_reserved=true — gallocr reservation invalidated", .{});
+            self.galloc_reserved = false;
+        }
         self.ctx_inc.reset();
         self.cached_input = null;
         self.cache_valid = false;
         self.steps_since_reset = 0;
-        log.debug("IncContext: full reset (ctx recycled, {d}%)", .{@as(u32, @intFromFloat(self.memRatio() * 100))});
+        log.debug("IncContext: full reset (ctx recycled)", .{});
     }
 
     /// 为增量解码步骤准备计算环境
@@ -135,12 +178,23 @@ pub const IncContext = struct {
     /// - CGraph：每步新建（极轻量，避免 ggml_graph_reset 梯度检查）
     /// - Gallocr：跨步复用（避免重复图分析）
     /// - 自动检测内存压力：超过阈值时触发 full reset
+    ///
+    /// 如果 gallocr 已预规划，不会触发 resetFull（因为会破坏 gallocr 哈希表）。
+    /// 上下文溢出会导致后续 allocGraph 失败，调用者应负责在溢出前重建 gallocr。
     pub fn beginStep(self: *IncContext) !DecodeStep {
         const g = try self.getGallocr();
 
         // 检查是否需要内存回收
-        if (self.cache_valid and self.needsRecycle()) {
+        // 注意：如果 gallocr 已预规划，跳过回收检查（reset 会破坏哈希表）
+        if (!self.galloc_reserved and self.cache_valid and self.needsRecycle()) {
             self.resetFull();
+        }
+
+        // 如果 gallocr 已预规划但上下文接近满，发出警告
+        if (self.galloc_reserved and self.cache_valid and self.needsRecycle()) {
+            log.warn("IncContext: context {d:.0}% full but gallocr_reserved — will need re-reservation soon", .{
+                self.memRatio() * 100,
+            });
         }
 
         if (!self.cache_valid) {
@@ -210,6 +264,7 @@ test "IncContext init and deinit" {
     defer ic.deinit();
 
     try testing.expect(!ic.galloc_ready);
+    try testing.expect(!ic.galloc_reserved);
     try testing.expectEqual(@as(usize, 0), ic.usedMem());
 }
 
@@ -315,4 +370,30 @@ test "IncContext resetFull" {
     _ = try ic.beginStep();
     try testing.expect(ic.cache_valid);
     try testing.expectEqual(@as(u32, 1), ic.stepsSinceReset());
+}
+
+test "IncContext resetFull clears gallocr_reserved" {
+    const params = model_if.ModelParams{
+        .n_vocab = 32000,
+        .n_embd = 4096,
+        .n_head = 32,
+        .n_head_dim = 128,
+        .n_kv_head = 32,
+        .n_layer = 1,
+        .n_ff = 11008,
+        .max_seq_len = 2048,
+        .rope_theta = 1000000.0,
+        .rope_dim = 64,
+        .norm_eps = 1e-5,
+    };
+
+    var ic = try IncContext.init(testing.allocator, &params, 64 * 1024 * 1024);
+    defer ic.deinit();
+
+    // Manually mark as reserved
+    ic.galloc_reserved = true;
+    try testing.expect(ic.galloc_reserved);
+
+    ic.resetFull();
+    try testing.expect(!ic.galloc_reserved);
 }

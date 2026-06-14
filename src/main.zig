@@ -470,6 +470,55 @@ const InferenceEngine = struct {
         var eog_detect_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         defer eog_detect_buf.deinit(self.allocator);
 
+        // --- Pre-reserve inc_ctx gallocr with worst-case graph ---
+        // Build a graph with position = max_seq_len-1 to cover the widest possible
+        // KV cache mask. This eliminates ggml_gallocr_needs_realloc during decode.
+        //
+        // IMPORTANT: Do NOT call inc_ctx.resetFull() after reservation!
+        // ggml_gallocr uses tensor pointers as hash keys internally.
+        // resetFull() destroys all tensors, invalidating the gallocr hash table
+        // and causing infinite realloc loops (see deps/guide.md).
+        {
+            // Save current KV cache lengths
+            const saved_lens = try self.kv_cache_mgr.getAllLengths(self.allocator);
+            defer self.allocator.free(saved_lens);
+
+            // Set all layer lengths to kv_cache.max_seq_len-1 (the actual allocated cache size)
+            const max_pos: u32 = self.kv_cache_mgr.max_seq_len -| 1;
+            self.kv_cache_mgr.setAllLengths(max_pos);
+
+            // Build worst-case graph through inc_ctx
+            const reserve_step = try self.inc_ctx.beginStep();
+            reserve_step.setToken(0); // dummy token
+            var reserve_builder = graph_builder.GraphBuilder.init(
+                reserve_step.ctx,
+                reserve_step.graph,
+                &self.params,
+                self.allocator,
+            );
+            _ = try self.model.buildGraph(
+                &reserve_builder,
+                reserve_step.input_token,
+                1,
+                @ptrCast(&self.kv_cache_mgr),
+                @intCast(max_pos),
+            );
+
+            // Reserve gallocr buffers with this max graph
+            try self.inc_ctx.reserveGallocr(reserve_step.graph);
+
+            // Restore original KV cache lengths (setKv in buildGraph would have incremented them)
+            for (self.kv_cache_mgr.layers, 0..) |*layer, i| {
+                layer.current_len = saved_lens[i];
+            }
+
+            // DO NOT call inc_ctx.resetFull() here!
+            // The gallocr reservation is tied to tensor pointers in the context.
+            // resetFull() would destroy these pointers, causing infinite realloc.
+            // The cached_input tensor from beginStep() above survives and will be
+            // reused by subsequent beginStep() calls (cache_valid == true).
+        }
+
         // --- Incremental decoding ---
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
@@ -1108,6 +1157,30 @@ const InferenceEngine = struct {
 
         const t_tg_start = engine_common.currentTimeMs();
 
+        // --- Pre-reserve inc_ctx gallocr with worst-case graph (vision) ---
+        {
+            const saved_lens = try self.kv_cache_mgr.getAllLengths(self.allocator);
+            defer self.allocator.free(saved_lens);
+
+            const max_pos: u32 = self.kv_cache_mgr.max_seq_len -| 1;
+            self.kv_cache_mgr.setAllLengths(max_pos);
+
+            const reserve_step = try self.inc_ctx.beginStep();
+            reserve_step.setToken(0);
+            var reserve_builder = graph_builder.GraphBuilder.init(
+                reserve_step.ctx, reserve_step.graph, &self.params, self.allocator,
+            );
+            _ = try self.model.buildGraph(
+                &reserve_builder, reserve_step.input_token, 1,
+                @ptrCast(&self.kv_cache_mgr), @intCast(max_pos),
+            );
+            try self.inc_ctx.reserveGallocr(reserve_step.graph);
+
+            for (self.kv_cache_mgr.layers, 0..) |*layer, i| {
+                layer.current_len = saved_lens[i];
+            }
+        }
+
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
 
@@ -1384,6 +1457,31 @@ const InferenceEngine = struct {
             pp_time_s,
         });
         const t_tg_start = engine_common.currentTimeMs();
+
+        // --- Pre-reserve inc_ctx gallocr with worst-case graph (audio) ---
+        {
+            const saved_lens = try self.kv_cache_mgr.getAllLengths(self.allocator);
+            defer self.allocator.free(saved_lens);
+
+            const max_pos: u32 = self.kv_cache_mgr.max_seq_len -| 1;
+            self.kv_cache_mgr.setAllLengths(max_pos);
+
+            const reserve_step = try self.inc_ctx.beginStep();
+            reserve_step.setToken(0);
+            var reserve_builder = graph_builder.GraphBuilder.init(
+                reserve_step.ctx, reserve_step.graph, &self.params, self.allocator,
+            );
+            _ = try self.model.buildGraph(
+                &reserve_builder, reserve_step.input_token, 1,
+                @ptrCast(&self.kv_cache_mgr), @intCast(max_pos),
+            );
+            try self.inc_ctx.reserveGallocr(reserve_step.graph);
+
+            for (self.kv_cache_mgr.layers, 0..) |*layer, i| {
+                layer.current_len = saved_lens[i];
+            }
+        }
+
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
 

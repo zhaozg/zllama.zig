@@ -120,9 +120,8 @@ pub const KVCache = struct {
 
         // 使用父张量的实际 stride（支持 per-layer head_dim 不同的情况）
         const parent_nb = layer.k.nb();
-        return ctx.view3d(layer.k, hdim, nkv, len,
-            parent_nb[1],  // nb1: 父张量沿 dim 1 的 stride
-            parent_nb[2],  // nb2: 父张量沿 dim 2 的 stride
+        return ctx.view3d(layer.k, hdim, nkv, len, parent_nb[1], // nb1: 父张量沿 dim 1 的 stride
+            parent_nb[2], // nb2: 父张量沿 dim 2 的 stride
             0);
     }
 
@@ -135,10 +134,7 @@ pub const KVCache = struct {
         const nkv: i64 = @intCast(layer.n_kv_head_actual);
 
         const parent_nb = layer.v.nb();
-        return ctx.view3d(layer.v, hdim, nkv, len,
-            parent_nb[1],
-            parent_nb[2],
-            0);
+        return ctx.view3d(layer.v, hdim, nkv, len, parent_nb[1], parent_nb[2], 0);
     }
 
     /// 将新的 K, V 写入 Cache
@@ -175,21 +171,33 @@ pub const KVCache = struct {
         const v_parent_nb = layer.v.nb();
 
         // layer.k: [head_dim_k_cache, n_kv_head_cache, max_seq_len]
-        const k_dst = ctx.view3d(layer.k, actual_hdim_k, actual_nkv_k, @intCast(n_tokens),
-            k_parent_nb[1],
-            k_parent_nb[2],
-            @intCast(offset * k_parent_nb[2]));
+        const k_dst = ctx.view3d(layer.k, actual_hdim_k, actual_nkv_k, @intCast(n_tokens), k_parent_nb[1], k_parent_nb[2], @intCast(offset * k_parent_nb[2]));
         const k_cpy = ggml.cpy(ctx, new_k, k_dst);
         graph.buildForwardExpand(k_cpy);
 
-        const v_dst = ctx.view3d(layer.v, actual_hdim_v, actual_nkv_v, @intCast(n_tokens),
-            v_parent_nb[1],
-            v_parent_nb[2],
-            @intCast(offset * v_parent_nb[2]));
+        const v_dst = ctx.view3d(layer.v, actual_hdim_v, actual_nkv_v, @intCast(n_tokens), v_parent_nb[1], v_parent_nb[2], @intCast(offset * v_parent_nb[2]));
         const v_cpy = ggml.cpy(ctx, new_v, v_dst);
         graph.buildForwardExpand(v_cpy);
 
         layer.current_len += n_tokens;
+    }
+
+    /// 设置所有层的 cache 长度为指定值。
+    /// 用于构建 worst-case 计算图进行 gallocr 预规划。
+    /// 调用者负责在预规划完成后恢复原始长度。
+    pub fn setAllLengths(self: *KVCache, len: u32) void {
+        for (self.layers) |*layer| {
+            layer.current_len = len;
+        }
+    }
+
+    /// 获取所有层当前长度的快照，用于 save/restore。
+    pub fn getAllLengths(self: *const KVCache, allocator: std.mem.Allocator) ![]u32 {
+        const lens = try allocator.alloc(u32, self.layers.len);
+        for (self.layers, 0..) |layer, i| {
+            lens[i] = layer.current_len;
+        }
+        return lens;
     }
 
     /// 获取当前 Cache 长度（取所有层的最大值）

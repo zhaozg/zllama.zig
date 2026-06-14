@@ -92,6 +92,18 @@ pub const Gallocr = opaque {
         return c.ggml_gallocr_alloc_graph(@ptrCast(self), @ptrCast(graph));
     }
 
+    /// Pre-allocate buffers from a measure graph to avoid reallocations.
+    /// Call once with a worst-case graph before the main loop.
+    /// Returns false if the buffer allocation failed.
+    pub fn reserve(self: *Gallocr, graph: *CGraph) bool {
+        return c.ggml_gallocr_reserve(@ptrCast(self), @ptrCast(graph));
+    }
+
+    /// Get the buffer size for the given buffer index (for diagnostics).
+    pub fn getBufferSize(self: *Gallocr, buffer_id: u32) usize {
+        return c.ggml_gallocr_get_buffer_size(@ptrCast(self), @intCast(buffer_id));
+    }
+
     /// 释放 graph allocator
     pub fn free(self: *Gallocr) void {
         c.ggml_gallocr_free(@as(*c.struct_ggml_gallocr, @ptrCast(self)));

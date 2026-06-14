@@ -7,6 +7,11 @@ pub fn build(b: *std.Build) void {
     // -Dbundle-ggml: build ggml from source instead of using system-installed libraries
     const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse true;
 
+    // -Dno-galloc-realloc: assert-fail on any gallocr reallocation.
+    // Useful for development to detect graph topology changes that would cause
+    // runtime reallocations. Not recommended for production.
+    const no_galloc_realloc = b.option(bool, "no-galloc-realloc", "Assert-fail on gallocr reallocation (dev only)") orelse false;
+
     // Build ggml from source when bundling, otherwise nil
     const ggml_lib: ?*std.Build.Step.Compile = if (bundle_ggml)
         buildGgmlFromSource(b, target, optimize)
@@ -28,6 +33,9 @@ pub fn build(b: *std.Build) void {
         ggml_mod.addIncludePath(b.path("deps/ggml/include"));
         ggml_mod.addIncludePath(b.path("deps/ggml/src"));
         ggml_mod.addCMacro("GGML_USE_CPU", "1");
+        if (no_galloc_realloc) {
+            ggml_mod.addCMacro("GGML_SCHED_NO_REALLOC", "1");
+        }
         ggml_mod.linkLibrary(ggml_lib.?);
     } else {
         // 使用系统安装的 ggml
@@ -42,7 +50,6 @@ pub fn build(b: *std.Build) void {
         ggml_mod.linkFramework("Accelerate", .{});
         ggml_mod.addCMacro("GGML_USE_ACCELERATE", "1");
     }
-
 
     // ======================================================================
     // vibe_jinja 模块（Jinja2 模板引擎）
@@ -131,7 +138,6 @@ pub fn build(b: *std.Build) void {
     });
     pooling_mod.addImport("ggml", ggml_mod);
 
-
     const weight_loader_mod = b.createModule(.{
         .root_source_file = b.path("src/core/weight_loader.zig"),
         .target = target,
@@ -140,7 +146,6 @@ pub fn build(b: *std.Build) void {
     });
     weight_loader_mod.addImport("ggml", ggml_mod);
     weight_loader_mod.addImport("gguf", gguf_mod);
-
 
     const model_mod = b.createModule(.{
         .root_source_file = b.path("src/model.zig"),
@@ -160,7 +165,6 @@ pub fn build(b: *std.Build) void {
     model_mod.addImport("pooling", pooling_mod);
 
     model_mod.addImport("weight_loader", weight_loader_mod);
-
 
     const graph_builder_mod = b.createModule(.{
         .root_source_file = b.path("src/core/graph_builder.zig"),
@@ -184,9 +188,6 @@ pub fn build(b: *std.Build) void {
     graph_context_mod.addImport("model", model_mod);
     graph_context_mod.addImport("graph_builder", graph_builder_mod);
     graph_context_mod.addImport("memory", memory_mod);
-
-
-
 
     model_mod.addImport("graph_builder", graph_builder_mod);
 
@@ -214,7 +215,6 @@ pub fn build(b: *std.Build) void {
     prefill_mod.addImport("engine_common", engine_common_mod);
 
     const registry_mod = b.createModule(.{
-
         .root_source_file = b.path("src/models/registry.zig"),
         .target = target,
         .optimize = optimize,
@@ -273,7 +273,6 @@ pub fn build(b: *std.Build) void {
     chat_template_mod.addImport("types", chat_template_types_mod);
     chat_template_mod.addImport("multimodal", chat_template_multimodal_mod);
 
-
     // --- Jinja 引擎集成模块 ---
     const chat_template_jinja_mod = b.createModule(.{
         .root_source_file = b.path("src/chat_template/jinja.zig"),
@@ -300,7 +299,6 @@ pub fn build(b: *std.Build) void {
     mm_audio_mod.addImport("gguf", gguf_mod);
     mm_audio_mod.addImport("weight_loader", weight_loader_mod);
 
-
     const mm_vision_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/vision.zig"),
         .target = target,
@@ -319,7 +317,6 @@ pub fn build(b: *std.Build) void {
     });
     fft_mod.linkFramework("Accelerate", .{});
 
-
     const utils_mod = b.createModule(.{
         .root_source_file = b.path("src/utils.zig"),
         .target = target,
@@ -329,7 +326,6 @@ pub fn build(b: *std.Build) void {
     utils_mod.addImport("ggml", ggml_mod);
     utils_mod.addImport("gguf", gguf_mod);
     utils_mod.addImport("tokenizer", tokenizer_mod);
-
 
     const mm_manager_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/manager.zig"),
@@ -391,8 +387,6 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("chat_template", chat_template_mod);
     exe_mod.addImport("prefill", prefill_mod);
 
-
-
     const exe = b.addExecutable(.{
         .name = "zllama",
         .root_module = exe_mod,
@@ -411,7 +405,6 @@ pub fn build(b: *std.Build) void {
     tokenize_mod.addImport("gguf", gguf_mod);
     tokenize_mod.addImport("tokenizer", tokenizer_mod);
     tokenize_mod.addImport("utils", utils_mod);
-
 
     const tokenize_exe = b.addExecutable(.{
         .name = "zllama-tokenize",

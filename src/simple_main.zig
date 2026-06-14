@@ -82,8 +82,7 @@ const CliArgs = struct {
                 result.debug = true;
             } else if (std.mem.eql(u8, arg, "--benchmark")) {
                 result.benchmark = true;
-            } else if (std.mem.startsWith(u8, arg, "-")) {
-            } else if (std.mem.eql(u8, arg, "--info")) {
+            } else if (std.mem.startsWith(u8, arg, "-")) {} else if (std.mem.eql(u8, arg, "--info")) {
                 result.info = true;
                 logger.warn("unknown argument '{s}'", .{arg});
             } else if (std.mem.eql(u8, arg, "--chat-template")) {
@@ -373,6 +372,55 @@ const SimpleEngine = struct {
         var new_token_id: i32 = first_token;
         var pos: i32 = n_prompt_tokens;
 
+        // --- Pre-reserve inc_ctx gallocr with worst-case graph ---
+        // Build a graph with position = max_seq_len-1 to cover the widest possible
+        // KV cache mask. This eliminates ggml_gallocr_needs_realloc during decode.
+        {
+            // Save current KV cache lengths
+            const saved_lens = try self.kv_cache_mgr.getAllLengths(self.allocator);
+            defer self.allocator.free(saved_lens);
+
+            // Set all layer lengths to kv_cache.max_seq_len-1 (the actual allocated cache size,
+            // capped at 2048 in init()). After setKv writes one token, current_len becomes
+            // max_seq_len (full cache). This ensures the reservation covers the widest mask.
+            const max_pos: u32 = self.kv_cache_mgr.max_seq_len -| 1;
+            self.kv_cache_mgr.setAllLengths(max_pos);
+
+            // Build worst-case graph through inc_ctx
+            const reserve_step = try self.inc_ctx.beginStep();
+            reserve_step.setToken(0); // dummy token
+            var reserve_builder = graph_builder.GraphBuilder.init(
+                reserve_step.ctx,
+                reserve_step.graph,
+                &self.params,
+                self.allocator,
+            );
+            _ = try self.model.buildGraph(
+                &reserve_builder,
+                reserve_step.input_token,
+                1,
+                @ptrCast(&self.kv_cache_mgr),
+                @intCast(max_pos),
+            );
+
+            // Reserve gallocr buffers with this max graph
+            try self.inc_ctx.reserveGallocr(reserve_step.graph);
+
+            // Restore original KV cache lengths (setKv in buildGraph would have incremented them)
+            for (self.kv_cache_mgr.layers, 0..) |*layer, i| {
+                layer.current_len = saved_lens[i];
+            }
+
+            // DO NOT call inc_ctx.resetFull() here!
+            // The gallocr reservation is tied to tensor pointers in the context.
+            // resetFull() would destroy these pointers, causing infinite realloc.
+            // The cached_input tensor from beginStep() above survives and will be
+            // reused by subsequent beginStep() calls (cache_valid == true).
+            //
+            // Context memory grows each decode step but with the standard 512MB
+            // allocation, ~5000 steps fit before overflow. If overflow occurs,
+            // the caller must re-reserve gallocr after resetFull().
+        }
         // Text generation timing
         const t_tg_start = engine_common.currentTimeUs();
 
@@ -506,9 +554,12 @@ const SimpleEngine = struct {
                 self.n_threads,
                 n_prompt_tokens,
                 n_decode,
-                pp_time_s, pp_speed,
-                tg_time_s, tg_speed,
-                total_time_s, avg_speed,
+                pp_time_s,
+                pp_speed,
+                tg_time_s,
+                tg_speed,
+                total_time_s,
+                avg_speed,
             });
         } else if (n_decode > 0) {
             const total_time_s = pp_time_s + tg_time_s;
