@@ -309,6 +309,13 @@ const InferenceEngine = struct {
             const owned = try allocator.dupe(u8, tmpl_str);
             chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
             logger.info("Chat template: from GGUF metadata", .{});
+            // Debug: print template detection info when verbose
+            if (cli_args.verbose) {
+                if (chat_template.debugPrintTemplate(allocator, chat_template_source.?, arch, null)) |debug_info| {
+                    defer allocator.free(debug_info);
+                    logger.info("{s}", .{debug_info});
+                } else |_| {}
+            }
         }
         // If no source resolved, will use arch default in generate()
 
@@ -1013,34 +1020,13 @@ const InferenceEngine = struct {
         const formatted_prompt = if (self.no_chat_template) blk: {
             break :blk try self.allocator.dupe(u8, content_with_placeholder);
         } else blk: {
-            // For multimodal, prefer GGUF Jinja template to match llama.cpp behavior.
-            // If no GGUF template is available, fall back to architecture preset.
-            var tmpl: chat_template.Template = undefined;
-            const use_jinja = self.chat_template_source != null and self.chat_template_source.? == .gguf_builtin;
-            if (use_jinja) {
-                tmpl = chat_template.Template{
-                    .kind = .unknown,
-                    .source = self.chat_template_source.?,
-                    .jinja_enabled = true,
-                };
-            } else {
-                const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
-                const source = self.chat_template_source orelse
-                    chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
-                tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
-            }
-            defer if (!use_jinja) tmpl.deinit(self.allocator);
-
-            const system = if (self.system_prompt.len > 0) self.system_prompt else null;
-            // Use withMedia to pass media info to Jinja template engine
+            // Use applyChatTemplateWithMedia which internally uses resolve()
+            // (detectKind → preset for known templates like gemma4, never dead loops)
             const media = chat_template.Media{
                 .type = .image,
                 .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
             };
-            const messages = [_]chat_template.ChatMessage{
-                chat_template.ChatMessage.withMedia("user", content_with_placeholder, media),
-            };
-            break :blk try tmpl.apply(self.allocator, &messages, system, true);
+            break :blk try self.applyChatTemplateWithMedia(content_with_placeholder, media);
         };
         defer self.allocator.free(formatted_prompt);
 
@@ -1184,6 +1170,28 @@ const InferenceEngine = struct {
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
 
+            // Skip control tokens (e.g. <|channel|>, <|channel>) that should
+            // be filtered from output but don't stop generation.
+            if (self.tok.isSkipToken(@intCast(current_token))) {
+                const step = try self.inc_ctx.beginStep();
+                step.setToken(current_token);
+
+                var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+                const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
+
+                if (!step.galloc.allocGraph(step.graph)) {
+                    logger.err("Failed to allocate incremental graph memory", .{});
+                    return error.GraphAllocFailed;
+                }
+
+                try step.graph.compute(self.n_threads);
+
+                current_token = sampler.Sampler.sampleGreedy(inc_logits);
+                pos += 1;
+                gen_count += 1;
+                continue;
+            }
+
             if (!self.benchmark) {
                 var buf: [128]u8 = undefined;
                 const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
@@ -1314,33 +1322,13 @@ const InferenceEngine = struct {
         const formatted_prompt = if (self.no_chat_template) blk: {
             break :blk try self.allocator.dupe(u8, content_with_placeholder);
         } else blk: {
-            // For multimodal, prefer GGUF Jinja template to match llama.cpp behavior.
-            var tmpl: chat_template.Template = undefined;
-            const use_jinja = self.chat_template_source != null and self.chat_template_source.? == .gguf_builtin;
-            if (use_jinja) {
-                tmpl = chat_template.Template{
-                    .kind = .unknown,
-                    .source = self.chat_template_source.?,
-                    .jinja_enabled = true,
-                };
-            } else {
-                const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
-                const source = self.chat_template_source orelse
-                    chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
-                tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
-            }
-            defer if (!use_jinja) tmpl.deinit(self.allocator);
-
-            const system = if (self.system_prompt.len > 0) self.system_prompt else null;
-            // Use withMedia to pass media info to Jinja template engine
+            // Use applyChatTemplateWithMedia which internally uses resolve()
+            // (detectKind → preset for known templates like gemma4, never dead loops)
             const media = chat_template.Media{
                 .type = .audio,
                 .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } },
             };
-            const messages = [_]chat_template.ChatMessage{
-                chat_template.ChatMessage.withMedia("user", content_with_placeholder, media),
-            };
-            break :blk try tmpl.apply(self.allocator, &messages, system, true);
+            break :blk try self.applyChatTemplateWithMedia(content_with_placeholder, media);
         };
         defer self.allocator.free(formatted_prompt);
 
@@ -1484,6 +1472,28 @@ const InferenceEngine = struct {
 
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
+
+            // Skip control tokens (e.g. <|channel|>, <|channel>) that should
+            // be filtered from output but don't stop generation.
+            if (self.tok.isSkipToken(@intCast(current_token))) {
+                const step = try self.inc_ctx.beginStep();
+                step.setToken(current_token);
+
+                var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+                const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
+
+                if (!step.galloc.allocGraph(step.graph)) {
+                    logger.err("Failed to allocate incremental graph memory", .{});
+                    return error.GraphAllocFailed;
+                }
+
+                try step.graph.compute(self.n_threads);
+
+                current_token = sampler.Sampler.sampleGreedy(inc_logits);
+                pos += 1;
+                gen_count += 1;
+                continue;
+            }
 
             if (!self.benchmark) {
                 var buf: [128]u8 = undefined;

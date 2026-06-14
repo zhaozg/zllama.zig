@@ -223,11 +223,13 @@ pub fn resolve(
         .gguf_builtin => |tmpl_str| {
             const kind = detectKind(tmpl_str);
             if (kind != .unknown) {
+                log.info("GGUF template ({d} bytes) detected as {s}, using built-in preset", .{ tmpl_str.len, @tagName(kind) });
                 return Template{ .kind = kind, .source = source };
             }
             // If Jinja is enabled, keep as .unknown so apply() can try Jinja rendering
             if (jinja_enabled) {
-                log.info("GGUF chat template not recognized, will try Jinja rendering", .{});
+                log.info("GGUF chat template ({d} bytes) not recognized, will try Jinja rendering", .{tmpl_str.len});
+                log.debug("Template preview: {s}", .{tmpl_str[0..@min(tmpl_str.len, 256)]});
                 return Template{ .kind = .unknown, .source = source, .jinja_enabled = true };
             }
             // If GGUF template can't be detected and Jinja is disabled, fall back to arch default
@@ -245,6 +247,89 @@ pub fn resolve(
             return Template{ .kind = .unknown, .source = source, .jinja_enabled = jinja_enabled };
         },
     }
+}
+
+/// Debug helper: extract and format template diagnostics.
+/// Prints the template string (truncated), detection result, and resolution path.
+/// This is useful for debugging multimodal template issues.
+///
+/// Returns a formatted string describing the template state. Caller owns the memory.
+pub fn debugPrintTemplate(
+    allocator: std.mem.Allocator,
+    source: TemplateSource,
+    arch: model.Architecture,
+    model_name: ?[]const u8,
+) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "=== Template Debug ===\n");
+
+    {
+        const line = try std.fmt.allocPrint(allocator, "Architecture: {s}\n", .{@tagName(arch)});
+        defer allocator.free(line);
+        try buf.appendSlice(allocator, line);
+    }
+    if (model_name) |name| {
+        const line = try std.fmt.allocPrint(allocator, "Model name: {s}\n", .{name});
+        defer allocator.free(line);
+        try buf.appendSlice(allocator, line);
+    }
+
+    switch (source) {
+        .preset => |kind| {
+            const line = try std.fmt.allocPrint(allocator, "Source: preset ({s})\n", .{@tagName(kind)});
+            defer allocator.free(line);
+            try buf.appendSlice(allocator, line);
+        },
+        .gguf_builtin => |tmpl_str| {
+            const kind = detectKind(tmpl_str);
+            {
+                const line = try std.fmt.allocPrint(allocator, "Source: GGUF built-in ({d} bytes)\n", .{tmpl_str.len});
+                defer allocator.free(line);
+                try buf.appendSlice(allocator, line);
+            }
+            {
+                const line = try std.fmt.allocPrint(allocator, "Detected kind: {s}\n", .{@tagName(kind)});
+                defer allocator.free(line);
+                try buf.appendSlice(allocator, line);
+            }
+            const preview_len = @min(tmpl_str.len, 512);
+            try buf.appendSlice(allocator, "Template preview:\n");
+            try buf.appendSlice(allocator, tmpl_str[0..preview_len]);
+            try buf.appendSlice(allocator, "\n");
+            if (tmpl_str.len > preview_len) {
+                const line = try std.fmt.allocPrint(allocator, "... ({d} more bytes)\n", .{tmpl_str.len - preview_len});
+                defer allocator.free(line);
+                try buf.appendSlice(allocator, line);
+            }
+        },
+        .custom => |tmpl_str| {
+            const kind = detectKind(tmpl_str);
+            {
+                const line = try std.fmt.allocPrint(allocator, "Source: custom ({d} bytes)\n", .{tmpl_str.len});
+                defer allocator.free(line);
+                try buf.appendSlice(allocator, line);
+            }
+            {
+                const line = try std.fmt.allocPrint(allocator, "Detected kind: {s}\n", .{@tagName(kind)});
+                defer allocator.free(line);
+                try buf.appendSlice(allocator, line);
+            }
+            const preview_len = @min(tmpl_str.len, 512);
+            try buf.appendSlice(allocator, "Template preview:\n");
+            try buf.appendSlice(allocator, tmpl_str[0..preview_len]);
+            try buf.appendSlice(allocator, "\n");
+            if (tmpl_str.len > preview_len) {
+                const line = try std.fmt.allocPrint(allocator, "... ({d} more bytes)\n", .{tmpl_str.len - preview_len});
+                defer allocator.free(line);
+                try buf.appendSlice(allocator, line);
+            }
+        },
+    }
+
+    try buf.appendSlice(allocator, "=== End Template Debug ===\n");
+    return buf.toOwnedSlice(allocator);
 }
 
 // ============================================================================
@@ -1399,3 +1484,273 @@ test "applyMultiTurn: backward compat" {
         result,
     );
 }
+
+// ============================================================================
+// Multimodal Template Pipeline Tests
+// ============================================================================
+
+test "debugPrintTemplate: GGUF built-in" {
+    const source = TemplateSource{ .gguf_builtin = "<|im_start|>user\nHello<|im_end|>" };
+    const result = try debugPrintTemplate(testing.allocator, source, .qwen2, null);
+    defer testing.allocator.free(result);
+
+    try testing.expect(std.mem.indexOf(u8, result, "Source: GGUF built-in") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "Detected kind: chatml") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "<|im_start|>") != null);
+}
+
+test "debugPrintTemplate: preset" {
+    const source = TemplateSource{ .preset = .gemma4 };
+    const result = try debugPrintTemplate(testing.allocator, source, .gemma4, "gemma-4-2B-it");
+    defer testing.allocator.free(result);
+
+    try testing.expect(std.mem.indexOf(u8, result, "Source: preset (gemma4)") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "Architecture: gemma4") != null);
+}
+
+test "detectKind: Gemma4 template with <|turn>" {
+    // Simulate a Gemma4 Jinja template snippet (from google-gemma-4-31B-it-interleaved.jinja)
+    const gemma4_template =
+        \\{%- for message in messages -%}
+        \\{{- '<|turn>' + role + '\n' }}
+        \\{{- message['content'] | trim }}
+        \\{{- '<turn|>\n' }}
+        \\{%- endfor -%}
+    ;
+    const kind = detectKind(gemma4_template);
+    try testing.expectEqual(TemplateKind.gemma4, kind);
+}
+
+test "detectKind: Gemma4 template NOT confused with Gemma3" {
+    // Gemma4 uses <|turn>, Gemma3 uses <start_of_turn>
+    // Ensure a Gemma4 template is NOT detected as Gemma3
+    const gemma4_template = "{{- '<|turn>' + role + '\\n' }}{{- '<turn|>\\n' }}";
+    const kind = detectKind(gemma4_template);
+    try testing.expectEqual(TemplateKind.gemma4, kind);
+}
+
+test "detectKind: Gemma3 template with <start_of_turn>" {
+    const gemma3_template = "{{ '<start_of_turn>' + role + '\\n' }}";
+    const kind = detectKind(gemma3_template);
+    try testing.expectEqual(TemplateKind.gemma, kind);
+}
+
+test "resolve: GGUF Gemma4 template detected and uses preset" {
+    // A Gemma4 Jinja template from GGUF should be detected as .gemma4 and use preset
+    const gemma4_template =
+        \\{%- for message in messages -%}
+        \\{{- '<|turn>' + role + '\n' }}
+        \\{{- message['content'] | trim }}
+        \\{{- '<turn|>\n' }}
+        \\{%- endfor -%}
+        \\{%- if add_generation_prompt -%}
+        \\{{- '<|turn>model\n' }}
+        \\{%- endif -%}
+    ;
+    const source = TemplateSource{ .gguf_builtin = gemma4_template };
+    var tmpl = try resolve(testing.allocator, source, .gemma4, null, true);
+    defer tmpl.deinit(testing.allocator);
+
+    // Should be detected as gemma4, NOT unknown (no Jinja rendering)
+    try testing.expectEqual(TemplateKind.gemma4, tmpl.kind);
+
+    // Apply the template and verify it renders correctly with image placeholder
+    const media = Media{
+        .type = .image,
+        .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
+    };
+    const content_with_placeholder = try ensurePlaceholderInContent("Describe this", .image, testing.allocator);
+    defer if (content_with_placeholder.ptr != "Describe this".ptr) testing.allocator.free(content_with_placeholder);
+
+    const messages = [_]ChatMessage{
+        ChatMessage.withMedia("user", content_with_placeholder, media),
+    };
+    const result = try tmpl.apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+
+    // The rendered output should contain the image placeholder
+    try testing.expect(std.mem.indexOf(u8, result, "<|image|>") != null);
+    // And the Gemma4 turn markers
+    try testing.expect(std.mem.indexOf(u8, result, "<|turn>user") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "<turn|>") != null);
+}
+
+test "resolve: unknown GGUF template uses Jinja fallback" {
+    // A truly unknown template (no recognizable markers) should fall back to Jinja
+    const unknown_template =
+        \\{{ bos_token }}
+        \\{% for message in messages %}
+        \\{{ message['role'] }}: {{ message['content'] }}
+        \\{% endfor %}
+        \\{% if add_generation_prompt %}assistant: {% endif %}
+    ;
+    const source = TemplateSource{ .gguf_builtin = unknown_template };
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, true);
+    defer tmpl.deinit(testing.allocator);
+
+    // Should stay as .unknown with Jinja enabled
+    try testing.expectEqual(TemplateKind.unknown, tmpl.kind);
+    try testing.expect(tmpl.jinja_enabled);
+
+    // Apply and verify Jinja rendering works
+    const messages = [_]ChatMessage{
+        ChatMessage.init("user", "Hello"),
+    };
+    const result = try tmpl.apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+
+    try testing.expect(std.mem.indexOf(u8, result, "user: Hello") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "assistant:") != null);
+}
+
+test "resolve: unknown GGUF template with media message via Jinja" {
+    // An unknown Jinja template that just echoes content - verify media placeholders work
+    const unknown_template =
+        \\{% for message in messages %}
+        \\{{ message['role'] }}: {{ message['content'] }}
+        \\{% endfor %}
+    ;
+    const source = TemplateSource{ .gguf_builtin = unknown_template };
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, true);
+    defer tmpl.deinit(testing.allocator);
+
+    // Should use Jinja rendering
+    try testing.expectEqual(TemplateKind.unknown, tmpl.kind);
+    try testing.expect(tmpl.jinja_enabled);
+
+    const media = Media{
+        .type = .image,
+        .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
+    };
+    // Content WITHOUT placeholder - Jinja messagesToList should add it
+    const messages = [_]ChatMessage{
+        ChatMessage.withMedia("user", "Describe this", media),
+    };
+    const result = try tmpl.apply(testing.allocator, &messages, null, false);
+    defer testing.allocator.free(result);
+
+    // Jinja messagesToList should prepend <|image|> to content
+    try testing.expect(std.mem.indexOf(u8, result, "<|image|>") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "Describe this") != null);
+}
+
+test "full multimodal pipeline: template render + placeholder scan" {
+    // Test the complete pipeline:
+    // 1. Template renders with placeholder in content
+    // 2. scanPlaceholders finds the placeholder
+    // 3. tokenizeWithPlaceholders expands it
+
+    const template_str = "{{ messages[0]['content'] }}";
+    const source = TemplateSource{ .gguf_builtin = template_str };
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, true);
+    defer tmpl.deinit(testing.allocator);
+
+    const media = Media{
+        .type = .audio,
+        .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } },
+    };
+    const messages = [_]ChatMessage{
+        ChatMessage.withMedia("user", "Transcribe", media),
+    };
+    const formatted = try tmpl.apply(testing.allocator, &messages, null, false);
+    defer testing.allocator.free(formatted);
+
+    // Verify Jinja rendered the content with audio placeholder
+    try testing.expect(std.mem.indexOf(u8, formatted, "<|audio|>") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "Transcribe") != null);
+
+    // Scan for placeholders
+    const placeholders = try scanPlaceholders(formatted, testing.allocator);
+    defer testing.allocator.free(placeholders);
+    try testing.expectEqual(@as(usize, 1), placeholders.len);
+    try testing.expectEqual(MediaType.audio, placeholders[0].media_type);
+
+    // Tokenize with placeholder expansion
+    const tokenizer_fn = struct {
+        fn tokenize(_ctx: ?*anyopaque, text_seg: []const u8, alloc: std.mem.Allocator) ![]u32 {
+            _ = _ctx;
+            var tokens = try alloc.alloc(u32, text_seg.len);
+            for (text_seg, 0..) |c, i| {
+                tokens[i] = @intCast(c);
+            }
+            return tokens;
+        }
+    }.tokenize;
+
+    var expanded = try tokenizeWithPlaceholders(
+        testing.allocator, formatted, null, &tokenizer_fn,
+        1, 2, // image_token_id, audio_token_id
+        0, 3, // image_token_count, audio_token_count
+    );
+    defer expanded.deinit();
+    try testing.expectEqual(@as(usize, 1), expanded.offsets.len);
+    try testing.expectEqual(@as(u32, 3), expanded.offsets[0].token_count);
+}
+
+test "full multimodal pipeline: Gemma4 preset with image placeholder" {
+    // Verify the Gemma4 preset correctly renders multimodal messages
+    // This is the path currently used after the HEAD revert
+    const source = TemplateSource{ .preset = .gemma4 };
+    var tmpl = try resolve(testing.allocator, source, .gemma4, null, true);
+    defer tmpl.deinit(testing.allocator);
+
+    // Content with image placeholder already inserted (as done in main.zig)
+    const content_with_placeholder = try ensurePlaceholderInContent("Describe this image", .image, testing.allocator);
+    defer if (content_with_placeholder.ptr != "Describe this image".ptr) testing.allocator.free(content_with_placeholder);
+
+    const media = Media{
+        .type = .image,
+        .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
+    };
+    const messages = [_]ChatMessage{
+        ChatMessage.withMedia("user", content_with_placeholder, media),
+    };
+    const result = try tmpl.apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+
+    // Verify Gemma4 turn format with image placeholder
+    try testing.expect(std.mem.indexOf(u8, result, "<|turn>user") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "<|image|>") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "<turn|>") != null);
+    // Generation prompt
+    try testing.expect(std.mem.indexOf(u8, result, "<|turn>model") != null);
+}
+
+test "multimodal: ensurePlaceholderInContent idempotent" {
+    // Adding placeholder twice should not duplicate it
+    const content = "Describe this";
+    const first = try ensurePlaceholderInContent(content, .image, testing.allocator);
+    defer testing.allocator.free(first);
+    try testing.expectEqualStrings("<|image|>Describe this", first);
+
+    // Second call should return same content (placeholder already present)
+    const second = try ensurePlaceholderInContent(first, .image, testing.allocator);
+    try testing.expect(second.ptr == first.ptr); // Same pointer = no new allocation
+}
+
+test "multimodal: Jinja messagesToList does not double-add placeholder" {
+    // When content already has a placeholder, messagesToList should NOT add another
+    const content_with_placeholder = "<|image|>Describe this";
+    const media = Media{
+        .type = .image,
+        .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
+    };
+    const messages = [_]ChatMessage{
+        ChatMessage.withMedia("user", content_with_placeholder, media),
+    };
+
+    const template_str = "{{ messages[0]['content'] }}";
+    const source = TemplateSource{ .gguf_builtin = template_str };
+    var tmpl = try resolve(testing.allocator, source, .qwen2, null, true);
+    defer tmpl.deinit(testing.allocator);
+
+    const result = try tmpl.apply(testing.allocator, &messages, null, false);
+    defer testing.allocator.free(result);
+
+    // Should have exactly one <|image|>, not two
+    const first = std.mem.indexOf(u8, result, "<|image|>");
+    try testing.expect(first != null);
+    const second = std.mem.indexOf(u8, result[first.? + 1..], "<|image|>");
+    try testing.expectEqual(@as(?usize, null), second);
+}
+
