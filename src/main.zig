@@ -27,21 +27,18 @@ const kv_cache = @import("kv_cache");
 const mm = @import("mm");
 const preprocess = @import("preprocess");
 const engine_common = @import("engine_common");
+const prefill_mod = @import("prefill");
 
 const chat_template = @import("chat_template");
 
-pub const std_options: std.Options = .{
-    .log_level = .info,
-    .logFn = engine_common.logFilter,
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .tokenizer, .level = .info},
-        .{ .scope = .ggml, .level = .info },
-        .{ .scope = .qwen, .level = .info },
-        .{ .scope = .llama, .level = .info },
-        .{ .scope = .model, .level = .info },
-        .{ .scope = .main, .level = .info },
-    }
-};
+pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_common.logFilter, .log_scope_levels = &[_]std.log.ScopeLevel{
+    .{ .scope = .tokenizer, .level = .info },
+    .{ .scope = .ggml, .level = .info },
+    .{ .scope = .qwen, .level = .info },
+    .{ .scope = .llama, .level = .info },
+    .{ .scope = .model, .level = .info },
+    .{ .scope = .main, .level = .info },
+} };
 
 const logger = std.log.scoped(.main);
 
@@ -122,8 +119,7 @@ const CliArgs = struct {
                 result.embed_normalize = std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
             } else if (std.mem.eql(u8, arg, "--chat-template")) {
                 result.chat_template_name = args_it.next() orelse return error.InvalidArgs;
-            } else if (std.mem.eql(u8, arg, "--system-prompt")) {
-            } else if (std.mem.eql(u8, arg, "--no-chat-template")) {
+            } else if (std.mem.eql(u8, arg, "--system-prompt")) {} else if (std.mem.eql(u8, arg, "--no-chat-template")) {
                 result.no_chat_template = true;
             } else if (std.mem.eql(u8, arg, "--no-jinja")) {
                 result.no_jinja = true;
@@ -168,8 +164,6 @@ const CliArgs = struct {
         , .{});
     }
 };
-
-
 
 const InferenceEngine = struct {
     allocator: std.mem.Allocator,
@@ -246,7 +240,6 @@ const InferenceEngine = struct {
             logger.info("max_seq_len={d}, rope_theta={d}, rope_dim={d}", .{ params.max_seq_len, params.rope_theta, params.rope_dim });
         }
 
-
         // Detect and log model capabilities (from main GGUF metadata only)
         // Full capabilities are determined after mmproj loading below
         var capabilities = registry.detectCapabilities(&gguf_file, arch);
@@ -259,7 +252,7 @@ const InferenceEngine = struct {
         logger.info("Estimated memory: {d} MB", .{mem_size_estimate / (1024 * 1024)});
         const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
         errdefer ctx_weights.deinit();
-        const ctx_kv_cache = try ggml.Context.initNoAlloc(mem_size_estimate);
+        const ctx_kv_cache = try ggml.Context.init(mem_size_estimate);
         errdefer ctx_kv_cache.deinit();
         const max_seq_len = @min(params.max_seq_len, 2048);
         const hdim_kv = params.n_head_dim;
@@ -318,7 +311,6 @@ const InferenceEngine = struct {
             logger.info("Chat template: from GGUF metadata", .{});
         }
         // If no source resolved, will use arch default in generate()
-
 
         const sampler_state = sampler.Sampler.init(.{
             .temperature = cli_args.temperature,
@@ -482,7 +474,6 @@ const InferenceEngine = struct {
         while (gen_count < max_tokens) {
             if (self.tok.isEog(@intCast(current_token))) break;
 
-
             // Skip control tokens (e.g. <|channel|>, <|channel>) that should
             // be filtered from output but don't stop generation.
             if (self.tok.isSkipToken(@intCast(current_token))) {
@@ -592,9 +583,12 @@ const InferenceEngine = struct {
                 self.n_threads,
                 n_prompt_tokens,
                 gen_count,
-                pp_time_s, pp_speed,
-                tg_time_s, tg_speed,
-                total_time_s, avg_speed,
+                pp_time_s,
+                pp_speed,
+                tg_time_s,
+                tg_speed,
+                total_time_s,
+                avg_speed,
             });
         } else if (gen_count > 0) {
             const total_time_s = pp_time_s + tg_time_s;
@@ -1003,47 +997,95 @@ const InferenceEngine = struct {
 
         const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
         logger.info("Total tokens for vision prefill: {d} (including {d} vision tokens)", .{ n_total_tokens, n_vision_tokens });
-
-        // Single-pass combined prefill: all tokens (text + image placeholders) in one forward
-        self.ctx_graph.setNoAlloc(false);
-        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
-        {
-            const data = input_tensor.dataBytes();
-            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            for (expanded.tokens.items, 0..) |token, j| {
-                slice[j] = @as(i32, @intCast(token));
-            }
-        }
-
+        // ===============================================================
+        // Three-stage multimodal prefill (matches llama.cpp behavior):
+        //   Pass 1: text prefix tokens (causal attention)
+        //   Pass 2: media tokens with vision embeddings (non-causal, per-layer embd)
+        //   Pass 3: text suffix tokens (causal, sampled for first token)
+        // ===============================================================
         self.model.resetSSMStates();
 
-        // Calculate the token offset for the image placeholder in the token sequence
-        const vision_embd_offset: i32 = if (expanded.offsets.len > 0)
-            @intCast(expanded.offsets[0].token_offset)
+        // Split token sequence into prefix / media / suffix using placeholder offset info
+        const vision_offset: u32 = if (expanded.offsets.len > 0)
+            expanded.offsets[0].token_offset
         else
             0;
-        logger.info("Vision embedding offset in token sequence: {d} (total tokens: {d})", .{ vision_embd_offset, n_total_tokens });
+        const vision_count: u32 = if (expanded.offsets.len > 0)
+            expanded.offsets[0].token_count
+        else
+            @intCast(n_vision_tokens);
+        logger.info("Three-stage prefill: prefix={d}, media={d} (offset={d}), suffix={d}", .{
+            vision_offset,
+            vision_count,
+            vision_offset,
+            @as(u32, @intCast(n_total_tokens)) - vision_offset - vision_count,
+        });
 
-        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
-        const logits = try gemma4_model.forwardWithEmbdOverride(
-            self.ctx_graph, graph, input_tensor, n_total_tokens,
-            @ptrCast(&self.kv_cache_mgr), 0, vision_embeddings, vision_embd_offset, false,
+        const prefix_tokens = if (vision_offset > 0)
+            expanded.tokens.items[0..vision_offset]
+        else
+            &[_]u32{};
+        const suffix_start: u32 = vision_offset + vision_count;
+        const suffix_tokens = if (suffix_start < n_total_tokens)
+            expanded.tokens.items[suffix_start..@as(usize, @intCast(n_total_tokens))]
+        else
+            &[_]u32{};
+
+        // Media forward adapter: converts Gemma4Model.mediaForward to MediaForwardFn
+        const mediaForwardFn = struct {
+            fn forward(
+                model_ptr: *anyopaque,
+                fwd_ctx: *ggml.Context,
+                fwd_graph: *ggml.CGraph,
+                fwd_input_tokens: *ggml.Tensor,
+                fwd_n_tokens: i32,
+                fwd_cache: ?*kv_cache.KVCache,
+                fwd_start_pos: i32,
+                fwd_embd_override: *ggml.Tensor,
+                fwd_embd_offset: i32,
+                fwd_causal: bool,
+            ) anyerror!*ggml.Tensor {
+                const m: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(model_ptr));
+                return m.mediaForward(fwd_ctx, fwd_graph, fwd_input_tokens, fwd_n_tokens, fwd_cache, fwd_start_pos, fwd_embd_override, fwd_embd_offset, fwd_causal);
+            }
+        }.forward;
+
+        // Copy vision embeddings data to heap so it survives context reset
+        const vision_embd_raw = vision_embeddings.dataF32();
+        const vision_embd_dim: u32 = @intCast(vision_embeddings.ne()[0]);
+        const vision_embd_heap = try self.allocator.dupe(f32, vision_embd_raw);
+        defer self.allocator.free(vision_embd_heap);
+
+        const prefill_result = try prefill_mod.threeStagePrefill(
+            self.ctx_graph,
+            self.model,
+            @ptrCast(@alignCast(gemma4_model)),
+            &mediaForwardFn,
+            &self.kv_cache_mgr,
+            prefix_tokens,
+            image_token_id,
+            @intCast(vision_count),
+            vision_embd_heap,
+            vision_embd_dim,
+            suffix_tokens,
+            &self.params,
+            self.n_threads,
+            self.allocator,
         );
-        self.ctx_graph.setNoAlloc(true);
-        var galloc = try ggml.Gallocr.init(buft);
-        defer galloc.free();
-        if (!galloc.allocGraph(graph)) {
-            logger.err("Failed to allocate LLM graph for vision+text", .{});
-            return error.GraphAllocFailed;
+
+        const pp_time_s = prefill_result.pp_time_s;
+        // Greedy sample from heap logits
+        var best_idx: i32 = 0;
+        var best_val: f32 = prefill_result.logits[0];
+        for (prefill_result.logits, 0..) |val, j| {
+            if (val > best_val) {
+                best_val = val;
+                best_idx = @intCast(j);
+            }
         }
-
-        const t_start = engine_common.currentTimeMs();
-        try graph.compute(self.n_threads);
-        const t_end = engine_common.currentTimeMs();
-        const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
-
-        var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
-        var pos: i32 = n_total_tokens;
+        self.allocator.free(prefill_result.logits);
+        var current_token: i32 = best_idx;
+        var pos: i32 = prefill_result.pos;
         var gen_count: u32 = 0;
 
         logger.info("First generated token (vision): id={d}, is_eog={}, pp_time={d:.3}s", .{
@@ -1051,7 +1093,6 @@ const InferenceEngine = struct {
             self.tok.isEog(@intCast(current_token)),
             pp_time_s,
         });
-
 
         const t_tg_start = engine_common.currentTimeMs();
 
@@ -1222,47 +1263,95 @@ const InferenceEngine = struct {
         const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
         logger.info("Total tokens for audio prefill: {d} (including {d} audio tokens)", .{ n_total_tokens, n_audio_tokens });
 
-        // Single-pass combined prefill: all tokens (text + audio placeholders) in one forward
-        self.ctx_graph.setNoAlloc(false);
-        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_total_tokens);
-        {
-            const data = input_tensor.dataBytes();
-            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            for (expanded.tokens.items, 0..) |token, j| {
-                slice[j] = @as(i32, @intCast(token));
-            }
-        }
-
+        // ===============================================================
+        // Three-stage multimodal prefill (matches llama.cpp behavior):
+        //   Pass 1: text prefix tokens (causal attention)
+        //   Pass 2: media tokens with audio embeddings (non-causal, per-layer embd)
+        //   Pass 3: text suffix tokens (causal, sampled for first token)
+        // ===============================================================
         self.model.resetSSMStates();
 
-        // Calculate the token offset for the audio placeholder in the token sequence
-        const audio_embd_offset: i32 = if (expanded.offsets.len > 0)
-            @intCast(expanded.offsets[0].token_offset)
+        // Split token sequence into prefix / media / suffix using placeholder offset info
+        const audio_offset: u32 = if (expanded.offsets.len > 0)
+            expanded.offsets[0].token_offset
         else
             0;
-        logger.info("Audio embedding offset in token sequence: {d} (total tokens: {d})", .{ audio_embd_offset, n_total_tokens });
+        const audio_count: u32 = if (expanded.offsets.len > 0)
+            expanded.offsets[0].token_count
+        else
+            @intCast(n_audio_tokens);
+        logger.info("Three-stage prefill: prefix={d}, media={d} (offset={d}), suffix={d}", .{
+            audio_offset,
+            audio_count,
+            audio_offset,
+            @as(u32, @intCast(n_total_tokens)) - audio_offset - audio_count,
+        });
 
-        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
-        const logits = try gemma4_model.forwardWithEmbdOverride(
-            self.ctx_graph, graph, input_tensor, n_total_tokens,
-            @ptrCast(&self.kv_cache_mgr), 0, audio_embeddings, audio_embd_offset, false,
+        const prefix_tokens = if (audio_offset > 0)
+            expanded.tokens.items[0..audio_offset]
+        else
+            &[_]u32{};
+        const suffix_start: u32 = audio_offset + audio_count;
+        const suffix_tokens = if (suffix_start < n_total_tokens)
+            expanded.tokens.items[suffix_start..@as(usize, @intCast(n_total_tokens))]
+        else
+            &[_]u32{};
+
+        // Media forward adapter: converts Gemma4Model.mediaForward to MediaForwardFn
+        const mediaForwardFn = struct {
+            fn forward(
+                model_ptr: *anyopaque,
+                fwd_ctx: *ggml.Context,
+                fwd_graph: *ggml.CGraph,
+                fwd_input_tokens: *ggml.Tensor,
+                fwd_n_tokens: i32,
+                fwd_cache: ?*kv_cache.KVCache,
+                fwd_start_pos: i32,
+                fwd_embd_override: *ggml.Tensor,
+                fwd_embd_offset: i32,
+                fwd_causal: bool,
+            ) anyerror!*ggml.Tensor {
+                const m: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(model_ptr));
+                return m.mediaForward(fwd_ctx, fwd_graph, fwd_input_tokens, fwd_n_tokens, fwd_cache, fwd_start_pos, fwd_embd_override, fwd_embd_offset, fwd_causal);
+            }
+        }.forward;
+
+        // Copy audio embeddings data to heap so it survives context reset
+        const audio_embd_raw = audio_embeddings.dataF32();
+        const audio_embd_dim: u32 = @intCast(audio_embeddings.ne()[0]);
+        const audio_embd_heap = try self.allocator.dupe(f32, audio_embd_raw);
+        defer self.allocator.free(audio_embd_heap);
+
+        const prefill_result = try prefill_mod.threeStagePrefill(
+            self.ctx_graph,
+            self.model,
+            @ptrCast(@alignCast(gemma4_model)),
+            &mediaForwardFn,
+            &self.kv_cache_mgr,
+            prefix_tokens,
+            audio_token_id,
+            @intCast(audio_count),
+            audio_embd_heap,
+            audio_embd_dim,
+            suffix_tokens,
+            &self.params,
+            self.n_threads,
+            self.allocator,
         );
-        self.ctx_graph.setNoAlloc(true);
 
-        var galloc = try ggml.Gallocr.init(buft);
-        defer galloc.free();
-        if (!galloc.allocGraph(graph)) {
-            logger.err("Failed to allocate LLM graph for audio+text", .{});
-            return error.GraphAllocFailed;
+        const pp_time_s = prefill_result.pp_time_s;
+        // Greedy sample from heap logits
+        var best_idx: i32 = 0;
+        var best_val: f32 = prefill_result.logits[0];
+        for (prefill_result.logits, 0..) |val, j| {
+            if (val > best_val) {
+                best_val = val;
+                best_idx = @intCast(j);
+            }
         }
-
-        const t_start = engine_common.currentTimeMs();
-        try graph.compute(self.n_threads);
-        const t_end = engine_common.currentTimeMs();
-        const pp_time_s = @as(f64, @floatFromInt(t_end - t_start)) / 1000.0;
-
-        var current_token: i32 = sampler.Sampler.sampleGreedy(logits);
-        var pos: i32 = n_total_tokens;
+        self.allocator.free(prefill_result.logits);
+        var current_token: i32 = best_idx;
+        var pos: i32 = prefill_result.pos;
         var gen_count: u32 = 0;
 
         logger.info("First generated token (audio): id={d}, is_eog={}, pp_time={d:.3}s", .{
@@ -1385,7 +1474,6 @@ pub fn main(init: std.process.Init) !void {
 
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     defer args_iter.deinit();
-
 
     const args = CliArgs.parse(&args_iter) catch |err| {
         if (err == error.InvalidArgs) {

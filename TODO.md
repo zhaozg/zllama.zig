@@ -21,8 +21,12 @@
   - [x] forwardWithEmbdOverride 使用正确的 embd_offset（从 token_offset 计算）
   - [x] forwardMediaOnly 方法（Gemma4 媒体-only 非因果前向，跳过 per-layer embedding）
   - [ ] 三阶段 prefill（text prefix causal → media non-causal → text suffix causal）— ggml 多图上下文冲突，需调试
-  - [ ] per_layer_embd 在媒体位置也需要 override
-- [ ] **线程池**：持久化 `ggml_threadpool`（需 ggml 升级后启用）
+  - [x] 三阶段 prefill（text prefix causal → media non-causal → text suffix causal）— ✅ 已实现并验证通过（Gemma4 + audio），修复要点：
+    - `ctx_kv_cache` 从 `initNoAlloc` 改为 `init`（KV cache tensors 需要真实内存承载 `ggml_cpy` 写入）
+    - 每阶段间 `graph_ctx.reset()` 清除旧 tensor descriptor，避免 Gallocr／backend 跨阶段张量混淆
+    - media embeddings 通过 heap copy 传递，不受 context reset 影响
+    - Pass 3 logits 在 Gallocr free 前 copy 到 heap，调用方负责释放
+  - [x] per_layer_embd 在媒体位置也需要 override — `forwardMediaOnly` 新增 `input_tokens` 参数，透传至 `transformerForward` 进行 per-layer embedding 查找
 - [ ] **减少 `ggml_cont` 调用**：消除不必要的内存重排
 - [ ] **预分配 SSM 状态张量**：避免运行时分配
 

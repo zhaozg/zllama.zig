@@ -230,7 +230,7 @@ pub const Gemma4Model = struct {
     /// Forward pass with pre-computed embeddings only (no token embedding lookup).
     /// Used for Stage 2 of three-stage multimodal prefill (media tokens only).
     /// - Non-causal (bidirectional) attention within the media segment
-    /// - No per-layer embedding (media embeddings already encode all needed info)
+    /// - Per-layer embedding via input_tokens (placeholder token IDs)
     /// - Writes to KV cache so subsequent text tokens can attend to media
     pub fn forwardMediaOnly(
         self: *Gemma4Model,
@@ -240,6 +240,7 @@ pub const Gemma4Model = struct {
         n_tokens: i32,
         kv_cache_mgr: ?*kv_cache.KVCache,
         start_pos: i32,
+        input_tokens: *ggml.Tensor,
     ) !*ggml.Tensor {
         const p = &self.params;
         const n_tokens_i64: i64 = n_tokens;
@@ -251,8 +252,27 @@ pub const Gemma4Model = struct {
         // Position tensor starts at start_pos
         const pos_tensor = rope.buildPositionTensor(ctx, @intCast(n_tokens), start_pos);
 
-        // Non-causal attention, NO per-layer embedding (input_tokens=null)
-        return self.transformerForward(ctx, graph, scaled_override, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, null, false);
+        // Non-causal attention, with per-layer embedding via input_tokens
+        return self.transformerForward(ctx, graph, scaled_override, pos_tensor, n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, false);
+    }
+
+    /// Media forward wrapper matching MediaForwardFn signature.
+    /// Used by threeStagePrefill for Pass 2 (media tokens, non-causal).
+    pub fn mediaForward(
+        self: *Gemma4Model,
+        ctx: *ggml.Context,
+        graph: *ggml.CGraph,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        kv_cache_mgr: ?*kv_cache.KVCache,
+        start_pos: i32,
+        embd_override: *ggml.Tensor,
+        embd_offset: i32,
+        causal: bool,
+    ) !*ggml.Tensor {
+        _ = embd_offset; // Not needed: media embeddings replace all tokens
+        _ = causal; // Always non-causal for media
+        return self.forwardMediaOnly(ctx, graph, embd_override, n_tokens, kv_cache_mgr, start_pos, input_tokens);
     }
 
     pub fn forward(
@@ -656,11 +676,11 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
     p.base.n_vocab = gguf_file.getU32("gemma4.vocab_size") orelse
         gguf_file.getU32("llama.vocab_size") orelse
         blk: {
-        if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
-            if (val.value_type == .array) break :blk @intCast(val.array_val.len);
-        }
-        break :blk 0;
-    };
+            if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
+                if (val.value_type == .array) break :blk @intCast(val.array_val.len);
+            }
+            break :blk 0;
+        };
     p.base.n_embd = gguf_file.getU32("gemma4.embedding_length") orelse
         gguf_file.getU32("llama.embedding_length") orelse 0;
     p.base.n_head = gguf_file.getU32("gemma4.attention.head_count") orelse
@@ -777,8 +797,9 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator
     }
 
     log.info("Gemma4: vocab={d}, embd={d}, heads={d}, kv_heads={d}, layers={d}, ff={d}, swa={d}, shared_kv={d}, softcap={d}, embd_per_layer={d}", .{
-        p.base.n_vocab, p.base.n_embd, p.base.n_head, p.base.n_kv_head,
-        p.base.n_layer, p.base.n_ff, p.n_swa, p.n_kv_shared_layers, p.final_logit_softcapping, p.n_embd_per_layer,
+        p.base.n_vocab,            p.base.n_embd,      p.base.n_head, p.base.n_kv_head,
+        p.base.n_layer,            p.base.n_ff,        p.n_swa,       p.n_kv_shared_layers,
+        p.final_logit_softcapping, p.n_embd_per_layer,
     });
 
     return p;
@@ -813,30 +834,21 @@ fn loadWeights(
     output_norm_weight.setName("output_norm.weight");
 
     // Per-layer embedding global weights (only when n_embd_per_layer > 0)
-    const per_layer_token_embd: ?*ggml.Tensor = if (params.n_embd_per_layer > 0)
-        blk: {
-            const t = findOrCreateTensor(ctx, gguf_file, "per_layer_token_embd.weight") catch null;
-            if (t) |tt| tt.setName("per_layer_token_embd.weight");
-            break :blk t;
-        }
-    else
-        null;
-    const per_layer_model_proj: ?*ggml.Tensor = if (params.n_embd_per_layer > 0)
-        blk: {
-            const t = findOrCreateTensor(ctx, gguf_file, "per_layer_model_proj.weight") catch null;
-            if (t) |tt| tt.setName("per_layer_model_proj.weight");
-            break :blk t;
-        }
-    else
-        null;
-    const per_layer_proj_norm: ?*ggml.Tensor = if (params.n_embd_per_layer > 0)
-        blk: {
-            const t = findOrCreateTensor(ctx, gguf_file, "per_layer_proj_norm.weight") catch null;
-            if (t) |tt| tt.setName("per_layer_proj_norm.weight");
-            break :blk t;
-        }
-    else
-        null;
+    const per_layer_token_embd: ?*ggml.Tensor = if (params.n_embd_per_layer > 0) blk: {
+        const t = findOrCreateTensor(ctx, gguf_file, "per_layer_token_embd.weight") catch null;
+        if (t) |tt| tt.setName("per_layer_token_embd.weight");
+        break :blk t;
+    } else null;
+    const per_layer_model_proj: ?*ggml.Tensor = if (params.n_embd_per_layer > 0) blk: {
+        const t = findOrCreateTensor(ctx, gguf_file, "per_layer_model_proj.weight") catch null;
+        if (t) |tt| tt.setName("per_layer_model_proj.weight");
+        break :blk t;
+    } else null;
+    const per_layer_proj_norm: ?*ggml.Tensor = if (params.n_embd_per_layer > 0) blk: {
+        const t = findOrCreateTensor(ctx, gguf_file, "per_layer_proj_norm.weight") catch null;
+        if (t) |tt| tt.setName("per_layer_proj_norm.weight");
+        break :blk t;
+    } else null;
 
     if (per_layer_token_embd != null) {
         log.info("Gemma4: per-layer embedding enabled (n_embd_per_layer={d})", .{params.n_embd_per_layer});

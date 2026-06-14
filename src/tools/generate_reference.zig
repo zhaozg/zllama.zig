@@ -127,7 +127,7 @@ pub const ReferenceGenerator = struct {
         var builder = graph_builder.GraphBuilder.init(ctx, graph, params, self.allocator);
 
         // Create KV cache if needed (some models like Gemma4 require it)
-        const ctx_kv = try ggml.Context.initNoAlloc(512 * 1024 * 1024);
+        const ctx_kv = try ggml.Context.init(512 * 1024 * 1024);
         defer ctx_kv.deinit();
         const max_seq_len = @min(params.max_seq_len, 2048);
         const hdim_kv = params.n_head_dim;

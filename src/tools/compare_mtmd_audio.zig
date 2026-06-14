@@ -286,7 +286,7 @@ pub const MtmdAudioComparator = struct {
         }
 
         // Setup KV cache context
-        const kv_cache_ctx = try ggml.Context.initNoAlloc(2 * 1024 * 1024 * 1024);
+        const kv_cache_ctx = try ggml.Context.init(2 * 1024 * 1024 * 1024);
         defer kv_cache_ctx.deinit();
 
         const max_seq_len = @min(params.max_seq_len, 2048);
