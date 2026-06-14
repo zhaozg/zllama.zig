@@ -42,6 +42,19 @@ pub const Sampler = struct {
         return 0;
     }
 
+    /// 从堆上的 logits 数组贪心采样
+    pub fn sampleGreedyFromLogits(logits: []const f32) i32 {
+        var best_idx: i32 = 0;
+        var best_val: f32 = logits[0];
+        for (logits, 0..) |val, i| {
+            if (val > best_val) {
+                best_val = val;
+                best_idx = @intCast(i);
+            }
+        }
+        return best_idx;
+    }
+
     /// 贪心采样：选择 logits 中概率最大的 token
     /// logits: [n_vocab] f32 张量
     pub fn sampleGreedy(logits: *ggml.Tensor) i32 {
