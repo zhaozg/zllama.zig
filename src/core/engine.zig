@@ -220,14 +220,18 @@ pub const InferenceEngine = struct {
     }
 
     // ========================================================================
-    // Chat template helpers
+    // Public chat template API
     // ========================================================================
 
-    fn applyChatTemplate(self: *InferenceEngine, user_prompt: []const u8) ![]const u8 {
+    /// Apply chat template for a single-turn user prompt.
+    /// Returns the formatted prompt (caller owns memory).
+    pub fn applyChatTemplate(self: *InferenceEngine, user_prompt: []const u8) ![]const u8 {
         return self.applyChatTemplateWithMedia(user_prompt, null);
     }
 
-    fn applyChatTemplateWithMedia(self: *InferenceEngine, user_prompt: []const u8, media: ?chat_template.Media) ![]const u8 {
+    /// Apply chat template for a single-turn user prompt with optional media attachment.
+    /// Returns the formatted prompt (caller owns memory).
+    pub fn applyChatTemplateWithMedia(self: *InferenceEngine, user_prompt: []const u8, media: ?chat_template.Media) ![]const u8 {
         if (self.no_chat_template) return self.allocator.dupe(u8, user_prompt);
         const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
         const source = self.chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
@@ -240,6 +244,22 @@ pub const InferenceEngine = struct {
         };
         const system = if (self.system_prompt.len > 0) self.system_prompt else null;
         return tmpl.apply(self.allocator, &messages, system, true);
+    }
+
+    /// Apply chat template for multi-turn conversation (chat history).
+    /// The last message in chat_history should be the new user message.
+    /// Returns the formatted prompt (caller owns memory).
+    pub fn applyChatTemplateMultiTurn(self: *InferenceEngine, chat_history: []const chat_template.ChatMessage) ![]const u8 {
+        if (self.no_chat_template) {
+            if (chat_history.len == 0) return self.allocator.dupe(u8, "");
+            return self.allocator.dupe(u8, chat_history[chat_history.len - 1].content);
+        }
+        const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
+        const source = self.chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
+        var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
+        defer tmpl.deinit(self.allocator);
+        const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+        return tmpl.apply(self.allocator, chat_history, system, true);
     }
 
     // ========================================================================
@@ -534,20 +554,15 @@ pub const InferenceEngine = struct {
                     try chat_history.append(self.allocator, chat_template.ChatMessage.withMedia("user", rest[sp+1..], .{ .type = .audio, .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } } }));
                     self.generateWithAudio(io, rest[sp+1..], @ptrCast(@constCast(rest[0..sp])), 256) catch { try stdout.writeStreamingAll(io, "Audio processing failed.\n"); };
                     try stdout.writeStreamingAll(io, "\n"); continue;
-                } else { try stdout.writeStreamingAll(io, "Unknown command. Try /help.\n"); }
+                } else {
+                    try stdout.writeStreamingAll(io, "Unknown command. Try /help.\n");
+                }
                 continue;
             }
 
+            // Normal message handling
             try chat_history.append(self.allocator, chat_template.ChatMessage.init("user", line));
-            const formatted_prompt = if (self.no_chat_template) blk: {
-                break :blk try self.allocator.dupe(u8, line);
-            } else blk: {
-                const mn: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
-                const src = self.chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, mn) };
-                var tmpl = try chat_template.resolve(self.allocator, src, self.arch, mn, !self.no_jinja);
-                defer tmpl.deinit(self.allocator);
-                break :blk try tmpl.apply(self.allocator, chat_history.items, if (self.system_prompt.len > 0) self.system_prompt else null, true);
-            };
+            const formatted_prompt = try self.applyChatTemplateMultiTurn(chat_history.items);
             defer self.allocator.free(formatted_prompt);
 
             self.kv_cache_mgr.reset(); self.model.resetSSMStates();

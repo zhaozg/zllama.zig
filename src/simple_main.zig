@@ -287,9 +287,13 @@ const SimpleEngine = struct {
         }
     }
 
-    /// Apply chat template to the user prompt.
+    // ========================================================================
+    // Public chat template API
+    // ========================================================================
+
+    /// Apply chat template for a single-turn user prompt.
     /// Returns the formatted prompt (caller owns memory).
-    fn applyChatTemplate(self: *SimpleEngine, user_prompt: []const u8) ![]const u8 {
+    pub fn applyChatTemplate(self: *SimpleEngine, user_prompt: []const u8) ![]const u8 {
         // If --no-chat-template is set, pass through raw prompt
         if (self.no_chat_template) {
             return self.allocator.dupe(u8, user_prompt);
@@ -310,6 +314,23 @@ const SimpleEngine = struct {
 
         const system = if (self.system_prompt.len > 0) self.system_prompt else null;
         return tmpl.apply(self.allocator, &messages, system, true);
+    }
+
+    /// Apply chat template for multi-turn conversation (chat history).
+    /// The last message in chat_history should be the new user message.
+    /// Returns the formatted prompt (caller owns memory).
+    pub fn applyChatTemplateMultiTurn(self: *SimpleEngine, chat_history: []const chat_template.ChatMessage) ![]const u8 {
+        if (self.no_chat_template) {
+            if (chat_history.len == 0) return self.allocator.dupe(u8, "");
+            return self.allocator.dupe(u8, chat_history[chat_history.len - 1].content);
+        }
+        const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
+        const source = self.chat_template_source orelse
+            chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
+        var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
+        defer tmpl.deinit(self.allocator);
+        const system = if (self.system_prompt.len > 0) self.system_prompt else null;
+        return tmpl.apply(self.allocator, chat_history, system, true);
     }
 
     /// Decode a single token and write to stdout
