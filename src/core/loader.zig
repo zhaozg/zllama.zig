@@ -9,9 +9,10 @@
 //! 3. 管理模型权重在 ggml context 中的分配
 
 const std = @import("std");
-const ggml = @import("../ggml.zig");
-const gguf = @import("../gguf.zig");
-const model_if = @import("../model.zig");
+const ggml = @import("ggml");
+const gguf = @import("gguf");
+const model_if = @import("model");
+const mm = @import("mm");
 
 const log = std.log.scoped(.loader);
 
@@ -138,17 +139,17 @@ pub const Loader = struct {
     }
 
     /// 便捷：创建 1D 张量
-    pub fn createTensor1d(self: *Loader, name: []const u8, type_: ggml.Type, ne0: i64, flags: u32) !?*ggml.Tensor {
+    pub fn createTensor1d(self: *Loader, name: []const u8, _: ggml.Type, ne0: i64, flags: u32) !?*ggml.Tensor {
         return self.findOrCreateTensor(name, &[_]i64{ne0}, flags);
     }
 
     /// 便捷：创建 2D 张量
-    pub fn createTensor2d(self: *Loader, name: []const u8, type_: ggml.Type, ne0: i64, ne1: i64, flags: u32) !?*ggml.Tensor {
+    pub fn createTensor2d(self: *Loader, name: []const u8, _: ggml.Type, ne0: i64, ne1: i64, flags: u32) !?*ggml.Tensor {
         return self.findOrCreateTensor(name, &[_]i64{ ne0, ne1 }, flags);
     }
 
     /// 便捷：创建 3D 张量
-    pub fn createTensor3d(self: *Loader, name: []const u8, type_: ggml.Type, ne0: i64, ne1: i64, ne2: i64, flags: u32) !?*ggml.Tensor {
+    pub fn createTensor3d(self: *Loader, name: []const u8, _: ggml.Type, ne0: i64, ne1: i64, ne2: i64, flags: u32) !?*ggml.Tensor {
         return self.findOrCreateTensor(name, &[_]i64{ ne0, ne1, ne2 }, flags);
     }
 
@@ -163,6 +164,68 @@ pub const Loader = struct {
         return model_if.Architecture.fromString(arch_name);
     }
 };
+
+/// Load multimodal projector from separate GGUF file
+/// Also detects audio/vision capabilities from the mmproj GGUF file.
+pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]const u8, capabilities: *model_if.ModelCapabilities) !mm.MultiModalManager {
+    const cwd = std.Io.Dir.cwd();
+    const file = try cwd.openFile(io, mmproj_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    const file_size = @as(usize, @intCast(stat.size));
+    const gguf_data = try allocator.alloc(u8, file_size);
+    defer allocator.free(gguf_data);
+
+    {
+        var offset: u64 = 0;
+        const chunk_size: usize = 64 * 1024 * 1024;
+        while (offset < file_size) {
+            const end = @min(offset + chunk_size, file_size);
+            const len = end - offset;
+            const bytes_read = try file.readPositionalAll(io, gguf_data[offset..][0..len], offset);
+            if (bytes_read != len) {
+                return error.FileReadError;
+            }
+            offset += bytes_read;
+        }
+    }
+
+    var gguf_file = try gguf.parse(gguf_data, allocator);
+    defer gguf_file.deinit();
+
+    // Detect capabilities from mmproj file
+    if (gguf_file.findTensor("a.conv1d.0.weight") != null or
+        gguf_file.findTensor("a.pre_encode.out.weight") != null or
+        gguf_file.findTensor("mm.a.input_projection.weight") != null)
+    {
+        capabilities.has_audio = true;
+        if (capabilities.audio_encoder_type.len == 0) {
+            capabilities.audio_encoder_type = "Conformer (E2B)";
+        }
+        if (capabilities.audio_sample_rate == 0) {
+            capabilities.audio_sample_rate = 16000;
+        }
+    }
+    if (gguf_file.findTensor("v.patch_embd.weight") != null or
+        gguf_file.findTensor("mm.input_projection.weight") != null or
+        gguf_file.findTensor("mm.soft_emb_norm.weight") != null)
+    {
+        capabilities.has_vision = true;
+        if (capabilities.vision_encoder_type.len == 0) {
+            capabilities.vision_encoder_type = "ViT (SigLIP/Gemma4V)";
+        }
+    }
+
+    log.info("MMProj capabilities: audio={}, vision={}", .{ capabilities.has_audio, capabilities.has_vision });
+
+    const mem_size = 2 * 1024 * 1024 * 1024;
+    const ctx = try ggml.Context.initNoAlloc(mem_size);
+    errdefer ctx.deinit();
+
+    const mgr = try mm.MultiModalManager.init(allocator, &gguf_file, ctx, capabilities.*);
+    return mgr;
+}
 
 const testing = std.testing;
 
