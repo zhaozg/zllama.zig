@@ -245,18 +245,17 @@ pub const AudioEncoder = struct {
         const p = self.params;
         const norm_eps = p.norm_eps;
         const res_weight: f32 = 0.5;
-
-        // 1. 创建输入张量并填充实际 Mel 数据
-        var cur = try ctx.newTensor4d(ggml.Type.f32, @intCast(n_frames), @intCast(n_mel_bins), 1, 1);
+        // 1. 创建 4D 输入张量 [n_mel_bins, n_frames, 1, 1] 匹配 llama.cpp 布局
+        // ggml: ne[0]=n_mel_bins (最快维度, conv2d 的 W), ne[1]=n_frames (conv2d 的 H)
+        // mel_data 布局: mel_data[m * n_frames + fi] (m 为 mel bin, fi 为 frame)
+        // memcpy 后: cur_data[m + fi * n_mel_bins] = mel_data[m * n_frames + fi]
+        // 即 ne[0] 维度存储同一 frame 的所有 bins
+        var cur = try ctx.newTensor4d(ggml.Type.f32, @intCast(n_mel_bins), @intCast(n_frames), 1, 1);
         cur.setName("audio_mel_input");
 
         const raw_bytes = cur.dataBytes();
         const mel_byte_len = mel_data.len * @sizeOf(f32);
         @memcpy(raw_bytes[0..mel_byte_len], @as([*]const u8, @ptrCast(mel_data.ptr))[0..mel_byte_len]);
-
-        // 转置: [n_mel_bins, n_frames] -> [n_frames, n_mel_bins, 1, 1]
-        // 以匹配 Conv2D 的 [H, W, C, N] 布局
-        cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
@@ -265,7 +264,7 @@ pub const AudioEncoder = struct {
                 if (w.sscp_conv_b[i]) |conv_b| {
                     cur = cur.add(ctx, conv_b);
                 }
-                // LayerNorm: permute to [N, H, W, C] -> [N, C, H, W] for norm on C axis
+                // LayerNorm: permute to [C, H, W, N] for norm on C axis
                 if (w.sscp_norm_w[i]) |norm_w| {
                     cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
                     cur = cur.norm(ctx, norm_eps);
@@ -282,13 +281,6 @@ pub const AudioEncoder = struct {
         cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
 
         // 输入投影
-        if (w.sscp_inp_proj_w) |proj_w| {
-            cur = proj_w.mulMat(ctx, cur);
-            if (w.sscp_inp_proj_b) |proj_b| {
-                cur = cur.add(ctx, proj_b);
-            }
-        }
-
         const n_pos = cur.ne()[1];
 
         // Chunked local attention parameters (matching llama.cpp gemma4a.cpp)

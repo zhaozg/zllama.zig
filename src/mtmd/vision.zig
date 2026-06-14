@@ -126,8 +126,9 @@ pub const VisionEncoder = struct {
         if (gguf_file.getU32("gemma4.vision.feed_forward_length")) |v| params.n_ff = v;
         if (gguf_file.getU32("gemma4.vision.projection_dim")) |v| params.n_merge = v;
         if (gguf_file.getF32("gemma4.vision.rope_theta")) |v| params.rope_theta = v;
-        // 检测编码器类型
-        const enc_type: EncoderType = if (gguf_file.findTensor("patch_norm_1.weight") != null)
+        // 检测编码器类型 — 与权重加载使用相同的命名前缀
+        const enc_type: EncoderType = if (gguf_file.findTensor("v.patch_norm.1.weight") != null or
+                                           gguf_file.findTensor("patch_norm_1.weight") != null)
             .gemma4uv
         else
             .gemma4v;

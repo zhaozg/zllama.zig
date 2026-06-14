@@ -189,6 +189,9 @@ const tokenizer = @import("tokenizer");
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Qwen3.5-4B-Q4_K_M.gguf` works
+   - 多模态模型 gemma-4-E2B-it-Q4_K_M.gguf 的音频、图像主要输出对齐
+      - llama-simple -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf --mmproj ~/.cache/models/mmproj-BF16.gguf --audio ~/.cache/models/hello.wav -p  "Transcribe the audio"
+      - llama-simple -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf --mmproj ~/.cache/models/mmproj-BF16.gguf --image ~/.cache/models/hello.png --prompt "Describe this image"
 8. **效果参照**:
    - `llama-simple -m ~/.cache/models/Qwen3.5-4B-Q4_K_M.gguf 你好`
 9. **文档同步**：修改架构或绑定设计后，需同步更新对应的 `*.md` 文件。

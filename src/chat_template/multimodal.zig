@@ -23,6 +23,9 @@ const log = std.log.scoped(.multimodal);
 
 /// 扫描字符串中的媒体占位符，返回所有占位符的位置信息
 ///
+/// 返回的 PlaceholderInfo.start 是相对于输入字符串开头的绝对位置，
+/// 按占位符在字符串中的出现顺序排列。
+///
 /// 支持的占位符：
 ///   - <|image|> 或 <image>（图像）
 ///   - <|audio|> 或 <audio>（音频）
@@ -121,6 +124,9 @@ pub const TokenizedSegments = struct {
 ///   4. 将占位符展开为指定数量的填充 token
 ///   5. 交错排列文本 token 和占位符 token
 ///
+/// 注意：scanPlaceholders 返回的 start 是绝对位置。
+/// 本函数使用 consumed 指针追踪已处理的字符数来正确切片。
+///
 /// @param allocator 分配器
 /// @param formatted 模板渲染后的字符串（可能包含占位符）
 /// @param tokenizer_fn 文本段 tokenize 回调：fn([]const u8) ![]u32
@@ -154,12 +160,13 @@ pub fn tokenizeWithPlaceholders(
     }
 
     // 分段处理：文本段 tokenize + 占位符展开
-    var remaining = formatted;
-    // Track the current token offset for each placeholder
+    // 使用 consumed 追踪已处理的原始字符串偏移量，
+    // 因为 scanPlaceholders 返回的 start 是相对于 formatted 开头的绝对位置。
+    var consumed: usize = 0;
     var current_token_offset: u32 = 0;
     for (placeholders) |*ph| {
-        // 占位符前的文本段
-        const text_segment = remaining[0..ph.start];
+        // 占位符前的文本段：从 consumed 到 ph.start（绝对位置）
+        const text_segment = formatted[consumed..ph.start];
         if (text_segment.len > 0) {
             const text_tokens = try tokenizer_fn(ctx, text_segment, allocator);
             defer allocator.free(text_tokens);
@@ -181,12 +188,12 @@ pub fn tokenizeWithPlaceholders(
         }
         current_token_offset += ph.token_count;
 
-        remaining = remaining[ph.start + ph.length ..];
+        consumed = ph.start + ph.length;
     }
 
     // 最后一个占位符后的文本段
-    if (remaining.len > 0) {
-        const text_tokens = try tokenizer_fn(ctx, remaining, allocator);
+    if (consumed < formatted.len) {
+        const text_tokens = try tokenizer_fn(ctx, formatted[consumed..], allocator);
         defer allocator.free(text_tokens);
         try tokens.appendSlice(allocator, text_tokens);
     }
@@ -223,12 +230,12 @@ pub fn expandPlaceholders(
         };
     }
 
-    // 构建 token 序列
-    var remaining = formatted;
-
-    for (placeholders) |ph| {
-        // 占位符前的文本段（当前实现中跳过 tokenization，由调用者处理）
-        _ = remaining[0..ph.start];
+    // 构建 token 序列（仅占位符 token，跳过文本段）
+    var consumed: usize = 0;
+    for (placeholders) |*ph| {
+        // 跳过占位符前的文本段（expandPlaceholders 不处理文本 token）
+        // Mark consumed up to this placeholder
+        ph.token_offset = @intCast(tokens.items.len);
 
         // 占位符展开为多个 token
         const token_count = ph.token_count;
@@ -240,10 +247,9 @@ pub fn expandPlaceholders(
             };
             try tokens.append(allocator, placeholder_token_id);
         }
-
-        remaining = remaining[ph.start + ph.length ..];
+        consumed = ph.start + ph.length;
     }
-
+    // consumed tracks the end of processed text; unused beyond this point
     return types.ExpandedPlaceholders{
         .tokens = tokens,
         .offsets = placeholders,
@@ -464,4 +470,45 @@ test "tokenizeWithPlaceholders: text before and after" {
     // 验证占位符后的文本
     try testing.expectEqual(@as(u32, ' '), result.tokens.items[9 + 784]);
     try testing.expectEqual(@as(u32, 't'), result.tokens.items[9 + 784 + 1]);
+}
+
+test "tokenizeWithPlaceholders: two placeholders with text" {
+    const text = "T1<|image|>T2<|audio|>T3";
+    // tokenizer: each char is a token
+    const tokenizer_fn = struct {
+        fn tokenize(_ctx: ?*anyopaque, text_seg: []const u8, alloc: std.mem.Allocator) ![]u32 {
+            _ = _ctx;
+            var tokens = try alloc.alloc(u32, text_seg.len);
+            for (text_seg, 0..) |c, i| {
+                tokens[i] = @intCast(c);
+            }
+            return tokens;
+        }
+    }.tokenize;
+
+    var result = try tokenizeWithPlaceholders(
+        testing.allocator, text, null, &tokenizer_fn,
+        258880, 258881, 3, 2,
+    );
+    defer result.deinit();
+
+    // Expected: "T1" (2) + IMG×3 + "T2" (2) + AUD×2 + "T3" (2) = 11
+    try testing.expectEqual(@as(usize, 2 + 3 + 2 + 2 + 2), result.tokens.items.len);
+    try testing.expectEqual(@as(usize, 2), result.offsets.len);
+
+    // Verify offsets: image placeholder
+    try testing.expectEqual(@as(u32, 2), result.offsets[0].token_offset);
+    try testing.expectEqual(@as(u32, 3), result.offsets[0].token_count);
+    // Audio placeholder comes after "T1" + 3 image tokens + "T2"
+    try testing.expectEqual(@as(u32, 2 + 3 + 2), result.offsets[1].token_offset);
+    try testing.expectEqual(@as(u32, 2), result.offsets[1].token_count);
+
+    // Verify token values
+    try testing.expectEqual(@as(u32, 'T'), result.tokens.items[0]);
+    try testing.expectEqual(@as(u32, '1'), result.tokens.items[1]);
+    try testing.expectEqual(@as(u32, 258880), result.tokens.items[2]); // image placeholder
+    try testing.expectEqual(@as(u32, 258880), result.tokens.items[4]); // last image token
+    try testing.expectEqual(@as(u32, 'T'), result.tokens.items[5]); // T2 starts
+    try testing.expectEqual(@as(u32, 258881), result.tokens.items[7]); // audio placeholder
+    try testing.expectEqual(@as(u32, 'T'), result.tokens.items[9]); // T3 starts
 }

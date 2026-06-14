@@ -964,11 +964,24 @@ const InferenceEngine = struct {
         const formatted_prompt = if (self.no_chat_template) blk: {
             break :blk try self.allocator.dupe(u8, content_with_placeholder);
         } else blk: {
-            const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
-            const source = self.chat_template_source orelse
-                chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
-            var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
-            defer tmpl.deinit(self.allocator);
+            // For multimodal, prefer GGUF Jinja template to match llama.cpp behavior.
+            // If no GGUF template is available, fall back to architecture preset.
+            var tmpl: chat_template.Template = undefined;
+            const use_jinja = self.chat_template_source != null and self.chat_template_source.? == .gguf_builtin;
+            if (use_jinja) {
+                tmpl = chat_template.Template{
+                    .kind = .unknown,
+                    .source = self.chat_template_source.?,
+                    .jinja_enabled = true,
+                };
+            } else {
+                const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
+                const source = self.chat_template_source orelse
+                    chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
+                tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
+            }
+            defer if (!use_jinja) tmpl.deinit(self.allocator);
+
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
             // Use withMedia to pass media info to Jinja template engine
             const media = chat_template.Media{
@@ -981,7 +994,6 @@ const InferenceEngine = struct {
             break :blk try tmpl.apply(self.allocator, &messages, system, true);
         };
         defer self.allocator.free(formatted_prompt);
-        logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
 
         var expanded = try chat_template.tokenizeWithPlaceholders(
             self.allocator,
@@ -1229,11 +1241,23 @@ const InferenceEngine = struct {
         const formatted_prompt = if (self.no_chat_template) blk: {
             break :blk try self.allocator.dupe(u8, content_with_placeholder);
         } else blk: {
-            const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
-            const source = self.chat_template_source orelse
-                chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
-            var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
-            defer tmpl.deinit(self.allocator);
+            // For multimodal, prefer GGUF Jinja template to match llama.cpp behavior.
+            var tmpl: chat_template.Template = undefined;
+            const use_jinja = self.chat_template_source != null and self.chat_template_source.? == .gguf_builtin;
+            if (use_jinja) {
+                tmpl = chat_template.Template{
+                    .kind = .unknown,
+                    .source = self.chat_template_source.?,
+                    .jinja_enabled = true,
+                };
+            } else {
+                const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
+                const source = self.chat_template_source orelse
+                    chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
+                tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
+            }
+            defer if (!use_jinja) tmpl.deinit(self.allocator);
+
             const system = if (self.system_prompt.len > 0) self.system_prompt else null;
             // Use withMedia to pass media info to Jinja template engine
             const media = chat_template.Media{

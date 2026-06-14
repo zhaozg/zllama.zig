@@ -219,13 +219,28 @@ pub const MtmdVisionComparator = struct {
         };
         log.info("Image placeholder token id: {d}", .{image_token_id});
 
-        // 9. 格式化 prompt（使用 chat template）
+        // 9. 格式化 prompt（使用 GGUF Jinja 模板以匹配 llama.cpp）
         const content_with_placeholder = try chat_template.ensurePlaceholderInContent(self.config.prompt, .image, self.allocator);
         defer if (content_with_placeholder.ptr != self.config.prompt.ptr) self.allocator.free(content_with_placeholder);
 
-        const source = chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(arch, null) };
-        var tmpl = try chat_template.resolve(self.allocator, source, arch, null, true);
-        defer tmpl.deinit(self.allocator);
+        // Use the GGUF built-in Jinja template when available (matches llama.cpp behavior).
+        // If unavailable, fall back to the architecture preset.
+        const gguf_template_str = gguf_file.getString("tokenizer.chat_template");
+        const use_gguf_jinja = gguf_template_str != null;
+
+        var tmpl: chat_template.Template = undefined;
+        if (use_gguf_jinja) {
+            // Force unknown kind so Jinja rendering is used.
+            // This ensures the comparison matches llama.cpp's exact template output.
+            tmpl = chat_template.Template{
+                .kind = .unknown,
+                .source = .{ .gguf_builtin = gguf_template_str.? },
+                .jinja_enabled = true,
+            };
+        } else {
+            tmpl = try chat_template.resolve(self.allocator, .{ .preset = chat_template.kindForArchitecture(arch, null) }, arch, null, true);
+        }
+        defer if (!use_gguf_jinja) tmpl.deinit(self.allocator);
 
         // Use withMedia to pass media info to Jinja template engine
         const media = chat_template.Media{

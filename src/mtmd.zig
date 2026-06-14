@@ -138,7 +138,13 @@ pub const MtmdContext = struct {
 fn detectCapabilities(gf: *const gguf.GGUFFile) !model.ModelCapabilities {
     var caps = model.ModelCapabilities{};
     if (gf.findTensor("v.patch_embd.weight") != null or gf.findTensor("v.position_embd.weight") != null) {
-        caps.has_vision = true; caps.vision_encoder_type = if (gf.findTensor("patch_norm_1.weight") != null) "gemma4uv" else "gemma4v";
+        caps.has_vision = true;
+        // 与 vision.zig 加载代码保持一致的命名前缀
+        caps.vision_encoder_type = if (gf.findTensor("v.patch_norm.1.weight") != null or
+                                        gf.findTensor("patch_norm_1.weight") != null)
+            "gemma4uv"
+        else
+            "gemma4v";
     }
     if (gf.findTensor("a.conv1d.0.weight") != null or gf.findTensor("a.input_projection.weight") != null) {
         caps.has_audio = true; caps.audio_encoder_type = "gemma4a"; caps.audio_sample_rate = 16000;

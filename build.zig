@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // -Dbundle-ggml: build ggml from source instead of using system-installed libraries
-    const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse false;
+    const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse true;
 
     // Build ggml from source when bundling, otherwise nil
     const ggml_lib: ?*std.Build.Step.Compile = if (bundle_ggml)
