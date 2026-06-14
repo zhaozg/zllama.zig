@@ -46,8 +46,7 @@ pub const CGraph = opaque {
     }
 
     /// 执行计算图
-    pub fn compute(self: *CGraph, _n_threads: i32) !void {
-        _ = _n_threads;
+    pub fn compute(self: *CGraph, n_threads: i32) !void {
         // 加载所有可用的后端（动态库），只加载一次
         if (!backends_loaded) {
             c.ggml_backend_load_all();
@@ -55,25 +54,23 @@ pub const CGraph = opaque {
             log.info("Backends loaded", .{});
         }
 
-        // 先尝试使用 ggml_backend API（Metal/CUDA 加速）
-        const backend = c.ggml_backend_init_best();
-        if (backend) |b| {
-            defer c.ggml_backend_free(b);
-            if (c.ggml_backend_graph_compute(b, @ptrCast(self)) == 0) return;
-            log.warn("ggml_backend_graph_compute failed, falling back to CPU", .{});
-        } else {
-            log.info("No GPU backend available, using CPU", .{});
-        }
-
-        // CPU 回退路径：使用 ggml_backend CPU 后端
+        // CPU backend with specified thread count
         const cpu_backend = c.ggml_backend_init_by_type(c.GGML_BACKEND_DEVICE_TYPE_CPU, null);
-        if (cpu_backend) |b| {
-            defer c.ggml_backend_free(b);
-            if (c.ggml_backend_graph_compute(b, @ptrCast(self)) == 0) return;
-            return error.ComputeError;
+        if (cpu_backend == null) return error.BackendInitFailed;
+        defer c.ggml_backend_free(cpu_backend);
+
+        c.ggml_backend_cpu_set_n_threads(cpu_backend, n_threads);
+
+        // Try GPU backend first (Metal/CUDA), fall back to CPU
+        const gpu_backend = c.ggml_backend_init_best();
+        if (gpu_backend) |gpu| {
+            defer c.ggml_backend_free(gpu);
+            if (c.ggml_backend_graph_compute(gpu, @ptrCast(self)) == 0) return;
+            log.warn("ggml_backend_graph_compute failed, falling back to CPU", .{});
         }
 
-        return error.BackendInitFailed;
+        if (c.ggml_backend_graph_compute(cpu_backend, @ptrCast(self)) == 0) return;
+        return error.ComputeError;
     }
 
     /// 获取图中节点数量

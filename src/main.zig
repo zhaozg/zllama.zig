@@ -309,13 +309,16 @@ const InferenceEngine = struct {
             const owned = try allocator.dupe(u8, tmpl_str);
             chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
             logger.info("Chat template: from GGUF metadata", .{});
-            // Debug: print template detection info when verbose
-            if (cli_args.verbose) {
-                if (chat_template.debugPrintTemplate(allocator, chat_template_source.?, arch, null)) |debug_info| {
-                    defer allocator.free(debug_info);
-                    logger.info("{s}", .{debug_info});
-                } else |_| {}
-            }
+        }
+        // Debug: print template detection info when verbose or debug,
+        // regardless of source (GGUF built-in, preset, or arch default).
+        if (cli_args.verbose or cli_args.debug) {
+            const source = chat_template_source orelse
+                chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(arch, null) };
+            if (chat_template.debugPrintTemplate(allocator, source, arch, null)) |debug_info| {
+                defer allocator.free(debug_info);
+                logger.info("{s}", .{debug_info});
+            } else |_| {}
         }
         // If no source resolved, will use arch default in generate()
 
@@ -1030,6 +1033,9 @@ const InferenceEngine = struct {
         };
         defer self.allocator.free(formatted_prompt);
 
+        logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
+        logger.debug("Template preview: {s}", .{formatted_prompt[0..@min(formatted_prompt.len, 256)]});
+
         var expanded = try chat_template.tokenizeWithPlaceholders(
             self.allocator,
             formatted_prompt,
@@ -1135,6 +1141,10 @@ const InferenceEngine = struct {
         var pos: i32 = prefill_result.pos;
         var gen_count: u32 = 0;
 
+        // Buffer for EOG text detection (accumulates decoded output)
+        var eog_detect_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        defer eog_detect_buf.deinit(self.allocator);
+
         logger.info("First generated token (vision): id={d}, is_eog={}, pp_time={d:.3}s", .{
             current_token,
             self.tok.isEog(@intCast(current_token)),
@@ -1192,13 +1202,29 @@ const InferenceEngine = struct {
                 continue;
             }
 
-            if (!self.benchmark) {
-                var buf: [128]u8 = undefined;
-                const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
-                if (n > 0) {
-                    const stdout_file = std.Io.File.stdout();
-                    try stdout_file.writeStreamingAll(io, buf[0..n]);
+            // Decode token
+            var buf: [128]u8 = undefined;
+            const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
+            const decoded = buf[0..n];
+
+            // Check if decoded text contains EOG token string
+            // (handles models that generate EOG token as sub-token sequence)
+            if (n > 0) {
+                try eog_detect_buf.appendSlice(self.allocator, decoded);
+                if (self.tok.isEogText(eog_detect_buf.items)) {
+                    // Stream the current token before stopping
+                    if (!self.benchmark) {
+                        const stdout_file = std.Io.File.stdout();
+                        try stdout_file.writeStreamingAll(io, decoded);
+                    }
+                    break;
                 }
+            }
+
+            // Stream output immediately (skip in benchmark mode)
+            if (!self.benchmark and n > 0) {
+                const stdout_file = std.Io.File.stdout();
+                try stdout_file.writeStreamingAll(io, decoded);
             }
 
             const step = try self.inc_ctx.beginStep();
@@ -1333,6 +1359,7 @@ const InferenceEngine = struct {
         defer self.allocator.free(formatted_prompt);
 
         logger.info("Formatted prompt ({d} chars):\n{s}", .{ formatted_prompt.len, formatted_prompt });
+        logger.debug("Template preview: {s}", .{formatted_prompt[0..@min(formatted_prompt.len, 256)]});
         var expanded = try chat_template.tokenizeWithPlaceholders(
             self.allocator,
             formatted_prompt,
@@ -1439,6 +1466,10 @@ const InferenceEngine = struct {
         var pos: i32 = prefill_result.pos;
         var gen_count: u32 = 0;
 
+        // Buffer for EOG text detection (accumulates decoded output)
+        var eog_detect_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        defer eog_detect_buf.deinit(self.allocator);
+
         logger.info("First generated token (audio): id={d}, is_eog={}, pp_time={d:.3}s", .{
             current_token,
             self.tok.isEog(@intCast(current_token)),
@@ -1495,13 +1526,29 @@ const InferenceEngine = struct {
                 continue;
             }
 
-            if (!self.benchmark) {
-                var buf: [128]u8 = undefined;
-                const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
-                if (n > 0) {
-                    const stdout_file = std.Io.File.stdout();
-                    try stdout_file.writeStreamingAll(io, buf[0..n]);
+            // Decode token
+            var buf: [128]u8 = undefined;
+            const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
+            const decoded = buf[0..n];
+
+            // Check if decoded text contains EOG token string
+            // (handles models that generate EOG token as sub-token sequence)
+            if (n > 0) {
+                try eog_detect_buf.appendSlice(self.allocator, decoded);
+                if (self.tok.isEogText(eog_detect_buf.items)) {
+                    // Stream the current token before stopping
+                    if (!self.benchmark) {
+                        const stdout_file = std.Io.File.stdout();
+                        try stdout_file.writeStreamingAll(io, decoded);
+                    }
+                    break;
                 }
+            }
+
+            // Stream output immediately (skip in benchmark mode)
+            if (!self.benchmark and n > 0) {
+                const stdout_file = std.Io.File.stdout();
+                try stdout_file.writeStreamingAll(io, decoded);
             }
 
             const step = try self.inc_ctx.beginStep();

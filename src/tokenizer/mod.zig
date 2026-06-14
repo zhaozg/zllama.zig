@@ -201,7 +201,6 @@ pub const Tokenizer = struct {
                 "<|eom_id|>",
                 "[EOT]",
                 "[EOS]",
-                "<turn|>",
                 "<|tool_response>",
                 "<｜end▁of▁sentence｜>",
             };
