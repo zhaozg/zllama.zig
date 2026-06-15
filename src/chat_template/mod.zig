@@ -678,11 +678,12 @@ test "Template.apply: gemma4" {
     const messages = [_]ChatMessage{.{ .role = "user", .content = "1+1=?" }};
     const result = try tmpl.apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
-    // Gemma 4: no system → no system turn; generation prompt with empty thinking block
+    // Gemma 4: no system → no system turn; generation prompt is just <|turn>model\n
     try testing.expectEqualStrings(
-        "<|turn>user\n1+1=?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>user\n1+1=?<turn|>\n<|turn>model\n",
         result,
     );
+
 }
 
 test "Template.apply: gemma4 with system" {
@@ -695,9 +696,10 @@ test "Template.apply: gemma4 with system" {
     defer testing.allocator.free(result);
     // Gemma 4: system gets its own <|turn>system\n turn
     try testing.expectEqualStrings(
-        "<|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nHello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nHello<turn|>\n<|turn>model\n",
         result,
     );
+
 }
 
 test "Template.apply: gemma4 multi-turn" {
@@ -713,9 +715,10 @@ test "Template.apply: gemma4 multi-turn" {
     const result = try tmpl.apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n",
         result,
     );
+
 }
 
 test "Template.apply: gemma4 multi-turn with system" {
@@ -731,9 +734,10 @@ test "Template.apply: gemma4 multi-turn with system" {
     const result = try tmpl.apply(testing.allocator, &messages, "You are helpful.", true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>system\nYou are helpful.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>system\nYou are helpful.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n",
         result,
     );
+
 }
 
 test "Template.apply: gemma4 strip thinking" {
@@ -750,9 +754,10 @@ test "Template.apply: gemma4 strip thinking" {
     defer testing.allocator.free(result);
     // Thinking block should be stripped from model output
     try testing.expectEqualStrings(
-        "<|turn>user\n1+1=?<turn|>\n<|turn>model\nThe answer is 2.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>user\n1+1=?<turn|>\n<|turn>model\nThe answer is 2.<turn|>\n<|turn>model\n",
         result,
     );
+
 }
 
 test "Template.apply: gemma4 system role message" {
@@ -768,9 +773,10 @@ test "Template.apply: gemma4 system role message" {
     const result = try tmpl.apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>system\nYou are a math tutor.<turn|>\n<|turn>user\n1+1=?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>system\nYou are a math tutor.<turn|>\n<|turn>user\n1+1=?<turn|>\n<|turn>model\n",
         result,
     );
+
 }
 
 test "Template.apply: multi-turn mistral_v7" {

@@ -3,16 +3,16 @@
 //! Format: <|turn>system\n{system}<turn|>\n   ← system turn (when system present)
 //!         <|turn>user\n{user}<turn|>\n
 //!         <|turn>model\n{assistant}<turn|>\n
-//!         <|turn>model\n<|channel>thought\n<channel|>   ← generation prompt
+//!         <|turn>model\n   ← generation prompt
 //!
-//! Reference: google-gemma-4-31B-it-interleaved.jinja
+//! Reference: google-gemma-4-31B-it-interleaved.jinja (GGUF built-in template)
 //!
 //! Key differences from Gemma 3:
 //!   - Uses <|turn> / <turn|> delimiters (instead of <start_of_turn> / <end_of_turn>)
 //!   - System messages get their own <|turn>system\n turn (not merged into user)
 //!   - Model output may contain <|channel>thought\n...<channel|> thinking blocks
-//!   - Generation prompt: <|turn>model\n + empty thinking block to suppress reasoning
-//!   - When enable_thinking=true: system turn gets <|think|>\n, no empty thinking block
+//!   - Generation prompt: just <|turn>model\n (no empty thinking block)
+//!   - When enable_thinking=true: system turn gets <|think|>\n prefix
 
 const std = @import("std");
 const types = @import("types");
@@ -20,45 +20,53 @@ const types = @import("types");
 const ChatMessage = types.ChatMessage;
 
 /// Apply Gemma 4 template.
+///
+/// Note: enable_thinking is currently hardcoded to false.
+/// When true, the system turn would get a <|think|>\n prefix and
+/// the generation prompt would NOT include the empty thinking block.
+/// Full enable_thinking support requires plumbing through the vtable.
 pub fn apply(
     allocator: std.mem.Allocator,
     messages: []const ChatMessage,
     system_prompt: ?[]const u8,
     add_generation_prompt: bool,
 ) ![]const u8 {
-    // Default: thinking disabled (injects empty thinking block to suppress reasoning)
+    // Default: thinking disabled
     const enable_thinking = false;
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    // Collect system content (either from explicit system_prompt or from messages)
-    var system_content: std.ArrayListUnmanaged(u8) = .empty;
-    defer system_content.deinit(allocator);
+    // Collect system content from the FIRST system message only
+    // (only leading consecutive system messages, matching official template behavior)
+    var system_content: ?[]const u8 = null;
+    var has_system_from_messages = false;
 
     if (system_prompt) |sp| {
         if (sp.len > 0) {
-            try system_content.appendSlice(allocator, sp);
+            system_content = sp;
         }
     }
 
-    // Collect system messages from the messages array
-    var system_msg_indices: std.ArrayListUnmanaged(usize) = .empty;
-    defer system_msg_indices.deinit(allocator);
-
-    for (messages, 0..) |msg, i| {
-        if (std.mem.eql(u8, msg.role, "system")) {
-            try system_msg_indices.append(allocator, i);
-            if (system_content.items.len > 0) {
-                try system_content.appendSlice(allocator, "\n\n");
-            }
-            try system_content.appendSlice(allocator, msg.content);
+    // Check if the first message is a system message
+    if (messages.len > 0 and std.mem.eql(u8, messages[0].role, "system")) {
+        if (system_content) |sc| {
+            // Merge: existing system_prompt + first message system content
+            var merged = std.ArrayListUnmanaged(u8).empty;
+            defer merged.deinit(allocator);
+            try merged.appendSlice(allocator, sc);
+            try merged.appendSlice(allocator, "\n\n");
+            try merged.appendSlice(allocator, messages[0].content);
+            system_content = try merged.toOwnedSlice(allocator);
+        } else {
+            system_content = messages[0].content;
         }
+        has_system_from_messages = true;
     }
 
-    const has_system = system_content.items.len > 0;
+    const has_system = if (system_content) |sc| sc.len > 0 else false;
 
-    // --- System turn (Gemma 4: dedicated turn, not merged into user) ---
+    // --- System turn (Gemma 4: dedicated turn, only from first message) ---
     if (has_system) {
         try buf.appendSlice(allocator, "<|turn>system\n");
 
@@ -66,25 +74,15 @@ pub fn apply(
             try buf.appendSlice(allocator, "<|think|>\n");
         }
 
-        try buf.appendSlice(allocator, system_content.items);
+        try buf.appendSlice(allocator, system_content.?);
         try buf.appendSlice(allocator, "<turn|>\n");
     }
 
     // --- Message turns ---
-    // Track system message indices to skip them (they were handled in the system turn)
-    const skip_indices = system_msg_indices.items;
+    // Skip the first message if it was a system message (already handled)
+    const start_idx: usize = if (has_system_from_messages) 1 else 0;
 
-    for (messages, 0..) |msg, i| {
-        // Skip system messages (handled in system turn)
-        var is_system = false;
-        for (skip_indices) |si| {
-            if (si == i) {
-                is_system = true;
-                break;
-            }
-        }
-        if (is_system) continue;
-
+    for (messages[start_idx..], 0..) |msg, i| {
         const role_tag = if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model"))
             "model"
         else
@@ -102,40 +100,41 @@ pub fn apply(
         }
 
         try buf.appendSlice(allocator, "<turn|>\n");
+        _ = i;
     }
 
     // --- Generation prompt ---
+    // Official template: just <|turn>model\n (no empty thinking block)
+    // The empty thinking block was a previous attempt to suppress reasoning
+    // but it causes the model to output "thought" as the first token.
     if (add_generation_prompt) {
         try buf.appendSlice(allocator, "<|turn>model\n");
-        if (!enable_thinking) {
-            // Inject empty thinking block to suppress model reasoning
-            try buf.appendSlice(allocator, "<|channel>thought\n<channel|>");
-        }
     }
 
     return buf.toOwnedSlice(allocator);
 }
 
 /// Strip thinking blocks (<|channel>thought\n...<channel|>) from model content.
+/// Only strips the "thought" channel, not other potential channels.
 /// Reference: strip_thinking macro in google-gemma-4-31B-it-interleaved.jinja
 fn appendStrippedThinking(
     buf: *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
     text: []const u8,
 ) !void {
-    const channel_start_tag = "<|channel>";
+    const thought_start_tag = "<|channel>thought\n";
     const channel_end_tag = "<channel|>";
 
     var remaining = text;
     while (remaining.len > 0) {
-        if (std.mem.indexOf(u8, remaining, channel_start_tag)) |tag_pos| {
-            // Output everything before the channel start tag
+        if (std.mem.indexOf(u8, remaining, thought_start_tag)) |tag_pos| {
+            // Output everything before the thought channel start tag
             try buf.appendSlice(allocator, remaining[0..tag_pos]);
 
             // Find the matching channel end tag
-            const after_start = remaining[tag_pos + channel_start_tag.len ..];
+            const after_start = remaining[tag_pos + thought_start_tag.len ..];
             if (std.mem.indexOf(u8, after_start, channel_end_tag)) |end_pos| {
-                // Skip the entire channel block
+                // Skip the entire thought channel block
                 remaining = after_start[end_pos + channel_end_tag.len ..];
             } else {
                 // No closing tag found — output the rest as-is
@@ -143,7 +142,7 @@ fn appendStrippedThinking(
                 break;
             }
         } else {
-            // No more channel tags
+            // No more thought channel tags
             try buf.appendSlice(allocator, remaining);
             break;
         }
@@ -156,8 +155,9 @@ test "gemma4: single turn" {
     const messages = [_]ChatMessage{.{ .role = "user", .content = "1+1=?" }};
     const result = try apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
+    // Generation prompt is just <|turn>model\n (no empty thinking block)
     try testing.expectEqualStrings(
-        "<|turn>user\n1+1=?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>user\n1+1=?<turn|>\n<|turn>model\n",
         result,
     );
 }
@@ -167,7 +167,7 @@ test "gemma4: with system" {
     const result = try apply(testing.allocator, &messages, "You are a helpful assistant.", true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nHello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nHello<turn|>\n<|turn>model\n",
         result,
     );
 }
@@ -181,7 +181,7 @@ test "gemma4: multi-turn" {
     const result = try apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n",
         result,
     );
 }
@@ -195,7 +195,7 @@ test "gemma4: multi-turn with system" {
     const result = try apply(testing.allocator, &messages, "You are helpful.", true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>system\nYou are helpful.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>system\nYou are helpful.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n",
         result,
     );
 }
@@ -207,8 +207,9 @@ test "gemma4: strip thinking" {
     };
     const result = try apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
+    // Thinking block should be stripped from model output
     try testing.expectEqualStrings(
-        "<|turn>user\n1+1=?<turn|>\n<|turn>model\nThe answer is 2.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>user\n1+1=?<turn|>\n<|turn>model\nThe answer is 2.<turn|>\n<|turn>model\n",
         result,
     );
 }
@@ -221,7 +222,44 @@ test "gemma4: system role message" {
     const result = try apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>system\nYou are a math tutor.<turn|>\n<|turn>user\n1+1=?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        "<|turn>system\nYou are a math tutor.<turn|>\n<|turn>user\n1+1=?<turn|>\n<|turn>model\n",
+        result,
+    );
+}
+
+test "gemma4: system role message with system_prompt" {
+    // When both system_prompt and first message is system, they should be merged
+    const messages = [_]ChatMessage{
+        .{ .role = "system", .content = "Be concise." },
+        .{ .role = "user", .content = "Hello" },
+    };
+    const result = try apply(testing.allocator, &messages, "You are helpful.", true);
+    defer testing.allocator.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "You are helpful.") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "Be concise.") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "<|turn>system") != null);
+}
+
+test "gemma4: non-system first message" {
+    // If the first message is NOT system, system_prompt is still used
+    const messages = [_]ChatMessage{
+        .{ .role = "user", .content = "Hello" },
+        .{ .role = "system", .content = "This should be ignored" },
+    };
+    const result = try apply(testing.allocator, &messages, "You are helpful.", true);
+    defer testing.allocator.free(result);
+    // System prompt should be used, but the system message in the middle should be ignored
+    // (only leading consecutive system messages are collected)
+    try testing.expect(std.mem.indexOf(u8, result, "You are helpful.") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "This should be ignored") == null);
+}
+
+test "gemma4: no generation prompt" {
+    const messages = [_]ChatMessage{.{ .role = "user", .content = "Hello" }};
+    const result = try apply(testing.allocator, &messages, null, false);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(
+        "<|turn>user\nHello<turn|>\n",
         result,
     );
 }
