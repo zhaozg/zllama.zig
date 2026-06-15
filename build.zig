@@ -29,16 +29,18 @@ pub fn build(b: *std.Build) void {
     });
 
     if (bundle_ggml) {
-        // 从源码构建时：使用 deps/ggml 中的头文件，链接自建静态库
-        ggml_mod.addIncludePath(b.path("deps/ggml/include"));
-        ggml_mod.addIncludePath(b.path("deps/ggml/src"));
+        // 从源码构建时：严格使用 deps/ggml 中的头文件，链接自建静态库
+        // -I 标志优先级高于系统路径（/usr/local/include），确保头文件不冲突
+        ggml_mod.addIncludePath(b.path("deps/ggml/include"));      // 公共 API: ggml.h, ggml-cpu.h, ggml-backend.h, ggml-alloc.h, gguf.h
+        ggml_mod.addIncludePath(b.path("deps/ggml/src"));          // 内部实现: ggml-impl.h, ggml-common.h, ggml-backend-impl.h, ggml-threading.h
+        ggml_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu")); // CPU 后端内部: ggml-cpu-impl.h, traits.h, quants.h 等
         ggml_mod.addCMacro("GGML_USE_CPU", "1");
         if (no_galloc_realloc) {
             ggml_mod.addCMacro("GGML_SCHED_NO_REALLOC", "1");
         }
         ggml_mod.linkLibrary(ggml_lib.?);
     } else {
-        // 使用系统安装的 ggml
+        // 使用系统安装的 ggml（仅在 -Dbundle-ggml=false 时启用）
         ggml_mod.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
         ggml_mod.linkSystemLibrary("ggml-base", .{});
         ggml_mod.linkSystemLibrary("ggml", .{});
@@ -741,10 +743,12 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .link_libcpp = true,
     });
 
-    // 头文件路径
-    lib_mod.addIncludePath(b.path("deps/ggml/include"));
-    lib_mod.addIncludePath(b.path("deps/ggml/src"));
-    lib_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu"));
+    // 头文件路径 — 全部从 deps/ggml/ 解析（-I 优先级 > 系统 /usr/local/include）
+    // 绝不使用系统安装的 ggml 头文件，避免版本不一致导致的 ABI 损坏
+    lib_mod.addIncludePath(b.path("deps/ggml/include"));         // 公共 API: ggml.h, ggml-cpu.h, ggml-backend.h, ggml-alloc.h, gguf.h
+    lib_mod.addIncludePath(b.path("deps/ggml/src"));             // 内部实现: ggml-impl.h, ggml-common.h, ggml-backend-impl.h, ggml-threading.h, ggml-quants.h
+    lib_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu"));    // CPU 后端内部: ggml-cpu-impl.h, traits.h, quants.h, ops.h, vec.h, simd-mappings.h 等
+    lib_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu/amx")); // AMX 内部: amx.h, mmq.h, common.h
 
     // 宏定义
     lib_mod.addCMacro("GGML_USE_CPU", "1");
@@ -836,6 +840,7 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     switch (cpu_arch) {
         .x86_64 => {
             const arch_dir = cpu_dir ++ "/arch/x86";
+            lib_mod.addIncludePath(b.path(arch_dir));
             lib_mod.addCSourceFile(.{
                 .file = b.path(arch_dir ++ "/cpu-feats.cpp"),
                 .flags = cpp_base_flags,
@@ -851,6 +856,7 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         },
         .aarch64 => {
             const arch_dir = cpu_dir ++ "/arch/arm";
+            lib_mod.addIncludePath(b.path(arch_dir));
             lib_mod.addCSourceFile(.{
                 .file = b.path(arch_dir ++ "/cpu-feats.cpp"),
                 .flags = cpp_base_flags,
