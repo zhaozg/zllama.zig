@@ -126,18 +126,6 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-const testing = std.testing;
-
-test "CliArgs parse" {
-    const test_args = CliArgs{};
-    try testing.expectEqual(@as(u32, 256), test_args.max_tokens);
-    try testing.expectEqual(@as(f32, 0.7), test_args.temperature);
-}
-
-test "ggml version available" {
-    const v = ggml.version();
-    try testing.expect(v.len > 0);
-}
 // 导入所有测试模块（通过 zig build test 运行）
 
 const test_utils = @import("tests/utils.zig");

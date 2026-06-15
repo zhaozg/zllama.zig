@@ -250,6 +250,7 @@ pub const MtmdAudioComparator = struct {
             tmpl = chat_template.Template{
                 .kind = .unknown,
                 .source = .{ .gguf_builtin = gguf_template_str.? },
+                .vtable = chat_template.vtableForKind(.unknown),
                 .jinja_enabled = true,
             };
         } else {

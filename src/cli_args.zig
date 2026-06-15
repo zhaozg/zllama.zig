@@ -116,3 +116,11 @@ pub const CliArgs = struct {
     }
 };
 
+const testing = std.testing;
+
+test "CliArgs parse" {
+    const test_args = CliArgs{};
+    try testing.expectEqual(@as(u32, 256), test_args.max_tokens);
+    try testing.expectEqual(@as(f32, 0.7), test_args.temperature);
+}
+

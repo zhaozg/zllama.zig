@@ -10,13 +10,30 @@
 //!   Phase 4: Multimodal placeholder support (expandPlaceholders, Media types)
 //!
 //! Reference: llama.cpp src/llama-chat.cpp, common/chat.cpp, docs/DIALOG_TEMPLATE.md
+//!
+//! Design: Each template kind is implemented in its own file under
+//! src/chat_template/<kind>.zig, exposing a uniform `apply()` function.
+//! The Template struct uses a vtable (TemplateVTable) to dispatch
+//! to the correct implementation at runtime.
+
 const std = @import("std");
 const model = @import("model");
 
 // 导入子模块
 const types = @import("types");
 const multimodal = @import("multimodal");
-// jinja_mod removed — deps/zig-jinja was removed due to instability
+
+// 导入各模板实现
+const chatml = @import("chatml");
+const llama3 = @import("llama3");
+const llama4 = @import("llama4");
+const gemma = @import("gemma");
+const gemma4 = @import("gemma4");
+const mistral_v7 = @import("mistral_v7");
+const phi4 = @import("phi4");
+const deepseek3 = @import("deepseek3");
+const tinyllama = @import("tinyllama");
+
 pub const ChatMessage = types.ChatMessage;
 pub const Media = types.Media;
 pub const MediaType = types.MediaType;
@@ -34,6 +51,39 @@ pub const placeholderTokenOffset = multimodal.placeholderTokenOffset;
 pub const TokenizedSegments = multimodal.TokenizedSegments;
 
 const log = std.log.scoped(.chat_template);
+
+// ============================================================================
+// Template VTable
+// ============================================================================
+
+/// Function signature for all template apply functions.
+const ApplyFn = *const fn (
+    allocator: std.mem.Allocator,
+    messages: []const ChatMessage,
+    system_prompt: ?[]const u8,
+    add_generation_prompt: bool,
+) anyerror![]const u8;
+
+/// VTable for template dispatch.
+pub const TemplateVTable = struct {
+    apply: ApplyFn,
+};
+
+/// Get the vtable for a given template kind.
+pub fn vtableForKind(kind: TemplateKind) TemplateVTable {
+    return switch (kind) {
+        .chatml => .{ .apply = chatml.apply },
+        .llama3 => .{ .apply = llama3.apply },
+        .llama4 => .{ .apply = llama4.apply },
+        .gemma => .{ .apply = gemma.apply },
+        .gemma4 => .{ .apply = gemma4.apply },
+        .mistral_v7 => .{ .apply = mistral_v7.apply },
+        .phi4 => .{ .apply = phi4.apply },
+        .deepseek3 => .{ .apply = deepseek3.apply },
+        .tinyllama => .{ .apply = tinyllama.apply },
+        .unknown => .{ .apply = applyUnknown },
+    };
+}
 
 // ============================================================================
 // Template Format
@@ -80,9 +130,12 @@ pub const TemplateSource = union(enum) {
 pub const Template = struct {
     kind: TemplateKind,
     source: TemplateSource,
+    /// VTable for dispatch — initialized from kind.
+    vtable: TemplateVTable,
     /// Whether Jinja rendering is enabled for unknown/custom templates.
     /// Set to false with --no-jinja flag.
     jinja_enabled: bool = true,
+
     /// Apply this template to format messages.
     pub fn apply(
         self: *const Template,
@@ -91,28 +144,9 @@ pub const Template = struct {
         system_prompt: ?[]const u8,
         add_generation_prompt: bool,
     ) ![]const u8 {
-        switch (self.kind) {
-            .chatml => return applyChatml(allocator, messages, system_prompt, add_generation_prompt),
-            .llama3 => return applyLlama3(allocator, messages, system_prompt, add_generation_prompt),
-            .llama4 => return applyLlama4(allocator, messages, system_prompt, add_generation_prompt),
-            .gemma => return applyGemma(allocator, messages, system_prompt, add_generation_prompt),
-            .gemma4 => return applyGemma4(allocator, messages, system_prompt, add_generation_prompt),
-            .mistral_v7 => return applyMistralV7(allocator, messages, system_prompt, add_generation_prompt),
-            .phi4 => return applyPhi4(allocator, messages, system_prompt, add_generation_prompt),
-            .deepseek3 => return applyDeepSeekV3(allocator, messages, system_prompt, add_generation_prompt),
-            .tinyllama => return applyTinyLlama(allocator, messages, system_prompt, add_generation_prompt),
-            .unknown => {
-                // Jinja rendering removed — deps/zig-jinja was removed due to instability.
-                // Fallback: treat as raw prompt (no template)
-                if (messages.len == 1 and std.mem.eql(u8, messages[0].role, "user")) {
-                    return allocator.dupe(u8, messages[0].content);
-                }
-                // For multi-turn with unknown template, use ChatML as safe default
-                log.warn("unknown template kind, falling back to ChatML", .{});
-                return applyChatml(allocator, messages, system_prompt, add_generation_prompt);
-            },
-        }
+        return self.vtable.apply(allocator, messages, system_prompt, add_generation_prompt);
     }
+
     pub fn deinit(self: *Template, allocator: std.mem.Allocator) void {
         _ = allocator;
         // Template does NOT own the source strings — they are borrowed from
@@ -122,7 +156,28 @@ pub const Template = struct {
     }
 };
 
+// ============================================================================
+// Unknown template fallback
+// ============================================================================
 
+/// Fallback for unknown templates.
+/// Jinja rendering removed — deps/zig-jinja was removed due to instability.
+/// Falls back to raw prompt or ChatML.
+fn applyUnknown(
+    allocator: std.mem.Allocator,
+    messages: []const ChatMessage,
+    system_prompt: ?[]const u8,
+    add_generation_prompt: bool,
+) ![]const u8 {
+    // system_prompt and add_generation_prompt are used in the fallback below
+    // Fallback: treat as raw prompt (no template)
+    if (messages.len == 1 and std.mem.eql(u8, messages[0].role, "user")) {
+        return allocator.dupe(u8, messages[0].content);
+    }
+    // For multi-turn with unknown template, use ChatML as safe default
+    log.warn("unknown template kind, falling back to ChatML", .{});
+    return chatml.apply(allocator, messages, system_prompt, add_generation_prompt);
+}
 
 // ============================================================================
 // Template resolution
@@ -153,6 +208,7 @@ pub fn detectKind(tmpl_src: []const u8) TemplateKind {
     }
     return .unknown;
 }
+
 /// Resolve template kind from architecture (default mapping).
 /// If model_name is provided and contains "tinyllama", returns .tinyllama
 /// for .llama architecture (since TinyLlama reports as "llama" arch).
@@ -178,7 +234,6 @@ pub fn kindForArchitecture(arch: model.Architecture, model_name: ?[]const u8) Te
     };
 }
 
-
 /// Resolve a template source to a concrete Template.
 /// Priority: custom > gguf_builtin > preset_name > architecture default
 /// model_name is optional and used to detect TinyLlama (which reports as "llama" arch).
@@ -193,33 +248,59 @@ pub fn resolve(
     _ = allocator;
     switch (source) {
         .preset => |kind| {
-            return Template{ .kind = kind, .source = source };
+            return Template{
+                .kind = kind,
+                .source = source,
+                .vtable = vtableForKind(kind),
+            };
         },
         .gguf_builtin => |tmpl_str| {
             const kind = detectKind(tmpl_str);
             if (kind != .unknown) {
                 log.info("GGUF template ({d} bytes) detected as {s}, using built-in preset", .{ tmpl_str.len, @tagName(kind) });
-                return Template{ .kind = kind, .source = source };
+                return Template{
+                    .kind = kind,
+                    .source = source,
+                    .vtable = vtableForKind(kind),
+                };
             }
             // If Jinja is enabled, keep as .unknown so apply() can try Jinja rendering
             if (jinja_enabled) {
                 log.info("GGUF chat template ({d} bytes) not recognized, will try Jinja rendering", .{tmpl_str.len});
                 log.debug("Template preview: {s}", .{tmpl_str});
-                return Template{ .kind = .unknown, .source = source, .jinja_enabled = true };
+                return Template{
+                    .kind = .unknown,
+                    .source = source,
+                    .vtable = vtableForKind(.unknown),
+                    .jinja_enabled = true,
+                };
             }
             // If GGUF template can't be detected and Jinja is disabled, fall back to arch default
             log.warn("GGUF chat template not recognized, falling back to arch default", .{});
             const arch_kind = kindForArchitecture(arch, model_name);
-            return Template{ .kind = arch_kind, .source = .{ .preset = arch_kind } };
+            return Template{
+                .kind = arch_kind,
+                .source = .{ .preset = arch_kind },
+                .vtable = vtableForKind(arch_kind),
+            };
         },
         .custom => |tmpl_str| {
             const kind = detectKind(tmpl_str);
             if (kind != .unknown) {
-                return Template{ .kind = kind, .source = source };
+                return Template{
+                    .kind = kind,
+                    .source = source,
+                    .vtable = vtableForKind(kind),
+                };
             }
             // For custom templates, always try Jinja rendering (user explicitly provided it)
             log.info("custom chat template not recognized, will try Jinja rendering", .{});
-            return Template{ .kind = .unknown, .source = source, .jinja_enabled = jinja_enabled };
+            return Template{
+                .kind = .unknown,
+                .source = source,
+                .vtable = vtableForKind(.unknown),
+                .jinja_enabled = jinja_enabled,
+            };
         },
     }
 }
@@ -332,636 +413,6 @@ pub fn applyMultiTurn(
     const source = TemplateSource{ .preset = kind };
     var tmpl = try resolve(allocator, source, arch, null, false);
     return tmpl.apply(allocator, messages, system_prompt, add_generation_prompt);
-}
-
-// ============================================================================
-// ChatML (Qwen2 / Qwen2.5 / Qwen3 / Qwen3.5)
-// Format: <|im_start|>system\n{system}<|im_end|>\n
-//         <|im_start|>user\n{user}<|im_end|>\n
-//         <|im_start|>assistant\n{assistant}<|im_end|>\n
-//         <|im_start|>assistant\n   ← generation prompt
-// ============================================================================
-fn applyChatml(
-    allocator: std.mem.Allocator,
-    messages: []const ChatMessage,
-    system_prompt: ?[]const u8,
-    add_generation_prompt: bool,
-) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // System message
-    if (system_prompt) |sp| {
-        if (sp.len > 0) {
-            try buf.appendSlice(allocator, "<|im_start|>system\n");
-            try buf.appendSlice(allocator, sp);
-            try buf.appendSlice(allocator, "<|im_end|>\n");
-        }
-    }
-
-    // Messages
-    for (messages) |msg| {
-        if (std.mem.eql(u8, msg.role, "system")) {
-            try buf.appendSlice(allocator, "<|im_start|>system\n");
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "<|im_end|>\n");
-        } else if (std.mem.eql(u8, msg.role, "user")) {
-            try buf.appendSlice(allocator, "<|im_start|>user\n");
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "<|im_end|>\n");
-        } else if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model")) {
-            try buf.appendSlice(allocator, "<|im_start|>assistant\n");
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "<|im_end|>\n");
-        }
-    }
-
-    // Generation prompt
-    if (add_generation_prompt) {
-        try buf.appendSlice(allocator, "<|im_start|>assistant\n");
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-// ============================================================================
-// Llama 3
-// Format: <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|>
-//         <|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|>
-//         <|start_header_id|>assistant<|end_header_id|>\n\n{assistant}<|eot_id|>
-//         <|start_header_id|>assistant<|end_header_id|>\n\n   ← generation prompt
-// ============================================================================
-fn applyLlama3(
-    allocator: std.mem.Allocator,
-    messages: []const ChatMessage,
-    system_prompt: ?[]const u8,
-    add_generation_prompt: bool,
-) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // BOS token
-    try buf.appendSlice(allocator, "<|begin_of_text|>");
-
-    // System message
-    if (system_prompt) |sp| {
-        if (sp.len > 0) {
-            try buf.appendSlice(allocator, "<|start_header_id|>system<|end_header_id|>\n\n");
-            try buf.appendSlice(allocator, sp);
-            try buf.appendSlice(allocator, "<|eot_id|>");
-        }
-    }
-
-    // Messages
-    for (messages) |msg| {
-        const role_tag = if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model"))
-            "assistant"
-        else
-            msg.role;
-
-        try buf.appendSlice(allocator, "<|start_header_id|>");
-        try buf.appendSlice(allocator, role_tag);
-        try buf.appendSlice(allocator, "<|end_header_id|>\n\n");
-        try buf.appendSlice(allocator, msg.content);
-        try buf.appendSlice(allocator, "<|eot_id|>");
-    }
-
-    // Generation prompt
-    if (add_generation_prompt) {
-        try buf.appendSlice(allocator, "<|start_header_id|>assistant<|end_header_id|>\n\n");
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-// ============================================================================
-// Llama 4
-// Format: <|begin_of_text|><|header_start|>system<|header_end|>\n\n{system}<|eom_id|>
-//         <|header_start|>user<|header_end|>\n\n{user}<|eom_id|>
-//         <|header_start|>assistant<|header_end|>\n\n{assistant}<|eom_id|>
-//         <|header_start|>assistant<|header_end|>\n\n   ← generation prompt
-//
-// Note: Llama 4 uses <|header_start|>/<|header_end|> instead of
-//       <|start_header_id|>/<|end_header_id|>, and <|eom_id|> instead of <|eot_id|>.
-// ============================================================================
-fn applyLlama4(
-    allocator: std.mem.Allocator,
-    messages: []const ChatMessage,
-    system_prompt: ?[]const u8,
-    add_generation_prompt: bool,
-) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // BOS token
-    try buf.appendSlice(allocator, "<|begin_of_text|>");
-
-    // System message
-    if (system_prompt) |sp| {
-        if (sp.len > 0) {
-            try buf.appendSlice(allocator, "<|header_start|>system<|header_end|>\n\n");
-            try buf.appendSlice(allocator, sp);
-            try buf.appendSlice(allocator, "<|eom_id|>");
-        }
-    }
-
-    // Messages
-    for (messages) |msg| {
-        const role_tag = if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model"))
-            "assistant"
-        else
-            msg.role;
-
-        try buf.appendSlice(allocator, "<|header_start|>");
-        try buf.appendSlice(allocator, role_tag);
-        try buf.appendSlice(allocator, "<|header_end|>\n\n");
-        try buf.appendSlice(allocator, msg.content);
-        try buf.appendSlice(allocator, "<|eom_id|>");
-    }
-
-    // Generation prompt
-    if (add_generation_prompt) {
-        try buf.appendSlice(allocator, "<|header_start|>assistant<|header_end|>\n\n");
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-// ============================================================================
-// Gemma (Gemma 3 / Gemma 4)
-// Format: <start_of_turn>user\n{user}<end_of_turn>\n
-//         <start_of_turn>model\n{assistant}<end_of_turn>\n
-//         <start_of_turn>model\n   ← generation prompt
-//
-// Note: Gemma uses "model" instead of "assistant".
-//       There is no explicit system role; system messages are merged
-//       into the first user turn (same as llama.cpp behavior).
-// ============================================================================
-fn applyGemma(
-    allocator: std.mem.Allocator,
-    messages: []const ChatMessage,
-    system_prompt: ?[]const u8,
-    add_generation_prompt: bool,
-) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // Collect system content (either from explicit system_prompt or from messages)
-    var system_content: std.ArrayListUnmanaged(u8) = .empty;
-    defer system_content.deinit(allocator);
-
-    if (system_prompt) |sp| {
-        if (sp.len > 0) {
-            try system_content.appendSlice(allocator, sp);
-        }
-    }
-
-    var system_merged = false;
-
-    for (messages) |msg| {
-        if (std.mem.eql(u8, msg.role, "system")) {
-            if (system_content.items.len > 0) {
-                try system_content.appendSlice(allocator, "\n\n");
-            }
-            try system_content.appendSlice(allocator, msg.content);
-            continue;
-        }
-
-        const role_tag = if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model"))
-            "model"
-        else
-            msg.role;
-
-        try buf.appendSlice(allocator, "<start_of_turn>");
-        try buf.appendSlice(allocator, role_tag);
-        try buf.appendSlice(allocator, "\n");
-
-        // Merge system content into the first non-system, non-model message
-        if (!system_merged and
-            !std.mem.eql(u8, msg.role, "assistant") and
-            !std.mem.eql(u8, msg.role, "model") and
-            system_content.items.len > 0)
-        {
-            try buf.appendSlice(allocator, system_content.items);
-            try buf.appendSlice(allocator, "\n\n");
-            system_merged = true;
-        }
-
-        try buf.appendSlice(allocator, msg.content);
-        try buf.appendSlice(allocator, "<end_of_turn>\n");
-    }
-
-    // Generation prompt
-    if (add_generation_prompt) {
-        try buf.appendSlice(allocator, "<start_of_turn>model\n");
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-
-// ============================================================================
-// Gemma 4
-// Format: <|turn>system\n{system}<turn|>\n   ← system turn (when system present)
-//         <|turn>user\n{user}<turn|>\n
-//         <|turn>model\n{assistant}<turn|>\n
-//         <|turn>model\n<|channel>thought\n<channel|>   ← generation prompt
-//
-// Reference: google-gemma-4-31B-it-interleaved.jinja
-//
-// Key differences from Gemma 3:
-//   - Uses <|turn> / <turn|> delimiters (instead of <start_of_turn> / <end_of_turn>)
-//   - System messages get their own <|turn>system\n turn (not merged into user)
-//   - Model output may contain <|channel>thought\n...<channel|> thinking blocks
-//   - Generation prompt: <|turn>model\n + empty thinking block to suppress reasoning
-//   - When enable_thinking=true: system turn gets <|think|>\n, no empty thinking block
-// ============================================================================
-fn applyGemma4(
-    allocator: std.mem.Allocator,
-    messages: []const ChatMessage,
-    system_prompt: ?[]const u8,
-    add_generation_prompt: bool,
-) ![]const u8 {
-    // Default: thinking disabled (injects empty thinking block to suppress reasoning)
-    const enable_thinking = false;
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // Collect system content (either from explicit system_prompt or from messages)
-    var system_content: std.ArrayListUnmanaged(u8) = .empty;
-    defer system_content.deinit(allocator);
-
-    if (system_prompt) |sp| {
-        if (sp.len > 0) {
-            try system_content.appendSlice(allocator, sp);
-        }
-    }
-
-    // Collect system messages from the messages array
-    var system_msg_indices: std.ArrayListUnmanaged(usize) = .empty;
-    defer system_msg_indices.deinit(allocator);
-
-    for (messages, 0..) |msg, i| {
-        if (std.mem.eql(u8, msg.role, "system")) {
-            try system_msg_indices.append(allocator, i);
-            if (system_content.items.len > 0) {
-                try system_content.appendSlice(allocator, "\n\n");
-            }
-            try system_content.appendSlice(allocator, msg.content);
-        }
-    }
-
-    const has_system = system_content.items.len > 0;
-
-    // --- System turn (Gemma 4: dedicated turn, not merged into user) ---
-    if (has_system) {
-        try buf.appendSlice(allocator, "<|turn>system\n");
-
-        if (enable_thinking) {
-            try buf.appendSlice(allocator, "<|think|>\n");
-        }
-
-        try buf.appendSlice(allocator, system_content.items);
-        try buf.appendSlice(allocator, "<turn|>\n");
-    }
-
-    // --- Message turns ---
-    // Track system message indices to skip them (they were handled in the system turn)
-    const skip_indices = system_msg_indices.items;
-
-    for (messages, 0..) |msg, i| {
-        // Skip system messages (handled in system turn)
-        var is_system = false;
-        for (skip_indices) |si| {
-            if (si == i) {
-                is_system = true;
-                break;
-            }
-        }
-        if (is_system) continue;
-
-        const role_tag = if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model"))
-            "model"
-        else
-            msg.role;
-
-        try buf.appendSlice(allocator, "<|turn>");
-        try buf.appendSlice(allocator, role_tag);
-        try buf.appendSlice(allocator, "\n");
-
-        // For model messages, strip thinking blocks before rendering
-        if (std.mem.eql(u8, role_tag, "model")) {
-            try appendStrippedThinking(&buf, allocator, msg.content);
-        } else {
-            try buf.appendSlice(allocator, msg.content);
-        }
-
-        try buf.appendSlice(allocator, "<turn|>\n");
-    }
-
-    // --- Generation prompt ---
-    // Reference: {% if add_generation_prompt %}
-    //   {% if ns.prev_message_type != 'tool_response' and ns.prev_message_type != 'tool_call' %}
-    //     <|turn>model\n
-    //     {% if not enable_thinking | default(false) %}
-    //       <|channel>thought\n<channel|>
-    //     {% endif %}
-    //   {% endif %}
-    // {% endif %}
-    if (add_generation_prompt) {
-        try buf.appendSlice(allocator, "<|turn>model\n");
-        if (!enable_thinking) {
-            // Inject empty thinking block to suppress model reasoning
-            try buf.appendSlice(allocator, "<|channel>thought\n<channel|>");
-        }
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-/// Strip thinking blocks (<|channel>thought\n...<channel|>) from model content.
-/// Reference: strip_thinking macro in google-gemma-4-31B-it-interleaved.jinja
-fn appendStrippedThinking(
-    buf: *std.ArrayListUnmanaged(u8),
-    allocator: std.mem.Allocator,
-    text: []const u8,
-) !void {
-    const channel_start_tag = "<|channel>";
-    const channel_end_tag = "<channel|>";
-
-    var remaining = text;
-    while (remaining.len > 0) {
-        if (std.mem.indexOf(u8, remaining, channel_start_tag)) |tag_pos| {
-            // Output everything before the channel start tag
-            try buf.appendSlice(allocator, remaining[0..tag_pos]);
-
-            // Find the matching channel end tag
-            const after_start = remaining[tag_pos + channel_start_tag.len ..];
-            if (std.mem.indexOf(u8, after_start, channel_end_tag)) |end_pos| {
-                // Skip the entire channel block
-                remaining = after_start[end_pos + channel_end_tag.len ..];
-            } else {
-                // No closing tag found — output the rest as-is
-                try buf.appendSlice(allocator, remaining[tag_pos..]);
-                break;
-            }
-        } else {
-            // No more channel tags
-            try buf.appendSlice(allocator, remaining);
-            break;
-        }
-    }
-}
-
-// ============================================================================
-// Mistral v7
-// Format: [INST] {user} [/INST]
-//         [INST] {system}\n\n{user} [/INST]
-//         {assistant}</s>
-//         [INST] {user} [/INST]
-//         ← generation prompt (no special marker, just empty)
-//
-// Note: Mistral v7 uses [INST] tags for user messages.
-//       Assistant responses are plain text followed by </s>.
-//       System prompt is prepended to the first user message.
-// ============================================================================
-fn applyMistralV7(
-    allocator: std.mem.Allocator,
-    messages: []const ChatMessage,
-    system_prompt: ?[]const u8,
-    add_generation_prompt: bool,
-) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // Collect system content
-    var system_content: std.ArrayListUnmanaged(u8) = .empty;
-    defer system_content.deinit(allocator);
-
-    if (system_prompt) |sp| {
-        if (sp.len > 0) {
-            try system_content.appendSlice(allocator, sp);
-        }
-    }
-
-    var system_merged = false;
-
-    for (messages) |msg| {
-        if (std.mem.eql(u8, msg.role, "system")) {
-            if (system_content.items.len > 0) {
-                try system_content.appendSlice(allocator, "\n\n");
-            }
-            try system_content.appendSlice(allocator, msg.content);
-            continue;
-        }
-
-        if (std.mem.eql(u8, msg.role, "user")) {
-            try buf.appendSlice(allocator, "[INST] ");
-
-            // Merge system content into the first user message
-            if (!system_merged and system_content.items.len > 0) {
-                try buf.appendSlice(allocator, system_content.items);
-                try buf.appendSlice(allocator, "\n\n");
-                system_merged = true;
-            }
-
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, " [/INST]");
-        } else if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model")) {
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "</s>");
-        }
-    }
-
-    // Generation prompt: Mistral doesn't have a special generation marker,
-    // but we add a space to indicate the assistant should start speaking
-    if (add_generation_prompt) {
-        try buf.appendSlice(allocator, " ");
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-// ============================================================================
-// Phi-4
-// Format: <|im_start|>system\n{system}<|im_end|>\n
-//         <|im_start|>user\n{user}<|im_sep|>\n
-//         <|im_start|>assistant\n{assistant}<|im_end|>\n
-//         <|im_start|>assistant\n   ← generation prompt
-//
-// Note: Phi-4 is similar to ChatML but uses <|im_sep|> instead of <|im_end|>
-//       for user messages. This allows the model to distinguish between
-//       user input boundaries and assistant output boundaries.
-// ============================================================================
-fn applyPhi4(
-    allocator: std.mem.Allocator,
-    messages: []const ChatMessage,
-    system_prompt: ?[]const u8,
-    add_generation_prompt: bool,
-) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // System message
-    if (system_prompt) |sp| {
-        if (sp.len > 0) {
-            try buf.appendSlice(allocator, "<|im_start|>system\n");
-            try buf.appendSlice(allocator, sp);
-            try buf.appendSlice(allocator, "<|im_end|>\n");
-        }
-    }
-
-    // Messages
-    for (messages) |msg| {
-        if (std.mem.eql(u8, msg.role, "system")) {
-            try buf.appendSlice(allocator, "<|im_start|>system\n");
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "<|im_end|>\n");
-        } else if (std.mem.eql(u8, msg.role, "user")) {
-            try buf.appendSlice(allocator, "<|im_start|>user\n");
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "<|im_sep|>\n");
-        } else if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model")) {
-            try buf.appendSlice(allocator, "<|im_start|>assistant\n");
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "<|im_end|>\n");
-        }
-    }
-
-    // Generation prompt
-    if (add_generation_prompt) {
-        try buf.appendSlice(allocator, "<|im_start|>assistant\n");
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-// ============================================================================
-// DeepSeek V3
-// Format: <｜User｜>{user}<｜Assistant｜>
-//         <｜User｜>{user}<｜Assistant｜>{assistant}<｜end▁of▁sentence｜>
-//         <｜User｜>{user}<｜Assistant｜>   ← generation prompt
-//
-// Note: DeepSeek V3 uses UTF-8 full-width angle brackets and special
-//       Unicode characters for its tags. The tags are:
-//       - <｜User｜>  (U+FF5C full-width vertical bar)
-//       - <｜Assistant｜>
-//       - <｜end▁of▁sentence｜>
-// ============================================================================
-fn applyDeepSeekV3(
-    allocator: std.mem.Allocator,
-    messages: []const ChatMessage,
-    system_prompt: ?[]const u8,
-    add_generation_prompt: bool,
-) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // System message: DeepSeek V3 doesn't have a separate system role.
-    // If system prompt is provided, prepend it to the first user message.
-    var system_content: std.ArrayListUnmanaged(u8) = .empty;
-    defer system_content.deinit(allocator);
-
-    if (system_prompt) |sp| {
-        if (sp.len > 0) {
-            try system_content.appendSlice(allocator, sp);
-            try system_content.appendSlice(allocator, "\n\n");
-        }
-    }
-
-    var system_merged = false;
-
-    for (messages) |msg| {
-        if (std.mem.eql(u8, msg.role, "system")) {
-            if (system_content.items.len > 0) {
-                try system_content.appendSlice(allocator, "\n\n");
-            }
-            try system_content.appendSlice(allocator, msg.content);
-            continue;
-        }
-
-        if (std.mem.eql(u8, msg.role, "user")) {
-            try buf.appendSlice(allocator, "<｜User｜>");
-
-            // Merge system content into the first user message
-            if (!system_merged and system_content.items.len > 0) {
-                try buf.appendSlice(allocator, system_content.items);
-                system_merged = true;
-            }
-
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "<｜Assistant｜>");
-        } else if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model")) {
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "<｜end▁of▁sentence｜>");
-        }
-    }
-
-    // Generation prompt: already ends with <｜Assistant｜> from the last user message
-    // If there are no user messages, add the generation prompt marker
-    if (add_generation_prompt) {
-        // Check if we already ended with <｜Assistant｜>
-        const ends_with_assistant = std.mem.endsWith(u8, buf.items, "<｜Assistant｜>");
-        if (!ends_with_assistant) {
-            try buf.appendSlice(allocator, "<｜Assistant｜>");
-        }
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-// ============================================================================
-// TinyLlama
-// Format: <|system|>
-// {system}</s>
-// <|user|>
-// {user}</s>
-// <|assistant|>
-// {assistant}</s>
-// <|assistant|>
-// ============================================================================
-fn applyTinyLlama(
-    allocator: std.mem.Allocator,
-    messages: []const ChatMessage,
-    system_prompt: ?[]const u8,
-    add_generation_prompt: bool,
-) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // System message
-    if (system_prompt) |sp| {
-        if (sp.len > 0) {
-            try buf.appendSlice(allocator, "<|system|>\n");
-            try buf.appendSlice(allocator, sp);
-            try buf.appendSlice(allocator, "</s>\n");
-        }
-    }
-
-    // Messages
-    for (messages) |msg| {
-        if (std.mem.eql(u8, msg.role, "system")) {
-            try buf.appendSlice(allocator, "<|system|>\n");
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "</s>\n");
-        } else if (std.mem.eql(u8, msg.role, "user")) {
-            try buf.appendSlice(allocator, "<|user|>\n");
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "</s>\n");
-        } else if (std.mem.eql(u8, msg.role, "assistant") or std.mem.eql(u8, msg.role, "model")) {
-            try buf.appendSlice(allocator, "<|assistant|>\n");
-            try buf.appendSlice(allocator, msg.content);
-            try buf.appendSlice(allocator, "</s>\n");
-        }
-    }
-
-    // Generation prompt
-    if (add_generation_prompt) {
-        try buf.appendSlice(allocator, "<|assistant|>\n");
-    }
-
-    return buf.toOwnedSlice(allocator);
 }
 
 // ============================================================================
@@ -1493,13 +944,13 @@ test "detectKind: Gemma4 template with <|turn>" {
 test "detectKind: Gemma4 template NOT confused with Gemma3" {
     // Gemma4 uses <|turn>, Gemma3 uses <start_of_turn>
     // Ensure a Gemma4 template is NOT detected as Gemma3
-    const gemma4_template = "{{- '<|turn>' + role + '\\n' }}{{- '<turn|>\\n' }}";
+    const gemma4_template = "{{- '<|turn>' + role + '\\\\n' }}{{- '<turn|>\\\\n' }}";
     const kind = detectKind(gemma4_template);
     try testing.expectEqual(TemplateKind.gemma4, kind);
 }
 
 test "detectKind: Gemma3 template with <start_of_turn>" {
-    const gemma3_template = "{{ '<start_of_turn>' + role + '\\n' }}";
+    const gemma3_template = "{{ '<start_of_turn>' + role + '\\\\n' }}";
     const kind = detectKind(gemma3_template);
     try testing.expectEqual(TemplateKind.gemma, kind);
 }
@@ -1722,4 +1173,3 @@ test "multimodal: Jinja messagesToList does not double-add placeholder" {
     const second = std.mem.indexOf(u8, result[first.? + 1..], "<|image|>");
     try testing.expectEqual(@as(?usize, null), second);
 }
-

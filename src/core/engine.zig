@@ -160,7 +160,7 @@ pub const InferenceEngine = struct {
             chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
             logger.info("Chat template: from GGUF metadata", .{});
         }
-        if (cli_args.verbose or cli_args.debug) {
+        if (cli_args.debug) {
             const source = chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(arch, null) };
             if (chat_template.debugPrintTemplate(allocator, source, arch, null)) |debug_info| {
                 defer allocator.free(debug_info);
@@ -259,7 +259,9 @@ pub const InferenceEngine = struct {
         var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
         defer tmpl.deinit(self.allocator);
         const system = if (self.system_prompt.len > 0) self.system_prompt else null;
-        return tmpl.apply(self.allocator, chat_history, system, true);
+        const result = tmpl.apply(self.allocator, chat_history, system, true);
+        logger.info("Prompt base on template: {s}", .{ try result });
+        return result;
     }
 
     // ========================================================================

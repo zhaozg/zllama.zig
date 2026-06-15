@@ -267,6 +267,54 @@ pub fn build(b: *std.Build) void {
     chat_template_mod.addImport("types", chat_template_types_mod);
     chat_template_mod.addImport("multimodal", chat_template_multimodal_mod);
 
+
+    // 注册 chat_template 各模板实现子模块
+    {
+        const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/chatml.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tmpl.addImport("types", chat_template_types_mod);
+        chat_template_mod.addImport("chatml", tmpl);
+    }
+    {
+        const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/llama3.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tmpl.addImport("types", chat_template_types_mod);
+        chat_template_mod.addImport("llama3", tmpl);
+    }
+    {
+        const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/llama4.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tmpl.addImport("types", chat_template_types_mod);
+        chat_template_mod.addImport("llama4", tmpl);
+    }
+    {
+        const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/gemma.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tmpl.addImport("types", chat_template_types_mod);
+        chat_template_mod.addImport("gemma", tmpl);
+    }
+    {
+        const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/gemma4.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tmpl.addImport("types", chat_template_types_mod);
+        chat_template_mod.addImport("gemma4", tmpl);
+    }
+    {
+        const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/mistral_v7.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tmpl.addImport("types", chat_template_types_mod);
+        chat_template_mod.addImport("mistral_v7", tmpl);
+    }
+    {
+        const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/phi4.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tmpl.addImport("types", chat_template_types_mod);
+        chat_template_mod.addImport("phi4", tmpl);
+    }
+    {
+        const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/deepseek3.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tmpl.addImport("types", chat_template_types_mod);
+        chat_template_mod.addImport("deepseek3", tmpl);
+    }
+    {
+        const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/tinyllama.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tmpl.addImport("types", chat_template_types_mod);
+        chat_template_mod.addImport("tinyllama", tmpl);
+    }
+
     // ======================================================================
     // 多模态模块
     // ======================================================================
