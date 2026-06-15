@@ -418,8 +418,11 @@ pub const InferenceEngine = struct {
         for (tokens) |token_id| {
             var buf: [128]u8 = undefined;
             const n = try self.tok.decodeSingle(token_id, &buf);
-            if (n > 0) try stdout_file.writeStreamingAll(io, buf[0..n]);
+            if (n > 0) {
+                try stdout_file.writeStreamingAll(io, buf[0..n]);
+            }
         }
+        try stdout_file.writeStreamingAll(io, "\n");
     }
 
     // ========================================================================
@@ -452,10 +455,11 @@ pub const InferenceEngine = struct {
             .onComplete = null,
         }, @ptrCast(self));
 
+        const stdout_file = std.Io.File.stdout();
+        try stdout_file.writeStreamingAll(io, "\n");
         self.printStats(n_prompt_tokens, dr.gen_count, prefill.pp_time_s, dr.tg_time_s);
 
         if (!self.benchmark) {
-            const stdout_file = std.Io.File.stdout();
             try stdout_file.writeStreamingAll(io, "\n");
         }
     }
@@ -653,14 +657,26 @@ pub const InferenceEngine = struct {
             return error.NoImagePlaceholderToken;
         };
 
-        const content_with_placeholder = try chat_template.ensurePlaceholderInContent(prompt, .image, self.allocator);
-        defer if (content_with_placeholder.ptr != prompt.ptr) self.allocator.free(content_with_placeholder);
-        const formatted_prompt = if (self.no_chat_template) try self.allocator.dupe(u8, content_with_placeholder)
-        else try self.applyChatTemplateWithMedia(content_with_placeholder, chat_template.Media{ .type = .image, .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } } });
+        // The Gemma4 template now handles media marker placement on its own line.
+        // We pass the raw prompt (without placeholder) to applyChatTemplateWithMedia,
+        // and the template's appendMediaContent function adds the marker.
+        const formatted_prompt = if (self.no_chat_template) blk: {
+            // Without chat template, we need to add the placeholder ourselves
+            const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .image, self.allocator);
+            break :blk with_ph;
+        } else try self.applyChatTemplateWithMedia(prompt, chat_template.Media{ .type = .image, .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } } });
         defer self.allocator.free(formatted_prompt);
+
+        logger.info("formatted_prompt: {s}", .{formatted_prompt});
 
         var expanded = try chat_template.tokenizeWithPlaceholders(self.allocator, formatted_prompt, @ptrCast(&self.tok), tokenizeTextSegment, image_token_id, 0, @intCast(n_vision_tokens), 0);
         defer expanded.deinit();
+        logger.info("Vision input: {d} prefix tokens + {d} image tokens + {d} suffix tokens = {d} total", .{
+            if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else @as(u32, 0),
+            n_vision_tokens,
+            if (expanded.offsets.len > 0) @as(u32, @intCast(expanded.tokens.items.len)) - expanded.offsets[0].token_offset - expanded.offsets[0].token_count else @as(u32, @intCast(expanded.tokens.items.len)),
+            expanded.tokens.items.len,
+        });
         try self.multimodalPrefill(io, gemma4_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens);
     }
 
@@ -705,14 +721,26 @@ pub const InferenceEngine = struct {
             return error.NoAudioPlaceholderToken;
         };
 
-        const content_with_placeholder = try chat_template.ensurePlaceholderInContent(prompt, .audio, self.allocator);
-        defer if (content_with_placeholder.ptr != prompt.ptr) self.allocator.free(content_with_placeholder);
-        const formatted_prompt = if (self.no_chat_template) try self.allocator.dupe(u8, content_with_placeholder)
-        else try self.applyChatTemplateWithMedia(content_with_placeholder, chat_template.Media{ .type = .audio, .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } } });
+        // The Gemma4 template now handles media marker placement on its own line.
+        // We pass the raw prompt (without placeholder) to applyChatTemplateWithMedia,
+        // and the template's appendMediaContent function adds the marker.
+        const formatted_prompt = if (self.no_chat_template) blk: {
+            // Without chat template, we need to add the placeholder ourselves
+            const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .audio, self.allocator);
+            break :blk with_ph;
+        } else try self.applyChatTemplateWithMedia(prompt, chat_template.Media{ .type = .audio, .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } } });
         defer self.allocator.free(formatted_prompt);
+
+        logger.info("formatted_prompt: {s}", .{formatted_prompt});
 
         var expanded = try chat_template.tokenizeWithPlaceholders(self.allocator, formatted_prompt, @ptrCast(&self.tok), tokenizeTextSegment, 0, audio_token_id, 0, @intCast(n_audio_tokens));
         defer expanded.deinit();
+        logger.info("Audio input: {d} prefix tokens + {d} audio tokens + {d} suffix tokens = {d} total", .{
+            if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else @as(u32, 0),
+            n_audio_tokens,
+            if (expanded.offsets.len > 0) @as(u32, @intCast(expanded.tokens.items.len)) - expanded.offsets[0].token_offset - expanded.offsets[0].token_count else @as(u32, @intCast(expanded.tokens.items.len)),
+            expanded.tokens.items.len,
+        });
         try self.multimodalPrefill(io, gemma4_model, &expanded, audio_token_id, @intCast(n_audio_tokens), audio_embeddings, max_tokens);
     }
 
@@ -757,30 +785,59 @@ pub const InferenceEngine = struct {
         var gen_count: u32 = 0;
 
         while (gen_count < max_tokens) {
-            if (self.tok.isEog(@intCast(current_token))) break;
+            if (self.tok.isEog(@intCast(current_token))) {
+                logger.debug("multimodalPrefill: EOG token {d} at pos {d}", .{ current_token, pos });
+                break;
+            }
+
+            // Skip tokens: compute forward but don't output anything.
+            // Use a loop to handle consecutive skip tokens (e.g. <|channel|>...<channel|> blocks).
             if (self.tok.isSkipToken(@intCast(current_token))) {
-                const step = try self.inc_ctx.beginStep(); step.setToken(current_token);
+                const step = try self.inc_ctx.beginStep();
+                step.setToken(current_token);
                 var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
                 const il = try self.model.buildGraph(&ib, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
                 if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
                 try step.graph.compute(self.n_threads);
-                current_token = sampler.Sampler.sampleGreedy(il); pos += 1; gen_count += 1; continue;
+                current_token = sampler.Sampler.sampleGreedy(il);
+                pos += 1;
+                gen_count += 1;
+                continue;
             }
+
+            // Decode and output the current token
             var buf: [128]u8 = undefined;
             const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
             const decoded = buf[0..n];
+
+            // Check for EOG text in accumulated output
             if (n > 0) {
                 try eog_buf.appendSlice(self.allocator, decoded);
-                if (self.tok.isEogText(eog_buf.items)) { if (!self.benchmark) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, decoded); } break; }
+                if (self.tok.isEogText(eog_buf.items)) {
+                    if (!self.benchmark) {
+                        const sf = std.Io.File.stdout();
+                        try sf.writeStreamingAll(io, decoded);
+                    }
+                    break;
+                }
             }
-            if (!self.benchmark and n > 0) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, decoded); }
 
-            const step = try self.inc_ctx.beginStep(); step.setToken(current_token);
+            // Print decoded text
+            if (!self.benchmark and n > 0) {
+                const sf = std.Io.File.stdout();
+                try sf.writeStreamingAll(io, decoded);
+            }
+
+            // Compute next step
+            const step = try self.inc_ctx.beginStep();
+            step.setToken(current_token);
             var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
             const il = try self.model.buildGraph(&ib, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
             if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
             try step.graph.compute(self.n_threads);
-            current_token = sampler.Sampler.sampleGreedy(il); pos += 1; gen_count += 1;
+            current_token = sampler.Sampler.sampleGreedy(il);
+            pos += 1;
+            gen_count += 1;
         }
 
         const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;

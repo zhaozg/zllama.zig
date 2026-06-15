@@ -1,18 +1,19 @@
 //! Gemma 4 template
 //!
-//! Format: <|turn>system\n{system}<turn|>\n   ← system turn (when system present)
-//!         <|turn>user\n{user}<turn|>\n
+//! Format: <bos><|turn>system\n{system}<turn|>\n   ← system turn (when system present)
+//!         <|turn>user\n<|media|>{user}<turn|>\n   ← media marker INLINE, per official Jinja
 //!         <|turn>model\n{assistant}<turn|>\n
-//!         <|turn>model\n   ← generation prompt
+//!         <|turn>model\n<|channel>thought\n<channel|>   ← gen prompt (thinking disabled)
 //!
-//! Reference: google-gemma-4-31B-it-interleaved.jinja (GGUF built-in template)
+//! Reference: google-gemma-4-31B-it-interleaved.jinja (deps/llama.cpp/models/templates/)
 //!
-//! Key differences from Gemma 3:
-//!   - Uses <|turn> / <turn|> delimiters (instead of <start_of_turn> / <end_of_turn>)
-//!   - System messages get their own <|turn>system\n turn (not merged into user)
-//!   - Model output may contain <|channel>thought\n...<channel|> thinking blocks
-//!   - Generation prompt: just <|turn>model\n (no empty thinking block)
-//!   - When enable_thinking=true: system turn gets <|think|>\n prefix
+//! Key behaviors from official template (verified 2025-06):
+//!   - {{ bos_token }} at start
+//!   - Media markers (<|image|>, <|audio|>) rendered INLINE via {{- '<|audio|>' -}}
+//!     (the "-" modifier strips whitespace, so no newline between marker and text)
+//!   - Empty thinking block <|channel>thought\n<channel|> when enable_thinking=false
+//!   - System turn supports <|think|>\n prefix when enable_thinking=true
+//!   - strip_thinking macro removes <|channel>thought\n...<channel|> from model output
 
 const std = @import("std");
 const types = @import("types");
@@ -36,6 +37,10 @@ pub fn apply(
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
+
+    // --- BOS token ---
+    // Official template: {{ bos_token }} at the very beginning.
+    try buf.appendSlice(allocator, "<bos>");
 
     // Collect system content from the FIRST system message only
     // (only leading consecutive system messages, matching official template behavior)
@@ -92,8 +97,13 @@ pub fn apply(
         try buf.appendSlice(allocator, role_tag);
         try buf.appendSlice(allocator, "\n");
 
-        // For model messages, strip thinking blocks before rendering
-        if (std.mem.eql(u8, role_tag, "model")) {
+        // User messages with media: render media marker INLINE before text content.
+        // This matches the official template's {{- '<|audio|>' -}} behavior
+        // where the "-" modifier strips surrounding whitespace.
+        if (std.mem.eql(u8, role_tag, "user") and msg.media != null) {
+            try appendMediaContent(&buf, allocator, msg.content, msg.media.?);
+        } else if (std.mem.eql(u8, role_tag, "model")) {
+            // For model messages, strip thinking blocks before rendering
             try appendStrippedThinking(&buf, allocator, msg.content);
         } else {
             try buf.appendSlice(allocator, msg.content);
@@ -104,14 +114,50 @@ pub fn apply(
     }
 
     // --- Generation prompt ---
-    // Official template: just <|turn>model\n (no empty thinking block)
-    // The empty thinking block was a previous attempt to suppress reasoning
-    // but it causes the model to output "thought" as the first token.
+    // Official template:
+    //   {%- if add_generation_prompt -%}
+    //     {{- '<|turn>model\n' -}}
+    //     {%- if not enable_thinking | default(false) -%}
+    //       {{- '<|channel>thought\n<channel|>' -}}
+    //     {%- endif -%}
+    //   {%- endif -%}
     if (add_generation_prompt) {
         try buf.appendSlice(allocator, "<|turn>model\n");
+        // When thinking is disabled, add an empty thinking block to suppress
+        // the model's internal reasoning. This matches the official template.
+        if (!enable_thinking) {
+            try buf.appendSlice(allocator, "<|channel>thought\n<channel|>");
+        }
     }
 
     return buf.toOwnedSlice(allocator);
+}
+
+/// Append user content with media marker placed INLINE before text.
+/// Format: <media_marker><text_content>
+///
+/// This matches the official Jinja template behavior:
+///   {{- '<|audio|>' -}}{{ item['text'] | trim }}
+/// The "-" modifier in Jinja strips surrounding whitespace, so the marker
+/// and text are directly adjacent (no newline between them).
+fn appendMediaContent(
+    buf: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    text_content: []const u8,
+    media: types.Media,
+) !void {
+    const marker = switch (media.type) {
+        .image => types.IMAGE_PLACEHOLDER,
+        .audio => types.AUDIO_PLACEHOLDER,
+        .none => "",
+    };
+
+    if (marker.len > 0) {
+        // Inline marker: <|audio|>Transcribe the audio
+        try buf.appendSlice(allocator, marker);
+    }
+
+    try buf.appendSlice(allocator, text_content);
 }
 
 /// Strip thinking blocks (<|channel>thought\n...<channel|>) from model content.
@@ -151,13 +197,16 @@ fn appendStrippedThinking(
 
 const testing = std.testing;
 
+/// Helper: expected prefix for all Gemma 4 templates (bos_token)
+const BOS = "<bos>";
+
 test "gemma4: single turn" {
     const messages = [_]ChatMessage{.{ .role = "user", .content = "1+1=?" }};
     const result = try apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
-    // Generation prompt is just <|turn>model\n (no empty thinking block)
+    // Official format: <bos><|turn>user\n{content}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>
     try testing.expectEqualStrings(
-        "<|turn>user\n1+1=?<turn|>\n<|turn>model\n",
+        BOS ++ "<|turn>user\n1+1=?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
         result,
     );
 }
@@ -167,7 +216,7 @@ test "gemma4: with system" {
     const result = try apply(testing.allocator, &messages, "You are a helpful assistant.", true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nHello<turn|>\n<|turn>model\n",
+        BOS ++ "<|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nHello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
         result,
     );
 }
@@ -181,7 +230,7 @@ test "gemma4: multi-turn" {
     const result = try apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n",
+        BOS ++ "<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
         result,
     );
 }
@@ -195,7 +244,7 @@ test "gemma4: multi-turn with system" {
     const result = try apply(testing.allocator, &messages, "You are helpful.", true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>system\nYou are helpful.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n",
+        BOS ++ "<|turn>system\nYou are helpful.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
         result,
     );
 }
@@ -209,7 +258,7 @@ test "gemma4: strip thinking" {
     defer testing.allocator.free(result);
     // Thinking block should be stripped from model output
     try testing.expectEqualStrings(
-        "<|turn>user\n1+1=?<turn|>\n<|turn>model\nThe answer is 2.<turn|>\n<|turn>model\n",
+        BOS ++ "<|turn>user\n1+1=?<turn|>\n<|turn>model\nThe answer is 2.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
         result,
     );
 }
@@ -222,7 +271,7 @@ test "gemma4: system role message" {
     const result = try apply(testing.allocator, &messages, null, true);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>system\nYou are a math tutor.<turn|>\n<|turn>user\n1+1=?<turn|>\n<|turn>model\n",
+        BOS ++ "<|turn>system\nYou are a math tutor.<turn|>\n<|turn>user\n1+1=?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
         result,
     );
 }
@@ -259,7 +308,44 @@ test "gemma4: no generation prompt" {
     const result = try apply(testing.allocator, &messages, null, false);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings(
-        "<|turn>user\nHello<turn|>\n",
+        BOS ++ "<|turn>user\nHello<turn|>\n",
+        result,
+    );
+}
+
+test "gemma4: user message with image media (inline marker)" {
+    // Official template: {{- '<|image|>' -}}{{ item['text'] | trim }}
+    // The "-" modifier strips whitespace → marker is INLINE with text
+    const media = types.Media{
+        .type = .image,
+        .data = .{ .image = .{ .data = &.{}, .width = 100, .height = 100 } },
+    };
+    const messages = [_]ChatMessage{
+        ChatMessage.withMedia("user", "Describe this image", media),
+    };
+    const result = try apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+    // Media marker is INLINE: <|image|>Describe this image (no newline between)
+    try testing.expectEqualStrings(
+        BOS ++ "<|turn>user\n<|image|>Describe this image<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        result,
+    );
+}
+
+test "gemma4: user message with audio media (inline marker)" {
+    // Official template: {{- '<|audio|>' -}}{{ item['text'] | trim }}
+    const media = types.Media{
+        .type = .audio,
+        .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 16000 } },
+    };
+    const messages = [_]ChatMessage{
+        ChatMessage.withMedia("user", "Transcribe the audio", media),
+    };
+    const result = try apply(testing.allocator, &messages, null, true);
+    defer testing.allocator.free(result);
+    // Audio marker is INLINE: <|audio|>Transcribe the audio (no newline between)
+    try testing.expectEqualStrings(
+        BOS ++ "<|turn>user\n<|audio|>Transcribe the audio<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
         result,
     );
 }
