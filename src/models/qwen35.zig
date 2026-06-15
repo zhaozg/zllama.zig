@@ -75,9 +75,11 @@ pub const QwenWeights = struct {
 };
 
 /// 每层的 SSM 状态（conv_state 和 ssm_state）
+/// 在 setKVCacheContext 时预分配，forward 中直接使用，无需 lazy-init。
 const LayerSSMState = struct {
-    conv_state: ?*ggml.Tensor, // [d_conv-1, conv_dim]
-    ssm_state: ?*ggml.Tensor, // [S_v*S_v*H, 1, n_seqs]
+    conv_state: ?*ggml.Tensor, // [d_conv-1, conv_dim] — SSM 层预分配，全注意力层为 null
+    ssm_state: ?*ggml.Tensor, // [S_v, S_v, H, 1] — SSM 层预分配，全注意力层为 null
+    is_ssm_layer: bool = false,
 };
 
 pub const QwenModel = struct {
@@ -85,7 +87,8 @@ pub const QwenModel = struct {
     qwen_weights: QwenWeights,
     ctx_weights: *ggml.Context,
     ctx_kv_cache: ?*ggml.Context = null, // 用于分配持久状态的 context
-    ssm_states: []LayerSSMState, // 每层的 SSM 状态
+    ssm_states: []LayerSSMState, // 每层的 SSM 状态（预分配后持久化）
+    ssm_states_allocated: bool = false,
 
     pub fn init(self: *QwenModel, allocator: std.mem.Allocator, gguf_file: *gguf.GGUFFile, io: std.Io) !void {
         _ = io;
@@ -93,16 +96,51 @@ pub const QwenModel = struct {
         self.ctx_weights = try ggml.Context.initNoAlloc(estimateMemSize(gguf_file));
         self.qwen_weights = try loadWeights(gguf_file, self.ctx_weights, &self.qwen_params, allocator);
 
-        // 初始化 SSM 状态（在推理上下文中分配）
+        // 初始化 SSM 状态数组（张量在 setKVCacheContext 时预分配）
         const n_layer = self.qwen_params.base.n_layer;
         self.ssm_states = try allocator.alloc(LayerSSMState, n_layer);
-        // 初始化为空，在 forward 中按需创建
         for (0..n_layer) |i| {
+            const idx: u32 = @intCast(i);
+            const is_ssm = !isFullAttentionLayer(idx, self.qwen_params.full_attention_interval);
             self.ssm_states[i] = .{
                 .conv_state = null,
                 .ssm_state = null,
+                .is_ssm_layer = is_ssm,
             };
         }
+        self.ssm_states_allocated = false;
+    }
+
+    /// 在 ctx_kv_cache 中预分配所有 SSM 层的持久状态张量。
+    /// 由 setKVCacheContext 自动调用；也可在 /reset 后手动调用重建状态。
+    pub fn allocateSSMStates(self: *QwenModel) !void {
+        const ctx = self.ctx_kv_cache orelse return error.NoKVCacheContext;
+        const p = self.qwen_params;
+
+        const d_conv: i64 = @intCast(p.ssm_conv_kernel);
+        const d_inner: i64 = @intCast(p.ssm_inner_size);
+        const d_state: i64 = @intCast(p.ssm_state_size);
+        const n_group: i64 = @intCast(p.ssm_group_count);
+        const dt_rank: i64 = @intCast(p.ssm_time_step_rank);
+
+        const head_v_dim = @divExact(d_inner, dt_rank);
+        const num_v_heads = dt_rank;
+        const key_dim = d_state * n_group;
+        const value_dim = head_v_dim * num_v_heads;
+        const conv_dim = key_dim * 2 + value_dim;
+
+        for (self.ssm_states) |*state| {
+            if (!state.is_ssm_layer) continue;
+
+            // Pre-allocate conv_state: [d_conv-1, conv_dim]
+            state.conv_state = try ctx.newTensor2d(.f32, d_conv - 1, conv_dim);
+            state.conv_state.?.setZero();
+
+            // Pre-allocate ssm_state: [head_v_dim, head_v_dim, num_v_heads, 1]
+            state.ssm_state = try ctx.newTensor4d(.f32, head_v_dim, head_v_dim, num_v_heads, 1);
+            state.ssm_state.?.setZero();
+        }
+        self.ssm_states_allocated = true;
     }
 
     pub fn deinit(self: *QwenModel, allocator: std.mem.Allocator) void {
@@ -117,10 +155,11 @@ pub const QwenModel = struct {
     pub fn getWeights(self: *const QwenModel) *const model.ModelWeights {
         return &self.qwen_weights.base;
     }
+    /// 重置所有 SSM 状态为零（不清除预分配的张量，避免重新分配开销）
     pub fn resetSSMStates(self: *QwenModel) void {
         for (self.ssm_states) |*state| {
-            state.conv_state = null;
-            state.ssm_state = null;
+            if (state.conv_state) |t| t.setZero();
+            if (state.ssm_state) |t| t.setZero();
         }
     }
 
@@ -354,16 +393,9 @@ pub const QwenModel = struct {
             const qkv_2d = ggml.reshape2d(ctx, qkv_mixed, conv_dim, n_tokens_i64);
             const qkv_transposed = ggml.cont(ctx, ggml.permute(ctx, qkv_2d, 1, 0, 2, 3));
 
-            // Lazy-init conv state
+            // SSM conv_state 已在 setKVCacheContext 时预分配，直接使用
             if (self.ssm_states[layer_idx].conv_state == null) {
-                ctx.setNoAlloc(false);
-                self.ssm_states[layer_idx].conv_state = try ctx.newTensor2d(.f32, d_conv - 1, conv_dim);
-                ctx.setNoAlloc(true);
-                self.ssm_states[layer_idx].conv_state.?.setZero();
-                var buf: [64]u8 = undefined;
-                const sl = try std.fmt.bufPrint(&buf, "ssm_conv_state.{d}", .{layer_idx});
-                buf[sl.len] = 0;
-                self.ssm_states[layer_idx].conv_state.?.setName(buf[0..sl.len :0]);
+                return error.SSMStateNotPreallocated;
             }
 
             const conv_state = self.ssm_states[layer_idx].conv_state.?;
@@ -403,16 +435,9 @@ pub const QwenModel = struct {
                 k_conv = ggml.repeat4d(ctx, k_conv, head_k_dim, num_v_heads, n_tokens_i64, n_seqs);
             }
 
-            // Step 6: Gated Delta Net
+            // SSM ssm_state 已在 setKVCacheContext 时预分配，直接使用
             if (self.ssm_states[layer_idx].ssm_state == null) {
-                ctx.setNoAlloc(false);
-                self.ssm_states[layer_idx].ssm_state = try ctx.newTensor4d(.f32, head_v_dim, head_v_dim, num_v_heads, n_seqs);
-                ctx.setNoAlloc(true);
-                self.ssm_states[layer_idx].ssm_state.?.setZero();
-                var buf: [64]u8 = undefined;
-                const sl = try std.fmt.bufPrint(&buf, "ssm_state.{d}", .{layer_idx});
-                buf[sl.len] = 0;
-                self.ssm_states[layer_idx].ssm_state.?.setName(buf[0..sl.len :0]);
+                return error.SSMStateNotPreallocated;
             }
             const ssm_state = self.ssm_states[layer_idx].ssm_state.?;
 
@@ -524,6 +549,10 @@ pub const QwenModel = struct {
     fn setKVCacheContextAdapter(data: *anyopaque, ctx: *ggml.Context) void {
         const self = @as(*QwenModel, @ptrCast(@alignCast(data)));
         self.ctx_kv_cache = ctx;
+        // 自动预分配 SSM 状态张量（避免 forward 中的 lazy-init 开销）
+        self.allocateSSMStates() catch |err| {
+            log.err("Failed to pre-allocate SSM states: {}", .{err});
+        };
     }
 };
 

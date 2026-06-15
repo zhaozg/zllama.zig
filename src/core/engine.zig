@@ -160,7 +160,7 @@ pub const InferenceEngine = struct {
             chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
             logger.info("Chat template: from GGUF metadata", .{});
         }
-        if (cli_args.debug) {
+        if (cli_args.debug or cli_args.verbose) {
             const source = chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(arch, null) };
             if (chat_template.debugPrintTemplate(allocator, source, arch, null)) |debug_info| {
                 defer allocator.free(debug_info);

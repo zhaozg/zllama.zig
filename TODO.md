@@ -13,25 +13,21 @@
 ## P1 — 关键功能与性能
 
 - [x] **多模态输出质量与 `llama-mtmd-cli` 交叉验证**：已创建 `tools/mtmd_ref_logits.cpp` 工具（C++，链接 libllama + libmtmd），可加载模型+mmproj+媒体文件，运行 mtmd 推理并输出 logits 到二进制文件。视觉和音频参考 logits 均已成功生成并验证（`zig build compare-mtmd-vision` / `zig build compare-mtmd-audio` 配合 `--ref-logits` 使用）
-- [ ] **混合内存输入**：实现 `build_inp_mem_hybrid` 模式，统一管理 KV Cache + SSM State（提升 Qwen3.5 混合架构效率）
+- [x] **混合内存输入**：已实现 `build_inp_mem_hybrid` 模式 — 在 `memory.zig` 中添加 `HybridMemory` 实现，统一管理 KV Cache + SSM State；`qwen35.zig` 中 `allocateSSMStates()` 方法在 `setKVCacheContext` 时预分配所有持久张量，`resetSSMStates` 改为清零而非置 null
 - [x] **graph 类分离**：参考 llama.cpp 设计，将 `forward()` 拆分为独立 graph 类（便于复用和优化）
   - [x] Gemma4: `Gemma4Graph` 结构体（`build()` / `buildWithEmbd()` / `buildMediaOnly()` → `transformerForward()` → `buildLayer()` / `buildAttention()` / `buildOutput()`）
   - [x] Qwen35: `Qwen35Graph` 结构体（`build()` → `buildFullAttnLayer()` / `buildSSMLayer()` / `buildOutput()`）
   - [x] 模型 `forward()` 方法变为 thin wrapper 委托给 graph 类
-- [ ] **多模态对话模板完整闭环**：使用针对不同模型的内置模板，支持 `<|image|>`/`<|audio|>` 占位符展开 → 嵌入注入
-  - [ ] 方法: 从 llama.cpp 中提取模板，构建提取处理模板的测试用例, 通过后再集成
-    - [ ] `main.zig` 集成：verbose 模式下自动打印模板诊断信息，`applyChatTemplateWithMedia` 统一使用 `resolve()` 确保 detectKind 正确分流
+- [x] **多模态对话模板完整闭环**：使用针对不同模型的内置模板，支持 `<|image|>`/`<|audio|>` 占位符展开 → 嵌入注入
+  - [x] 方法: 从 llama.cpp 中提取模板，构建提取处理模板的测试用例, 通过后再集成
+    - [x] `main.zig` 集成：verbose 模式下自动打印模板诊断信息（`engine.zig:init` 中 `cli_args.debug or cli_args.verbose` 触发 `debugPrintTemplate`），`applyChatTemplateWithMedia` 统一使用 `resolve()` 确保 detectKind 正确分流
   - [x] tokenizeWithPlaceholders 记录占位符 token 偏移（token_offset）
   - [x] forwardWithEmbdOverride 使用正确的 embd_offset（从 token_offset 计算）
   - [x] forwardMediaOnly 方法（Gemma4 媒体-only 非因果前向，跳过 per-layer embedding）
-  - [x] 三阶段 prefill（text prefix causal → media non-causal → text suffix causal）— ✅ 已实现并验证通过（Gemma4 + audio），修复要点：
-    - `ctx_kv_cache` 从 `initNoAlloc` 改为 `init`（KV cache tensors 需要真实内存承载 `ggml_cpy` 写入）
-    - 每阶段间 `graph_ctx.reset()` 清除旧 tensor descriptor，避免 Gallocr／backend 跨阶段张量混淆
-    - media embeddings 通过 heap copy 传递，不受 context reset 影响
-    - Pass 3 logits 在 Gallocr free 前 copy 到 heap，调用方负责释放
+  - [x] 三阶段 prefill（text prefix causal → media non-causal → text suffix causal）— ✅ 已实现并验证通过
   - [x] per_layer_embd 在媒体位置也需要 override — `forwardMediaOnly` 新增 `input_tokens` 参数，透传至 `transformerForward` 进行 per-layer embedding 查找
-- [ ] **减少 `ggml_cont` 调用**：消除不必要的内存重排
-- [ ] **预分配 SSM 状态张量**：避免运行时分配
+- [x] **减少 `ggml_cont` 调用**：已审查代码，现有 `ggml_cont` 调用均用于 view/permute/concat 后的必要内存重排，无冗余调用可移除
+- [x] **预分配 SSM 状态张量**：已在 `qwen35.zig` 中实现 — `allocateSSMStates()` 方法使用 `ctx_kv_cache` 预分配 conv_state 和 ssm_state 张量，并在 `buildSSMLayer` 中移除 lazy-init 模式，改为前置检查 `SSMStateNotPreallocated` 错误
 
 ## P2 — 扩展功能与模型支持
 
