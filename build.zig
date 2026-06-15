@@ -52,14 +52,8 @@ pub fn build(b: *std.Build) void {
     }
 
     // ======================================================================
-    // vibe_jinja 模块（Jinja2 模板引擎）
+    // 内部模块
     // ======================================================================
-    const vibe_jinja_mod = b.createModule(.{
-        .root_source_file = b.path("deps/zig-jinja/src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
 
     // ======================================================================
     // 内部模块
@@ -273,22 +267,9 @@ pub fn build(b: *std.Build) void {
     chat_template_mod.addImport("types", chat_template_types_mod);
     chat_template_mod.addImport("multimodal", chat_template_multimodal_mod);
 
-    // --- Jinja 引擎集成模块 ---
-    const chat_template_jinja_mod = b.createModule(.{
-        .root_source_file = b.path("src/chat_template/jinja.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    chat_template_jinja_mod.addImport("vibe_jinja", vibe_jinja_mod);
-    chat_template_jinja_mod.addImport("types", chat_template_types_mod);
-
-    // 让 chat_template 模块可以导入 jinja 子模块
-    chat_template_mod.addImport("jinja", chat_template_jinja_mod);
-
     // ======================================================================
-
-    // --- 多模态模块 ---
+    // 多模态模块
+    // ======================================================================
     const mm_audio_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/audio.zig"),
         .target = target,
@@ -476,25 +457,7 @@ pub fn build(b: *std.Build) void {
     _ = b.step("test-kv-cache", "Run KV Cache tests only");
     _ = b.step("test-vocab", "Run vocab-based tokenizer tests only");
 
-    // ======================================================================
-    // Jinja 模板引擎测试
-    // ======================================================================
-    const jinja_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/tests/test_jinja.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    jinja_test_mod.addImport("vibe_jinja", vibe_jinja_mod);
 
-    const jinja_tests = b.addTest(.{
-        .name = "jinja-tests",
-        .root_module = jinja_test_mod,
-    });
-    const run_jinja_tests = b.addRunArtifact(jinja_tests);
-    const jinja_test_step = b.step("test-jinja", "Run Jinja template engine tests");
-    jinja_test_step.dependOn(&run_jinja_tests.step);
-    test_step.dependOn(&run_jinja_tests.step);
 
     // ======================================================================
     // 工具可执行文件

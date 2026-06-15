@@ -16,7 +16,7 @@ const model = @import("model");
 // 导入子模块
 const types = @import("types");
 const multimodal = @import("multimodal");
-const jinja_mod = @import("jinja");
+// jinja_mod removed — deps/zig-jinja was removed due to instability
 pub const ChatMessage = types.ChatMessage;
 pub const Media = types.Media;
 pub const MediaType = types.MediaType;
@@ -102,32 +102,7 @@ pub const Template = struct {
             .deepseek3 => return applyDeepSeekV3(allocator, messages, system_prompt, add_generation_prompt),
             .tinyllama => return applyTinyLlama(allocator, messages, system_prompt, add_generation_prompt),
             .unknown => {
-                // Try Jinja rendering for GGUF built-in and custom templates
-                if (self.jinja_enabled) {
-                    const tmpl_str = switch (self.source) {
-                        .gguf_builtin => |s| s,
-                        .custom => |s| s,
-                        .preset => null,
-                    };
-                    if (tmpl_str) |src| {
-                        // Try Jinja rendering with empty BOS/EOS (template-specific)
-                        // The jinja_mod.render() now handles multimodal messages by
-                        // prepending <|image|>/<|audio|> placeholders to content when
-                        // the message has media attached.
-                        const result = jinja_mod.render(
-                            allocator,
-                            src,
-                            messages,
-                            "", // bos_token: template-specific, defaults to empty
-                            "", // eos_token: template-specific, defaults to empty
-                            add_generation_prompt,
-                        ) catch null;
-                        if (result) |rendered| {
-                            return rendered;
-                        }
-                        log.warn("Jinja rendering failed for unknown template, falling back to ChatML", .{});
-                    }
-                }
+                // Jinja rendering removed — deps/zig-jinja was removed due to instability.
                 // Fallback: treat as raw prompt (no template)
                 if (messages.len == 1 and std.mem.eql(u8, messages[0].role, "user")) {
                     return allocator.dupe(u8, messages[0].content);
@@ -229,7 +204,7 @@ pub fn resolve(
             // If Jinja is enabled, keep as .unknown so apply() can try Jinja rendering
             if (jinja_enabled) {
                 log.info("GGUF chat template ({d} bytes) not recognized, will try Jinja rendering", .{tmpl_str.len});
-                log.debug("Template preview: {s}", .{tmpl_str[0..@min(tmpl_str.len, 256)]});
+                log.debug("Template preview: {s}", .{tmpl_str});
                 return Template{ .kind = .unknown, .source = source, .jinja_enabled = true };
             }
             // If GGUF template can't be detected and Jinja is disabled, fall back to arch default
@@ -294,15 +269,12 @@ pub fn debugPrintTemplate(
                 defer allocator.free(line);
                 try buf.appendSlice(allocator, line);
             }
-            const preview_len = @min(tmpl_str.len, 512);
             try buf.appendSlice(allocator, "Template preview:\n");
-            try buf.appendSlice(allocator, tmpl_str[0..preview_len]);
+            try buf.appendSlice(allocator, tmpl_str);
             try buf.appendSlice(allocator, "\n");
-            if (tmpl_str.len > preview_len) {
-                const line = try std.fmt.allocPrint(allocator, "... ({d} more bytes)\n", .{tmpl_str.len - preview_len});
-                defer allocator.free(line);
-                try buf.appendSlice(allocator, line);
-            }
+            const line = try std.fmt.allocPrint(allocator, "... (total {d} bytes)\n", .{tmpl_str.len});
+            defer allocator.free(line);
+            try buf.appendSlice(allocator, line);
         },
         .custom => |tmpl_str| {
             const kind = detectKind(tmpl_str);
@@ -316,15 +288,12 @@ pub fn debugPrintTemplate(
                 defer allocator.free(line);
                 try buf.appendSlice(allocator, line);
             }
-            const preview_len = @min(tmpl_str.len, 512);
             try buf.appendSlice(allocator, "Template preview:\n");
-            try buf.appendSlice(allocator, tmpl_str[0..preview_len]);
+            try buf.appendSlice(allocator, tmpl_str);
             try buf.appendSlice(allocator, "\n");
-            if (tmpl_str.len > preview_len) {
-                const line = try std.fmt.allocPrint(allocator, "... ({d} more bytes)\n", .{tmpl_str.len - preview_len});
-                defer allocator.free(line);
-                try buf.appendSlice(allocator, line);
-            }
+            const line = try std.fmt.allocPrint(allocator, "... (total {d} more bytes)\n", .{tmpl_str.len});
+            defer allocator.free(line);
+            try buf.appendSlice(allocator, line);
         },
     }
 

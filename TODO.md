@@ -18,13 +18,9 @@
   - [x] Gemma4: `Gemma4Graph` 结构体（`build()` / `buildWithEmbd()` / `buildMediaOnly()` → `transformerForward()` → `buildLayer()` / `buildAttention()` / `buildOutput()`）
   - [x] Qwen35: `Qwen35Graph` 结构体（`build()` → `buildFullAttnLayer()` / `buildSSMLayer()` / `buildOutput()`）
   - [x] 模型 `forward()` 方法变为 thin wrapper 委托给 graph 类
-- [x] **多模态对话模板完整闭环**：使用 src/chat_template/jinja.zig 实现 jinja 模板中的 `<|image|>`/`<|audio|>` 占位符展开 → 嵌入注入
-  - [x] 方法: 可打印提取的模板，构建提取处理模板的测试用例, 通过后再集成, 否则有死循环问题, 看 HEAD 提交
-    - [x] `debugPrintTemplate()` 函数：可打印 GGUF 模板内容、detectKind 结果、架构信息（`src/chat_template/mod.zig`）
-    - [x] 测试用例：`debugPrintTemplate` / `detectKind`（Gemma3 vs Gemma4 区分）/ `resolve`（GGUF 模板检测为 preset vs Jinja fallback）/ 完整多模态管线（template render → placeholder scan → tokenize）/ 占位符幂等性
-    - [x] 根因分析：`detectKind` 已正确识别 `<|turn>` 为 `.gemma4`，Gemma4 GGUF 模板通过内置 preset 处理，不会触发 Jinja 死循环（Jinja 仅在 `.unknown` 模板中使用；vibe_jinja 的 `dictsort`/`.split()` 不支持导致 Gemma4 Jinja 模板渲染死循环）
-    - [x] `main.zig` 集成：verbose 模式下自动打印模板诊断信息，`applyChatTemplateWithMedia` 统一使用 `resolve()` 确保 detectKind 正确分流
-  - [x] Jinja 模板引擎支持媒体消息（messagesToList 自动插入占位符）
+- [ ] **多模态对话模板完整闭环**：使用针对不同模型的内置模板，支持 `<|image|>`/`<|audio|>` 占位符展开 → 嵌入注入
+  - [ ] 方法: 从 llama.cpp 中提取模板，构建提取处理模板的测试用例, 通过后再集成
+    - [ ] `main.zig` 集成：verbose 模式下自动打印模板诊断信息，`applyChatTemplateWithMedia` 统一使用 `resolve()` 确保 detectKind 正确分流
   - [x] tokenizeWithPlaceholders 记录占位符 token 偏移（token_offset）
   - [x] forwardWithEmbdOverride 使用正确的 embd_offset（从 token_offset 计算）
   - [x] forwardMediaOnly 方法（Gemma4 媒体-only 非因果前向，跳过 per-layer embedding）
