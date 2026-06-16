@@ -41,6 +41,7 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
     .{ .scope = .llama, .level = .info },
     .{ .scope = .model, .level = .info },
     .{ .scope = .main, .level = .info },
+    .{ .scope = .engine, .level = .debug },
 } };
 
 const logger = std.log.scoped(.main);

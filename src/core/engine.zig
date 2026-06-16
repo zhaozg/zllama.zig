@@ -814,6 +814,20 @@ pub const InferenceEngine = struct {
         defer self.allocator.free(embd_heap);
 
         self.model.resetSSMStates();
+        // —— 嵌入数值有效性验证 ——
+        {
+            const n_total: usize = embd_heap.len;
+            const n_preview: usize = @min(n_total, 5);
+            var all_zero = true;
+            var has_nan = false;
+            for (embd_heap) |v| {
+                if (v != 0.0) all_zero = false;
+                if (std.math.isNan(v)) has_nan = true;
+            }
+            logger.debug("Embedding validation: total={d} preview={any} all_zero={} has_nan={}", .{ n_total, embd_heap[0..n_preview], all_zero, has_nan });
+            if (all_zero) logger.warn("  ⚠ all embedding values are ZERO!", .{});
+            if (has_nan) logger.warn("  ⚠ embedding contains NaN!", .{});
+        }
         const pr = try prefill_mod.threeStagePrefill(self.ctx_graph, self.model, @ptrCast(@alignCast(gemma4_model)), &mediaForwardFn, &self.kv_cache_mgr, prefix_tokens, media_token_id, @intCast(media_count), embd_heap, embd_dim, suffix_tokens, &self.params, self.n_threads, self.allocator);
 
         var best_idx: i32 = 0;

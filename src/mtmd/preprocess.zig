@@ -36,10 +36,10 @@ pub const AUDIO_N_MEL_BINS: u32 = 128;
 pub const AUDIO_MEL_F_MIN: f32 = 80.0;
 /// Mel 最高频率
 pub const AUDIO_MEL_F_MAX: f32 = 7600.0;
-/// 预加重系数
-pub const AUDIO_PRE_EMPHASIS: f32 = 0.97;
-/// 对数偏移（防止 log(0)）
-pub const AUDIO_LOG_OFFSET: f32 = 1e-6;
+/// 预加重系数 (gemma4a disables pre-emphasis)
+pub const AUDIO_PRE_EMPHASIS: f32 = 0.0;
+/// 对数偏移（防止 log(0)，matches gemma4a mel_floor=0.001）
+pub const AUDIO_LOG_OFFSET: f32 = 0.001;
 
 /// 音频预处理参数（可从 GGUF 元数据加载）
 pub const AudioPreprocessParams = struct {
@@ -676,8 +676,8 @@ pub fn computeMelSpectrogram(
             for (0..@as(usize, n_freqs)) |k| {
                 mel_val += row[k] * spectrum[k];
             }
-            // Step 4: log10 压缩
-            mel_out[m * @as(usize, n_frames) + fi] = math.log10(@max(mel_val, log_offset));
+            // Step 4: natural log compression (use_natural_log=true for gemma4a)
+            mel_out[m * @as(usize, n_frames) + fi] = @log(@max(mel_val, log_offset));
         }
     }
 

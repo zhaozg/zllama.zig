@@ -25,10 +25,8 @@ pub const AccelFFT = struct {
     setup: vdsp.FFTSetup,
     log2n: u32,
     n: u32,
-    /// Hann 窗函数 [n]
+    /// Hann 窗函数 [n]（400 点 + 零填充，匹配 llama.cpp）
     window: []f32,
-    /// 窗函数能量补偿因子
-    window_scale: f32,
     /// 分割复数缓冲区 [n/2]，重用避免逐帧分配
     split_buf: []f32,
     /// 帧填充缓冲区 [n]，重用避免逐帧分配
@@ -47,24 +45,22 @@ pub const AccelFFT = struct {
         const setup = vdsp.vDSP_create_fftsetup(log2n, vdsp.kFFTRadix2);
         if (setup == null) return error.FftSetupFailed;
         errdefer vdsp.vDSP_destroy_fftsetup(setup);
-        // 生成 Hann 窗函数
+        // 生成 Hann 窗函数（匹配 llama.cpp: 400 点窗 + 零填充到 512）
         const window = try allocator.alloc(f32, n);
         errdefer allocator.free(window);
-        vdsp.vDSP_hann_window(window.ptr, n, vdsp.vDSP_HANN_DENORM);
-
-        // 计算窗函数能量补偿因子
-        // window_scale = 2.0 / sum(window)  (amplitude-preserving for Hann)
-        var window_scale: f32 = undefined;
-        {
-            var s: f32 = 0;
-            for (window) |w| s += w;
-            window_scale = 2.0 / s;
+        @memset(window, 0.0);
+        // Use 400-point Hann window (matches llama.cpp hparams.audio_window_len)
+        const frame_len: usize = 400; // Matches llama.cpp hparams.audio_window_len
+        for (0..frame_len) |i| {
+            window[i] = 0.5 - 0.5 * @cos(2.0 * std.math.pi * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(frame_len)));
         }
+        // Remaining 112 entries are already zero (window zero-padded to FFT size)
+
         const split_buf = try allocator.alloc(f32, n); // n floats for interleaved complex storage
         errdefer allocator.free(split_buf);
         const frame_buf = try allocator.alloc(f32, n);
 
-        log.info("AccelFFT: n={d} log2n={d} window_scale={d:.4}", .{ n, log2n, window_scale });
+        log.info("AccelFFT: n={d} log2n={d} window=400+zero-pad", .{ n, log2n });
 
         return AccelFFT{
             .allocator = allocator,
@@ -72,7 +68,6 @@ pub const AccelFFT = struct {
             .log2n = @intCast(log2n),
             .n = n,
             .window = window,
-            .window_scale = window_scale,
             .split_buf = split_buf,
             .frame_buf = frame_buf,
         };
@@ -87,10 +82,10 @@ pub const AccelFFT = struct {
         self.* = undefined;
     }
 
-    /// 计算实数帧的功率谱
+    /// 计算实数帧的幅度谱（magnitude, 匹配 llama.cpp use_magnitude=true）
     ///
     /// 处理流程：
-    /// 1. 零填充 + 加窗 + 缩放
+    /// 1. 零填充 + 加窗
     /// 2. 转换到分割复数格式
     /// 3. 执行前向实数 FFT (vDSP_fft_zrip)
     /// 4. 计算幅度平方 → 功率谱
@@ -107,24 +102,24 @@ pub const AccelFFT = struct {
         @memcpy(buf[0..copy_len], frame[0..copy_len]);
         @memset(buf[copy_len..n], 0);
 
-        // 应用窗函数缩放因子，再乘以窗函数
-        vdsp.vDSP_vsmul(buf.ptr, 1, &self.window_scale, buf.ptr, 1, n);
+        // 应用窗函数（不缩放，匹配 llama.cpp 行为）
         vdsp.vDSP_vmul(buf.ptr, 1, self.window.ptr, 1, buf.ptr, 1, n);
 
-        // 2. 转换到分割复数格式（in-place）
-        //    将 buf 作为交错复数数组转换为 DSPSplitComplex
+        // 2. 转换到分割复数格式（vDSP_fft_zrip 需要 even/odd 分割）
+        //    vDSP_fft_zrip expects: realp[i] = x[2*i], imagp[i] = x[2*i+1]
         var split = vdsp.DSPSplitComplex{
             .realp = self.split_buf.ptr,
             .imagp = self.split_buf.ptr + n / 2,
         };
-        // ctoz: 将交错复数 (buf) 转换到分割复数 (split)
-        // stride=2 因为 buf 中两两一组为实部和虚部（全为实数时虚部=0）
-        vdsp.vDSP_ctoz(@as([*]vdsp.DSPComplex, @ptrCast(@alignCast(buf.ptr))), 2, &split, 1, n / 2);
+        for (0..n / 2) |i| {
+            split.realp[i] = buf[2 * i];       // even samples
+            split.imagp[i] = buf[2 * i + 1];   // odd samples
+        }
 
         // 3. 前向 FFT
         vdsp.vDSP_fft_zrip(self.setup, &split, 1, self.log2n, vdsp.kFFTDirection_Forward);
 
-        // 4. 计算幅度平方（功率谱）
+        // 计算幅度平方（功率谱）
         //    vDSP_zvmags: 直接输出 |real+j*imag|² 到 spectrum
         vdsp.vDSP_zvmags(&split, 1, spectrum.ptr, 1, n / 2);
 
@@ -134,10 +129,12 @@ pub const AccelFFT = struct {
         spectrum[0] = split.realp[0] * split.realp[0];
         spectrum[n / 2] = split.imagp[0] * split.imagp[0];
 
-        // 归一化到每 bin 的平均功率
-        const norm = 1.0 / @as(f32, @floatFromInt(n));
+        // Convert power → magnitude (sqrt of power).
+        // vDSP_fft_zrip applies internal 2x scaling → divide by 2.
+        // This matches numpy's np.abs(np.fft.rfft(x)).
+        const half: f32 = 0.5;
         for (spectrum[0 .. n / 2 + 1]) |*s| {
-            s.* *= norm;
+            s.* = half * @sqrt(@max(s.*, 0.0));
         }
     }
 };

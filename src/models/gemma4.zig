@@ -223,7 +223,7 @@ pub const Gemma4Graph = struct {
 
         var all_embd = embed.tokenEmbedding(self.ctx, w.base.token_embd, input_tokens);
         all_embd = ggml.scale(self.ctx, all_embd, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
-        const scaled_override = ggml.scale(self.ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+        const scaled_override = embd_override; // Already in model embedding space — NO scale
 
         var cur: *ggml.Tensor = undefined;
         if (n_text_pre > 0 and n_text_post > 0) {
@@ -251,6 +251,10 @@ pub const Gemma4Graph = struct {
     }
 
     /// 纯媒体 forward：使用预计算嵌入，不做 token 查表。非因果注意力。
+    /// NOTE: input_tokens is only used for per-layer embedding lookup.
+    /// For pure-media forward, per-layer injection is skipped (passing null)
+    /// because the placeholder token's per-layer embedding is untrained noise
+    /// that would corrupt the audio/vision hidden states.
     pub fn buildMediaOnly(
         self: *Self,
         embd_override: *ggml.Tensor,
@@ -273,12 +277,14 @@ pub const Gemma4Graph = struct {
         }
         log.debug("  ✓ embedding dimension check passed", .{});
 
-        const scaled = ggml.scale(self.ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+        const scaled = embd_override; // Already in model embedding space — NO scale
         scaled.setName("inp_media");
 
         const pos_tensor = rope.buildPositionTensor(self.ctx, @intCast(n_tokens), start_pos);
 
         var g = Self.init(self.ctx, self.gf, p, w, scaled, pos_tensor);
+        // Per-layer embedding uses the placeholder token (258881), which was
+        // trained for multimodal content. DO NOT skip it.
         return try g.transformerForward(n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, false);
     }
 
@@ -690,8 +696,33 @@ pub const Gemma4Model = struct {
         embd_offset: i32,
         causal: bool,
     ) !*ggml.Tensor {
+        // —— 音频嵌入诊断 ——
+        {
+            const eo_data = embd_override.dataF32();
+            const n_total: usize = @as(usize, @intCast(embd_override.ne()[0] * embd_override.ne()[1]));
+            const n_preview: usize = @min(n_total, 8);
+            var all_zero = true;
+            var has_nan = false;
+            for (eo_data[0..n_total]) |v| {
+                if (v != 0.0) all_zero = false;
+                if (std.math.isNan(v)) has_nan = true;
+            }
+            log.debug("mediaForward: ne=[{d},{d}] start_pos={d} n_tokens={d} causal={}", .{
+                embd_override.ne()[0], embd_override.ne()[1], start_pos, n_tokens, causal,
+            });
+            log.debug("  embed preview[0..{d}]: {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}", .{
+                @min(n_preview, @as(usize, 8)),
+                eo_data[0], if (n_total > 1) eo_data[1] else @as(f32, 0),
+                if (n_total > 2) eo_data[2] else @as(f32, 0), if (n_total > 3) eo_data[3] else @as(f32, 0),
+                if (n_total > 4) eo_data[4] else @as(f32, 0), if (n_total > 5) eo_data[5] else @as(f32, 0),
+                if (n_total > 6) eo_data[6] else @as(f32, 0), if (n_total > 7) eo_data[7] else @as(f32, 0),
+            });
+            log.debug("  all_zero={} has_nan={}", .{ all_zero, has_nan });
+            if (all_zero) log.warn("  ⚠ embd_override is ALL ZEROS!", .{});
+            if (has_nan) log.warn("  ⚠ embd_override contains NaN!", .{});
+        }
+
         _ = embd_offset;
-        _ = causal;
         var g = Gemma4Graph{
             .ctx = ctx,
             .gf = graph,

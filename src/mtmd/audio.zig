@@ -245,17 +245,30 @@ pub const AudioEncoder = struct {
         const p = self.params;
         const norm_eps = p.norm_eps;
         const res_weight: f32 = 0.5;
-        // 1. 创建 4D 输入张量 [n_mel_bins, n_frames, 1, 1] 匹配 llama.cpp 布局
-        // ggml: ne[0]=n_mel_bins (最快维度, conv2d 的 W), ne[1]=n_frames (conv2d 的 H)
-        // mel_data 布局: mel_data[m * n_frames + fi] (m 为 mel bin, fi 为 frame)
-        // memcpy 后: cur_data[m + fi * n_mel_bins] = mel_data[m * n_frames + fi]
-        // 即 ne[0] 维度存储同一 frame 的所有 bins
-        var cur = try ctx.newTensor4d(ggml.Type.f32, @intCast(n_mel_bins), @intCast(n_frames), 1, 1);
+        // 1. Create input tensor matching llama.cpp layout
+        //    llama.cpp: inp = build_inp_raw(1) with shape [n_mel, n_frames]
+        //    then: cur = transpose(inp) → [n_mel, n_frames] (for conv2d W=mel, H=frames)
+        //    We create a 2D tensor [n_mel_bins, n_frames] with frame-major data
+        //    (each row in contiguous memory = one frame's mel bins).
+        var cur = try ctx.newTensor2d(ggml.Type.f32, @intCast(n_mel_bins), @intCast(n_frames));
         cur.setName("audio_mel_input");
 
-        const raw_bytes = cur.dataBytes();
-        const mel_byte_len = mel_data.len * @sizeOf(f32);
-        @memcpy(raw_bytes[0..mel_byte_len], @as([*]const u8, @ptrCast(mel_data.ptr))[0..mel_byte_len]);
+        {
+            const raw = cur.dataBytes();
+            const dst = @as([*]f32, @ptrCast(@alignCast(raw.ptr)));
+            const n_mel: usize = @intCast(n_mel_bins);
+            const n_fr: usize = @intCast(n_frames);
+            // mel_data is bin-major: src[m * n_fr + fi]
+            // dst expects frame-major: dst[m + fi * n_mel]
+            for (0..n_fr) |fi| {
+                for (0..n_mel) |m| {
+                    dst[m + fi * n_mel] = mel_data[m * n_fr + fi];
+                }
+            }
+        }
+
+        // Reshape to 4D for conv2d: [n_mel_bins, n_frames, 1, 1]
+        cur = cur.reshape4d(ctx, @intCast(n_mel_bins), @intCast(n_frames), 1, 1);
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
@@ -279,6 +292,14 @@ pub const AudioEncoder = struct {
         cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
         const flat_dim0 = cur.ne()[0] * cur.ne()[1];
         cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
+
+        // Input projection: map conv output dim → Conformer embedding dim
+        if (w.sscp_inp_proj_w) |proj_w| {
+            cur = proj_w.mulMat(ctx, cur);
+            if (w.sscp_inp_proj_b) |proj_b| {
+                cur = cur.add(ctx, proj_b);
+            }
+        }
 
         // 输入投影
         const n_pos = cur.ne()[1];
