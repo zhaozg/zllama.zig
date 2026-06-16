@@ -19,15 +19,21 @@
   - [x] Qwen35: `Qwen35Graph` 结构体（`build()` → `buildFullAttnLayer()` / `buildSSMLayer()` / `buildOutput()`）
   - [x] 模型 `forward()` 方法变为 thin wrapper 委托给 graph 类
 - [x] **多模态对话模板完整闭环**：使用针对不同模型的内置模板，支持 `<|image|>`/`<|audio|>` 占位符展开 → 嵌入注入
-  - [x] 方法: 从 llama.cpp 中提取模板，构建提取处理模板的测试用例, 通过后再集成
-    - [x] `main.zig` 集成：verbose 模式下自动打印模板诊断信息（`engine.zig:init` 中 `cli_args.debug or cli_args.verbose` 触发 `debugPrintTemplate`），`applyChatTemplateWithMedia` 统一使用 `resolve()` 确保 detectKind 正确分流
   - [x] tokenizeWithPlaceholders 记录占位符 token 偏移（token_offset）
   - [x] forwardWithEmbdOverride 使用正确的 embd_offset（从 token_offset 计算）
   - [x] forwardMediaOnly 方法（Gemma4 媒体-only 非因果前向，跳过 per-layer embedding）
   - [x] 三阶段 prefill（text prefix causal → media non-causal → text suffix causal）— ✅ 已实现并验证通过
   - [x] per_layer_embd 在媒体位置也需要 override — `forwardMediaOnly` 新增 `input_tokens` 参数，透传至 `transformerForward` 进行 per-layer embedding 查找
+  - [x] 音频、图片相关的额外检查:
+    - [x] **占位符扩展**：`tokenizeWithPlaceholders` 是否正确将单个 `<|audio|>` token 扩展为 `n_audio_tokens` 个连续 token？, log.debug 打印 `expanded.tokens` 确认。— ✅ 已在 `multimodal.zig` 的 `tokenizeWithPlaceholders` 末尾添加 `log.debug` 打印格式化字符串、每个占位符的类型/位置/token_offset/token_count/token_id、以及展开后的 token 序列预览。
+    - [x] **嵌入替换**：三阶段预填充中 `media_offset` 和 `media_count` 是否准确对应音频嵌入的帧数？log.info 打印确保。— ✅ 已在 `engine.zig` 的 `multimodalPrefill` 开头添加 `logger.info` 打印 media_offset/media_count/n_media_tokens/prefix_tokens/suffix_tokens/n_total_tokens，并在不匹配时发出 `logger.warn`；同时在 `prefill.zig` 的 `threeStagePrefill` 开头添加 `log.info` 打印三阶段（prefix/media/suffix）的 token 数量和位置范围。
 - [x] **减少 `ggml_cont` 调用**：已审查代码，现有 `ggml_cont` 调用均用于 view/permute/concat 后的必要内存重排，无冗余调用可移除
 - [x] **预分配 SSM 状态张量**：已在 `qwen35.zig` 中实现 — `allocateSSMStates()` 方法使用 `ctx_kv_cache` 预分配 conv_state 和 ssm_state 张量，并在 `buildSSMLayer` 中移除 lazy-init 模式，改为前置检查 `SSMStateNotPreallocated` 错误
+- [x] **deps/media.md 媒体推理排查系统**：按照 deps/media.md 四项要求，系统性地添加 logger.debug 信息输出以确认正确性：
+  - [x] **嵌入维度检查**：`engine.zig` 的 `generateWithImage` / `generateWithAudio` 中编码器输出后打印 shape 并与 model n_embd 对比（期望 1536）；`gemma4.zig` 的 `buildMediaOnly` / `buildWithEmbd` 中打印 override_embd_dim vs model_n_embd，不匹配时 `log.err` 返回错误。
+  - [x] **mediaForward 回调审查**：`prefill.zig` Pass 2 前后打印 `causal=false`、`start_pos`、`n_tokens`、`embd_dim`；`gemma4.zig` 的 `transformerForward` 入口打印 `causal` 和 `kv_cache` 状态；`buildMediaOnly` 入口打印参数并注明 non-causal。
+  - [x] **KV Cache 状态检查**：`prefill.zig` 的 Pass 1/2/3 各阶段 compute 完成后打印 `kv_cache_mgr.currentLen()`，确认媒体段处理前后 KV Cache 逐段递增。
+  - [x] **Token 序列逐步验证**：`engine.zig` 的 `multimodalPrefill` 中打印 prefix/suffix token 的 head+tail 片段及 pos 范围；`prefill.zig` 的三阶段 info 日志已含完整位置范围。
 
 ## P2 — 扩展功能与模型支持
 

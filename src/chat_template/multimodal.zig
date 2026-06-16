@@ -198,6 +198,44 @@ pub fn tokenizeWithPlaceholders(
         try tokens.appendSlice(allocator, text_tokens);
     }
 
+    // —— 占位符扩展调试日志 ——
+    log.debug("tokenizeWithPlaceholders: formatted=\"{s}\"", .{formatted});
+    log.debug("  total tokens after expansion: {d}", .{tokens.items.len});
+    if (placeholders.len == 0) {
+        log.debug("  no placeholders found — pure text tokenization", .{});
+    }
+    for (placeholders, 0..) |ph, i| {
+        const media_label = switch (ph.media_type) {
+            .image => "image",
+            .audio => "audio",
+            .none => "none",
+        };
+        log.debug("  placeholder[{d}]: type={s} str_pos={d}..{d} token_offset={d} token_count={d} token_id={d}", .{
+            i,
+            media_label,
+            ph.start,
+            ph.start + ph.length,
+            ph.token_offset,
+            ph.token_count,
+            if (ph.media_type == .image) image_token_id else if (ph.media_type == .audio) audio_token_id else @as(u32, 0),
+        });
+        // 打印展开后的 token 序列片段（前 8 个 + 后 4 个，避免刷屏）
+        const start_idx = ph.token_offset;
+        const end_idx = ph.token_offset + ph.token_count;
+        const max_preview: u32 = 8;
+        const max_tail: u32 = 4;
+        if (ph.token_count <= max_preview + max_tail + 2) {
+            log.debug("    expanded tokens[{d}..{d}): {any}", .{ start_idx, end_idx, tokens.items[start_idx..end_idx] });
+        } else {
+            log.debug("    expanded tokens[{d}..{d}+{d}..{d}): head={any} ... tail={any}", .{
+                start_idx, start_idx + max_preview,
+                end_idx - max_tail, end_idx,
+                tokens.items[start_idx .. start_idx + max_preview],
+                tokens.items[end_idx - max_tail .. end_idx],
+            });
+        }
+    }
+
     return TokenizedSegments{
         .tokens = tokens,
         .offsets = placeholders,

@@ -105,6 +105,17 @@ pub fn threeStagePrefill(
 
     const buft = ggml.backendCpuBufferType();
 
+    // —— 三阶段预填充参数日志 ——
+    log.info("=== Three-stage multimodal prefill ===", .{});
+    log.info("  Prefix  (text, causal) : {d} tokens  [pos 0..{d})", .{ prefix_len, prefix_len });
+    log.info("  Media   (embed,non-causal): {d} tokens  [pos {d}..{d})  embd_dim={d}  placeholder_token_id={d}", .{
+        n_media, prefix_len, prefix_len + n_media, n_embd_val, media_token_id,
+    });
+    log.info("  Suffix  (text, causal) : {d} tokens  [pos {d}..{d})", .{
+        suffix_len, prefix_len + n_media, prefix_len + n_media + suffix_len,
+    });
+    log.info("  Total tokens (3 passes): {d}", .{prefix_len + n_media + suffix_len});
+
     // Helper to create a media embeddings tensor in the fresh context
     const createMediaTensor = struct {
         fn create(ctx: *ggml.Context, data: []const f32, n_embd: i64, n_tokens: i32) !*ggml.Tensor {
@@ -150,6 +161,7 @@ pub fn threeStagePrefill(
         const t1_end = engine_common.currentTimeMs();
         pp_time_s += @as(f64, @floatFromInt(t1_end - t1_start)) / 1000.0;
         log.debug("Pass 1 (text prefix): {d} tokens in {d:.3}s ✓", .{ prefix_len, @as(f64, @floatFromInt(t1_end - t1_start)) / 1000.0 });
+        log.debug("  -> KV cache current_len after Pass 1: {d}", .{kv_cache_mgr.currentLen()});
     }
 
     // ===================================================================
@@ -200,6 +212,8 @@ pub fn threeStagePrefill(
         const t2_end = engine_common.currentTimeMs();
         pp_time_s += @as(f64, @floatFromInt(t2_end - t2_start)) / 1000.0;
         log.debug("Pass 2 (media): {d} tokens in {d:.3}s ✓", .{ n_media, @as(f64, @floatFromInt(t2_end - t2_start)) / 1000.0 });
+        log.debug("  -> mediaForward called with: start_pos={d}, n_tokens={d}, causal=false, embd_dim={d}", .{ prefix_len, n_media, n_embd_val });
+        log.debug("  -> KV cache current_len after Pass 2: {d}", .{kv_cache_mgr.currentLen()});
     }
 
     // ===================================================================
@@ -242,6 +256,8 @@ pub fn threeStagePrefill(
     const t3_end = engine_common.currentTimeMs();
     pp_time_s += @as(f64, @floatFromInt(t3_end - t3_start)) / 1000.0;
     log.debug("Pass 3 (text suffix): {d} tokens in {d:.3}s ✓", .{ sfx_n, @as(f64, @floatFromInt(t3_end - t3_start)) / 1000.0 });
+    log.debug("  -> suffix pass start_pos={d}, causal=true (default text forward)", .{suffix_start_pos});
+    log.debug("  -> KV cache current_len after Pass 3: {d}", .{kv_cache_mgr.currentLen()});
 
     // Copy last token's logits to heap before galloc is freed
     // logits shape: [n_vocab, n_tokens] — we want the last token

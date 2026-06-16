@@ -214,9 +214,12 @@ pub const Gemma4Graph = struct {
         const override_embd_dim: i64 = embd_override.ne()[0];
 
         if (override_embd_dim != n_embd_i64) {
-            std.log.err("Dimension mismatch: embeddings dim={d} but model n_embd={d}", .{ override_embd_dim, n_embd_i64 });
+            log.err("buildWithEmbd: embedding dim mismatch — override={d} model={d}", .{ override_embd_dim, n_embd_i64 });
             return error.EmbeddingDimensionMismatch;
         }
+        log.debug("buildWithEmbd: n_tokens={d}, embd_offset={d}, n_override={d}, causal={}, embd_dim={d} ✓", .{
+            n_tokens, embd_offset, n_override, causal, override_embd_dim,
+        });
 
         var all_embd = embed.tokenEmbedding(self.ctx, w.base.token_embd, input_tokens);
         all_embd = ggml.scale(self.ctx, all_embd, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
@@ -260,6 +263,16 @@ pub const Gemma4Graph = struct {
         const w = self.weights;
         const n_tokens_i64: i64 = n_tokens;
 
+        // —— 嵌入维度检查 ——
+        const override_embd_dim: i64 = embd_override.ne()[0];
+        const model_n_embd: i64 = @intCast(p.base.n_embd);
+        log.debug("buildMediaOnly (non-causal): n_tokens={d}, start_pos={d}, embd_dim={d}, model_n_embd={d}", .{ n_tokens, start_pos, override_embd_dim, model_n_embd });
+        if (override_embd_dim != model_n_embd) {
+            log.err("buildMediaOnly: embedding dim mismatch — override={d} model={d}", .{ override_embd_dim, model_n_embd });
+            return error.EmbeddingDimensionMismatch;
+        }
+        log.debug("  ✓ embedding dimension check passed", .{});
+
         const scaled = ggml.scale(self.ctx, embd_override, @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
         scaled.setName("inp_media");
 
@@ -281,6 +294,10 @@ pub const Gemma4Graph = struct {
         input_tokens: ?*ggml.Tensor,
         causal: bool,
     ) !*ggml.Tensor {
+        log.debug("transformerForward: n_tokens={d}, start_pos={d}, causal={}, kv_cache={}", .{
+            n_tokens_i64, start_pos, causal, kv_cache_mgr != null,
+        });
+
         // --- Per-layer embedding 预计算 ---
         self.inp_per_layer = try self.buildPerLayerInputs(self.cur, input_tokens, n_tokens_i64);
 

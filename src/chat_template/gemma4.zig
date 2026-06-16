@@ -125,7 +125,7 @@ pub fn apply(
         try buf.appendSlice(allocator, "<|turn>model\n");
         // When thinking is disabled, add an empty thinking block to suppress
         // the model's internal reasoning. This matches the official template.
-        if (!enable_thinking) {
+        if (enable_thinking) {
             try buf.appendSlice(allocator, "<|channel>thought\n<channel|>");
         }
     }

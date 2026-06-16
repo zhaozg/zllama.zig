@@ -160,14 +160,15 @@ pub const InferenceEngine = struct {
             chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
             logger.info("Chat template: from GGUF metadata", .{});
         }
-        if (cli_args.debug or cli_args.verbose) {
-            const source = chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(arch, null) };
-            if (chat_template.debugPrintTemplate(allocator, source, arch, null)) |debug_info| {
-                defer allocator.free(debug_info);
-                logger.info("{s}", .{debug_info});
-            } else |_| {}
-        }
-
+        // TODO: enable jinja template
+        // if (cli_args.debug or cli_args.verbose) {
+        //     const source = chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(arch, null) };
+        //     if (chat_template.debugPrintTemplate(allocator, source, arch, null)) |debug_info| {
+        //         defer allocator.free(debug_info);
+        //         logger.info("{s}", .{debug_info});
+        //     } else |_| {}
+        // }
+        //
         const sampler_state = sampler.Sampler.init(.{
             .temperature = cli_args.temperature,
             .top_k = cli_args.top_k,
@@ -649,7 +650,15 @@ pub const InferenceEngine = struct {
 
         const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
-        if (n_embd_val != @as(usize, @intCast(self.params.n_embd))) return error.EmbeddingDimensionMismatch;
+
+        // —— 嵌入维度检查 ——
+        logger.debug("Vision encoder output: shape=[{d}, {d}] (n_embd×n_tokens)", .{ n_embd_val, n_vision_tokens });
+        logger.debug("  model n_embd={d}, expected embed_dim=1536 for Gemma4", .{self.params.n_embd});
+        if (n_embd_val != @as(usize, @intCast(self.params.n_embd))) {
+            logger.err("EMBEDDING DIMENSION MISMATCH: encoder={d} vs model={d}", .{ n_embd_val, self.params.n_embd });
+            return error.EmbeddingDimensionMismatch;
+        }
+        logger.debug("  ✓ embedding dimension matches model n_embd", .{});
 
         const image_token_id: u32 = blk: {
             if (self.tok.textToToken("<|image|>")) |id| break :blk @as(u32, @intCast(id));
@@ -713,7 +722,15 @@ pub const InferenceEngine = struct {
 
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
-        if (n_embd_val != @as(usize, @intCast(self.params.n_embd))) return error.EmbeddingDimensionMismatch;
+
+        // —— 嵌入维度检查 ——
+        logger.debug("Audio encoder output: shape=[{d}, {d}] (n_embd×n_tokens)", .{ n_embd_val, n_audio_tokens });
+        logger.debug("  model n_embd={d}, expected embed_dim=1536 for Gemma4", .{self.params.n_embd});
+        if (n_embd_val != @as(usize, @intCast(self.params.n_embd))) {
+            logger.err("EMBEDDING DIMENSION MISMATCH: encoder={d} vs model={d}", .{ n_embd_val, self.params.n_embd });
+            return error.EmbeddingDimensionMismatch;
+        }
+        logger.debug("  ✓ embedding dimension matches model n_embd", .{});
 
         const audio_token_id: u32 = blk: {
             if (self.tok.textToToken("<|audio|>")) |id| break :blk @as(u32, @intCast(id));
@@ -755,6 +772,35 @@ pub const InferenceEngine = struct {
         const prefix_tokens = if (media_offset > 0) expanded.tokens.items[0..media_offset] else &[_]u32{};
         const suffix_start: u32 = media_offset + media_count;
         const suffix_tokens = if (suffix_start < n_total_tokens) expanded.tokens.items[suffix_start..@as(usize, @intCast(n_total_tokens))] else &[_]u32{};
+
+        // —— 多模态嵌入替换对齐检查 ——
+        logger.info("=== Multimodal embedding substitution check ===", .{});
+        logger.info("  media_offset    = {d}  (token position where media placeholder starts)", .{media_offset});
+        logger.info("  media_count     = {d}  (number of placeholder tokens in token sequence)", .{media_count});
+        logger.info("  n_media_tokens  = {d}  (actual embedding frames from encoder)", .{n_media_tokens});
+        logger.info("  prefix_tokens   = {d}", .{prefix_tokens.len});
+        logger.info("  suffix_tokens   = {d}", .{suffix_tokens.len});
+        logger.info("  n_total_tokens  = {d}", .{n_total_tokens});
+        if (media_count != @as(u32, @intCast(n_media_tokens))) {
+            logger.warn("  ⚠ MISMATCH: media_count ({d}) != n_media_tokens ({d}) — embedding substitution may be misaligned!", .{ media_count, n_media_tokens });
+        } else {
+            logger.info("  ✓ media_count == n_media_tokens — embedding substitution aligned", .{});
+        }
+
+        // —— Token 序列验证：打印 pos 和 token ID ——
+        logger.debug("=== Token sequence verification (before prefill) ===", .{});
+        if (prefix_tokens.len > 0) {
+            const pre_head: usize = @min(prefix_tokens.len, 8);
+            const pre_tail_start: usize = if (prefix_tokens.len > pre_head) prefix_tokens.len - @min(4, prefix_tokens.len - pre_head) else prefix_tokens.len;
+            logger.debug("  prefix[pos 0..{d}]: head={any} ... tail={any}", .{ prefix_tokens.len, prefix_tokens[0..pre_head], prefix_tokens[pre_tail_start..] });
+        }
+        logger.debug("  media[pos {d}..{d}]: token_id={d} × {d}", .{ media_offset, media_offset + media_count, media_token_id, media_count });
+        if (suffix_tokens.len > 0) {
+            const suf_head: usize = @min(suffix_tokens.len, 8);
+            const suf_tail_start: usize = if (suffix_tokens.len > suf_head) suffix_tokens.len - @min(4, suffix_tokens.len - suf_head) else suffix_tokens.len;
+            const suf_pos_start = media_offset + media_count;
+            logger.debug("  suffix[pos {d}..{d}]: head={any} ... tail={any}", .{ suf_pos_start, suf_pos_start + suffix_tokens.len, suffix_tokens[0..suf_head], suffix_tokens[suf_tail_start..] });
+        }
 
         const mediaForwardFn = struct {
             fn f(mp: *anyopaque, c: *ggml.Context, g: *ggml.CGraph, it: *ggml.Tensor, nt: i32, kvc: ?*kv_cache.KVCache, sp: i32, eo: *ggml.Tensor, eoff: i32, causal: bool) anyerror!*ggml.Tensor {
