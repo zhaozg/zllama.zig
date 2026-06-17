@@ -572,7 +572,27 @@ pub fn build(b: *std.Build) void {
         .name = "unit-tests",
         .root_module = test_root_mod,
     });
-    test_step.dependOn(&test_unit.step);
+    if (!bundle_ggml) {
+        test_unit.root_module.addRPathSpecial("/usr/local/lib");
+    }
+    const run_test_unit = b.addRunArtifact(test_unit);
+    test_step.dependOn(&run_test_unit.step);
+
+    // 辅助函数：为测试步骤添加 rpath（使用系统库时需要）
+    const addTestWithRpath: *const fn (*std.Build, []const u8, *std.Build.Module) *std.Build.Step.Compile = if (bundle_ggml)
+        struct {
+            fn add(b2: *std.Build, name: []const u8, root_module: *std.Build.Module) *std.Build.Step.Compile {
+                return b2.addTest(.{ .name = name, .root_module = root_module });
+            }
+        }.add
+    else
+        struct {
+            fn add(b2: *std.Build, name: []const u8, root_module: *std.Build.Module) *std.Build.Step.Compile {
+                const t = b2.addTest(.{ .name = name, .root_module = root_module });
+                t.root_module.addRPathSpecial("/usr/local/lib");
+                return t;
+            }
+        }.add;
 
     // 子测试步骤（用于单独运行特定类别的测试）
     // 测试工具模块（src/tests/utils.zig），与 src/utils.zig 不同
@@ -600,8 +620,9 @@ pub fn build(b: *std.Build) void {
         mod.addImport("attention", attention_mod);
         mod.addImport("swiglu", swiglu_mod);
         mod.addImport("utils", test_utils_mod);
-        const t = b.addTest(.{ .name = "test-layers", .root_module = mod });
-        test_layers_step.dependOn(&t.step);
+        const t = addTestWithRpath(b, "test-layers", mod);
+        const run_t = b.addRunArtifact(t);
+        test_layers_step.dependOn(&run_t.step);
     }
 
     const test_gguf_step = b.step("test-gguf", "Run GGUF tests only");
@@ -614,8 +635,9 @@ pub fn build(b: *std.Build) void {
         });
         mod.addImport("ggml", ggml_mod);
         mod.addImport("gguf", gguf_mod);
-        const t = b.addTest(.{ .name = "test-gguf", .root_module = mod });
-        test_gguf_step.dependOn(&t.step);
+        const t = addTestWithRpath(b, "test-gguf", mod);
+        const run_t = b.addRunArtifact(t);
+        test_gguf_step.dependOn(&run_t.step);
     }
 
     const test_archs_step = b.step("test-archs", "Run architecture tests only");
@@ -633,8 +655,9 @@ pub fn build(b: *std.Build) void {
         mod.addImport("graph_builder", graph_builder_mod);
         mod.addImport("memory", memory_mod);
         mod.addImport("utils", test_utils_mod);
-        const t = b.addTest(.{ .name = "test-archs", .root_module = mod });
-        test_archs_step.dependOn(&t.step);
+        const t = addTestWithRpath(b, "test-archs", mod);
+        const run_t = b.addRunArtifact(t);
+        test_archs_step.dependOn(&run_t.step);
     }
 
     const test_kv_cache_step = b.step("test-kv-cache", "Run KV Cache tests only");
@@ -649,8 +672,9 @@ pub fn build(b: *std.Build) void {
         mod.addImport("gguf", gguf_mod);
         mod.addImport("kv_cache", kv_cache_mod);
         mod.addImport("memory", memory_mod);
-        const t = b.addTest(.{ .name = "test-kv-cache", .root_module = mod });
-        test_kv_cache_step.dependOn(&t.step);
+        const t = addTestWithRpath(b, "test-kv-cache", mod);
+        const run_t = b.addRunArtifact(t);
+        test_kv_cache_step.dependOn(&run_t.step);
     }
 
     const test_vocab_step = b.step("test-vocab", "Run vocab-based tokenizer tests only");
@@ -664,8 +688,9 @@ pub fn build(b: *std.Build) void {
         mod.addImport("ggml", ggml_mod);
         mod.addImport("gguf", gguf_mod);
         mod.addImport("tokenizer", tokenizer_mod);
-        const t = b.addTest(.{ .name = "test-vocab", .root_module = mod });
-        test_vocab_step.dependOn(&t.step);
+        const t = addTestWithRpath(b, "test-vocab", mod);
+        const run_t = b.addRunArtifact(t);
+        test_vocab_step.dependOn(&run_t.step);
     }
 
     const test_embed_step = b.step("test-embed", "Run embedding tests only");
@@ -678,8 +703,9 @@ pub fn build(b: *std.Build) void {
         });
         mod.addImport("ggml", ggml_mod);
         mod.addImport("pooling", pooling_mod);
-        const t = b.addTest(.{ .name = "test-embed", .root_module = mod });
-        test_embed_step.dependOn(&t.step);
+        const t = addTestWithRpath(b, "test-embed", mod);
+        const run_t = b.addRunArtifact(t);
+        test_embed_step.dependOn(&run_t.step);
     }
 
     const test_mtmd_step = b.step("test-mtmd", "Run multimodal tests only");
@@ -693,8 +719,9 @@ pub fn build(b: *std.Build) void {
         mod.addImport("model", model_mod);
         mod.addImport("mm", mm_manager_mod);
         mod.addImport("mtmd", mtmd_mod);
-        const t = b.addTest(.{ .name = "test-mtmd", .root_module = mod });
-        test_mtmd_step.dependOn(&t.step);
+        const t = addTestWithRpath(b, "test-mtmd", mod);
+        const run_t = b.addRunArtifact(t);
+        test_mtmd_step.dependOn(&run_t.step);
     }
 
     const test_compare_logits_step = b.step("test-compare-logits", "Run compare_logits tests only");
@@ -712,8 +739,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         mod.addImport("compare_logits", compare_logits_mod);
-        const t = b.addTest(.{ .name = "test-compare-logits", .root_module = mod });
-        test_compare_logits_step.dependOn(&t.step);
+        const t = addTestWithRpath(b, "test-compare-logits", mod);
+        const run_t = b.addRunArtifact(t);
+        test_compare_logits_step.dependOn(&run_t.step);
     }
 
 
