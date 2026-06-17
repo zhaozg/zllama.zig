@@ -235,7 +235,12 @@ pub fn kindForArchitecture(arch: model.Architecture, model_name: ?[]const u8) Te
 }
 
 /// Resolve a template source to a concrete Template.
-/// Priority: custom > gguf_builtin > preset_name > architecture default
+/// Priority chain (set by caller): GGUF detected known template > preset > minja Jinja > ChatML fallback
+/// When source is .gguf_builtin:
+///   1. detectKind → known preset (uses built-in Zig implementation)
+///   2. If unknown + jinja_enabled → .unknown with Jinja rendering
+///   3. If unknown + jinja disabled → fall back to arch default preset
+///   4. If arch default also unknown → ChatML fallback (inside apply())
 /// model_name is optional and used to detect TinyLlama (which reports as "llama" arch).
 /// jinja_enabled: when true, unrecognized templates are kept as .unknown for Jinja rendering.
 pub fn resolve(

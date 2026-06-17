@@ -148,6 +148,11 @@ pub const InferenceEngine = struct {
         if (cli_args.system_prompt.len > 0) system_prompt = try allocator.dupe(u8, cli_args.system_prompt);
         if (cli_args.no_chat_template) {
             chat_template_source = null;
+        } else if (gguf_file.getString("tokenizer.chat_template")) |tmpl_str| {
+            // GGUF detected known template > preset template > minja Jinja > ChatML fallback
+            const owned = try allocator.dupe(u8, tmpl_str);
+            chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
+            logger.info("Chat template: from GGUF metadata ({d} bytes)", .{tmpl_str.len});
         } else if (cli_args.chat_template_name.len > 0) {
             if (chat_template.TemplateKind.fromString(cli_args.chat_template_name)) |kind| {
                 chat_template_source = chat_template.TemplateSource{ .preset = kind };
@@ -155,10 +160,6 @@ pub const InferenceEngine = struct {
             } else {
                 logger.warn("Unknown chat template '{s}', falling back to arch default", .{cli_args.chat_template_name});
             }
-        } else if (gguf_file.getString("tokenizer.chat_template")) |tmpl_str| {
-            const owned = try allocator.dupe(u8, tmpl_str);
-            chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
-            logger.info("Chat template: from GGUF metadata", .{});
         }
         // TODO: enable jinja template
         // if (cli_args.debug or cli_args.verbose) {

@@ -17,6 +17,9 @@ pub fn build(b: *std.Build) void {
         buildGgmlFromSource(b, target, optimize)
     else
         null;
+    // Build minja from source (C++ bridge around Google minja for Jinja2 templates)
+    const minja_lib = buildMinjaFromSource(b, target, optimize);
+
 
     // ======================================================================
     // ggml 模块（C 绑定 + 安全封装）
@@ -316,6 +319,24 @@ pub fn build(b: *std.Build) void {
         tmpl.addImport("types", chat_template_types_mod);
         chat_template_mod.addImport("tinyllama", tmpl);
     }
+
+    // ======================================================================
+    // minja 模块（C++ Jinja2 模板引擎 Zig 封装）
+    // ======================================================================
+    const minja_mod = b.createModule(.{
+        .root_source_file = b.path("src/chat_template/minja.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
+    });
+    minja_mod.addIncludePath(b.path("src/vendor/minja"));
+    minja_mod.addIncludePath(b.path("src/vendor/minja/nlohmann"));
+    minja_mod.linkLibrary(minja_lib);
+
+    // Let chat_template module import minja for Jinja rendering fallback
+    chat_template_mod.addImport("minja", minja_mod);
+
 
     // ======================================================================
     // 多模态模块
@@ -880,6 +901,40 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         lib.lto = .full;
         lib.use_lld = true;
     }
+
+    return lib;
+}
+
+
+/// 构建 minja 静态库（C++ Jinja2 模板引擎桥接层）。
+/// 返回一个 Step.Compile，可通过 Module.linkLibrary() 链接。
+fn buildMinjaFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const vendor_dir = "src/vendor/minja";
+
+    const lib_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
+    });
+
+    // Include paths: vendor minja headers and nlohmann/json
+    lib_mod.addIncludePath(b.path(vendor_dir));
+    lib_mod.addIncludePath(b.path(vendor_dir ++ "/nlohmann"));
+
+    const cpp_flags = &.{ "-std=c++17", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-missing-braces" };
+
+    // Add the bridge C++ source
+    lib_mod.addCSourceFile(.{
+        .file = b.path(vendor_dir ++ "/bridge.cpp"),
+        .flags = cpp_flags,
+    });
+
+    const lib = b.addLibrary(.{
+        .name = "minja",
+        .root_module = lib_mod,
+        .linkage = .static,
+    });
 
     return lib;
 }
