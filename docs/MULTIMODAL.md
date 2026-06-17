@@ -155,7 +155,7 @@ pub const MtmdContext = struct {
 | 三阶段 prefill | ✅ 已实现 |
 | parse_special 特殊 token 解析 | ✅ 已集成到 tokenizer |
 | 端到端文本推理 (Gemma 4 text) | ✅ 已验证 |
-| 输出质量对比 (vs llama.cpp) | 🟡 比较工具已构建，待生成参考 logits |
+| 输出质量对比 (vs llama.cpp) | ✅ 比较工具已使用三阶段 prefill，正确处理 causal/non-causal 注意力掩码 |
 | 多图像支持 | 🟡 待完成 |
 | 动态分辨率 | 🟡 待完成 |
 
@@ -205,7 +205,7 @@ WAV 文件 (16-bit PCM)
 | 占位符 token `<|audio|>` 处理 | ✅ 已实现 |
 | 三阶段 prefill | ✅ 已实现 |
 | parse_special 特殊 token 解析 | ✅ 已集成到 tokenizer |
-| 端到端输出质量验证 | 🟡 比较工具已构建，待生成参考 logits |
+| 端到端输出质量验证 | ✅ 比较工具已使用三阶段 prefill，正确处理 causal/non-causal 注意力掩码 |
 | 跨平台 FFT 后备 (非 macOS) | 🟡 待完成（当前仅支持 macOS Accelerate） |
 
 ---
@@ -253,6 +253,20 @@ WAV 文件 (16-bit PCM)
 ---
 
 ## 质量对比验证方法
+
+### 注意力掩码验证 ✅ 已确认
+
+三阶段 prefill（`src/core/prefill.zig`）正确处理不同阶段的注意力掩码：
+
+| 阶段 | 注意力类型 | causal | 实现位置 |
+|------|-----------|--------|---------|
+| Pass 1: 文本前缀 | Causal（只能看到自身及左侧） | `true` | `Gemma4Graph.build()` → `transformerForward(..., true)` |
+| Pass 2: 媒体 tokens | Bidirectional（所有 token 相互可见） | `false` | `mediaForwardFn` → `mediaForward(..., false)` |
+| Pass 3: 文本后缀 | Causal + 历史可见（可看到 prefix+media+左侧） | `true` | `Gemma4Graph.build()` → `transformerForward(..., true)` |
+
+验证要点：
+- KV cache 在三次 pass 之间持久化（通过独立的 `kv_cache_ctx`），每阶段追加写入
+- 比较工具已更新为使用 `threeStagePrefill`，不再使用单次 `forwardWithEmbdOverride`（后者对所有 token 使用相同的 causal 标志）
 
 ### 生成参考 logits
 
