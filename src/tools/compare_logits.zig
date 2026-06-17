@@ -74,8 +74,7 @@ pub const LogitsComparator = struct {
 
         // 计算余弦相似度
         var dot_product: f64 = 0.0;
-        var sum_ref: f64 = 0.0;
-        var sum_test: f64 = 0.0;
+        var sum_sq_test: f64 = 0.0;
 
         for (ref_logits, test_logits) |r, t| {
             const rf: f64 = @floatCast(r);
@@ -84,6 +83,7 @@ pub const LogitsComparator = struct {
             const abs_diff = @abs(diff);
 
             sum_sq_ref += rf * rf;
+            sum_sq_test += tf * tf;
             sum_sq_diff += @as(f64, @floatCast(diff)) * @as(f64, @floatCast(diff));
             sum_abs_err += @as(f64, @floatCast(abs_diff));
 
@@ -92,18 +92,16 @@ pub const LogitsComparator = struct {
             }
 
             dot_product += rf * tf;
-            sum_ref += rf;
-            sum_test += tf;
         }
 
         const nmse = if (sum_sq_ref > 0.0) sum_sq_diff / sum_sq_ref else 0.0;
         const mean_abs_error: f32 = @floatCast(sum_abs_err / @as(f64, @floatFromInt(n)));
 
-        // 余弦相似度
-        const norm_ref = @sqrt(sum_ref * sum_ref);
-        const norm_test_val = @sqrt(sum_test * sum_test);
-        const cosine_similarity = if (norm_ref > 0.0 and norm_test_val > 0.0)
-            dot_product / (norm_ref * norm_test_val)
+        // 余弦相似度: dot_product / (||ref|| * ||test||)
+        const norm_ref = @sqrt(sum_sq_ref);
+        const norm_test = @sqrt(sum_sq_test);
+        const cosine_similarity = if (norm_ref > 0.0 and norm_test > 0.0)
+            dot_product / (norm_ref * norm_test)
         else
             1.0;
 

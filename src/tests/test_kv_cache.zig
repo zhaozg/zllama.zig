@@ -155,8 +155,8 @@ test "KVCache multiple layers" {
     // 验证所有层都初始化
     for (0..n_layers) |i| {
         try testing.expectEqual(@as(u32, 0), kv.layers[i].current_len);
-        try testing.expect(kv.layers[i].k != undefined);
-        try testing.expect(kv.layers[i].v != undefined);
+        try testing.expect(kv.layers[i].k.dataType() == .f32);
+        try testing.expect(kv.layers[i].v.dataType() == .f32);
     }
 }
 
@@ -191,8 +191,8 @@ test "KVCache toMemoryContext" {
 
     const k = mem_ctx.getK(0);
     const v = mem_ctx.getV(0);
-    try testing.expect(k != undefined);
-    try testing.expect(v != undefined);
+    try testing.expect(k.dataType() == .f32);
+    try testing.expect(v.dataType() == .f32);
 
     // 测试 reset
     kv.layers[0].current_len = 5;
@@ -266,7 +266,7 @@ test "KVCacheMemory init and basic ops" {
     defer ctx.deinit();
 
     var kv_mem = try memory.KVCacheMemory.init(ctx, 2, 2, 16, 32, testing.allocator);
-    defer memory.KVCacheMemory.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
+    defer testing.allocator.free(kv_mem.layers);
 
     try testing.expectEqual(@as(u32, 2), memory.KVCacheMemory.nLayers(@as(*anyopaque, @ptrCast(&kv_mem))));
     try testing.expectEqual(@as(u32, 0), memory.KVCacheMemory.currentLen(@as(*anyopaque, @ptrCast(&kv_mem))));
@@ -286,7 +286,7 @@ test "KVCacheMemory setKv via interface" {
     defer ctx.deinit();
 
     var kv_mem = try memory.KVCacheMemory.init(ctx, 1, 2, 16, 32, testing.allocator);
-    defer memory.KVCacheMemory.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
+    defer testing.allocator.free(kv_mem.layers);
 
     var mem_ctx = kv_mem.toMemoryContext();
 
@@ -307,7 +307,7 @@ test "KVCacheMemory multiple layers setKv" {
     defer ctx.deinit();
 
     var kv_mem = try memory.KVCacheMemory.init(ctx, 3, 4, 32, 64, testing.allocator);
-    defer memory.KVCacheMemory.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
+    defer testing.allocator.free(kv_mem.layers);
 
     var mem_ctx = kv_mem.toMemoryContext();
 

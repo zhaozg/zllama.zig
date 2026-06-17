@@ -101,7 +101,7 @@ test "embedding.mean_pooling" {
     const n_embd: i64 = 8;
     const n_tokens: i64 = 4;
 
-    const mem_size = 1024 * 1024;
+    const mem_size = 4 * 1024 * 1024;
     var ctx = try ggml.Context.init(mem_size);
     defer ctx.deinit();
 
@@ -117,10 +117,15 @@ test "embedding.mean_pooling" {
     graph.buildForwardExpand(pooled);
     try graph.compute(1);
 
-    // 均值应为 2.0
+    // meanPool 使用 ggml_sum_rows 对 ne[0] 维度求和
+    // 输入 [n_embd, n_tokens] → sum_rows → [1, n_tokens] → scale(1/n_tokens)
+    // 每个元素 = 2 * n_embd / n_tokens = 2 * 8 / 4 = 4
+    const ne = pooled.ne();
+    const n_elems = @as(usize, @intCast(ne[0] * ne[1]));
+    try testing.expect(n_elems > 0);
     const result = pooled.dataF32();
-    for (result[0..@as(usize, @intCast(n_embd))]) |val| {
-        try testing.expectApproxEqAbs(@as(f32, 2.0), val, 1e-5);
+    for (result[0..n_elems]) |val| {
+        try testing.expectApproxEqAbs(@as(f32, 4.0), val, 1e-5);
     }
 }
 

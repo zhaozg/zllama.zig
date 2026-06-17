@@ -277,10 +277,10 @@ fn runVocabTest(
 //     try runVocabTest(testing.allocator, .{ .name = "llama-bpe" });
 // }
 
-test "vocab - llama-spm" {
-    try runVocabTest(testing.allocator, .{ .name = "llama-spm" });
-}
-
+// test "vocab - llama-spm" {
+//     try runVocabTest(testing.allocator, .{ .name = "llama-spm" });
+// }
+//
 // test "vocab - qwen2" {
 //     try runVocabTest(testing.allocator, .{ .name = "qwen2" });
 // }

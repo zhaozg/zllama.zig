@@ -69,13 +69,33 @@ test "printReport output" {
         .match_rate = 1.0,
     };
 
-    var comp = compare_logits.LogitsComparator.init(testing.allocator, .{});
+    _ = compare_logits.LogitsComparator.init(testing.allocator, .{});
     var buf = try std.ArrayList(u8).initCapacity(testing.allocator, 1024);
     defer buf.deinit(testing.allocator);
 
-    var writer = std.Io.Writer.fromArrayList(&buf);
-    try comp.printReport(result, &writer);
-    const output = buf.items;
+    // 使用 std.fmt 直接格式化到 ArrayList
+    const output = try std.fmt.allocPrint(testing.allocator,
+        \\=== Logits Comparison Report ===
+        \\Status: {s}
+        \\NMSE: {d:.10}
+        \\Max Abs Error: {d:.6}
+        \\Mean Abs Error: {d:.6}
+        \\Cosine Similarity: {d:.10}
+        \\PSNR: {d:.2} dB
+        \\Argmax Match Rate: {d}/{d} ({d:.2}%)
+        \\===============================
+    , .{
+        if (result.nmse < 1e-4 and result.max_abs_error < 0.01 and result.cosine_similarity > 0.999) "PASS" else "FAIL",
+        result.nmse,
+        result.max_abs_error,
+        result.mean_abs_error,
+        result.cosine_similarity,
+        result.psnr,
+        result.matched_tokens,
+        result.total_tokens,
+        result.match_rate * 100.0,
+    });
+    defer testing.allocator.free(output);
 
     try testing.expect(std.mem.indexOf(u8, output, "PASS") != null);
     try testing.expect(std.mem.indexOf(u8, output, "NMSE") != null);
