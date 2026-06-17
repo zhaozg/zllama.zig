@@ -199,7 +199,8 @@ pub const GraphBuilder = struct {
 
     /// 设置输出张量
     pub fn setOutput(self: *GraphBuilder, tensor: *ggml.Tensor) void {
-        ggml.setOutput(self.ctx, tensor);
+        _ = self;
+        ggml.setOutput(tensor);
     }
 };
 

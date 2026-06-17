@@ -79,15 +79,16 @@ const vocab_tests = [_]VocabTestConfig{
 
 /// 读取文件内容
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const cwd = std.fs.cwd();
-    const file = try cwd.openFile(path, .{ .mode = .read_only });
-    defer file.close();
+    const cwd = std.Io.Dir.cwd();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const file = try cwd.openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const content = try allocator.alloc(u8, @as(usize, @intCast(stat.size)));
     errdefer allocator.free(content);
 
-    const bytes_read = try file.readAll(content);
+    const bytes_read = try file.readPositionalAll(io, content, 0);
     if (bytes_read != content.len) return error.FileReadError;
     return content;
 }
@@ -95,10 +96,10 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 /// 解析 .inp 文件：按分隔符分割文本
 /// 返回分配的所有权字符串列表，调用者负责释放
 fn parseInpFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u8 {
-    var result = std.ArrayList([]const u8).init(allocator);
+    var result = try std.ArrayList([]const u8).initCapacity(allocator, 0);
     errdefer {
         for (result.items) |item| allocator.free(item);
-        result.deinit();
+        result.deinit(allocator);
     }
 
     var start: usize = 0;
@@ -107,20 +108,20 @@ fn parseInpFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u8
         const segment = content[start..end];
         // 复制每个段
         const owned = try allocator.dupe(u8, segment);
-        try result.append(owned);
+        try result.append(allocator, owned);
         start = end + test_separator.len;
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
 
 /// 解析 .out 文件：每行空格分隔的 token ID
 /// 返回分配的所有权列表，调用者负责释放
 fn parseOutFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u32 {
-    var result = std.ArrayList([]const u32).init(allocator);
+    var result = try std.ArrayList([]const u32).initCapacity(allocator, 0);
     errdefer {
         for (result.items) |item| allocator.free(item);
-        result.deinit();
+        result.deinit(allocator);
     }
 
     var line_iter = std.mem.splitScalar(u8, content, '\n');
@@ -128,21 +129,21 @@ fn parseOutFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u3
         const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
         if (trimmed.len == 0) continue;
 
-        var tokens = std.ArrayList(u32).init(allocator);
-        errdefer tokens.deinit();
+        var tokens = try std.ArrayList(u32).initCapacity(allocator, 0);
+        errdefer tokens.deinit(allocator);
 
         var token_iter = std.mem.splitScalar(u8, trimmed, ' ');
         while (token_iter.next()) |token_str| {
             const trimmed_token = std.mem.trim(u8, token_str, &std.ascii.whitespace);
             if (trimmed_token.len == 0) continue;
             const token_id = try std.fmt.parseInt(u32, trimmed_token, 10);
-            try tokens.append(token_id);
+            try tokens.append(allocator, token_id);
         }
 
-        try result.append(try tokens.toOwnedSlice());
+        try result.append(allocator, try tokens.toOwnedSlice(allocator));
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
 
 /// 释放解析后的测试数据

@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // -Dbundle-ggml: build ggml from source instead of using system-installed libraries
-    const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse true;
+    const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse false;
 
     // -Dno-galloc-realloc: assert-fail on any gallocr reallocation.
     // Useful for development to detect graph topology changes that would cause
@@ -47,6 +47,7 @@ pub fn build(b: *std.Build) void {
         ggml_mod.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
         ggml_mod.linkSystemLibrary("ggml-base", .{});
         ggml_mod.linkSystemLibrary("ggml", .{});
+        ggml_mod.linkSystemLibrary("ggml-cpu", .{});
     }
 
     // macOS 框架和加速
@@ -55,10 +56,6 @@ pub fn build(b: *std.Build) void {
         ggml_mod.linkFramework("Accelerate", .{});
         ggml_mod.addCMacro("GGML_USE_ACCELERATE", "1");
     }
-
-    // ======================================================================
-    // 内部模块
-    // ======================================================================
 
     // ======================================================================
     // 内部模块
@@ -427,6 +424,33 @@ pub fn build(b: *std.Build) void {
     mtmd_mod.addImport("preprocess", mm_preprocess_mod);
     mtmd_mod.addImport("tokenizer", tokenizer_mod);
     mtmd_mod.addImport("utils", utils_mod);
+    // mtmd 子模块（helper 和 tokenize 通过相对路径导入）
+    {
+        const helper_mod = b.createModule(.{
+            .root_source_file = b.path("src/mtmd/helper.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        helper_mod.addImport("ggml", ggml_mod);
+        helper_mod.addImport("mtmd", mtmd_mod);
+        helper_mod.addImport("preprocess", mm_preprocess_mod);
+        helper_mod.addImport("stb_image", stb_image_mod);
+        mtmd_mod.addImport("helper", helper_mod);
+    }
+    {
+        const tokenize_mod = b.createModule(.{
+            .root_source_file = b.path("src/mtmd/tokenize.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        tokenize_mod.addImport("ggml", ggml_mod);
+        tokenize_mod.addImport("gguf", gguf_mod);
+        tokenize_mod.addImport("tokenizer", tokenizer_mod);
+        tokenize_mod.addImport("mtmd", mtmd_mod);
+        mtmd_mod.addImport("tokenize", tokenize_mod);
+    }
 
     // 主可执行文件 zllama
     // ======================================================================
@@ -551,6 +575,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&test_unit.step);
 
     // 子测试步骤（用于单独运行特定类别的测试）
+    // 测试工具模块（src/tests/utils.zig），与 src/utils.zig 不同
+    const test_utils_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/utils.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_utils_mod.addImport("ggml", ggml_mod);
+    test_utils_mod.addImport("gguf", gguf_mod);
+    test_utils_mod.addImport("model", model_mod);
+
     const test_layers_step = b.step("test-layers", "Run layer tests only");
     {
         const mod = b.createModule(.{
@@ -564,7 +599,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("rope", rope_mod);
         mod.addImport("attention", attention_mod);
         mod.addImport("swiglu", swiglu_mod);
-        mod.addImport("utils", utils_mod);
+        mod.addImport("utils", test_utils_mod);
         const t = b.addTest(.{ .name = "test-layers", .root_module = mod });
         test_layers_step.dependOn(&t.step);
     }
@@ -597,7 +632,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("registry", registry_mod);
         mod.addImport("graph_builder", graph_builder_mod);
         mod.addImport("memory", memory_mod);
-        mod.addImport("utils", utils_mod);
+        mod.addImport("utils", test_utils_mod);
         const t = b.addTest(.{ .name = "test-archs", .root_module = mod });
         test_archs_step.dependOn(&t.step);
     }
@@ -664,12 +699,19 @@ pub fn build(b: *std.Build) void {
 
     const test_compare_logits_step = b.step("test-compare-logits", "Run compare_logits tests only");
     {
+        const compare_logits_mod = b.createModule(.{
+            .root_source_file = b.path("src/tools/compare_logits.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
         const mod = b.createModule(.{
             .root_source_file = b.path("src/tests/test_compare_logits.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
         });
+        mod.addImport("compare_logits", compare_logits_mod);
         const t = b.addTest(.{ .name = "test-compare-logits", .root_module = mod });
         test_compare_logits_step.dependOn(&t.step);
     }

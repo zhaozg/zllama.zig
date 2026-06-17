@@ -100,11 +100,13 @@ pub const MemoryContext = struct {
 
 /// 标准 KV Cache 实现
 pub const KVCacheMemory = struct {
-    layers: []struct {
+    pub const Layer = struct {
         k: *ggml.Tensor,
         v: *ggml.Tensor,
         current_len: u32,
-    },
+    };
+
+    layers: []Layer,
     max_seq_len: u32,
     n_kv_head: u32,
     head_dim: u32,
@@ -117,11 +119,7 @@ pub const KVCacheMemory = struct {
         max_seq_len: u32,
         allocator: std.mem.Allocator,
     ) !KVCacheMemory {
-        var layers = try allocator.alloc(struct {
-            k: *ggml.Tensor,
-            v: *ggml.Tensor,
-            current_len: u32,
-        }, n_layer);
+        var layers = try allocator.alloc(Layer, n_layer);
 
         for (0..n_layer) |i| {
             const k = try ctx.newTensor3d(.f32, @intCast(head_dim), @intCast(n_kv_head), @intCast(max_seq_len));

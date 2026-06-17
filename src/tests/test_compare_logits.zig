@@ -3,7 +3,7 @@
 //! 测试 compare_logits 工具的各项功能。
 
 const std = @import("std");
-const compare_logits = @import("../tools/compare_logits.zig");
+const compare_logits = @import("compare_logits");
 
 const testing = std.testing;
 
@@ -70,10 +70,11 @@ test "printReport output" {
     };
 
     var comp = compare_logits.LogitsComparator.init(testing.allocator, .{});
-    var buf = std.ArrayList(u8).initCapacity(testing.allocator, 1024);
-    defer buf.deinit();
+    var buf = try std.ArrayList(u8).initCapacity(testing.allocator, 1024);
+    defer buf.deinit(testing.allocator);
 
-    try comp.printReport(result, buf.writer());
+    var writer = std.Io.Writer.fromArrayList(&buf);
+    try comp.printReport(result, &writer);
     const output = buf.items;
 
     try testing.expect(std.mem.indexOf(u8, output, "PASS") != null);

@@ -38,16 +38,16 @@ fn writeString(buf: []u8, pos: *usize, str: []const u8) void {
 /// 写入 u32 元数据值
 fn writeMetadataU32(buf: []u8, pos: *usize, key: []const u8, val: u32) void {
     writeString(buf, pos, key);
-    // value type: U32 = 6
-    writeU32(buf, pos, 6);
+    // value type: U32 = 4
+    writeU32(buf, pos, 4);
     writeU32(buf, pos, val);
 }
 
 /// 写入 f32 元数据值
 fn writeMetadataF32(buf: []u8, pos: *usize, key: []const u8, val: f32) void {
     writeString(buf, pos, key);
-    // value type: F32 = 4
-    writeU32(buf, pos, 4);
+    // value type: F32 = 6
+    writeU32(buf, pos, 6);
     std.mem.writeInt(u32, buf[pos.*..][0..4], @bitCast(val), .little);
     pos.* += 4;
 }
@@ -63,8 +63,8 @@ fn writeMetadataString(buf: []u8, pos: *usize, key: []const u8, val: []const u8)
 /// 写入 bool 元数据值
 fn writeMetadataBool(buf: []u8, pos: *usize, key: []const u8, val: bool) void {
     writeString(buf, pos, key);
-    // value type: BOOL = 0
-    writeU32(buf, pos, 0);
+    // value type: BOOL = 7
+    writeU32(buf, pos, 7);
     writeU32(buf, pos, if (val) 1 else 0);
 }
 
@@ -73,8 +73,8 @@ fn writeMetadataArrayU32(buf: []u8, pos: *usize, key: []const u8, vals: []const 
     writeString(buf, pos, key);
     // value type: ARRAY = 9
     writeU32(buf, pos, 9);
-    // array element type: U32 = 6
-    writeU32(buf, pos, 6);
+    // array element type: U32 = 4
+    writeU32(buf, pos, 4);
     // array length
     writeU64(buf, pos, @intCast(vals.len));
     for (vals) |v| {
@@ -410,49 +410,49 @@ test "GGUF - TensorInfo sizeBytes" {
 }
 
 test "GGUF - MetadataValueType enum" {
-    try testing.expectEqual(@as(u32, 0), @intFromEnum(gguf.MetadataValueType.bool));
-    try testing.expectEqual(@as(u32, 4), @intFromEnum(gguf.MetadataValueType.f32));
-    try testing.expectEqual(@as(u32, 6), @intFromEnum(gguf.MetadataValueType.u32));
+    try testing.expectEqual(@as(u32, 7), @intFromEnum(gguf.MetadataValueType.bool));
+    try testing.expectEqual(@as(u32, 6), @intFromEnum(gguf.MetadataValueType.float32));
+    try testing.expectEqual(@as(u32, 4), @intFromEnum(gguf.MetadataValueType.uint32));
     try testing.expectEqual(@as(u32, 8), @intFromEnum(gguf.MetadataValueType.string));
     try testing.expectEqual(@as(u32, 9), @intFromEnum(gguf.MetadataValueType.array));
 }
 
 test "GGUF - MetadataValue asString" {
     // 测试 MetadataValue 的 asString 方法
-    const val = gguf.MetadataValue{ .value_type = .string, .data = .{ .string = "hello" } };
+    const val = gguf.MetadataValue{ .value_type = .string, .string_val = "hello" };
     const s = val.asString();
     try testing.expect(s != null);
     try testing.expectEqualStrings("hello", s.?);
 }
 
 test "GGUF - MetadataValue asU32" {
-    const val = gguf.MetadataValue{ .value_type = .u32, .data = .{ .u32 = 42 } };
+    const val = gguf.MetadataValue{ .value_type = .uint32, .uint32_val = 42 };
     const n = val.asU32();
     try testing.expect(n != null);
     try testing.expectEqual(@as(u32, 42), n.?);
 }
 
 test "GGUF - MetadataValue asF32" {
-    const val = gguf.MetadataValue{ .value_type = .f32, .data = .{ .f32 = 3.14 } };
+    const val = gguf.MetadataValue{ .value_type = .float32, .float32_val = 3.14 };
     const n = val.asF32();
     try testing.expect(n != null);
     try testing.expectApproxEqAbs(@as(f32, 3.14), n.?, 0.001);
 }
 
 test "GGUF - MetadataValue asBool" {
-    const val_true = gguf.MetadataValue{ .value_type = .bool, .data = .{ .bool = true } };
+    const val_true = gguf.MetadataValue{ .value_type = .bool, .bool_val = true };
     try testing.expect(val_true.asBool().?);
 
-    const val_false = gguf.MetadataValue{ .value_type = .bool, .data = .{ .bool = false } };
+    const val_false = gguf.MetadataValue{ .value_type = .bool, .bool_val = false };
     try testing.expect(!val_false.asBool().?);
 }
 
 test "GGUF - MetadataValue wrong type returns null" {
-    const str_val = gguf.MetadataValue{ .value_type = .string, .data = .{ .string = "hello" } };
+    const str_val = gguf.MetadataValue{ .value_type = .string, .string_val = "hello" };
     try testing.expect(str_val.asU32() == null);
     try testing.expect(str_val.asF32() == null);
     try testing.expect(str_val.asBool() == null);
 
-    const u32_val = gguf.MetadataValue{ .value_type = .u32, .data = .{ .u32 = 42 } };
+    const u32_val = gguf.MetadataValue{ .value_type = .uint32, .uint32_val = 42 };
     try testing.expect(u32_val.asString() == null);
 }

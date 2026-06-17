@@ -37,7 +37,7 @@ test "KVCache init and deinit" {
     var kv = try kv_cache.KVCache.init(ctx, 2, 4, 32, 64, testing.allocator);
     defer kv.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(u32, 2), @intCast(kv.layers.len));
+    try testing.expectEqual(@as(u32, 2), @as(u32, @intCast(kv.layers.len)));
     try testing.expectEqual(@as(u32, 64), kv.max_seq_len);
     try testing.expectEqual(@as(u32, 4), kv.n_kv_head);
     try testing.expectEqual(@as(u32, 32), kv.head_dim);
@@ -266,10 +266,10 @@ test "KVCacheMemory init and basic ops" {
     defer ctx.deinit();
 
     var kv_mem = try memory.KVCacheMemory.init(ctx, 2, 2, 16, 32, testing.allocator);
-    defer kv_mem.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
+    defer memory.KVCacheMemory.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
 
-    try testing.expectEqual(@as(u32, 2), kv_mem.nLayers(@as(*anyopaque, @ptrCast(&kv_mem))));
-    try testing.expectEqual(@as(u32, 0), kv_mem.currentLen(@as(*anyopaque, @ptrCast(&kv_mem))));
+    try testing.expectEqual(@as(u32, 2), memory.KVCacheMemory.nLayers(@as(*anyopaque, @ptrCast(&kv_mem))));
+    try testing.expectEqual(@as(u32, 0), memory.KVCacheMemory.currentLen(@as(*anyopaque, @ptrCast(&kv_mem))));
 
     // 测试 MemoryContext 包装
     var mem_ctx = kv_mem.toMemoryContext();
@@ -286,7 +286,7 @@ test "KVCacheMemory setKv via interface" {
     defer ctx.deinit();
 
     var kv_mem = try memory.KVCacheMemory.init(ctx, 1, 2, 16, 32, testing.allocator);
-    defer kv_mem.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
+    defer memory.KVCacheMemory.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
 
     var mem_ctx = kv_mem.toMemoryContext();
 
@@ -307,7 +307,7 @@ test "KVCacheMemory multiple layers setKv" {
     defer ctx.deinit();
 
     var kv_mem = try memory.KVCacheMemory.init(ctx, 3, 4, 32, 64, testing.allocator);
-    defer kv_mem.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
+    defer memory.KVCacheMemory.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
 
     var mem_ctx = kv_mem.toMemoryContext();
 

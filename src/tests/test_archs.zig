@@ -367,10 +367,10 @@ test "KVCacheMemory basic operations" {
     defer ctx.deinit();
 
     var kv_mem = try memory.KVCacheMemory.init(ctx, 2, 2, 16, 32, testing.allocator);
-    defer kv_mem.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
+    defer memory.KVCacheMemory.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
 
-    try testing.expectEqual(@as(u32, 2), kv_mem.nLayers(@as(*anyopaque, @ptrCast(&kv_mem))));
-    try testing.expectEqual(@as(u32, 0), kv_mem.currentLen(@as(*anyopaque, @ptrCast(&kv_mem))));
+    try testing.expectEqual(@as(u32, 2), memory.KVCacheMemory.nLayers(@as(*anyopaque, @ptrCast(&kv_mem))));
+    try testing.expectEqual(@as(u32, 0), memory.KVCacheMemory.currentLen(@as(*anyopaque, @ptrCast(&kv_mem))));
 
     // 测试 MemoryContext 包装
     var mem_ctx = kv_mem.toMemoryContext();
@@ -387,7 +387,7 @@ test "KVCacheMemory toMemoryContext" {
     defer ctx.deinit();
 
     var kv_mem = try memory.KVCacheMemory.init(ctx, 1, 4, 32, 64, testing.allocator);
-    defer kv_mem.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
+    defer memory.KVCacheMemory.deinit(@as(*anyopaque, @ptrCast(&kv_mem)));
 
     var mem_ctx = kv_mem.toMemoryContext();
 
@@ -740,4 +740,3 @@ test "test_utils TestConfig" {
     try testing.expectEqual(@as(u32, 64), c.n_embd);
     try testing.expectEqual(@as(u32, 128), c.n_vocab);
 }
-
