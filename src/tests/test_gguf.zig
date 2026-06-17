@@ -65,7 +65,9 @@ fn writeMetadataBool(buf: []u8, pos: *usize, key: []const u8, val: bool) void {
     writeString(buf, pos, key);
     // value type: BOOL = 7
     writeU32(buf, pos, 7);
-    writeU32(buf, pos, if (val) 1 else 0);
+    // BOOL is 1 byte in GGUF spec
+    buf[pos.*] = if (val) 1 else 0;
+    pos.* += 1;
 }
 
 /// 写入数组元数据值（u32 数组）
@@ -104,15 +106,27 @@ fn writeTensorInfo(
 /// 构造一个简单的 v3 GGUF 文件
 /// 包含：魔数 + 版本 + tensor_count + metadata_kv_count + 元数据 + 张量信息 + 对齐 + 张量数据
 fn buildSimpleV3GGUF(allocator: std.mem.Allocator) ![]u8 {
-    // 估算大小
-    const estimated_size: usize = 4 + 4 + 8 + 8 + // header
-        200 + // metadata
-        200 + // tensor infos
-        32 + // alignment padding
-        64; // tensor data
-    var buf = try allocator.alloc(u8, estimated_size);
-    @memset(buf, 0);
+    // 先计算精确大小
     var pos: usize = 0;
+    // header: magic(4) + version(4) + tensor_count(8) + metadata_kv_count(8) = 24
+    pos += 24;
+    // metadata: 4 KV pairs
+    // "general.architecture" = 8+20 + type(4) + "llama" = 8+5 = 45
+    pos += 45;
+    // "llama.block_count" = 8+17 + type(4) + u32(4) = 33
+    pos += 33;
+    // "llama.rope.freq_base" = 8+20 + type(4) + f32(4) = 36
+    pos += 36;
+    // "general.file_type" = 8+17 + type(4) + bool(1) = 30
+    pos += 30;
+    // tensor info: "token_embd_weight" = 8+18 + n_dims(4) + dims(8+8) + data_type(4) + offset(8) = 58
+    pos += 58;
+    // v3 alignment to 32
+    const aligned_pos = std.mem.alignForward(usize, pos, 32);
+    const total_size = aligned_pos + 64; // 64 bytes of fake tensor data
+    var buf = try allocator.alloc(u8, total_size);
+    @memset(buf, 0);
+    pos = 0;
 
     // 魔数 "GGUF"
     @memcpy(buf[pos..][0..4], "GGUF");
@@ -135,22 +149,22 @@ fn buildSimpleV3GGUF(allocator: std.mem.Allocator) ![]u8 {
     writeTensorInfo(buf, &pos, "token_embd_weight", 2, &[_]u64{ 128, 4096 }, 0, 0); // f32 = 0
 
     // v3 对齐到 32 字节
-    const aligned_pos = std.mem.alignForward(usize, pos, 32);
-    @memset(buf[pos..aligned_pos], 0);
-    pos = aligned_pos;
+    const aligned = std.mem.alignForward(usize, pos, 32);
+    @memset(buf[pos..aligned], 0);
+    pos = aligned;
 
-    // 张量数据：128 * 4096 * 4 = 2MB，太大了，只写一小部分
-    // 实际上我们只测试解析，不测试数据内容
-    // 所以只写 64 字节占位
-    const data_start = pos;
-    _ = data_start;
+    // 写 64 字节占位张量数据
+    @memset(buf[pos..][0..64], 0);
+    pos += 64;
 
     return buf[0..pos];
 }
 
 /// 构造一个空的 v3 GGUF 文件（无元数据、无张量）
 fn buildEmptyV3GGUF(allocator: std.mem.Allocator) ![]u8 {
-    var buf = try allocator.alloc(u8, 64);
+    // header: magic(4) + version(4) + tensor_count(8) + metadata_kv_count(8) = 24
+    const total_size: usize = 24;
+    var buf = try allocator.alloc(u8, total_size);
     @memset(buf, 0);
     var pos: usize = 0;
 
@@ -161,12 +175,15 @@ fn buildEmptyV3GGUF(allocator: std.mem.Allocator) ![]u8 {
     writeU64(buf, &pos, 0); // tensor_count = 0
     writeU64(buf, &pos, 0); // metadata_kv_count = 0
 
-    return buf[0..pos];
+    return buf;
 }
 
 /// 构造一个 v2 GGUF 文件（与 v3 结构相同，只是版本号不同）
 fn buildV2GGUF(allocator: std.mem.Allocator) ![]u8 {
-    var buf = try allocator.alloc(u8, 128);
+    // header: magic(4) + version(4) + tensor_count(8) + metadata_kv_count(8) = 24
+    // metadata: "general.architecture" = 8+20 + type(4) + "qwen2" = 8+5 = 45
+    const total_size: usize = 24 + 45;
+    var buf = try allocator.alloc(u8, total_size);
     @memset(buf, 0);
     var pos: usize = 0;
 
@@ -179,7 +196,7 @@ fn buildV2GGUF(allocator: std.mem.Allocator) ![]u8 {
 
     writeMetadataString(buf, &pos, "general.architecture", "qwen2");
 
-    return buf[0..pos];
+    return buf;
 }
 
 // ============================================================================

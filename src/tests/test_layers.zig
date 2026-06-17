@@ -10,7 +10,7 @@ const rms_norm = @import("rms_norm");
 const rope = @import("rope");
 const attention = @import("attention");
 const swiglu = @import("swiglu");
-const test_utils = @import("utils");
+const test_utils = @import("test_utils");
 
 test "rms_norm structure" {
     // 验证 rms_norm 模块的导出函数存在

@@ -19,7 +19,7 @@ const model_if = @import("model");
 const registry = @import("registry");
 const graph_builder = @import("graph_builder");
 const memory = @import("memory");
-const test_utils = @import("utils");
+const test_utils = @import("test_utils");
 
 const log = std.log.scoped(.test_archs);
 

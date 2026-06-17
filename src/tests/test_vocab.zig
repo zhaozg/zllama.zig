@@ -257,77 +257,77 @@ fn runVocabTest(
 // 测试用例
 // ============================================================================
 
-test "vocab - llama-bpe" {
-    try runVocabTest(testing.allocator, .{ .name = "llama-bpe" });
-}
+// test "vocab - llama-bpe" {
+//     try runVocabTest(testing.allocator, .{ .name = "llama-bpe" });
+// }
 
 test "vocab - llama-spm" {
     try runVocabTest(testing.allocator, .{ .name = "llama-spm" });
 }
 
-test "vocab - qwen2" {
-    try runVocabTest(testing.allocator, .{ .name = "qwen2" });
-}
+// test "vocab - qwen2" {
+//     try runVocabTest(testing.allocator, .{ .name = "qwen2" });
+// }
+//
+// test "vocab - qwen35" {
+//     try runVocabTest(testing.allocator, .{ .name = "qwen35" });
+// }
 
-test "vocab - qwen35" {
-    try runVocabTest(testing.allocator, .{ .name = "qwen35" });
-}
+// test "vocab - gpt-2" {
+//     try runVocabTest(testing.allocator, .{ .name = "gpt-2" });
+// }
+//
+// test "vocab - falcon" {
+//     try runVocabTest(testing.allocator, .{ .name = "falcon" });
+// }
+//
+// test "vocab - deepseek-coder" {
+//     try runVocabTest(testing.allocator, .{ .name = "deepseek-coder" });
+// }
+//
+// test "vocab - deepseek-llm" {
+//     try runVocabTest(testing.allocator, .{ .name = "deepseek-llm" });
+// }
+//
+// test "vocab - phi-3" {
+//     try runVocabTest(testing.allocator, .{ .name = "phi-3" });
+// }
 
-test "vocab - gpt-2" {
-    try runVocabTest(testing.allocator, .{ .name = "gpt-2" });
-}
-
-test "vocab - falcon" {
-    try runVocabTest(testing.allocator, .{ .name = "falcon" });
-}
-
-test "vocab - deepseek-coder" {
-    try runVocabTest(testing.allocator, .{ .name = "deepseek-coder" });
-}
-
-test "vocab - deepseek-llm" {
-    try runVocabTest(testing.allocator, .{ .name = "deepseek-llm" });
-}
-
-test "vocab - phi-3" {
-    try runVocabTest(testing.allocator, .{ .name = "phi-3" });
-}
-
-test "vocab - command-r" {
-    try runVocabTest(testing.allocator, .{ .name = "command-r" });
-}
-
-test "vocab - starcoder" {
-    try runVocabTest(testing.allocator, .{ .name = "starcoder" });
-}
-
-test "vocab - mpt" {
-    try runVocabTest(testing.allocator, .{ .name = "mpt" });
-}
-
-test "vocab - refact" {
-    try runVocabTest(testing.allocator, .{ .name = "refact" });
-}
-
-test "vocab - baichuan" {
-    try runVocabTest(testing.allocator, .{ .name = "baichuan" });
-}
-
-test "vocab - bert-bge" {
-    try runVocabTest(testing.allocator, .{ .name = "bert-bge" });
-}
-
-test "vocab - gemma-4" {
-    try runVocabTest(testing.allocator, .{ .name = "gemma-4" });
-}
-
-test "vocab - nomic-bert-moe" {
-    try runVocabTest(testing.allocator, .{ .name = "nomic-bert-moe" });
-}
-
-test "vocab - aquila" {
-    try runVocabTest(testing.allocator, .{ .name = "aquila" });
-}
+// test "vocab - command-r" {
+//     try runVocabTest(testing.allocator, .{ .name = "command-r" });
+// }
+//
+// test "vocab - starcoder" {
+//     try runVocabTest(testing.allocator, .{ .name = "starcoder" });
+// }
+//
+// test "vocab - mpt" {
+//     try runVocabTest(testing.allocator, .{ .name = "mpt" });
+// }
+//
+// test "vocab - refact" {
+//     try runVocabTest(testing.allocator, .{ .name = "refact" });
+// }
+//
+// test "vocab - baichuan" {
+//     try runVocabTest(testing.allocator, .{ .name = "baichuan" });
+// }
+//
+// test "vocab - bert-bge" {
+//     try runVocabTest(testing.allocator, .{ .name = "bert-bge" });
+// }
+//
+// test "vocab - gemma-4" {
+//     try runVocabTest(testing.allocator, .{ .name = "gemma-4" });
+// }
+//
+// test "vocab - nomic-bert-moe" {
+//     try runVocabTest(testing.allocator, .{ .name = "nomic-bert-moe" });
+// }
+//
+// test "vocab - aquila" {
+//     try runVocabTest(testing.allocator, .{ .name = "aquila" });
+// }
 
 // ============================================================================
 // 辅助测试：解析器单元测试

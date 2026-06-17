@@ -335,16 +335,19 @@ const log = std.log.scoped(.gguf);
 fn readString(data: []const u8, pos: *usize, version: GGUFVersion, arena: *std.heap.ArenaAllocator) ![]const u8 {
     const len = if (version == .v3 or version == .v2) blk: {
         // v2/v3 都使用 64 位长度
+        if (pos.* + 8 > data.len) return error.InvalidGGUFFile;
         const l = std.mem.readInt(u64, data[pos.*..][0..8], .little);
         pos.* += 8;
         break :blk l;
     } else blk: {
         // v1 使用 32 位长度
+        if (pos.* + 4 > data.len) return error.InvalidGGUFFile;
         const l = std.mem.readInt(u32, data[pos.*..][0..4], .little);
         pos.* += 4;
         break :blk @as(u64, l);
     };
 
+    if (pos.* + @as(usize, @intCast(len)) > data.len) return error.InvalidGGUFFile;
     const str = data[pos.* .. pos.* + @as(usize, @intCast(len))];
     pos.* += @as(usize, @intCast(len));
 
@@ -357,6 +360,7 @@ fn readString(data: []const u8, pos: *usize, version: GGUFVersion, arena: *std.h
 
 /// 读取一个元数据值
 fn readMetadataValue(data: []const u8, pos: *usize, version: GGUFVersion, arena: *std.heap.ArenaAllocator) !MetadataValue {
+    if (pos.* + 4 > data.len) return error.InvalidGGUFFile;
     const value_type_int = std.mem.readInt(u32, data[pos.*..][0..4], .little);
     pos.* += 4;
     const value_type: MetadataValueType = @enumFromInt(value_type_int);
@@ -576,6 +580,7 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
 
     for (0..@as(usize, @intCast(tensor_count))) |_| {
         const name = try readString(data, &pos, version, &arena);
+        if (pos + 4 > data.len) return error.InvalidGGUFFile;
         const n_dims = if (is_64bit) blk: {
             const nd = std.mem.readInt(u32, data[pos..][0..4], .little);
             pos += 4;
@@ -589,24 +594,29 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
         var dims: [4]u64 = [_]u64{0} ** 4;
         for (0..@as(usize, @intCast(n_dims))) |i| {
             if (is_64bit) {
+                if (pos + 8 > data.len) return error.InvalidGGUFFile;
                 dims[i] = std.mem.readInt(u64, data[pos..][0..8], .little);
                 pos += 8;
             } else {
+                if (pos + 4 > data.len) return error.InvalidGGUFFile;
                 dims[i] = std.mem.readInt(u32, data[pos..][0..4], .little);
                 pos += 4;
             }
         }
 
+        if (pos + 4 > data.len) return error.InvalidGGUFFile;
         const data_type_int = std.mem.readInt(u32, data[pos..][0..4], .little);
         pos += 4;
         const data_type: TensorDataType = @enumFromInt(data_type_int);
 
         // v2/v3 使用 64 位偏移
         const offset = if (is_64bit) blk: {
+            if (pos + 8 > data.len) return error.InvalidGGUFFile;
             const off = std.mem.readInt(u64, data[pos..][0..8], .little);
             pos += 8;
             break :blk off;
         } else blk: {
+            if (pos + 4 > data.len) return error.InvalidGGUFFile;
             const off = std.mem.readInt(u32, data[pos..][0..4], .little);
             pos += 4;
             break :blk @as(u64, off);

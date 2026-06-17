@@ -568,14 +568,38 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("stb_image", stb_image_mod);
     test_root_mod.addImport("utils", utils_mod);
 
-    const test_unit = b.addTest(.{
-        .name = "unit-tests",
+    // 测试工具模块（src/tests/utils.zig），与 src/utils.zig 不同
+    const test_utils_mod_for_root = b.createModule(.{
+        .root_source_file = b.path("src/tests/utils.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_utils_mod_for_root.addImport("ggml", ggml_mod);
+    test_utils_mod_for_root.addImport("gguf", gguf_mod);
+    test_utils_mod_for_root.addImport("model", model_mod);
+    test_root_mod.addImport("test_utils", test_utils_mod_for_root);
+
+    // compare_logits 模块（用于 test_compare_logits.zig）
+    const compare_logits_mod_for_root = b.createModule(.{
+        .root_source_file = b.path("src/tools/compare_logits.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_root_mod.addImport("compare_logits", compare_logits_mod_for_root);
+
+    // mtmd 模块（用于 test_mtmd.zig）
+    test_root_mod.addImport("mtmd", mtmd_mod);
+
+    const unit_tests = b.addTest(.{
         .root_module = test_root_mod,
     });
+
     if (!bundle_ggml) {
-        test_unit.root_module.addRPathSpecial("/usr/local/lib");
+        unit_tests.root_module.addRPathSpecial("/usr/local/lib");
     }
-    const run_test_unit = b.addRunArtifact(test_unit);
+    const run_test_unit = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_test_unit.step);
 
     // 辅助函数：为测试步骤添加 rpath（使用系统库时需要）
