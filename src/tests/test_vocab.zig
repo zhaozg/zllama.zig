@@ -272,11 +272,12 @@ fn runVocabTest(
 // ============================================================================
 // 测试用例
 // ============================================================================
-
+// TODO: uncomment to test
+//
 // test "vocab - llama-bpe" {
 //     try runVocabTest(testing.allocator, .{ .name = "llama-bpe" });
 // }
-
+//
 // test "vocab - llama-spm" {
 //     try runVocabTest(testing.allocator, .{ .name = "llama-spm" });
 // }
@@ -288,7 +289,7 @@ fn runVocabTest(
 // test "vocab - qwen35" {
 //     try runVocabTest(testing.allocator, .{ .name = "qwen35" });
 // }
-
+//
 // test "vocab - gpt-2" {
 //     try runVocabTest(testing.allocator, .{ .name = "gpt-2" });
 // }

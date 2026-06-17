@@ -678,7 +678,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("registry", registry_mod);
         mod.addImport("graph_builder", graph_builder_mod);
         mod.addImport("memory", memory_mod);
-        mod.addImport("utils", test_utils_mod);
+        mod.addImport("test_utils", test_utils_mod);
         const t = addTestWithRpath(b, "test-archs", mod);
         const run_t = b.addRunArtifact(t);
         test_archs_step.dependOn(&run_t.step);

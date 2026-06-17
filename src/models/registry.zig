@@ -104,7 +104,7 @@ pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model_if.Architectur
                 arch = a;
                 break;
             }
-            log.warn("Unknown architecture: '{s}' from key '{s}'", .{ arch_str, key });
+            log.debug("Unknown architecture: '{s}' from key '{s}'", .{ arch_str, key });
         }
     }
 
@@ -138,7 +138,7 @@ pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model_if.Architectur
         return a;
     }
 
-    log.err("Could not detect model architecture from GGUF metadata", .{});
+    log.debug("Could not detect model architecture from GGUF metadata", .{});
     return null;
 }
 /// 检测模型的多模态能力
