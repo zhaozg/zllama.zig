@@ -99,7 +99,10 @@ pub const CliArgs = struct {
             \\  -c, --chat            交互式聊天模式
             \\
             \\对话模板选项:
-            \\  --chat-template <名称> 指定对话模板 (chatml | llama3 | gemma)
+            \\  --chat-template <名称|Jinja> 指定对话模板 (预设名称或Jinja模板字符串)
+            \\                  预设: chatml | llama3 | llama4 | gemma | gemma4 |
+            \\                        mistral-v7 | phi4 | deepseek3 | tinyllama
+            \\                  也可直接传入Jinja模板字符串作为自定义模板
             \\  --system-prompt <文本> 指定系统提示词
             \\  --no-chat-template     禁用对话模板，原始 prompt 透传
             \\

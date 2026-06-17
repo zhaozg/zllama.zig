@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const model = @import("model");
+const minja = @import("minja");
 
 // 导入子模块
 const types = @import("types");
@@ -137,6 +138,8 @@ pub const Template = struct {
     jinja_enabled: bool = true,
 
     /// Apply this template to format messages.
+    /// When jinja_enabled and source is a template string (gguf_builtin or custom),
+    /// Jinja rendering is tried first. On failure, falls back to the built-in preset.
     pub fn apply(
         self: *const Template,
         allocator: std.mem.Allocator,
@@ -144,7 +147,27 @@ pub const Template = struct {
         system_prompt: ?[]const u8,
         add_generation_prompt: bool,
     ) ![]const u8 {
+        // Try Jinja rendering first when enabled and source is a template string
+        if (self.jinja_enabled) {
+            if (self.getTemplateString()) |tmpl_str| {
+                if (tryJinjaApply(allocator, tmpl_str, messages, system_prompt, add_generation_prompt)) |result| {
+                    return result;
+                } else |_| {
+                    log.warn("Jinja rendering failed ({d} byte template), falling back to built-in preset", .{tmpl_str.len});
+                }
+            }
+        }
+        // Fall back to vtable dispatch (built-in presets, ChatML, raw prompt, etc.)
         return self.vtable.apply(allocator, messages, system_prompt, add_generation_prompt);
+    }
+
+    /// Extract the Jinja template source string from the TemplateSource, if any.
+    fn getTemplateString(self: *const Template) ?[]const u8 {
+        return switch (self.source) {
+            .gguf_builtin => |s| s,
+            .custom => |s| s,
+            .preset => null,
+        };
     }
 
     pub fn deinit(self: *Template, allocator: std.mem.Allocator) void {
@@ -157,26 +180,55 @@ pub const Template = struct {
 };
 
 // ============================================================================
+// Jinja template rendering via minja C++ bridge
+// ============================================================================
+
+/// Try to render messages through the Jinja template engine (minja).
+/// Returns the formatted prompt on success, or an error on failure.
+fn tryJinjaApply(
+    allocator: std.mem.Allocator,
+    tmpl_str: []const u8,
+    messages: []const ChatMessage,
+    system_prompt: ?[]const u8,
+    add_generation_prompt: bool,
+) ![]const u8 {
+    // minja requires null-terminated strings
+    const tmpl_z = try allocator.dupeZ(u8, tmpl_str);
+    defer allocator.free(tmpl_z);
+
+    // Convert ChatMessage (with optional media) to minja ChatMessage (role+content only)
+    // Media placeholders (e.g., <|image|>, <|audio|>) are expected to already be in content
+    const minja_messages = try allocator.alloc(minja.ChatMessage, messages.len);
+    defer allocator.free(minja_messages);
+    for (messages, 0..) |msg, i| {
+        minja_messages[i] = .{ .role = msg.role, .content = msg.content };
+    }
+
+    const tmpl = try minja.ChatTemplate.create(tmpl_z, "", "");
+    defer tmpl.destroy();
+    return try minja.applyTemplate(allocator, tmpl, minja_messages, system_prompt, null, add_generation_prompt);
+}
+
+// ============================================================================
 // Unknown template fallback
 // ============================================================================
 
 /// Fallback for unknown templates.
-/// Jinja rendering removed — deps/zig-jinja was removed due to instability.
-/// Falls back to raw prompt or ChatML.
+/// Jinja rendering is attempted by Template.apply() before this vtable entry
+/// is reached, so this function handles only the "Jinja failed or disabled" case.
 fn applyUnknown(
     allocator: std.mem.Allocator,
     messages: []const ChatMessage,
     system_prompt: ?[]const u8,
     add_generation_prompt: bool,
 ) ![]const u8 {
-    // system_prompt and add_generation_prompt are used in the fallback below
-    // Fallback: treat as raw prompt (no template)
-    if (messages.len == 1 and std.mem.eql(u8, messages[0].role, "user")) {
-        return allocator.dupe(u8, messages[0].content);
-    }
     // For multi-turn with unknown template, use ChatML as safe default
-    log.warn("unknown template kind, falling back to ChatML", .{});
-    return chatml.apply(allocator, messages, system_prompt, add_generation_prompt);
+    if (messages.len != 1 or !std.mem.eql(u8, messages[0].role, "user")) {
+        log.warn("unknown template kind, falling back to ChatML", .{});
+        return chatml.apply(allocator, messages, system_prompt, add_generation_prompt);
+    }
+    // Single-message: return content directly as raw prompt
+    return allocator.dupe(u8, messages[0].content);
 }
 
 // ============================================================================
@@ -235,14 +287,19 @@ pub fn kindForArchitecture(arch: model.Architecture, model_name: ?[]const u8) Te
 }
 
 /// Resolve a template source to a concrete Template.
-/// Priority chain (set by caller): GGUF detected known template > preset > minja Jinja > ChatML fallback
-/// When source is .gguf_builtin:
+/// Priority chain: custom > GGUF built-in > preset > arch default > ChatML fallback
+///
+/// When source is .gguf_builtin or .custom and jinja_enabled:
+///   1. Route to .unknown with jinja_enabled=true so apply() tries Jinja rendering
+///   2. Jinja failing → falls back to vtable (ChatML/raw within applyUnknown)
+///
+/// When jinja_enabled is false:
 ///   1. detectKind → known preset (uses built-in Zig implementation)
-///   2. If unknown + jinja_enabled → .unknown with Jinja rendering
-///   3. If unknown + jinja disabled → fall back to arch default preset
-///   4. If arch default also unknown → ChatML fallback (inside apply())
+///   2. If unknown → fall back to arch default preset
+///   3. If arch default also unknown → ChatML fallback (inside apply())
+///
 /// model_name is optional and used to detect TinyLlama (which reports as "llama" arch).
-/// jinja_enabled: when true, unrecognized templates are kept as .unknown for Jinja rendering.
+/// jinja_enabled: when true, GGUF/custom template strings are routed to Jinja rendering.
 pub fn resolve(
     allocator: std.mem.Allocator,
     source: TemplateSource,
@@ -260,6 +317,23 @@ pub fn resolve(
             };
         },
         .gguf_builtin => |tmpl_str| {
+            // When Jinja is enabled, always try Jinja rendering first
+            // (the GGUF template is the canonical format; detectKind is only a hint)
+            if (jinja_enabled) {
+                const hint = detectKind(tmpl_str);
+                if (hint != .unknown) {
+                    log.info("GGUF template ({d} bytes) hint={s}, will use Jinja rendering (preferred)", .{ tmpl_str.len, @tagName(hint) });
+                } else {
+                    log.info("GGUF chat template ({d} bytes), will try Jinja rendering", .{tmpl_str.len});
+                }
+                return Template{
+                    .kind = .unknown,
+                    .source = source,
+                    .vtable = vtableForKind(.unknown),
+                    .jinja_enabled = true,
+                };
+            }
+            // Jinja disabled: detect kind and use built-in preset if known
             const kind = detectKind(tmpl_str);
             if (kind != .unknown) {
                 log.info("GGUF template ({d} bytes) detected as {s}, using built-in preset", .{ tmpl_str.len, @tagName(kind) });
@@ -269,18 +343,7 @@ pub fn resolve(
                     .vtable = vtableForKind(kind),
                 };
             }
-            // If Jinja is enabled, keep as .unknown so apply() can try Jinja rendering
-            if (jinja_enabled) {
-                log.info("GGUF chat template ({d} bytes) not recognized, will try Jinja rendering", .{tmpl_str.len});
-                log.debug("Template preview: {s}", .{tmpl_str});
-                return Template{
-                    .kind = .unknown,
-                    .source = source,
-                    .vtable = vtableForKind(.unknown),
-                    .jinja_enabled = true,
-                };
-            }
-            // If GGUF template can't be detected and Jinja is disabled, fall back to arch default
+            // Jinja disabled + unknown template → fall back to arch default
             log.warn("GGUF chat template not recognized, falling back to arch default", .{});
             const arch_kind = kindForArchitecture(arch, model_name);
             return Template{
@@ -290,6 +353,17 @@ pub fn resolve(
             };
         },
         .custom => |tmpl_str| {
+            // For custom templates, always try Jinja rendering first when enabled
+            if (jinja_enabled) {
+                log.info("custom chat template ({d} bytes), will try Jinja rendering", .{tmpl_str.len});
+                return Template{
+                    .kind = .unknown,
+                    .source = source,
+                    .vtable = vtableForKind(.unknown),
+                    .jinja_enabled = true,
+                };
+            }
+            // Jinja disabled: detect kind and use built-in preset if known
             const kind = detectKind(tmpl_str);
             if (kind != .unknown) {
                 return Template{
@@ -298,13 +372,13 @@ pub fn resolve(
                     .vtable = vtableForKind(kind),
                 };
             }
-            // For custom templates, always try Jinja rendering (user explicitly provided it)
-            log.info("custom chat template not recognized, will try Jinja rendering", .{});
+            // Jinja disabled + unknown → fall back to arch default
+            log.warn("custom chat template not recognized and Jinja disabled, falling back to arch default", .{});
+            const arch_kind = kindForArchitecture(arch, model_name);
             return Template{
-                .kind = .unknown,
-                .source = source,
-                .vtable = vtableForKind(.unknown),
-                .jinja_enabled = jinja_enabled,
+                .kind = arch_kind,
+                .source = .{ .preset = arch_kind },
+                .vtable = vtableForKind(arch_kind),
             };
         },
     }
@@ -966,8 +1040,9 @@ test "detectKind: Gemma3 template with <start_of_turn>" {
     try testing.expectEqual(TemplateKind.gemma, kind);
 }
 
-test "resolve: GGUF Gemma4 template detected and uses preset" {
-    // A Gemma4 Jinja template from GGUF should be detected as .gemma4 and use preset
+test "resolve: GGUF Gemma4 template routes to Jinja rendering" {
+    // A Gemma4 Jinja template from GGUF — now routes to Jinja rendering
+    // (the GGUF template is the canonical source; detectKind is only a hint)
     const gemma4_template =
         \\{%- for message in messages -%}
         \\{{- '<|turn>' + role + '\n' }}
@@ -982,8 +1057,9 @@ test "resolve: GGUF Gemma4 template detected and uses preset" {
     var tmpl = try resolve(testing.allocator, source, .gemma4, null, true);
     defer tmpl.deinit(testing.allocator);
 
-    // Should be detected as gemma4, NOT unknown (no Jinja rendering)
-    try testing.expectEqual(TemplateKind.gemma4, tmpl.kind);
+    // Should be .unknown with Jinja enabled (GGUF template renders via minja)
+    try testing.expectEqual(TemplateKind.unknown, tmpl.kind);
+    try testing.expect(tmpl.jinja_enabled);
 
     // Apply the template and verify it renders correctly with image placeholder
     const media = Media{

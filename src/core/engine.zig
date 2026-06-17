@@ -148,19 +148,24 @@ pub const InferenceEngine = struct {
         if (cli_args.system_prompt.len > 0) system_prompt = try allocator.dupe(u8, cli_args.system_prompt);
         if (cli_args.no_chat_template) {
             chat_template_source = null;
-        } else if (gguf_file.getString("tokenizer.chat_template")) |tmpl_str| {
-            // GGUF detected known template > preset template > minja Jinja > ChatML fallback
-            const owned = try allocator.dupe(u8, tmpl_str);
-            chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
-            logger.info("Chat template: from GGUF metadata ({d} bytes)", .{tmpl_str.len});
         } else if (cli_args.chat_template_name.len > 0) {
+            // Priority 1: User explicitly provides a template via --chat-template.
+            // Try preset name first; if unrecognized, treat as custom Jinja string.
             if (chat_template.TemplateKind.fromString(cli_args.chat_template_name)) |kind| {
                 chat_template_source = chat_template.TemplateSource{ .preset = kind };
                 logger.info("Chat template: {s} (from --chat-template)", .{cli_args.chat_template_name});
             } else {
-                logger.warn("Unknown chat template '{s}', falling back to arch default", .{cli_args.chat_template_name});
+                const owned = try allocator.dupe(u8, cli_args.chat_template_name);
+                chat_template_source = chat_template.TemplateSource{ .custom = owned };
+                logger.info("Chat template: custom Jinja ({d} bytes) (from --chat-template)", .{cli_args.chat_template_name.len});
             }
+        } else if (gguf_file.getString("tokenizer.chat_template")) |tmpl_str| {
+            // Priority 2: GGUF built-in template (auto-detected from model metadata).
+            const owned = try allocator.dupe(u8, tmpl_str);
+            chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
+            logger.info("Chat template: from GGUF metadata ({d} bytes)", .{tmpl_str.len});
         }
+        // Priority 3 (fallback): Architecture default — handled in applyChatTemplate().
         // TODO: enable jinja template
         // if (cli_args.debug or cli_args.verbose) {
         //     const source = chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(arch, null) };
