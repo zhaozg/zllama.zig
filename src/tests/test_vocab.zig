@@ -106,6 +106,11 @@ fn parseInpFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u8
     while (start < content.len) {
         const end = std.mem.indexOfPos(u8, content, start, test_separator) orelse content.len;
         const segment = content[start..end];
+        // 跳过末尾的空白段（当文件以分隔符结尾时，最后一个段通常是空白）
+        if (end == content.len) {
+            const trimmed = std.mem.trim(u8, segment, " \n\r\t");
+            if (trimmed.len == 0) break;
+        }
         // 复制每个段
         const owned = try allocator.dupe(u8, segment);
         try result.append(allocator, owned);
@@ -124,10 +129,21 @@ fn parseOutFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u3
         result.deinit(allocator);
     }
 
-    var line_iter = std.mem.splitScalar(u8, content, '\n');
+    // 去除末尾的换行符，避免产生多余的空行
+    var end = content.len;
+    while (end > 0 and (content[end - 1] == '\n' or content[end - 1] == '\r')) {
+        end -= 1;
+    }
+    const trimmed_content = content[0..end];
+
+    var line_iter = std.mem.splitScalar(u8, trimmed_content, '\n');
     while (line_iter.next()) |line| {
         const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
-        if (trimmed.len == 0) continue;
+        // 空行对应空 token 数组（保留以匹配 .inp 文件中的空段）
+        if (trimmed.len == 0) {
+            try result.append(allocator, &.{});
+            continue;
+        }
 
         var tokens = try std.ArrayList(u32).initCapacity(allocator, 0);
         errdefer tokens.deinit(allocator);
@@ -386,9 +402,12 @@ test "parseOutFile empty lines" {
         testing.allocator.free(outputs);
     }
 
-    try testing.expectEqual(@as(usize, 2), outputs.len);
+    // 去除末尾换行后： "1 2\n\n3" -> 3 lines: "1 2", "", "3"
+    try testing.expectEqual(@as(usize, 3), outputs.len);
     try testing.expectEqual(@as(u32, 1), outputs[0][0]);
-    try testing.expectEqual(@as(u32, 3), outputs[1][0]);
+    try testing.expectEqual(@as(u32, 2), outputs[0][1]);
+    try testing.expectEqual(@as(usize, 0), outputs[1].len); // empty line
+    try testing.expectEqual(@as(u32, 3), outputs[2][0]);
 }
 
 test "parseOutFile single token" {
