@@ -1,7 +1,7 @@
 # 多模态推理模块 — MULTIMODAL
 
 > 参考：[llama.cpp tools/mtmd](deps/llama.cpp/tools/mtmd/)、Gemma 4 多模态实现
-> 当前状态：视觉/音频端到端基础联调已完成（三阶段 prefill + 注意力修复），待质量验证与功能扩展。
+> 当前状态：视觉/音频编码器实现完整，parse_special 特殊 token 解析已集成，端到端文本推理已验证。质量对比（含参考 logits 验证）待完成。
 
 ---
 
@@ -153,7 +153,9 @@ pub const MtmdContext = struct {
 | stb_image 集成 | ✅ 完整 |
 | 占位符 token `<|image|>` 处理 | ✅ 已实现（预分词拆分） |
 | 三阶段 prefill | ✅ 已实现 |
-| 输出质量对比 | 🟡 待完成 |
+| parse_special 特殊 token 解析 | ✅ 已集成到 tokenizer |
+| 端到端文本推理 (Gemma 4 text) | ✅ 已验证 |
+| 输出质量对比 (vs llama.cpp) | 🟡 比较工具已构建，待生成参考 logits |
 | 多图像支持 | 🟡 待完成 |
 | 动态分辨率 | 🟡 待完成 |
 
@@ -202,8 +204,9 @@ WAV 文件 (16-bit PCM)
 | Mel 频谱预处理 | ✅ 完整 |
 | 占位符 token `<|audio|>` 处理 | ✅ 已实现 |
 | 三阶段 prefill | ✅ 已实现 |
-| 端到端输出质量验证 | 🟡 待完成（需 `hello.wav` 测试） |
-| 跨平台 FFT 后备 | 🟡 待完成 |
+| parse_special 特殊 token 解析 | ✅ 已集成到 tokenizer |
+| 端到端输出质量验证 | 🟡 比较工具已构建，待生成参考 logits |
+| 跨平台 FFT 后备 (非 macOS) | 🟡 待完成（当前仅支持 macOS Accelerate） |
 
 ---
 
@@ -246,6 +249,45 @@ WAV 文件 (16-bit PCM)
 - [Gemma 4 技术报告](https://ai.google.dev/gemma)
 - [GGUF 规范](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
 - [本项目的待办事项](TODO.md)
+
+---
+
+## 质量对比验证方法
+
+### 生成参考 logits
+
+使用 zllama-gen-ref 工具从文本模型生成参考 logits：
+
+```bash
+zig-out/bin/zllama-gen-ref --model model.gguf -p "prompt" -n 1 -o ref.bin
 ```
 
-这份合并后的文档可以用 `docs/MULTIMODAL.md` 保存，替代原有的 MTMD.md、IMAGE.md、AUDIO.md。需要我帮你直接生成文件内容以便保存吗？
+### 视觉对比
+
+```bash
+# 第 1 步：用 llama.cpp mtmd 生成参考
+llama-mtmd-cli -m model.gguf --mmproj mmproj.gguf --image img.png \
+  --jinja -p ":" --logit-binary ref_vision.bin
+
+# 第 2 步：对比 zllama.zig 输出
+zig-out/bin/zllama-compare-mtmd-vision \
+  --model model.gguf --mmproj mmproj.gguf --image img.png \
+  --prompt "Describe this image" --ref-logits ref_vision.bin
+```
+
+### 音频对比
+
+```bash
+# 第 1 步：用 llama.cpp mtmd 生成参考
+llama-mtmd-cli -m model.gguf --mmproj mmproj.gguf --audio hello.wav \
+  --jinja -p ":" --logit-binary ref_audio.bin
+
+# 第 2 步：对比 zllama.zig 输出
+zig-out/bin/zllama-compare-mtmd-audio \
+  --model model.gguf --mmproj mmproj.gguf --audio hello.wav \
+  --prompt "Transcribe the audio" --ref-logits ref_audio.bin
+```
+
+> 注意：`--logit-binary` 需要 llama.cpp 对应版本支持。如果该 flag 不可用，
+> 可使用 `zllama-gen-ref` 在 zllama.zig 内部生成纯文本参考，或通过修改
+> llama.cpp 源码添加 logit 导出功能。
