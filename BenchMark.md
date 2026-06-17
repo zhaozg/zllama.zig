@@ -7,8 +7,6 @@
 ```
 zllama.zig on  build/ggml via ↯ v0.16.0
 ❯ zig-out/bin/zllama-simple -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf "3+3=?" --benchmark
-load_backend: loaded BLAS backend from /usr/local/Cellar/ggml/0.13.1/libexec/libggml-blas.so
-load_backend: loaded CPU backend from /usr/local/Cellar/ggml/0.13.1/libexec/libggml-cpu.so
 
 ============ Benchmark Results ============
   Model            : gpt2
@@ -52,8 +50,6 @@ zllama.zig on  build/ggml via ↯ v0.16.0 took 57s
 
 zllama.zig on  build/ggml via ↯ v0.16.0 took 33s
 ❯ zig-out/bin/zllama-simple -m ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf "3+3=?" --benchmark
-load_backend: loaded BLAS backend from /usr/local/Cellar/ggml/0.13.1/libexec/libggml-blas.so
-load_backend: loaded CPU backend from /usr/local/Cellar/ggml/0.13.1/libexec/libggml-cpu.so
 
 ============ Benchmark Results ============
   Model            : ����

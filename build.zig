@@ -753,8 +753,8 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     // 宏定义
     lib_mod.addCMacro("GGML_USE_CPU", "1");
     lib_mod.addCMacro("GGML_BACKEND_DL", "1");
-    lib_mod.addCMacro("GGML_VERSION", "\"0.13.1\"");
-    lib_mod.addCMacro("GGML_COMMIT", "\"1e33fed3\"");
+    lib_mod.addCMacro("GGML_VERSION", "\"0.15.1\"");
+    lib_mod.addCMacro("GGML_COMMIT", "\"f158c192\"");
     // x86_64 优化标志（所有 CPU 后端文件共享）
     const x86_opt_flags: []const []const u8 = if (cpu_arch == .x86_64)
         &.{ "-mavx2", "-mfma", "-mf16c", "-mavx", "-msse4.2" }
