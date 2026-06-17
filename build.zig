@@ -413,6 +413,21 @@ pub fn build(b: *std.Build) void {
 
     mm_preprocess_mod.addImport("stb_image", stb_image_mod);
 
+    // mtmd 模块（多模态解码）
+    const mtmd_mod = b.createModule(.{
+        .root_source_file = b.path("src/mtmd.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mtmd_mod.addImport("ggml", ggml_mod);
+    mtmd_mod.addImport("gguf", gguf_mod);
+    mtmd_mod.addImport("model", model_mod);
+    mtmd_mod.addImport("mm", mm_manager_mod);
+    mtmd_mod.addImport("preprocess", mm_preprocess_mod);
+    mtmd_mod.addImport("tokenizer", tokenizer_mod);
+    mtmd_mod.addImport("utils", utils_mod);
+
     // 主可执行文件 zllama
     // ======================================================================
     const exe_mod = b.createModule(.{
@@ -499,7 +514,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
 
     const test_root_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/test_runner.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -515,6 +530,19 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("kv_cache", kv_cache_mod);
     test_root_mod.addImport("graph_context", graph_context_mod);
     test_root_mod.addImport("mm", mm_manager_mod);
+    test_root_mod.addImport("preprocess", mm_preprocess_mod);
+    test_root_mod.addImport("engine_common", engine_common_mod);
+    test_root_mod.addImport("prefill", prefill_mod);
+    test_root_mod.addImport("chat_template", chat_template_mod);
+    test_root_mod.addImport("rms_norm", rms_norm_mod);
+    test_root_mod.addImport("rope", rope_mod);
+    test_root_mod.addImport("attention", attention_mod);
+    test_root_mod.addImport("swiglu", swiglu_mod);
+    test_root_mod.addImport("embed", embed_mod);
+    test_root_mod.addImport("pooling", pooling_mod);
+    test_root_mod.addImport("weight_loader", weight_loader_mod);
+    test_root_mod.addImport("stb_image", stb_image_mod);
+    test_root_mod.addImport("utils", utils_mod);
 
     const test_unit = b.addTest(.{
         .name = "unit-tests",
@@ -522,11 +550,129 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&test_unit.step);
 
-    _ = b.step("test-layers", "Run layer tests only");
-    _ = b.step("test-gguf", "Run GGUF tests only");
-    _ = b.step("test-archs", "Run architecture tests only");
-    _ = b.step("test-kv-cache", "Run KV Cache tests only");
-    _ = b.step("test-vocab", "Run vocab-based tokenizer tests only");
+    // 子测试步骤（用于单独运行特定类别的测试）
+    const test_layers_step = b.step("test-layers", "Run layer tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_layers.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("rms_norm", rms_norm_mod);
+        mod.addImport("rope", rope_mod);
+        mod.addImport("attention", attention_mod);
+        mod.addImport("swiglu", swiglu_mod);
+        mod.addImport("utils", utils_mod);
+        const t = b.addTest(.{ .name = "test-layers", .root_module = mod });
+        test_layers_step.dependOn(&t.step);
+    }
+
+    const test_gguf_step = b.step("test-gguf", "Run GGUF tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_gguf.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("gguf", gguf_mod);
+        const t = b.addTest(.{ .name = "test-gguf", .root_module = mod });
+        test_gguf_step.dependOn(&t.step);
+    }
+
+    const test_archs_step = b.step("test-archs", "Run architecture tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_archs.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("gguf", gguf_mod);
+        mod.addImport("model", model_mod);
+        mod.addImport("registry", registry_mod);
+        mod.addImport("graph_builder", graph_builder_mod);
+        mod.addImport("memory", memory_mod);
+        mod.addImport("utils", utils_mod);
+        const t = b.addTest(.{ .name = "test-archs", .root_module = mod });
+        test_archs_step.dependOn(&t.step);
+    }
+
+    const test_kv_cache_step = b.step("test-kv-cache", "Run KV Cache tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_kv_cache.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("gguf", gguf_mod);
+        mod.addImport("kv_cache", kv_cache_mod);
+        mod.addImport("memory", memory_mod);
+        const t = b.addTest(.{ .name = "test-kv-cache", .root_module = mod });
+        test_kv_cache_step.dependOn(&t.step);
+    }
+
+    const test_vocab_step = b.step("test-vocab", "Run vocab-based tokenizer tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_vocab.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("gguf", gguf_mod);
+        mod.addImport("tokenizer", tokenizer_mod);
+        const t = b.addTest(.{ .name = "test-vocab", .root_module = mod });
+        test_vocab_step.dependOn(&t.step);
+    }
+
+    const test_embed_step = b.step("test-embed", "Run embedding tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_embed.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("pooling", pooling_mod);
+        const t = b.addTest(.{ .name = "test-embed", .root_module = mod });
+        test_embed_step.dependOn(&t.step);
+    }
+
+    const test_mtmd_step = b.step("test-mtmd", "Run multimodal tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_mtmd.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("model", model_mod);
+        mod.addImport("mm", mm_manager_mod);
+        mod.addImport("mtmd", mtmd_mod);
+        const t = b.addTest(.{ .name = "test-mtmd", .root_module = mod });
+        test_mtmd_step.dependOn(&t.step);
+    }
+
+    const test_compare_logits_step = b.step("test-compare-logits", "Run compare_logits tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_compare_logits.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const t = b.addTest(.{ .name = "test-compare-logits", .root_module = mod });
+        test_compare_logits_step.dependOn(&t.step);
+    }
 
 
 
