@@ -643,6 +643,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("preprocess", mm_preprocess_mod);
         mod.addImport("chat_template", chat_template_mod);
         mod.addImport("engine_common", engine_common_mod);
+        mod.addImport("prefill", prefill_mod);
 
         const exe_tool = b.addExecutable(.{
             .name = "zllama-compare-mtmd-vision",
@@ -677,6 +678,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("preprocess", mm_preprocess_mod);
         mod.addImport("chat_template", chat_template_mod);
         mod.addImport("engine_common", engine_common_mod);
+        mod.addImport("prefill", prefill_mod);
 
         const exe_tool = b.addExecutable(.{
             .name = "zllama-compare-mtmd-audio",

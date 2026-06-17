@@ -26,6 +26,7 @@ const mm = @import("mm");
 const preprocess = @import("preprocess");
 const chat_template = @import("chat_template");
 const engine_common = @import("engine_common");
+const prefill = @import("prefill");
 
 const log = std.log.scoped(.compare_mtmd_vision);
 
@@ -272,18 +273,11 @@ pub const MtmdVisionComparator = struct {
         const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
         log.info("Total tokens: {d} (including {d} vision tokens)", .{ n_total_tokens, n_vision_tokens });
 
-        // 11. 构建 LLM 推理图（使用 forwardWithEmbdOverride）
-        graph_ctx.setNoAlloc(false);
-        const input_tensor = try graph_ctx.newTensor1d(.i32, n_total_tokens);
-        {
-            const data = input_tensor.dataBytes();
-            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total_tokens))];
-            for (expanded.tokens.items, 0..) |token, j| {
-                slice[j] = @as(i32, @intCast(token));
-            }
-        }
+        // 11. 三阶段 prefill（使用正确的注意力掩码）
+        // 阶段1: 文本前缀 (causal) → 阶段2: 图像媒体 (non-causal) → 阶段3: 文本后缀 (causal)
+        const n_threads: i32 = if (self.config.n_threads > 0) self.config.n_threads else @as(i32, @intCast(@min(4, @max(1, try std.Thread.getCpuCount() - 1))));
 
-        // Setup KV cache context
+        // Setup KV cache context (separate from graph context)
         const kv_cache_ctx = try ggml.Context.init(2 * 1024 * 1024 * 1024);
         defer kv_cache_ctx.deinit();
 
@@ -296,53 +290,62 @@ pub const MtmdVisionComparator = struct {
 
         model.setKVCacheContext(kv_cache_ctx);
 
-        // Access Gemma4Model directly for forwardWithEmbdOverride
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(model.ptr));
 
-        // Calculate the token offset for the image placeholder in the token sequence
-        const vision_embd_offset: i32 = if (expanded.offsets.len > 0)
-            @intCast(expanded.offsets[0].token_offset)
+        const vision_token_count: i32 = @intCast(n_vision_tokens);
+        const vision_embd_offset: u32 = if (expanded.offsets.len > 0)
+            expanded.offsets[0].token_offset
         else
             0;
-        log.info("Vision embedding offset in token sequence: {d} (total tokens: {d})", .{ vision_embd_offset, n_total_tokens });
+        const vision_embd_dim: u32 = @intCast(vision_embeddings.ne()[0]);
+        const vision_embd_data = vision_embeddings.dataF32();
 
-        var graph = try ggml.CGraph.initReserved(graph_ctx, 16384);
-        const logits_tensor = try gemma4_model.forwardWithEmbdOverride(
-            graph_ctx, graph, input_tensor, n_total_tokens,
-            @ptrCast(&kv_cache_mgr), 0, vision_embeddings, vision_embd_offset, false,
+        const prefix_tokens = expanded.tokens.items[0..vision_embd_offset];
+        const suffix_start = vision_embd_offset + expanded.offsets[0].token_count;
+        const suffix_tokens = if (suffix_start < expanded.tokens.items.len)
+            expanded.tokens.items[suffix_start..]
+        else
+            &[_]u32{};
+
+        log.info("Three-stage prefill: prefix={d}, media={d}, suffix={d}", .{
+            prefix_tokens.len, vision_token_count, suffix_tokens.len,
+        });
+
+        // Adapter: Gemma4Model.forwardWithEmbdOverride → prefill.MediaForwardFn
+        const mediaForwardFn = struct {
+            fn f(mp: *anyopaque, c: *ggml.Context, g: *ggml.CGraph, it: *ggml.Tensor, nt: i32, kvc: ?*kv_cache.KVCache, sp: i32, eo: *ggml.Tensor, eoff: i32, causal: bool) anyerror!*ggml.Tensor {
+                return (@as(*model_if.gemma4.Gemma4Model, @ptrCast(@alignCast(mp)))).mediaForward(c, g, it, nt, kvc, sp, eo, eoff, causal);
+            }
+        }.f;
+
+        const pr = try prefill.threeStagePrefill(
+            graph_ctx, model, @ptrCast(@alignCast(gemma4_model)), &mediaForwardFn,
+            &kv_cache_mgr, prefix_tokens, image_token_id, vision_token_count,
+            vision_embd_data, vision_embd_dim, suffix_tokens,
+            params, n_threads, self.allocator,
         );
-        graph_ctx.setNoAlloc(true);
+        const our_logits = pr.logits;
 
-        var galloc = try ggml.Gallocr.init(buft);
-        defer galloc.free();
-        if (!galloc.allocGraph(graph)) {
-            return error.GraphAllocFailed;
-        }
-
-        const n_threads: i32 = if (self.config.n_threads > 0) self.config.n_threads else @as(i32, @intCast(@min(4, @max(1, try std.Thread.getCpuCount() - 1))));
-        try graph.compute(n_threads);
-
-        // 12. 读取 logits
-        const logits_data = logits_tensor.dataBytes();
-        const n_vocab = @as(usize, @intCast(params.n_vocab));
-        const our_logits = @as([*]f32, @ptrCast(@alignCast(logits_data.ptr)))[0..n_vocab];
-
-        // 13. 加载参考 logits
+        // 12. 加载参考 logits
         const ref_logits = try self.loadReferenceLogits(io);
         defer self.allocator.free(ref_logits);
 
+        const n_vocab = @as(usize, @intCast(params.n_vocab));
         if (ref_logits.len != n_vocab) {
             log.err("Reference logits length mismatch: expected {d}, got {d}", .{ n_vocab, ref_logits.len });
             return error.SizeMismatch;
         }
 
-        // 14. 计算指标
+        // 13. 计算指标
         const nmse = calcNMSE(our_logits, ref_logits);
         const cos_sim = calcCosineSimilarity(our_logits, ref_logits);
         const max_abs_err = calcMaxAbsError(our_logits, ref_logits);
         const argmax_match = calcArgmaxMatch(our_logits, ref_logits);
 
-        // 15. 输出结果
+        // Free our logits (heap-allocated by threeStagePrefill)
+        self.allocator.free(our_logits);
+
+        // 14. 输出结果
         const stdout_file = std.Io.File.stdout();
         try stdout_file.writeStreamingAll(io, "\n=== zllama.zig Vision vs llama.cpp mtmd Comparison ===\n");
         try printMetric(io, "NMSE", nmse, self.config.nmse_threshold, true);
