@@ -620,7 +620,7 @@ pub fn isEogToken(tok: *const tokenizer.Tokenizer, id: u32) bool {
 pub fn findLfToken(tok: *tokenizer.Tokenizer) u32 {
     // 对于 BPE 类型，通过 tokenize("\n") 查找
     if (tok.config.model == .gpt2 or tok.config.model == .tiktoken or tok.config.model == .replit) {
-        var tokens = tok.encode("\n", false) catch return 13;
+        var tokens = tok.encode("\n", false, false) catch return 13;
         defer tokens.deinit(tok.allocator);
         if (tokens.items.len > 0) {
             return tokens.items[0];

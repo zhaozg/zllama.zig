@@ -436,7 +436,7 @@ pub const InferenceEngine = struct {
 
         logger.info("formatted_prompt: {s}", .{formatted_prompt});
 
-        var input_tokens = try self.tok.encode(formatted_prompt, true);
+        var input_tokens = try self.tok.encode(formatted_prompt, true, true);
         defer input_tokens.deinit(self.allocator);
 
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
@@ -470,7 +470,7 @@ pub const InferenceEngine = struct {
     // ========================================================================
 
     pub fn generateEmbedding(self: *InferenceEngine, io: std.Io, prompt: []const u8) ![]f32 {
-        var input_tokens = try self.tok.encode(prompt, true);
+        var input_tokens = try self.tok.encode(prompt, true, true);
         defer input_tokens.deinit(self.allocator);
         const n_tokens: i32 = @intCast(input_tokens.items.len);
         if (n_tokens == 0) return error.EmptyInput;
@@ -575,7 +575,7 @@ pub const InferenceEngine = struct {
             defer self.allocator.free(formatted_prompt);
 
             self.kv_cache_mgr.reset(); self.model.resetSSMStates();
-            var input_tokens = try self.tok.encode(formatted_prompt, true);
+            var input_tokens = try self.tok.encode(formatted_prompt, true, true);
             defer input_tokens.deinit(self.allocator);
 
             const prefill = try self.textPrefill(input_tokens.items);
@@ -908,7 +908,7 @@ pub const InferenceEngine = struct {
 
 fn tokenizeTextSegment(ctx: ?*anyopaque, text: []const u8, alloc: std.mem.Allocator) ![]u32 {
     const tok: *tokenizer.Tokenizer = @ptrCast(@alignCast(ctx orelse return error.NullCtx));
-    var result = try tok.encode(text, false);
+    var result = try tok.encode(text, false, true);
     defer result.deinit(alloc);
     return try result.toOwnedSlice(alloc);
 }

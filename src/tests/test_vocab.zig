@@ -206,7 +206,7 @@ fn runVocabTest(
     // 对每个测试用例进行 tokenize 验证
     for (inputs, expected_outputs, 0..) |input, expected, i| {
         // 编码（不添加特殊 token）
-        var tokens = try tok.encode(input, false);
+        var tokens = try tok.encode(input, false, false);
         defer tokens.deinit(allocator);
 
         // 验证 token 数量

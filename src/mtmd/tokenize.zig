@@ -33,7 +33,8 @@ fn addTextChunk(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, chunks: *m
     var tokens = std.ArrayList(i32).initCapacity(allocator, 0) catch @panic("OOM");
     defer tokens.deinit(allocator);
     if (ctx.tok) |tok| {
-        var encoded = try tok.encode(txt, parse_special);
+        // Text chunks within multimodal input: no BOS/EOS, but parse special tokens
+        var encoded = try tok.encode(txt, false, parse_special);
         defer encoded.deinit(allocator);
         for (encoded.items) |token| try tokens.append(allocator, @intCast(token));
     } else {

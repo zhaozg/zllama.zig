@@ -93,7 +93,7 @@ pub const LlamaCppComparator = struct {
         var tok = try tokenizer.Tokenizer.init(&gguf_file, self.allocator);
         defer tok.deinit();
 
-        var input_token_list = try tok.encode(self.config.prompt, false);
+        var input_token_list = try tok.encode(self.config.prompt, false, false);
         defer input_token_list.deinit(self.allocator);
         const input_tokens = input_token_list.items;
 

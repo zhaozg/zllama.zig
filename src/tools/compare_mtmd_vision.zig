@@ -53,7 +53,7 @@ pub const CompareMtmdVisionConfig = struct {
 
 fn tokenizeTextSegment(ctx: ?*anyopaque, text: []const u8, alloc: std.mem.Allocator) ![]u32 {
     const tok: *tokenizer.Tokenizer = @ptrCast(@alignCast(ctx orelse return error.NullCtx));
-    var result = try tok.encode(text, false);
+    var result = try tok.encode(text, false, false);
     defer result.deinit(alloc);
     return try result.toOwnedSlice(alloc);
 }

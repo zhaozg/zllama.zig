@@ -36,6 +36,18 @@ pub const inferIsByteToken = utils.inferIsByteToken;
 pub const hexDump = utils.hexDump;
 
 // ============================================================================
+// 特殊 Token 缓存条目
+// ============================================================================
+
+/// 缓存的特殊 token，用于 parse_special 预分词匹配
+/// 与 llama.cpp 的 cache_special_tokens 对应
+pub const CacheSpecialToken = struct {
+    id: u32,
+    text: []const u8, // 指向 vocab 中的 owned 字符串（生命周期与 vocab 一致）
+    attr: types.TokenAttr,
+};
+
+// ============================================================================
 // Tokenizer 主结构体
 // ============================================================================
 
@@ -63,6 +75,11 @@ pub const Tokenizer = struct {
     /// 与 llama.cpp 的 special_eog_ids 对应
     eog_ids: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 
+    /// 缓存的特殊 token 列表（按 text 长度降序排列）
+    /// 包含类型为 .control、.user_defined、.unknown 的 token
+    /// 用于 parse_special 模式下的预分词匹配
+    cache_special_tokens: std.ArrayListUnmanaged(CacheSpecialToken),
+
     // ========================================================================
     // 初始化
     // ========================================================================
@@ -80,6 +97,7 @@ pub const Tokenizer = struct {
             .unicode_to_byte = std.StringHashMap(u8).init(allocator),
             .token_scores = .empty,
             .eog_ids = .empty,
+            .cache_special_tokens = .empty,
         };
 
         log.info("Tokenizer model: '{s}' -> {s}", .{
@@ -174,12 +192,10 @@ pub const Tokenizer = struct {
             }
 
             // 通过名称匹配收集 EOG tokens（与 llama.cpp 保持一致）
-            // 注意：Qwen3.5 的 tokenizer.ggml.eos_token_id 通常指向 <|endoftext|>，
-            // 但对话结束标记是 <|im_end|>，必须通过名称匹配加入
             const eog_names = [_][]const u8{
                 "<|endoftext|>",
                 "<|im_end|>",
-                "<|im_start|>",  // Qwen 系列：<|im_start|> 也可能作为分隔符
+                "<|im_start|>",
                 "<|fim_pad|>",
                 "<|repo_name|>",
                 "<|file_sep|>",
@@ -218,17 +234,12 @@ pub const Tokenizer = struct {
                 }
             }
 
-            // 确保 special.eos 在集合中
             if (tok.special.eos != 0 and !tok.eog_ids.contains(tok.special.eos)) {
                 tok.eog_ids.put(allocator, tok.special.eos, {}) catch {};
             }
-
-            // 确保 special.eot 在集合中
             if (tok.special.eot != 0 and !tok.eog_ids.contains(tok.special.eot)) {
                 tok.eog_ids.put(allocator, tok.special.eot, {}) catch {};
             }
-
-            // 确保 special.eom 在集合中
             if (tok.special.eom != 0 and !tok.eog_ids.contains(tok.special.eom)) {
                 tok.eog_ids.put(allocator, tok.special.eom, {}) catch {};
             }
@@ -236,59 +247,97 @@ pub const Tokenizer = struct {
             log.info("Tokenizer: {d} EOG tokens", .{tok.eog_ids.count()});
         }
 
+        // 构建特殊 token 缓存（用于 parse_special 模式）
+        // 与 llama.cpp 的 cache_special_tokens 构建逻辑一致
+        {
+            var special_count: usize = 0;
+            for (tok.vocab.items, 0..) |entry, id| {
+                if (id < tok.token_types.items.len) {
+                    const tt = tok.token_types.items[id];
+                    if (tt == .control or tt == .user_defined or tt == .unknown) {
+                        special_count += 1;
+                    }
+                } else if (entry == .normal) {
+                    if (entry.normal.len > 2 and entry.normal[0] == '<' and entry.normal[entry.normal.len - 1] == '>') {
+                        special_count += 1;
+                    }
+                }
+            }
+
+            if (special_count > 0) {
+                try tok.cache_special_tokens.ensureTotalCapacity(allocator, special_count);
+                for (tok.vocab.items, 0..) |entry, id| {
+                    if (id < tok.token_types.items.len) {
+                        const tt = tok.token_types.items[id];
+                        if (tt == .control or tt == .user_defined or tt == .unknown) {
+                            tok.cache_special_tokens.appendAssumeCapacity(.{
+                                .id = @intCast(id),
+                                .text = if (entry == .normal) entry.normal else "",
+                                .attr = types.tokenTypeToAttr(tt),
+                            });
+                        }
+                    } else if (entry == .normal) {
+                        if (entry.normal.len > 2 and entry.normal[0] == '<' and entry.normal[entry.normal.len - 1] == '>') {
+                            tok.cache_special_tokens.appendAssumeCapacity(.{
+                                .id = @intCast(id),
+                                .text = entry.normal,
+                                .attr = types.TokenAttr{ .control = true },
+                            });
+                        }
+                    }
+                }
+
+                // 按 text 长度降序排列（最长优先匹配）
+                std.mem.sort(CacheSpecialToken, tok.cache_special_tokens.items, {}, struct {
+                    fn lessThan(_: void, a: CacheSpecialToken, b: CacheSpecialToken) bool {
+                        return a.text.len > b.text.len;
+                    }
+                }.lessThan);
+
+                log.info("Tokenizer: {d} special tokens cached for parse_special", .{tok.cache_special_tokens.items.len});
+            }
+        }
+
         return tok;
     }
 
     /// 初始化 GPT-2 字节编码映射
     fn initBytesToUnicode(self: *Tokenizer) !void {
-        // GPT-2 的 bytes_to_unicode 映射
-        // 将 0-255 字节映射到可打印的 Unicode 字符
         var bs: [256]bool = [_]bool{false} ** 256;
         var cs: [256]u32 = undefined;
         var n: u32 = 0;
 
-        // 可打印 ASCII: 0x21-0x7E (! 到 ~)
-        var ch: u32 = 0x21;
-        while (ch <= 0x7E) {
-            bs[ch] = true;
-            cs[ch] = ch;
-            ch += 1;
+        for (0x21..0x7F) |b| {
+            bs[b] = true;
+            cs[n] = @intCast(b);
+            n += 1;
         }
-
-        // Latin-1: 0xA1-0xAC (¡ 到 ¬)
-        ch = 0xA1;
-        while (ch <= 0xAC) {
-            bs[ch] = true;
-            cs[ch] = ch;
-            ch += 1;
+        for (0xA1..0xAD) |b| {
+            bs[b] = true;
+            cs[n] = @intCast(b);
+            n += 1;
         }
-
-        // Latin-1: 0xAE-0xFF (® 到 ÿ)
-        ch = 0xAE;
-        while (ch <= 0xFF) {
-            bs[ch] = true;
-            cs[ch] = ch;
-            ch += 1;
+        for (0xAE..0x100) |b| {
+            bs[b] = true;
+            cs[n] = @intCast(b);
+            n += 1;
         }
-
-        // 剩余字节映射到 0x100+ 范围
-        n = 0;
-        ch = 0;
-        while (ch < 256) {
-            if (!bs[ch]) {
-                cs[ch] = 256 + n;
+        for (0..256) |b| {
+            if (!bs[b]) {
+                cs[n] = @intCast(256 + b);
                 n += 1;
             }
-            ch += 1;
         }
 
-        // 将 codepoint 转换为 UTF-8 字符串
-        var buf: [4]u8 = undefined;
-        for (&self.bytes_to_unicode, 0..) |*mapped, byte| {
-            const cp = cs[byte];
+        for (0..256) |b| {
+            var buf: [4]u8 = undefined;
+            const cp = cs[b];
             const len = std.unicode.utf8Encode(@intCast(cp), &buf) catch unreachable;
-            mapped.* = try self.allocator.dupe(u8, buf[0..len]);
-            try self.unicode_to_byte.put(mapped.*, @intCast(byte));
+            self.bytes_to_unicode[b] = try self.allocator.dupe(u8, buf[0..len]);
+        }
+
+        for (0..256) |b| {
+            try self.unicode_to_byte.put(self.bytes_to_unicode[b], @intCast(b));
         }
     }
 
@@ -304,13 +353,13 @@ pub const Tokenizer = struct {
         self.token_types.deinit(self.allocator);
         self.token_scores.deinit(self.allocator);
 
-        // 释放 merges 中复制的 key 字符串
         var key_iter = self.merges.keyIterator();
         while (key_iter.next()) |key| {
             self.allocator.free(key.*);
         }
         self.merges.deinit();
         self.eog_ids.deinit(self.allocator);
+        self.cache_special_tokens.deinit(self.allocator);
 
         self.trie_root.deinit(self.allocator);
         for (&self.bytes_to_unicode) |mapped| {
@@ -323,9 +372,17 @@ pub const Tokenizer = struct {
     // 编码
     // ========================================================================
 
-    pub fn encode(self: *Tokenizer, text: []const u8, add_special: bool) !std.ArrayListUnmanaged(u32) {
+    /// 将文本编码为 token ID 列表
+    /// - add_special: 是否添加 BOS/EOS 等特殊 token
+    /// - parse_special: 是否解析文本中的特殊 token（如 <|turn|>、<|audio|>）
+    pub fn encode(self: *Tokenizer, text: []const u8, add_special: bool, parse_special: bool) !std.ArrayListUnmanaged(u32) {
         const add_bos = add_special and self.config.add_bos;
         const add_eos = add_special and self.config.add_eos;
+
+        const cache_special: ?[]const CacheSpecialToken = if (parse_special and self.cache_special_tokens.items.len > 0)
+            self.cache_special_tokens.items
+        else
+            null;
 
         const enc_config = encode_mod.EncodeConfig{
             .allocator = self.allocator,
@@ -341,9 +398,10 @@ pub const Tokenizer = struct {
             .byteToTokenIdFn = byteToTokenIdWrapper,
             .bytesToUnicodeFn = bytesToUnicodeWrapper,
             .ctx = @ptrCast(self),
+            .cache_special_tokens = cache_special,
         };
 
-        return encode_mod.encode(text, add_bos, add_eos, self.config.add_space_prefix, self.config.ignore_merges, &enc_config);
+        return encode_mod.encode(text, add_bos, add_eos, self.config.add_space_prefix, self.config.ignore_merges, parse_special, &enc_config);
     }
 
     // ========================================================================
@@ -381,12 +439,10 @@ pub const Tokenizer = struct {
     }
 
     /// 判断 token 是否为 EOG (End-of-Generation) token
-    /// 与 llama.cpp 的 llama_vocab_is_eog() 对应
     pub fn isEog(self: *const Tokenizer, token_id: u32) bool {
         return self.eog_ids.contains(token_id);
     }
 
-    /// EOG token 名称列表（用于文本匹配）
     const eog_token_names = [_][]const u8{
         "<|endoftext|>",
         "<|im_end|>",
@@ -398,8 +454,6 @@ pub const Tokenizer = struct {
         "<｜end▁of▁sentence｜>",
     };
 
-    /// 检查解码后的文本是否包含 EOG token 字符串。
-    /// 用于处理模型生成 EOG token 的子 token 序列的情况。
     pub fn isEogText(self: *const Tokenizer, text: []const u8) bool {
         _ = self;
         for (eog_token_names) |name| {
@@ -408,9 +462,6 @@ pub const Tokenizer = struct {
         return false;
     }
 
-    /// 应被过滤（跳过）的 token 名称列表。
-    /// 这些 token 是控制/特殊 token，不应出现在输出中，
-    /// 但生成不应停止（与 EOG 不同）。
     const skip_token_names = [_][]const u8{
         "<|channel|>",
         "<|channel>",
@@ -419,8 +470,6 @@ pub const Tokenizer = struct {
         "<end_of_turn>",
     };
 
-    /// 检查 token 是否为应被过滤的 skip token。
-    /// 这些 token 会被从输出中移除，但生成继续。
     pub fn isSkipToken(self: *const Tokenizer, token_id: u32) bool {
         if (token_id >= self.vocab.items.len) return false;
         const entry = self.vocab.items[token_id];
@@ -430,17 +479,15 @@ pub const Tokenizer = struct {
         }
         return false;
     }
+
     pub fn byteToTokenId(self: *const Tokenizer, byte: u8) u32 {
         if (self.byte_to_token_id[byte]) |tid| return tid;
         return self.special.unk;
     }
 
-    /// 解码单个 token 到缓冲区（对齐 llama-simple 的 token_to_piece 行为）
-    /// 返回写入的字节数
+    /// 解码单个 token 到缓冲区
     pub fn decodeSingle(self: *const Tokenizer, token_id: u32, buf: []u8) !usize {
         if (token_id >= self.vocab.items.len) return 0;
-
-        // 跳过特殊 token
         if (self.isSpecialToken(token_id)) return 0;
 
         var written: usize = 0;
@@ -454,7 +501,6 @@ pub const Tokenizer = struct {
             },
             .normal => |ts| {
                 if (self.config.model == .tiktoken) {
-                    // tiktoken 风格：<0xXX> 格式
                     var rem = ts;
                     while (rem.len > 0 and written < buf.len) {
                         if (rem.len >= 4 and rem[0] == '<' and rem[1] == '0' and rem[2] == 'x') {
@@ -484,7 +530,6 @@ pub const Tokenizer = struct {
                         rem = rem[1..];
                     }
                 } else if (self.config.model == .gpt2) {
-                    // GPT-2 风格：字节编码
                     var i: usize = 0;
                     while (i < ts.len and written < buf.len) {
                         const byte = ts[i];
@@ -515,13 +560,9 @@ pub const Tokenizer = struct {
                         i += cp_len;
                     }
                 } else {
-                    // SPM 风格：替换 ▁ 或 Ġ 为空格，同时处理 <0xXX> 字节模式
                     var i: usize = 0;
                     while (i < ts.len and written < buf.len) {
-                        // 检查 <0xXX> 字节模式（某些 SPM 词表的 token 使用此格式）
-                        if (ts[i] == '<' and i + 3 < ts.len and
-                            ts[i + 1] == '0' and ts[i + 2] == 'x')
-                        {
+                        if (ts[i] == '<' and i + 3 < ts.len and ts[i + 1] == '0' and ts[i + 2] == 'x') {
                             const end = std.mem.indexOfScalar(u8, ts[i + 1 ..], '>') orelse {
                                 buf[written] = ts[i];
                                 written += 1;
@@ -542,14 +583,12 @@ pub const Tokenizer = struct {
                             i += 1;
                             continue;
                         }
-                        // U+2581 (▁) UTF-8: E2 96 81
                         if (i + 2 < ts.len and ts[i] == 0xE2 and ts[i+1] == 0x96 and ts[i+2] == 0x81) {
                             buf[written] = ' ';
                             written += 1;
                             i += 3;
                             continue;
                         }
-                        // U+0120 (Ġ) UTF-8: C4 A0
                         if (i + 1 < ts.len and ts[i] == 0xC4 and ts[i+1] == 0xA0) {
                             buf[written] = ' ';
                             written += 1;
@@ -567,7 +606,6 @@ pub const Tokenizer = struct {
         return written;
     }
 
-
     /// 将 token ID 转换为字符串表示（用于 BPE 合并）
     fn tokenToString(self: *Tokenizer, token_id: u32) ?[]const u8 {
         if (token_id >= self.vocab.items.len) return null;
@@ -580,20 +618,16 @@ pub const Tokenizer = struct {
         }
     }
 
-    /// 将字节转换为 GPT-2 编码后的字符串
     fn bytesToUnicode(self: *const Tokenizer, byte: u8) []const u8 {
         return self.bytes_to_unicode[byte];
     }
 
-    /// 通过 token 名称（字符串）查找对应的 token ID。
-    /// 用于查找特殊 token（如音频/视觉占位符）的 ID。
+    /// 通过 token 名称（字符串）查找对应的 token ID
     pub fn textToToken(self: *const Tokenizer, text: []const u8) ?u32 {
-        // 先在 Trie 中查找
         const match = trie.longestMatch(&self.trie_root, text, 0);
         if (match) |m| {
             if (m.len == text.len) return m.token_id;
         }
-        // 再在词表中线性查找（作为回退）
         for (self.vocab.items, 0..) |entry, i| {
             if (entry == .normal and std.mem.eql(u8, entry.normal, text)) {
                 return @intCast(i);
@@ -602,16 +636,12 @@ pub const Tokenizer = struct {
         return null;
     }
 
-    /// 查找两个 token 的 BPE 合并 rank
     fn findBpeRank(self: *const Tokenizer, left: []const u8, right: []const u8) ?u32 {
-        // merges 中的 key 格式为 "left right"
-        // 使用动态分配避免缓冲区溢出
         const key = std.fmt.allocPrint(self.allocator, "{s} {s}", .{ left, right }) catch return null;
         defer self.allocator.free(key);
         return self.merges.get(key);
     }
 
-    /// 获取 token 的 score
     fn tokenScore(self: *const Tokenizer, token_id: u32) f32 {
         if (token_id < self.token_scores.items.len) {
             return self.token_scores.items[token_id];

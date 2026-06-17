@@ -347,7 +347,7 @@ const SimpleEngine = struct {
         const formatted_prompt = try self.applyChatTemplate(prompt);
         defer self.allocator.free(formatted_prompt);
 
-        var input_tokens = try self.tok.encode(formatted_prompt, true);
+        var input_tokens = try self.tok.encode(formatted_prompt, true, true);
         defer input_tokens.deinit(self.allocator);
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
 

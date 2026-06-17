@@ -288,7 +288,7 @@ pub fn main(init: std.process.Init) !void {
     const add_bos = model_wants_add_bos and !args.no_bos;
 
     // 编码 prompt
-    var tokens = try tok.encode(prompt, add_bos);
+    var tokens = try tok.encode(prompt, add_bos, true);
     defer tokens.deinit(allocator);
 
     // 输出结果

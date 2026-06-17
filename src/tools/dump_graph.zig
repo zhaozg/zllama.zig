@@ -394,7 +394,7 @@ pub fn main(init: std.process.Init) !void {
     var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
     defer tok.deinit();
 
-    var input_token_list = try tok.encode(prompt, false);
+    var input_token_list = try tok.encode(prompt, false, false);
     defer input_token_list.deinit(allocator);
     const input_tokens = input_token_list.items;
 
