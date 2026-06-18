@@ -722,6 +722,7 @@ fn encodeWord(
     const is_spm_model = config.model == .llama or config.model == .spm;
 
     // 步骤 1：确定基础文本（可能添加空格前缀）
+    // 对于 escape_whitespaces 的模型（gemma-4 等），将空格转为 ▁ (U+2581)
     const base_text = if (add_space_prefix) blk: {
         if (is_spm_model) {
             if (word.len > 0 and isWhitespace(word[0])) {
@@ -732,12 +733,39 @@ fn encodeWord(
                 }
             }
             break :blk try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word });
+        } else if (config.escape_whitespaces) {
+            if (word.len > 0 and isWhitespace(word[0])) {
+                // Only convert single leading space to ▁.
+                // Multiple spaces (like "  ") should remain as-is
+                // because they may be tokens themselves (e.g. gemma-4 token 138).
+                var ws_end: usize = 1;
+                while (ws_end < word.len and isWhitespace(word[ws_end])) ws_end += 1;
+                if (ws_end < word.len) {
+                    break :blk try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] });
+                }
+                // Word is all whitespace — keep as-is for token lookup
+            }
+            break :blk word;
         } else {
             break :blk try std.fmt.allocPrint(config.allocator, " {s}", .{word});
         }
+    } else if (config.escape_whitespaces and word.len > 0 and isWhitespace(word[0])) blk: {
+        var ws_end: usize = 1;
+        while (ws_end < word.len and isWhitespace(word[ws_end])) ws_end += 1;
+        if (ws_end < word.len) {
+            break :blk try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] });
+        }
+        // Word is all whitespace — keep as-is for token lookup
+        break :blk word;
     } else word;
 
-    const base_needs_free = add_space_prefix;
+    const base_needs_free = add_space_prefix or
+        (config.escape_whitespaces and word.len > 0 and isWhitespace(word[0]) and
+         blk: {
+            var ws_end: usize = 1;
+            while (ws_end < word.len and isWhitespace(word[ws_end])) ws_end += 1;
+            break :blk ws_end < word.len;
+         });
     errdefer {
         if (base_needs_free) config.allocator.free(base_text);
     }
@@ -767,14 +795,15 @@ fn encodeWord(
     }
 
     // 阶段 2：Tokenization
-    // 对于有 BPE 合并规则的模型：使用字节级 tokenization + BPE 合并
-    // 这与 llama.cpp 行为一致：先拆成最小单元（字节 token），再用 BPE 合并
-    // Trie 贪婪最长匹配对 BPE 模型会破坏正确的合并路径
+    // BPE 模型：先拆分为最小单元，再 BPE 合并。
+    // - GPT-2 byte-encoded BPE (llama-bpe, qwen2 等): 通过 unicodeToByte
+    //   映射回原始 byte，用 byteToTokenIdFn 查找字节 token。
+    // - Non-byte-encoded BPE (gemma-4, bert): 直接按 UTF-8 字符查找 token。
     if (config.merges.count() > 0) {
-        // BPE 模型：字节级 tokenization
         var pos: usize = 0;
         while (pos < final_text.len) {
             if (config.unicodeToByte) |utb| {
+                // GPT-2 byte-encoded BPE: decode each UTF-8 code point back to raw byte
                 const ch_len = std.unicode.utf8ByteSequenceLength(final_text[pos]) catch 1;
                 const ch = final_text[pos .. pos + @as(usize, ch_len)];
                 if (utb.get(ch)) |byte| {
@@ -787,9 +816,25 @@ fn encodeWord(
                     pos += 1;
                 }
             } else {
-                const tid = config.byteToTokenIdFn(final_text[pos], config.ctx);
-                try tokens.append(config.allocator, tid);
-                pos += 1;
+                // Non-byte-encoded BPE: character-level lookup
+                const ch_len = std.unicode.utf8ByteSequenceLength(final_text[pos]) catch 1;
+                const ch = final_text[pos .. pos + @as(usize, ch_len)];
+                if (config.textToTokenFn(ch, config.ctx)) |tid| {
+                    try tokens.append(config.allocator, tid);
+                } else if (config.escape_whitespaces and ch.len == 1 and isWhitespace(ch[0])) {
+                    if (config.textToTokenFn(SPM_SPACE, config.ctx)) |tid| {
+                        try tokens.append(config.allocator, tid);
+                    } else {
+                        const tid = config.byteToTokenIdFn(ch[0], config.ctx);
+                        try tokens.append(config.allocator, tid);
+                    }
+                } else {
+                    for (ch) |byte| {
+                        const tid = config.byteToTokenIdFn(byte, config.ctx);
+                        try tokens.append(config.allocator, tid);
+                    }
+                }
+                pos += ch.len;
             }
         }
     } else {
@@ -851,6 +896,7 @@ pub const EncodeConfig = struct {
     byteToTokenIdFn: *const fn (byte: u8, ctx: ?*anyopaque) u32,
     bytesToUnicodeFn: ?*const fn (byte: u8, ctx: ?*anyopaque) []const u8 = null,
     unicodeToByte: ?*const std.StringHashMap(u8) = null,
+    escape_whitespaces: bool = false,
     ctx: ?*anyopaque,
     /// 缓存的特殊 token 列表（按 text 长度降序排列），用于 parse_special 模式
     cache_special_tokens: ?[]const mod.CacheSpecialToken = null,

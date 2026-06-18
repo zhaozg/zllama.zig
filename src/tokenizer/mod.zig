@@ -183,6 +183,8 @@ pub const Tokenizer = struct {
     /// 同时处理两种字节 token 格式：
     /// 1. GPT-2 编码的多字节 token（如 "Ã" = [0xC3,0x83] 表示 byte 0xC3）
     /// 2. 原始单字节 token（如直接存储 byte 值）
+    /// 只设置尚未映射的 byte 槽位（first-wins），防止 BPE 合并 token
+    /// 覆盖 byte token 映射。
     fn fixByteToTokenMapping(self: *Tokenizer) !void {
         const v = &self.vocab;
         const reverse = &self.bytes_to_unicode_map.reverse;
@@ -191,11 +193,15 @@ pub const Tokenizer = struct {
             const uid = @as(u32, @intCast(id));
             // 尝试通过反向映射查找字节值（处理 GPT-2 编码的多字节 token）
             if (reverse.get(td.text)) |byte| {
-                v.byte_to_token[byte] = uid;
+                if (v.byte_to_token[byte] == v.special.unk) {
+                    v.byte_to_token[byte] = uid;
+                }
             }
             // 也处理直接的单字节 token（回退：对于 raw byte 存储的模型）
             if (td.type == .byte and td.text.len == 1) {
-                v.byte_to_token[td.text[0]] = uid;
+                if (v.byte_to_token[td.text[0]] == v.special.unk) {
+                    v.byte_to_token[td.text[0]] = uid;
+                }
             }
         }
     }
@@ -284,19 +290,24 @@ pub const Tokenizer = struct {
         else
             null;
 
+        // 对于 gemma-4/bert 等使用 <0xXX> 格式字节 token 的模型，不使用 GPT-2 字节编码
+        const model_type = self.vocab.getType();
+        const needs_gpt2_encoding = model_type != .gemma4 and model_type != .bert;
+
         const enc_config = encode_mod.EncodeConfig{
             .allocator = self.allocator,
             .special = self.vocab.getSpecial(),
             .pre_type = self.vocab.getPreType(),
-            .model = self.vocab.getType(),
+            .model = model_type,
             .vocab = .empty, // initialized empty; not used (all lookups via callbacks)
             .merges = self.vocab.merges,
             .trie_root = &self.trie_root,
             .tokenToStringFn = tokenToStringWrapper,
             .textToTokenFn = textToTokenWrapper,
-            .unicodeToByte = &self.bytes_to_unicode_map.reverse,
+            .unicodeToByte = if (needs_gpt2_encoding) &self.bytes_to_unicode_map.reverse else null,
             .byteToTokenIdFn = byteToTokenIdWrapper,
-            .bytesToUnicodeFn = bytesToUnicodeWrapper,
+            .bytesToUnicodeFn = if (needs_gpt2_encoding) bytesToUnicodeWrapper else null,
+            .escape_whitespaces = self.vocab.getEscapeWhitespaces(),
             .ctx = @ptrCast(self),
             .cache_special_tokens = cache_special,
         };

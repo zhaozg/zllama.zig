@@ -670,7 +670,13 @@ pub const Vocab = struct {
                     else => {},
                 }
             },
-            .gemma4, .bert => {
+            .gemma4 => {
+                self.add_space_prefix = false;
+                self.escape_whitespaces = true;  // gemma-4 使用 ▁ (U+2581) 代替空格
+                self.ignore_merges = false;
+                self.add_bos = false;
+            },
+            .bert => {
                 self.add_space_prefix = false;
                 self.escape_whitespaces = false;
                 self.ignore_merges = false;
@@ -706,35 +712,38 @@ pub const Vocab = struct {
         // 初始化 byte→token 为 unk
         @memset(&self.byte_to_token, self.special.unk);
 
+        // 第一遍：处理所有 token 的 text→token 映射和普通 byte→token 映射
+        // 跳过 <0xXX> 格式的字节 token（留给第二遍处理，确保不被单字节 normal token 覆盖）
         for (self.tokens, 0..) |td, id| {
             const uid = @as(u32, @intCast(id));
 
-            // text→token 映射（normal、control 和 byte 类型）
-            // NOTE: byte 类型的 token 也需要加入 text_to_token 映射，
-            // 因为 BPE 合并可能查找合并后的文本是否在词表中
+            // text→token 映射
             if (td.type == .normal or td.type == .control or td.type == .byte) {
                 const key = try allocator.dupe(u8, td.text);
                 try self.text_to_token.put(allocator, key, uid);
             }
 
-            // byte→token 映射
-            // NOTE: 某些模型的字节 token 可能是 normal 类型（如 GPT-2 BPE），
-            // 需要同时检查 byte 类型和单字节的 normal 类型
-            // 对于 gemma-4 等模型，字节 token 使用 <0xXX> 格式
-            if (td.type == .byte or (td.type == .normal and td.text.len == 1)) {
-                if (td.text.len == 1) {
-                    self.byte_to_token[td.text[0]] = uid;
+            // byte→token 映射（跳过 <0xXX> 格式，留给第二遍）
+            const is_hex_byte = td.text.len == 6 and td.text[0] == '<' and td.text[1] == '0' and td.text[2] == 'x' and td.text[5] == '>';
+            if (!is_hex_byte) {
+                if (td.type == .byte or (td.type == .normal and td.text.len == 1)) {
+                    if (td.text.len == 1) {
+                        self.byte_to_token[td.text[0]] = uid;
+                    }
                 }
             }
-            // 处理 <0xXX> 格式的字节 token（如 gemma-4）
+        }
+
+        // 第二遍：处理 <0xXX> 格式的字节 token（如 gemma-4）
+        // 必须放在最后，确保不被单字节 normal token 覆盖
+        for (self.tokens, 0..) |td, id| {
             if (td.text.len == 6 and td.text[0] == '<' and td.text[1] == '0' and td.text[2] == 'x' and td.text[5] == '>') {
                 const hex_str = td.text[3..5];
                 const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch continue;
-                self.byte_to_token[byte_val] = uid;
+                self.byte_to_token[byte_val] = @as(u32, @intCast(id));
             }
         }
     }
-
     /// 加载 BPE 合并规则
     fn loadMerges(self: *Vocab, gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator) !void {
         const val = gguf_file.metadata.get("tokenizer.ggml.merges") orelse return;
