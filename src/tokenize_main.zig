@@ -238,15 +238,21 @@ pub fn main(init: std.process.Init) !void {
 
     // 打印 init_tokenizer 信息（与 llama.cpp 保持一致）
     {
-        const tokenizer_type: u32 = switch (tok.config.model) {
+        const tokenizer_type: u32 = switch (tok.vocab.getType()) {
             .llama => 1,
             .gpt2 => 2,
             .tiktoken => 2,
             .replit => 2,
+            .spm => 1,
             else => 0,
         };
         logger.info("init_tokenizer: initializing tokenizer for type {d}", .{tokenizer_type});
     }
+    // 打印模型加载信息
+    utils.printModelLoaderInfo(&gguf_file, file_size, args.model_path);
+
+    // 打印分词器信息
+    utils.printTokenizerInfo(&tok, &gguf_file);
     // 打印模型加载信息
     utils.printModelLoaderInfo(&gguf_file, file_size, args.model_path);
 
@@ -284,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (needs_escape) allocator.free(prompt);
 
     // 确定是否添加 BOS
-    const model_wants_add_bos = tok.config.add_bos;
+    const model_wants_add_bos = tok.vocab.getAddBos();
     const add_bos = model_wants_add_bos and !args.no_bos;
 
     // 编码 prompt

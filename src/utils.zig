@@ -338,18 +338,19 @@ pub fn printTokenizerInfo(tok: *tokenizer.Tokenizer, gguf_file: *const gguf.GGUF
     logger.info("vocab_only            = 1", .{});
     logger.info("no_alloc              = 0", .{});
 
-    const vocab_type_str = switch (tok.config.model) {
+    const vocab_type_str = switch (tok.vocab.getType()) {
         .llama => "SPM",
         .gpt2 => "BPE",
         .tiktoken => "BPE",
         .replit => "BPE",
-        else => @tagName(tok.config.model),
+        .spm => "SPM",
+        else => tok.vocab.getType().toString(),
     };
     logger.info("vocab type            = {s}", .{vocab_type_str});
 
     // 从 tokenizer 获取实际值
-    const n_vocab = tok.vocab.items.len;
-    const n_merges = tok.merges.count();
+    const n_vocab = tok.vocab.nTokens();
+    const n_merges = tok.vocab.merges.count();
     const n_embd = getModelParamU32(gguf_file, "llama.embedding_length") orelse
         getModelParamU32(gguf_file, "qwen.embedding_length") orelse
         getModelParamU32(gguf_file, "qwen35.embedding_length") orelse 0;
@@ -365,25 +366,25 @@ pub fn printTokenizerInfo(tok: *tokenizer.Tokenizer, gguf_file: *const gguf.GGUF
     // 打印特殊 token - 直接从 vocab 读取文本，避免 decode 跳过特殊 token
     // 对于 BPE 类型（gpt2），llama.cpp 默认 BOS 为 11
     {
-        const bos_id = if (tok.config.model == .gpt2 and gguf_file.getU32("tokenizer.ggml.bos_token_id") == null)
+        const bos_id = if (tok.vocab.getType() == .gpt2 and gguf_file.getU32("tokenizer.ggml.bos_token_id") == null)
             @as(u32, 11)
         else
-            tok.special.bos;
+            tok.vocab.tokenBos();
         const bos_str = getTokenText(tok, bos_id);
         logger.info("BOS token             = {d} '{s}'", .{ bos_id, bos_str });
     }
     {
-        const eos_str = getTokenText(tok, tok.special.eos);
-        logger.info("EOS token             = {d} '{s}'", .{ tok.special.eos, eos_str });
+        const eos_str = getTokenText(tok, tok.vocab.tokenEos());
+        logger.info("EOS token             = {d} '{s}'", .{ tok.vocab.tokenEos(), eos_str });
     }
     {
-        const eot_id = gguf_file.getU32("tokenizer.ggml.eot_token_id") orelse tok.special.eos;
+        const eot_id = gguf_file.getU32("tokenizer.ggml.eot_token_id") orelse tok.vocab.tokenEos();
         const eot_str = getTokenText(tok, eot_id);
         logger.info("EOT token             = {d} '{s}'", .{ eot_id, eot_str });
     }
     {
-        const pad_str = getTokenText(tok, tok.special.pad);
-        logger.info("PAD token             = {d} '{s}'", .{ tok.special.pad, pad_str });
+        const pad_str = getTokenText(tok, tok.vocab.tokenPad());
+        logger.info("PAD token             = {d} '{s}'", .{ tok.vocab.tokenPad(), pad_str });
     }
     {
         // LF token: 对于 BPE 类型，通过 tokenize("\n") 查找
@@ -391,178 +392,16 @@ pub fn printTokenizerInfo(tok: *tokenizer.Tokenizer, gguf_file: *const gguf.GGUF
         const lf_str = getTokenText(tok, lf_id);
         logger.info("LF token              = {d} '{s}'", .{ lf_id, lf_str });
     }
-
-    // FIM tokens - 先尝试从 GGUF 元数据读取，再通过文本匹配自动检测
-    {
-        const fim_pre_id = findFimToken(tok, gguf_file, "tokenizer.ggml.fim_pre_token_id", "<|fim_prefix|>");
-        if (fim_pre_id != 0) {
-            const fim_pre_str = getTokenText(tok, fim_pre_id);
-            logger.info("FIM PRE token         = {d} '{s}'", .{ fim_pre_id, fim_pre_str });
-        }
-    }
-    {
-        const fim_suf_id = findFimToken(tok, gguf_file, "tokenizer.ggml.fim_suf_token_id", "<|fim_suffix|>");
-        if (fim_suf_id != 0) {
-            const fim_suf_str = getTokenText(tok, fim_suf_id);
-            logger.info("FIM SUF token         = {d} '{s}'", .{ fim_suf_id, fim_suf_str });
-        }
-    }
-    {
-        const fim_mid_id = findFimToken(tok, gguf_file, "tokenizer.ggml.fim_mid_token_id", "<|fim_middle|>");
-        if (fim_mid_id != 0) {
-            const fim_mid_str = getTokenText(tok, fim_mid_id);
-            logger.info("FIM MID token         = {d} '{s}'", .{ fim_mid_id, fim_mid_str });
-        }
-    }
-    {
-        const fim_pad_id = findFimToken(tok, gguf_file, "tokenizer.ggml.fim_pad_token_id", "<|fim_pad|>");
-        if (fim_pad_id != 0) {
-            const fim_pad_str = getTokenText(tok, fim_pad_id);
-            logger.info("FIM PAD token         = {d} '{s}'", .{ fim_pad_id, fim_pad_str });
-        }
-    }
-    {
-        const fim_rep_id = findFimToken(tok, gguf_file, "tokenizer.ggml.fim_rep_token_id", "<|repo_name|>");
-        if (fim_rep_id != 0) {
-            const fim_rep_str = getTokenText(tok, fim_rep_id);
-            logger.info("FIM REP token         = {d} '{s}'", .{ fim_rep_id, fim_rep_str });
-        }
-    }
-    {
-        const fim_sep_id = findFimToken(tok, gguf_file, "tokenizer.ggml.fim_sep_token_id", "<|file_sep|>");
-        if (fim_sep_id != 0) {
-            const fim_sep_str = getTokenText(tok, fim_sep_id);
-            logger.info("FIM SEP token         = {d} '{s}'", .{ fim_sep_id, fim_sep_str });
-        }
-    }
-
-    // 收集所有 EOG tokens（通过名称匹配和元数据）
-    logger.info("load: printing all EOG tokens:", .{});
-    {
-        var eog_ids = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
-
-        // 从 GGUF 元数据收集
-        if (gguf_file.getU32("tokenizer.ggml.eos_token_id")) |eos_id| {
-            if (!eogIdsContains(eog_ids.items, eos_id)) {
-                eog_ids.append(std.heap.page_allocator, eos_id) catch {};
-            }
-        }
-        if (gguf_file.getU32("tokenizer.ggml.eot_token_id")) |eot_id| {
-            if (!eogIdsContains(eog_ids.items, eot_id)) {
-                eog_ids.append(std.heap.page_allocator, eot_id) catch {};
-            }
-        }
-        if (gguf_file.getU32("tokenizer.ggml.fim_pad_token_id")) |fim_pad_id| {
-            if (!eogIdsContains(eog_ids.items, fim_pad_id)) {
-                eog_ids.append(std.heap.page_allocator, fim_pad_id) catch {};
-            }
-        }
-        if (gguf_file.getU32("tokenizer.ggml.fim_rep_token_id")) |fim_rep_id| {
-            if (!eogIdsContains(eog_ids.items, fim_rep_id)) {
-                eog_ids.append(std.heap.page_allocator, fim_rep_id) catch {};
-            }
-        }
-        if (gguf_file.getU32("tokenizer.ggml.fim_sep_token_id")) |fim_sep_id| {
-            if (!eogIdsContains(eog_ids.items, fim_sep_id)) {
-                eog_ids.append(std.heap.page_allocator, fim_sep_id) catch {};
-            }
-        }
-
-        // 通过名称匹配收集 EOG tokens（与 llama.cpp 保持一致）
-        const eog_names = [_][]const u8{
-            "<|endoftext|>",
-            "<|im_end|>",
-            "<|fim_pad|>",
-            "<|repo_name|>",
-            "<|file_sep|>",
-            "<|eot_id|>",
-            "<|end|>",
-            "<|END|>",
-            "<EOS>",
-            "<EOT>",
-            "<end_of_text>",
-            "<|end_of_text|>",
-            "<end_of_utterance>",
-            "<eos>",
-        };
-        for (tok.vocab.items, 0..) |entry, id| {
-            if (entry == .normal) {
-                for (eog_names) |name| {
-                    if (std.mem.eql(u8, entry.normal, name)) {
-                        const uid = @as(u32, @intCast(id));
-                        if (!eogIdsContains(eog_ids.items, uid)) {
-                            eog_ids.append(std.heap.page_allocator, uid) catch {};
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        for (eog_ids.items) |eog_id| {
-            const eog_str = getTokenText(tok, eog_id);
-            logger.info("load:   - {d} ('{s}')", .{ eog_id, eog_str });
-        }
-    }
-    {
-        var unused_count: u32 = 0;
-        var i: usize = tok.token_types.items.len;
-        while (i > 0) {
-            i -= 1;
-            const ttype = tok.token_types.items[i];
-            if (ttype == .control) {
-                const uid = @as(u32, @intCast(i));
-                // 检查是否在 EOG 列表中（通过名称匹配）
-                const is_eog = isEogToken(tok, uid);
-                if (!is_eog) {
-                    const text = getTokenText(tok, uid);
-                    logger.info("load: control token: {d} '{s}' is not marked as EOG", .{ uid, text });
-                }
-            } else if (ttype == .unused) {
-                unused_count += 1;
-            }
-        }
-        logger.info("load: 0 unused tokens", .{});
-    }
-
-    // special tokens cache size - 包含 control、user_defined 和 unknown 类型（与 llama.cpp 保持一致）
-    {
-        var special_count: u32 = 0;
-        for (tok.token_types.items, 0..) |ttype, idx| {
-            _ = idx;
-            if (ttype == .control or ttype == .user_defined or ttype == .unknown) {
-                special_count += 1;
-            }
-        }
-        logger.info("load: special tokens cache size = {d}", .{special_count});
-    }
-
-    // token to piece cache size
-    {
-        // 估算 token to piece 缓存大小：每个 token 平均约 8 字节
-        const cache_size = @as(f64, @floatFromInt(tok.vocab.items.len)) * 8.0 / (1024.0 * 1024.0);
-        logger.info("load: token to piece cache size = {d:.4} MB", .{cache_size});
-    }
-
-    // 获取 max token length
-    var max_token_len: u32 = 0;
-    for (tok.vocab.items) |entry| {
-        if (entry == .normal and entry.normal.len > max_token_len) {
-            max_token_len = @as(u32, @intCast(entry.normal.len));
-        }
-    }
-    logger.info("max token length      = {d}", .{max_token_len});
 }
 
-/// 查找 FIM token：先尝试从 GGUF 元数据读取，再通过文本匹配自动检测
 pub fn findFimToken(tok: *const tokenizer.Tokenizer, gguf_file: *const gguf.GGUFFile, key: []const u8, text: []const u8) u32 {
     // 先尝试从 GGUF 元数据读取
     if (gguf_file.getU32(key)) |id| {
         return id;
     }
     // 再通过文本匹配自动检测
-    for (tok.vocab.items, 0..) |entry, id| {
-        if (entry == .normal and std.mem.eql(u8, entry.normal, text)) {
+    for (tok.vocab.tokens, 0..) |td, id| {
+        if (td.type == .normal and std.mem.eql(u8, td.text, text)) {
             return @as(u32, @intCast(id));
         }
     }
@@ -570,19 +409,21 @@ pub fn findFimToken(tok: *const tokenizer.Tokenizer, gguf_file: *const gguf.GGUF
 }
 
 pub fn getTokenText(tok: *const tokenizer.Tokenizer, id: u32) []const u8 {
-    if (id < tok.vocab.items.len) {
-        switch (tok.vocab.items[id]) {
-            .normal => |s| return s,
-            .byte => |b| {
-                // 将单字节转换为字符串
-                const buf = &[_]u8{b};
+    if (id < tok.vocab.tokens.len) {
+        const td = tok.vocab.tokens[id];
+        switch (td.type) {
+            .byte => {
+                const buf = &[_]u8{td.text[0]};
                 return buf[0..1];
             },
+            else => return td.text,
         }
     }
     return "?";
 }
 
+
+/// 检查 token 是否为 EOG token（通过名称匹配）
 
 /// 检查 token 是否为 EOG token（通过名称匹配）
 pub fn isEogToken(tok: *const tokenizer.Tokenizer, id: u32) bool {
@@ -602,11 +443,11 @@ pub fn isEogToken(tok: *const tokenizer.Tokenizer, id: u32) bool {
         "<end_of_utterance>",
         "<eos>",
     };
-    if (id < tok.vocab.items.len) {
-        const entry = tok.vocab.items[id];
-        if (entry == .normal) {
+    if (id < tok.vocab.tokens.len) {
+        const td = tok.vocab.tokens[id];
+        if (td.type == .normal) {
             for (eog_names) |name| {
-                if (std.mem.eql(u8, entry.normal, name)) {
+                if (std.mem.eql(u8, td.text, name)) {
                     return true;
                 }
             }
@@ -619,7 +460,8 @@ pub fn isEogToken(tok: *const tokenizer.Tokenizer, id: u32) bool {
 /// 对于 BPE 类型，通过 tokenize("\n") 查找（与 llama.cpp 保持一致）
 pub fn findLfToken(tok: *tokenizer.Tokenizer) u32 {
     // 对于 BPE 类型，通过 tokenize("\n") 查找
-    if (tok.config.model == .gpt2 or tok.config.model == .tiktoken or tok.config.model == .replit) {
+    const vt = tok.vocab.getType();
+    if (vt == .gpt2 or vt == .tiktoken or vt == .replit) {
         var tokens = tok.encode("\n", false, false) catch return 13;
         defer tokens.deinit(tok.allocator);
         if (tokens.items.len > 0) {
@@ -628,14 +470,13 @@ pub fn findLfToken(tok: *tokenizer.Tokenizer) u32 {
         return 13;
     }
     // 对于 SPM 类型，查找字节 token 为 '\n' 的条目
-    for (tok.vocab.items, 0..) |entry, id| {
-        if (entry == .byte and entry.byte == '\n') {
+    for (tok.vocab.tokens, 0..) |td, id| {
+        if (td.type == .byte and td.text[0] == '\n') {
             return @as(u32, @intCast(id));
         }
     }
     return 13; // 默认值
 }
-
 /// 检查 EOG IDs 列表中是否已包含指定 ID
 pub fn eogIdsContains(ids: []const u32, id: u32) bool {
     for (ids) |existing| {

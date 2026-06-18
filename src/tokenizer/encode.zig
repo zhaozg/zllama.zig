@@ -117,42 +117,135 @@ pub fn preTokenizeSPM(text: []const u8, allocator: std.mem.Allocator) !PreTokeni
 }
 
 /// GPT-2 风格预分词
+/// 使用简化的 GPT-2 正则逻辑分割文本：
+/// 1. 收缩形式（'s, 't, 're, 've, 'm, 'll, 'd）保持完整
+/// 2. 单词（可选前导非字母/非数字字符 + 字母序列）：[^\s\p{L}\p{N}]?\p{L}+
+/// 3. 带前导空格的单词： ?\p{L}+
+/// 4. 数字序列：\p{N}+
+/// 5. 其他非空白、非字母、非数字字符序列：?[^\s\p{L}\p{N}]+
+/// 6. 空白序列：\s+
+/// 参考 llama.cpp 的 GPT-2 regex
 fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
-    var start: usize = 0;
     var i: usize = 0;
-
     while (i < text.len) {
-        if (isWhitespace(text[i])) {
-            if (i > start) {
-                const word = try result.allocator.dupe(u8, text[start..i]);
+        // 1. 检查收缩形式：'s, 't, 're, 've, 'm, 'll, 'd
+        if (i + 1 < text.len and text[i] == '\'') {
+            const suffix = text[i+1..];
+            if (suffix.len >= 1 and (suffix[0] == 's' or suffix[0] == 'S' or
+                suffix[0] == 't' or suffix[0] == 'T' or
+                suffix[0] == 'm' or suffix[0] == 'M' or
+                suffix[0] == 'd' or suffix[0] == 'D')) {
+                var word_start = i;
+                while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
+                    word_start -= 1;
+                }
+                const word = try result.allocator.dupe(u8, text[word_start..i+2]);
                 try result.words.append(result.allocator, word);
+                i = i + 2;
+                continue;
             }
-            start = i;
+            if (suffix.len >= 2 and ((suffix[0] == 'r' and suffix[1] == 'e') or
+                (suffix[0] == 'R' and suffix[1] == 'E') or
+                (suffix[0] == 'v' and suffix[1] == 'e') or
+                (suffix[0] == 'V' and suffix[1] == 'E') or
+                (suffix[0] == 'l' and suffix[1] == 'l') or
+                (suffix[0] == 'L' and suffix[1] == 'L'))) {
+                var word_start = i;
+                while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
+                    word_start -= 1;
+                }
+                const word = try result.allocator.dupe(u8, text[word_start..i+3]);
+                try result.words.append(result.allocator, word);
+                i = i + 3;
+                continue;
+            }
+        }
+
+        // 2. 带前导空格的单词：一个空格后跟字母序列
+        // 匹配 GPT-2 的 " ?\p{L}+" 模式
+        // 注意：不匹配空格后跟非字母字符（如数字、符号、多字节 UTF-8 字符）
+        // 这些由后续的空白和"其他"模式分别处理
+        if (text[i] == ' ' and i + 1 < text.len and isLetter(text[i + 1])) {
+            const start = i;
+            i += 1;
+            while (i < text.len and isLetter(text[i])) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 3. 带前导空格的 emoji/符号：一个空格后跟非字母/非数字/非空白字符
+        // 匹配 GPT-2 的 " ?[^\s\p{L}\p{N}]+" 模式
+        // 注意：只匹配多字节 UTF-8 字符（如 emoji），不匹配 ASCII 符号
+        if (text[i] == ' ' and i + 1 < text.len and text[i + 1] >= 0xC0) {
+            const start = i;
+            i += 1;
+            while (i < text.len and !isWhitespace(text[i]) and !isLetter(text[i]) and !isDigit(text[i])) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 3. 空白序列（非单个空格后跟字母）
+        if (isWhitespace(text[i])) {
+            const start = i;
             while (i < text.len and isWhitespace(text[i])) {
                 i += 1;
             }
-            if (i > start) {
-                const word = try result.allocator.dupe(u8, text[start..i]);
-                try result.words.append(result.allocator, word);
-            }
-            start = i;
-        } else if (isPunctuation(text[i])) {
-            if (i > start) {
-                const word = try result.allocator.dupe(u8, text[start..i]);
-                try result.words.append(result.allocator, word);
-            }
-            const word = try result.allocator.dupe(u8, text[i .. i + 1]);
+            const word = try result.allocator.dupe(u8, text[start..i]);
             try result.words.append(result.allocator, word);
-            i += 1;
-            start = i;
-        } else {
-            i += 1;
+            continue;
         }
-    }
 
-    if (i > start) {
-        const word = try result.allocator.dupe(u8, text[start..i]);
-        try result.words.append(result.allocator, word);
+        // 4. 单词：可选前导非字母/非数字字符 + 字母序列
+        if (isLetter(text[i])) {
+            const start = i;
+            while (i < text.len and isLetter(text[i])) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 检查是否有可选前导字符后跟字母序列
+        if (!isWhitespace(text[i]) and !isLetter(text[i]) and !isDigit(text[i])) {
+            if (i + 1 < text.len and isLetter(text[i + 1])) {
+                const start = i;
+                i += 1;
+                while (i < text.len and isLetter(text[i])) {
+                    i += 1;
+                }
+                const word = try result.allocator.dupe(u8, text[start..i]);
+                try result.words.append(result.allocator, word);
+                continue;
+            }
+        }
+
+        // 5. 数字序列
+        if (isDigit(text[i])) {
+            const start = i;
+            while (i < text.len and isDigit(text[i])) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 6. 其他非空白、非字母、非数字字符序列
+        {
+            const start = i;
+            while (i < text.len and !isWhitespace(text[i]) and !isLetter(text[i]) and !isDigit(text[i])) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+        }
     }
 }
 
@@ -164,6 +257,20 @@ fn preTokenizeQwen(text: []const u8, result: *PreTokenized) !void {
 fn isWhitespace(c: u8) bool {
     return switch (c) {
         ' ', '\t', '\n', '\r', 0x0B, 0x0C => true,
+        else => false,
+    };
+}
+
+fn isLetter(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z' => true,
+        else => false,
+    };
+}
+
+fn isDigit(c: u8) bool {
+    return switch (c) {
+        '0'...'9' => true,
         else => false,
     };
 }
@@ -465,7 +572,21 @@ fn encodeWord(
         if (final_needs_free) config.allocator.free(@constCast(final_text));
     }
 
-    // 阶段 1：Trie 贪婪最长匹配
+    // 阶段 1：如果 ignore_merges=true 且整个词在词表中，直接使用
+    // 与 llama.cpp 的 llm_tokenizer_bpe_session::tokenize 逻辑一致：
+    // if (vocab.get_ignore_merges() && vocab.text_to_token(word) != LLAMA_TOKEN_NULL)
+    // 则直接使用整个词作为一个 token，否则走正常 BPE 流程
+    if (ignore_merges) {
+        if (config.textToTokenFn(final_text, config.ctx)) |token_id| {
+            try tokens.append(config.allocator, token_id);
+            return tokens;
+        }
+        // 整个词不在词表中，回退到字符级拆分 + BPE 合并
+    }
+
+    // 阶段 2：Trie 贪婪最长匹配
+    // 对于 ignore_merges=true 的情况，如果整个词不在词表中，
+    // 我们仍然需要 Trie 匹配 + BPE 合并来找到正确的 token 序列
     var pos: usize = 0;
     while (pos < final_text.len) {
         const match = trie.longestMatch(config.trie_root, final_text, pos);
@@ -490,8 +611,10 @@ fn encodeWord(
         }
     }
 
-    // 阶段 2：BPE 合并（如果不忽略合并规则）
-    if (!ignore_merges and config.merges.count() > 0) {
+    // 阶段 3：BPE 合并（如果有合并规则）
+    // 注意：即使 ignore_merges=true，如果整个词不在词表中，仍然需要 BPE 合并
+    // 这与 llama.cpp 的行为一致
+    if (config.merges.count() > 0) {
         try bpe.applyBpeMerges(&tokens, config.merges, config.tokenToStringFn, config.textToTokenFn, config.ctx, config.allocator);
     }
 

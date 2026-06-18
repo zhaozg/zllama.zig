@@ -45,10 +45,8 @@ const test_separator = "\n__ggml_vocab_test__\n";
 /// 词汇表测试配置
 const VocabTestConfig = struct {
     name: []const u8,
-    /// 是否跳过（某些词汇表可能不支持）
+    /// 是否跳过
     skip: bool = false,
-    /// 是否忽略 merges 检查（某些词汇表 token 可能被拆分为多个）
-    ignore_merges: bool = false,
 };
 
 /// 所有支持的词汇表测试
@@ -94,7 +92,6 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 }
 
 /// 解析 .inp 文件：按分隔符分割文本
-/// 返回分配的所有权字符串列表，调用者负责释放
 fn parseInpFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u8 {
     var result = try std.ArrayList([]const u8).initCapacity(allocator, 0);
     errdefer {
@@ -106,12 +103,11 @@ fn parseInpFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u8
     while (start < content.len) {
         const end = std.mem.indexOfPos(u8, content, start, test_separator) orelse content.len;
         const segment = content[start..end];
-        // 跳过末尾的空白段（当文件以分隔符结尾时，最后一个段通常是空白）
+        // 跳过末尾的空白段
         if (end == content.len) {
             const trimmed = std.mem.trim(u8, segment, " \n\r\t");
             if (trimmed.len == 0) break;
         }
-        // 复制每个段
         const owned = try allocator.dupe(u8, segment);
         try result.append(allocator, owned);
         start = end + test_separator.len;
@@ -121,7 +117,6 @@ fn parseInpFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u8
 }
 
 /// 解析 .out 文件：每行空格分隔的 token ID
-/// 返回分配的所有权列表，调用者负责释放
 fn parseOutFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u32 {
     var result = try std.ArrayList([]const u32).initCapacity(allocator, 0);
     errdefer {
@@ -129,7 +124,6 @@ fn parseOutFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u3
         result.deinit(allocator);
     }
 
-    // 去除末尾的换行符，避免产生多余的空行
     var end = content.len;
     while (end > 0 and (content[end - 1] == '\n' or content[end - 1] == '\r')) {
         end -= 1;
@@ -139,7 +133,6 @@ fn parseOutFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u3
     var line_iter = std.mem.splitScalar(u8, trimmed_content, '\n');
     while (line_iter.next()) |line| {
         const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
-        // 空行对应空 token 数组（保留以匹配 .inp 文件中的空段）
         if (trimmed.len == 0) {
             try result.append(allocator, &.{});
             continue;
@@ -160,14 +153,6 @@ fn parseOutFile(allocator: std.mem.Allocator, content: []const u8) ![][]const u3
     }
 
     return result.toOwnedSlice(allocator);
-}
-
-/// 释放解析后的测试数据
-fn freeTestData(allocator: std.mem.Allocator, inputs: [][]const u8, expected_outputs: [][]const u32) void {
-    for (inputs) |input| allocator.free(input);
-    allocator.free(inputs);
-    for (expected_outputs) |output| allocator.free(output);
-    allocator.free(expected_outputs);
 }
 
 /// 运行单个词汇表的测试
@@ -193,7 +178,7 @@ fn runVocabTest(
     var gguf_file = try gguf.parse(gguf_data, allocator);
     defer gguf_file.deinit();
 
-    // 初始化 tokenizer
+    // 初始化 tokenizer（使用新的 Vocab）
     var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
     defer tok.deinit();
 
@@ -250,101 +235,95 @@ fn runVocabTest(
             try testing.expectEqual(exp, got);
         }
 
-        // 验证往返一致性：detokenize(tokenize(text)) == text
+        // 验证往返一致性
         const decoded = try tok.decode(tokens.items, allocator);
         defer allocator.free(decoded);
 
-        // 注意：某些特殊 token（如字节级 token）在往返过程中可能会有细微差异
-        // 这里只做基本检查，不严格相等
         if (decoded.len > 0) {
-            // 验证解码后的文本至少包含原始文本的部分内容
-            // 对于空输入，解码结果也应为空
             if (input.len == 0) {
                 try testing.expectEqual(@as(usize, 0), decoded.len);
             }
         }
     }
 
-    // 测试通过
     std.debug.print("  [{s}] {d} tests passed\n", .{ config.name, inputs.len });
 }
 
 // ============================================================================
 // 测试用例
 // ============================================================================
-// TODO: uncomment to test
-//
-// test "vocab - llama-bpe" {
-//     try runVocabTest(testing.allocator, .{ .name = "llama-bpe" });
-// }
-//
-// test "vocab - llama-spm" {
-//     try runVocabTest(testing.allocator, .{ .name = "llama-spm" });
-// }
-//
-// test "vocab - qwen2" {
-//     try runVocabTest(testing.allocator, .{ .name = "qwen2" });
-// }
-//
-// test "vocab - qwen35" {
-//     try runVocabTest(testing.allocator, .{ .name = "qwen35" });
-// }
-//
-// test "vocab - gpt-2" {
-//     try runVocabTest(testing.allocator, .{ .name = "gpt-2" });
-// }
-//
-// test "vocab - falcon" {
-//     try runVocabTest(testing.allocator, .{ .name = "falcon" });
-// }
-//
-// test "vocab - deepseek-coder" {
-//     try runVocabTest(testing.allocator, .{ .name = "deepseek-coder" });
-// }
-//
-// test "vocab - deepseek-llm" {
-//     try runVocabTest(testing.allocator, .{ .name = "deepseek-llm" });
-// }
-//
-// test "vocab - phi-3" {
-//     try runVocabTest(testing.allocator, .{ .name = "phi-3" });
-// }
 
-// test "vocab - command-r" {
-//     try runVocabTest(testing.allocator, .{ .name = "command-r" });
-// }
-//
-// test "vocab - starcoder" {
-//     try runVocabTest(testing.allocator, .{ .name = "starcoder" });
-// }
-//
-// test "vocab - mpt" {
-//     try runVocabTest(testing.allocator, .{ .name = "mpt" });
-// }
-//
-// test "vocab - refact" {
-//     try runVocabTest(testing.allocator, .{ .name = "refact" });
-// }
-//
-// test "vocab - baichuan" {
-//     try runVocabTest(testing.allocator, .{ .name = "baichuan" });
-// }
-//
-// test "vocab - bert-bge" {
-//     try runVocabTest(testing.allocator, .{ .name = "bert-bge" });
-// }
-//
-// test "vocab - gemma-4" {
-//     try runVocabTest(testing.allocator, .{ .name = "gemma-4" });
-// }
-//
-// test "vocab - nomic-bert-moe" {
-//     try runVocabTest(testing.allocator, .{ .name = "nomic-bert-moe" });
-// }
-//
-// test "vocab - aquila" {
-//     try runVocabTest(testing.allocator, .{ .name = "aquila" });
-// }
+test "vocab - llama-spm" {
+    try runVocabTest(testing.allocator, .{ .name = "llama-spm" });
+}
+
+test "vocab - llama-bpe" {
+    try runVocabTest(testing.allocator, .{ .name = "llama-bpe" });
+}
+
+test "vocab - qwen2" {
+    try runVocabTest(testing.allocator, .{ .name = "qwen2" });
+}
+
+test "vocab - qwen35" {
+    try runVocabTest(testing.allocator, .{ .name = "qwen35" });
+}
+
+test "vocab - gpt-2" {
+    try runVocabTest(testing.allocator, .{ .name = "gpt-2" });
+}
+
+test "vocab - falcon" {
+    try runVocabTest(testing.allocator, .{ .name = "falcon" });
+}
+
+test "vocab - deepseek-coder" {
+    try runVocabTest(testing.allocator, .{ .name = "deepseek-coder" });
+}
+
+test "vocab - deepseek-llm" {
+    try runVocabTest(testing.allocator, .{ .name = "deepseek-llm" });
+}
+
+test "vocab - phi-3" {
+    try runVocabTest(testing.allocator, .{ .name = "phi-3" });
+}
+
+test "vocab - command-r" {
+    try runVocabTest(testing.allocator, .{ .name = "command-r" });
+}
+
+test "vocab - starcoder" {
+    try runVocabTest(testing.allocator, .{ .name = "starcoder" });
+}
+
+test "vocab - mpt" {
+    try runVocabTest(testing.allocator, .{ .name = "mpt" });
+}
+
+test "vocab - refact" {
+    try runVocabTest(testing.allocator, .{ .name = "refact" });
+}
+
+test "vocab - baichuan" {
+    try runVocabTest(testing.allocator, .{ .name = "baichuan" });
+}
+
+test "vocab - bert-bge" {
+    try runVocabTest(testing.allocator, .{ .name = "bert-bge" });
+}
+
+test "vocab - gemma-4" {
+    try runVocabTest(testing.allocator, .{ .name = "gemma-4" });
+}
+
+test "vocab - nomic-bert-moe" {
+    try runVocabTest(testing.allocator, .{ .name = "nomic-bert-moe" });
+}
+
+test "vocab - aquila" {
+    try runVocabTest(testing.allocator, .{ .name = "aquila" });
+}
 
 // ============================================================================
 // 辅助测试：解析器单元测试
@@ -403,11 +382,10 @@ test "parseOutFile empty lines" {
         testing.allocator.free(outputs);
     }
 
-    // 去除末尾换行后： "1 2\n\n3" -> 3 lines: "1 2", "", "3"
     try testing.expectEqual(@as(usize, 3), outputs.len);
     try testing.expectEqual(@as(u32, 1), outputs[0][0]);
     try testing.expectEqual(@as(u32, 2), outputs[0][1]);
-    try testing.expectEqual(@as(usize, 0), outputs[1].len); // empty line
+    try testing.expectEqual(@as(usize, 0), outputs[1].len);
     try testing.expectEqual(@as(u32, 3), outputs[2][0]);
 }
 

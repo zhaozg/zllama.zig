@@ -222,6 +222,14 @@ pub fn build(b: *std.Build) void {
     registry_mod.addImport("graph_builder", graph_builder_mod);
     registry_mod.addImport("memory", memory_mod);
 
+    const vocab_mod = b.createModule(.{
+        .root_source_file = b.path("src/vocab.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    vocab_mod.addImport("gguf", gguf_mod);
+
     const tokenizer_mod = b.createModule(.{
         .root_source_file = b.path("src/tokenizer/mod.zig"),
         .target = target,
@@ -230,8 +238,7 @@ pub fn build(b: *std.Build) void {
     });
     tokenizer_mod.addImport("ggml", ggml_mod);
     tokenizer_mod.addImport("gguf", gguf_mod);
-    tokenizer_mod.addImport("ggml", ggml_mod);
-    tokenizer_mod.addImport("gguf", gguf_mod);
+    tokenizer_mod.addImport("vocab", vocab_mod);
 
     const sampler_mod = b.createModule(.{
         .root_source_file = b.path("src/sampler.zig"),
