@@ -723,49 +723,60 @@ fn encodeWord(
 
     // 步骤 1：确定基础文本（可能添加空格前缀）
     // 对于 escape_whitespaces 的模型（gemma-4 等），将空格转为 ▁ (U+2581)
-    const base_text = if (add_space_prefix) blk: {
+    const BaseText = struct {
+        text: []const u8,
+        needs_free: bool,
+    };
+    const base = if (add_space_prefix) blk: {
         if (is_spm_model) {
             if (word.len > 0 and isWhitespace(word[0])) {
                 var ws_end: usize = 1;
                 while (ws_end < word.len and isWhitespace(word[ws_end])) ws_end += 1;
                 if (ws_end < word.len) {
-                    break :blk try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] });
+                    break :blk BaseText{
+                        .text = try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] }),
+                        .needs_free = true,
+                    };
                 }
             }
-            break :blk try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word });
+            break :blk BaseText{
+                .text = try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word }),
+                .needs_free = true,
+            };
         } else if (config.escape_whitespaces) {
             if (word.len > 0 and isWhitespace(word[0])) {
-                // Only convert single leading space to ▁.
-                // Multiple spaces (like "  ") should remain as-is
-                // because they may be tokens themselves (e.g. gemma-4 token 138).
                 var ws_end: usize = 1;
                 while (ws_end < word.len and isWhitespace(word[ws_end])) ws_end += 1;
                 if (ws_end < word.len) {
-                    break :blk try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] });
+                    break :blk BaseText{
+                        .text = try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] }),
+                        .needs_free = true,
+                    };
                 }
                 // Word is all whitespace — keep as-is for token lookup
             }
-            break :blk word;
+            break :blk BaseText{ .text = word, .needs_free = false };
         } else {
-            break :blk try std.fmt.allocPrint(config.allocator, " {s}", .{word});
+            break :blk BaseText{
+                .text = try std.fmt.allocPrint(config.allocator, " {s}", .{word}),
+                .needs_free = true,
+            };
         }
     } else if (config.escape_whitespaces and word.len > 0 and isWhitespace(word[0])) blk: {
         var ws_end: usize = 1;
         while (ws_end < word.len and isWhitespace(word[ws_end])) ws_end += 1;
         if (ws_end < word.len) {
-            break :blk try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] });
+            break :blk BaseText{
+                .text = try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] }),
+                .needs_free = true,
+            };
         }
         // Word is all whitespace — keep as-is for token lookup
-        break :blk word;
-    } else word;
+        break :blk BaseText{ .text = word, .needs_free = false };
+    } else BaseText{ .text = word, .needs_free = false };
 
-    const base_needs_free = add_space_prefix or
-        (config.escape_whitespaces and word.len > 0 and isWhitespace(word[0]) and
-         blk: {
-            var ws_end: usize = 1;
-            while (ws_end < word.len and isWhitespace(word[ws_end])) ws_end += 1;
-            break :blk ws_end < word.len;
-         });
+    const base_text = base.text;
+    const base_needs_free = base.needs_free;
     errdefer {
         if (base_needs_free) config.allocator.free(base_text);
     }
