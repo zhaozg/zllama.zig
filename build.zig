@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // -Dbundle-ggml: build ggml from source instead of using system-installed libraries
-    const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse false;
+    const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse true;
 
     // -Dno-galloc-realloc: assert-fail on any gallocr reallocation.
     // Useful for development to detect graph topology changes that would cause

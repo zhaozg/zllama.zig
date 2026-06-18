@@ -156,6 +156,7 @@ const tokenizer = @import("tokenizer");
 ```
 
 ### 禁止事项 ❌
+
 - 使用相对路径：`@import("../ggml.zig")`
 - 使用文件名：`@import("ggml.zig")`（应写 `@import("ggml")`）
 - 混合使用模块名与路径导入同一个文件
@@ -208,6 +209,7 @@ const tokenizer = @import("tokenizer");
 - ❌ 在业务代码中直接导入 `ggml/` 子目录文件。
 - ❌ 参数硬编码，没有从权重文件实际形状获取。
 - ❌ 直接使用`llama-cli`交互式聊天模式, 导致 run_command 无法处理.
+- ❌ 编译并安装 llama.cpp, llama.cpp 已安装在 /usr/local 目录下。
 
 ## 📚 参考材料
 

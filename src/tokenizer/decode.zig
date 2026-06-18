@@ -12,7 +12,9 @@
 //! 4. 清理空格（clean_spaces 后处理）
 
 const std = @import("std");
-const types = @import("types.zig");
+// NOTE: 通过 mod 模块的 pub const 导出访问，确保与 mod.zig 使用同一个模块实例
+const mod = @import("mod.zig");
+const types = mod.types;
 
 const log = std.log.scoped(.tokenizer);
 

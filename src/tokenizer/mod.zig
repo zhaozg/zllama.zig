@@ -165,6 +165,11 @@ pub const Tokenizer = struct {
             .bytes_to_unicode_map = try BytesToUnicodeMap.init(allocator),
         };
 
+        // 修复 byte_to_token 映射：对于 GPT-2 风格的 BPE 模型，
+        // 字节 token 的 text 是经过 GPT-2 字节编码的 Unicode 字符，
+        // 需要使用 bytes_to_unicode_map 的反向映射来正确建立 byte→token 关系
+        try tok.fixByteToTokenMapping();
+
         // 构建 Trie（用于贪婪最长匹配编码）
         try tok.buildTrie();
 
@@ -174,9 +179,33 @@ pub const Tokenizer = struct {
         return tok;
     }
 
+    /// 修复 byte_to_token 映射，使用 bytes_to_unicode_map 的反向映射
+    /// 同时处理两种字节 token 格式：
+    /// 1. GPT-2 编码的多字节 token（如 "Ã" = [0xC3,0x83] 表示 byte 0xC3）
+    /// 2. 原始单字节 token（如直接存储 byte 值）
+    fn fixByteToTokenMapping(self: *Tokenizer) !void {
+        const v = &self.vocab;
+        const reverse = &self.bytes_to_unicode_map.reverse;
+
+        for (v.tokens, 0..) |td, id| {
+            const uid = @as(u32, @intCast(id));
+            // 尝试通过反向映射查找字节值（处理 GPT-2 编码的多字节 token）
+            if (reverse.get(td.text)) |byte| {
+                v.byte_to_token[byte] = uid;
+            }
+            // 也处理直接的单字节 token（回退：对于 raw byte 存储的模型）
+            if (td.type == .byte and td.text.len == 1) {
+                v.byte_to_token[td.text[0]] = uid;
+            }
+        }
+    }
+
     fn buildTrie(self: *Tokenizer) !void {
         for (self.vocab.tokens, 0..) |td, id| {
-            if (td.type == .normal or td.type == .control) {
+            // NOTE: 添加所有类型的 token 到 Trie，包括 byte 类型
+            // 对于 BPE 模型，字节 token（0-255）通常是 byte 类型，
+            // 必须添加到 Trie 中才能实现正确的贪婪匹配
+            if (td.type == .normal or td.type == .control or td.type == .byte) {
                 try trie.addToTrie(&self.trie_root, td.text, @intCast(id), self.allocator);
             }
         }
@@ -260,7 +289,7 @@ pub const Tokenizer = struct {
             .special = self.vocab.getSpecial(),
             .pre_type = self.vocab.getPreType(),
             .model = self.vocab.getType(),
-            .vocab = undefined, // will be filled by the encoder via callbacks
+            .vocab = .empty, // initialized empty; not used (all lookups via callbacks)
             .merges = self.vocab.merges,
             .trie_root = &self.trie_root,
             .tokenToStringFn = tokenToStringWrapper,
@@ -402,10 +431,8 @@ pub const Tokenizer = struct {
     /// 将 token ID 转换为字符串表示（用于 BPE 合并）
     fn tokenToString(self: *Tokenizer, token_id: u32) ?[]const u8 {
         const td = self.vocab.getTokenData(token_id) orelse return null;
-        if (td.type == .byte and td.text.len == 1) {
-            self.byte_token_buf[0] = td.text[0];
-            return &self.byte_token_buf;
-        }
+        // NOTE: byte 类型的 token 文本就是单个字节，直接返回 td.text 即可
+        // 之前使用 byte_token_buf 会导致连续调用时数据被覆盖（BPE 合并中的 left_str/right_str）
         return td.text;
     }
 

@@ -27,6 +27,8 @@ const Bigram = struct {
     right: i32,
     rank: u32,
 
+    /// Zig PriorityQueue 是最小堆，按 rank 升序弹出（最低 rank = 最高优先级）
+    /// BPE 算法要求优先合并 rank 最小（最频繁）的 pair
     fn lessThan(context: void, a: @This(), b: @This()) std.math.Order {
         _ = context;
         if (a.rank < b.rank) return .lt;
@@ -97,6 +99,14 @@ pub fn applyBpeMerges(
         const left_str = tokenToStringFn(symbols.items[left_idx].token_id, ctx) orelse continue;
         const right_str = tokenToStringFn(symbols.items[right_idx].token_id, ctx) orelse continue;
 
+        // 关键检查：重新计算当前 rank，与存储的 rank 比较
+        // 如果 token 在入队后被合并过，token_id 改变 → left_str/right_str 改变 → rank 不同 → 跳过
+        // 对应 llama.cpp: if (left_token + right_token != bigram.text) continue;
+        const current_key = try std.fmt.allocPrint(allocator, "{s} {s}", .{ left_str, right_str });
+        defer allocator.free(current_key);
+        const current_rank = merges.get(current_key) orelse continue;
+        if (current_rank != bigram.rank) continue;
+
         // 查找合并后的 token ID
         const merged_str = try std.fmt.allocPrint(allocator, "{s}{s}", .{ left_str, right_str });
         defer allocator.free(merged_str);
@@ -105,6 +115,9 @@ pub fn applyBpeMerges(
         // 合并：将右符号合并到左符号
         symbols.items[left_idx].token_id = merged_token_id;
         symbols.items[left_idx].next = symbols.items[right_idx].next;
+
+        // 无效化右符号：设置 prev = -1 以标记为已合并（对齐 llama.cpp 行为）
+        symbols.items[right_idx].prev = -1;
 
         // 更新右符号的后继的前驱指针
         if (symbols.items[right_idx].next >= 0) {
@@ -153,12 +166,16 @@ fn addNewBigram(
     const key = std.fmt.allocPrint(allocator, "{s} {s}", .{ left_str, right_str }) catch return;
     defer allocator.free(key);
 
-    const rank = merges.get(key) orelse return;
+    const rank = merges.get(key) orelse {
+        return;
+    };
 
     // 验证合并后的 token 在词表中存在
     const merged = std.fmt.allocPrint(allocator, "{s}{s}", .{ left_str, right_str }) catch return;
     defer allocator.free(merged);
-    if (textToTokenFn(merged, ctx) == null) return;
+    if (textToTokenFn(merged, ctx) == null) {
+        return;
+    }
 
     queue.push(allocator, .{
         .left = left,

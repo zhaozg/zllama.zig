@@ -31,7 +31,9 @@ pub const VocabType = enum {
     gpt2, // Byte-level BPE
     tiktoken, // tiktoken (OpenAI)
     replit, // Replit tokenizer
-    spm, // SentencePiece (别名，如 gemma4)
+    spm, // SentencePiece (alias)
+    gemma4, // Gemma-4 BPE
+    bert, // BERT-style BPE (bert-bge etc.)
     unknown,
 
     pub fn fromString(s: []const u8) VocabType {
@@ -40,7 +42,8 @@ pub const VocabType = enum {
         if (std.ascii.eqlIgnoreCase(s, "tiktoken")) return .tiktoken;
         if (std.ascii.eqlIgnoreCase(s, "replit")) return .replit;
         if (std.ascii.eqlIgnoreCase(s, "spm")) return .spm;
-        if (std.ascii.eqlIgnoreCase(s, "gemma4")) return .spm;
+        if (std.ascii.eqlIgnoreCase(s, "gemma4")) return .gemma4;
+        if (std.ascii.eqlIgnoreCase(s, "bert")) return .bert;
         return .unknown;
     }
 
@@ -55,7 +58,7 @@ pub const VocabType = enum {
 
     /// 是否使用 BPE 风格的 tokenization
     pub fn isBPE(self: VocabType) bool {
-        return self == .gpt2 or self == .tiktoken;
+        return self == .gpt2 or self == .tiktoken or self == .gemma4 or self == .bert;
     }
 };
 
@@ -169,7 +172,7 @@ pub const PreType = enum {
         if (std.mem.eql(u8, s, "falcon")) return .falcon;
         if (std.mem.eql(u8, s, "mpt")) return .mpt;
         if (std.mem.eql(u8, s, "starcoder")) return .starcoder;
-        if (std.mem.eql(u8, s, "gpt2")) return .gpt2;
+        if (std.mem.eql(u8, s, "gpt2") or std.mem.eql(u8, s, "gpt-2")) return .gpt2;
         if (std.mem.eql(u8, s, "refact")) return .refact;
         if (std.mem.eql(u8, s, "command-r")) return .command_r;
         if (std.mem.eql(u8, s, "stablelm2")) return .stablelm2;
@@ -211,6 +214,7 @@ pub const PreType = enum {
         if (std.mem.eql(u8, s, "joyai-llm")) return .joyai_llm;
         if (std.mem.eql(u8, s, "jais2")) return .jais2;
         if (std.mem.eql(u8, s, "gemma4")) return .gemma4;
+        if (std.mem.eql(u8, s, "bert-bge")) return .gpt2;
         if (std.mem.eql(u8, s, "sarvam-moe")) return .sarvam_moe;
         if (std.mem.eql(u8, s, "minicpm5")) return .minicpm5;
         return .default;
@@ -348,7 +352,12 @@ pub const Vocab = struct {
         const vocab_type_str = gguf_file.getString("tokenizer.ggml.model") orelse "gpt2";
         const vocab_type = VocabType.fromString(vocab_type_str);
         const pre_type_str = gguf_file.getString("tokenizer.ggml.pre") orelse "";
-        const pre_type = PreType.fromString(pre_type_str);
+        var pre_type = PreType.fromString(pre_type_str);
+
+        // 如果 pre_type 是 default 但 vocab type 暗示了特定的 pre_type，使用它
+        if (pre_type == .default) {
+            if (vocab_type == .gemma4) pre_type = .gemma4;
+        }
 
         log.info("Vocab type: '{s}' → {s}, pre: '{s}' → {s}", .{
             vocab_type_str, vocab_type.toString(),
@@ -661,6 +670,12 @@ pub const Vocab = struct {
                     else => {},
                 }
             },
+            .gemma4, .bert => {
+                self.add_space_prefix = false;
+                self.escape_whitespaces = false;
+                self.ignore_merges = false;
+                self.add_bos = false;
+            },
             .tiktoken => {
                 self.add_space_prefix = false;
                 self.escape_whitespaces = false;
@@ -694,14 +709,18 @@ pub const Vocab = struct {
         for (self.tokens, 0..) |td, id| {
             const uid = @as(u32, @intCast(id));
 
-            // text→token 映射（仅 normal 和 control 类型）
-            if (td.type == .normal or td.type == .control) {
+            // text→token 映射（normal、control 和 byte 类型）
+            // NOTE: byte 类型的 token 也需要加入 text_to_token 映射，
+            // 因为 BPE 合并可能查找合并后的文本是否在词表中
+            if (td.type == .normal or td.type == .control or td.type == .byte) {
                 const key = try allocator.dupe(u8, td.text);
                 try self.text_to_token.put(allocator, key, uid);
             }
 
             // byte→token 映射
-            if (td.type == .byte) {
+            // NOTE: 某些模型的字节 token 可能是 normal 类型（如 GPT-2 BPE），
+            // 需要同时检查 byte 类型和单字节的 normal 类型
+            if (td.type == .byte or (td.type == .normal and td.text.len == 1)) {
                 if (td.text.len == 1) {
                     self.byte_to_token[td.text[0]] = uid;
                 }
@@ -720,7 +739,7 @@ pub const Vocab = struct {
             const owned_key = try allocator.dupe(u8, merge_str);
             self.merges.putAssumeCapacity(owned_key, @intCast(rank));
         }
-        log.info("Vocab: {d} BPE merge rules", .{arr.len});
+        log.info("Vocab: {d} BPE merge rules loaded", .{arr.len});
     }
 
     /// 构建 EOG (End-of-Generation) token ID 集合
@@ -772,7 +791,7 @@ test "VocabType fromString" {
     const testing = std.testing;
     try testing.expectEqual(VocabType.llama, VocabType.fromString("llama"));
     try testing.expectEqual(VocabType.gpt2, VocabType.fromString("gpt2"));
-    try testing.expectEqual(VocabType.spm, VocabType.fromString("gemma4"));
+    try testing.expectEqual(VocabType.gemma4, VocabType.fromString("gemma4"));
     try testing.expectEqual(VocabType.unknown, VocabType.fromString("nonexistent"));
 }
 
