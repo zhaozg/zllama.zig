@@ -720,10 +720,17 @@ pub const Vocab = struct {
             // byte→token 映射
             // NOTE: 某些模型的字节 token 可能是 normal 类型（如 GPT-2 BPE），
             // 需要同时检查 byte 类型和单字节的 normal 类型
+            // 对于 gemma-4 等模型，字节 token 使用 <0xXX> 格式
             if (td.type == .byte or (td.type == .normal and td.text.len == 1)) {
                 if (td.text.len == 1) {
                     self.byte_to_token[td.text[0]] = uid;
                 }
+            }
+            // 处理 <0xXX> 格式的字节 token（如 gemma-4）
+            if (td.text.len == 6 and td.text[0] == '<' and td.text[1] == '0' and td.text[2] == 'x' and td.text[5] == '>') {
+                const hex_str = td.text[3..5];
+                const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch continue;
+                self.byte_to_token[byte_val] = uid;
             }
         }
     }

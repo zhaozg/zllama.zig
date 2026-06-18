@@ -208,23 +208,25 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // 5. 尾随空白: \s+(?!\S) — whitespace at end of string
+        // 5. 空白序列：先尝试 \s+(?!\S)（后面有非空白时只取前 n-1 个），再尝试 \s+
         if (isWhitespace(text[i])) {
-            const start = i;
-            while (i < text.len and isWhitespace(text[i])) {
-                i += 1;
+            var ws_count: usize = 0;
+            while (i + ws_count < text.len and isWhitespace(text[i + ws_count])) {
+                ws_count += 1;
             }
-            // Only match as standalone whitespace if it's at end OR followed by end
-            if (i >= text.len) {
-                const word = try result.allocator.dupe(u8, text[start..i]);
+
+            // \s+(?!\S)：如果空白后面有非空白字符，且空白数 > 1，只取前 n-1 个
+            if (ws_count > 1 and i + ws_count < text.len) {
+                const word = try result.allocator.dupe(u8, text[i .. i + ws_count - 1]);
                 try result.words.append(result.allocator, word);
+                i += ws_count - 1;
                 continue;
             }
-            // Otherwise, this space was not consumed - try without space
-            i = start;
-            if (text[i] == ' ') {
-                i += 1;
-            }
+
+            // \s+：普通空白序列
+            const word = try result.allocator.dupe(u8, text[i .. i + ws_count]);
+            try result.words.append(result.allocator, word);
+            i += ws_count;
             continue;
         }
 
@@ -277,13 +279,12 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             }
         }
 
-        // 2. 带前导空格的单词：一个空格后跟字母序列（包括多字节 Unicode 字母）
-        // 匹配 GPT-2 的 " ?\p{L}+" 模式
-        // 使用 isUnicodeLetter 检测多字节 UTF-8 字母（如 é, ñ, ä, œ 等）
+        // 2. GPT-2 " ?\p{L}+" 模式：可选空格 + 字母序列
+        // 先尝试带空格的版本（一个空格 + 字母），再尝试无空格版本（纯字母）
         if (text[i] == ' ' and i + 1 < text.len and isUnicodeLetter(text, i + 1)) {
             const start = i;
             i += 1;
-            i += utf8CharLen(text, i); // advance past first letter char
+            i += utf8CharLen(text, i);
             while (i < text.len and isUnicodeLetter(text, i)) {
                 i += utf8CharLen(text, i);
             }
@@ -291,40 +292,6 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             try result.words.append(result.allocator, word);
             continue;
         }
-
-        // 3. 带前导空格的符号：一个空格后跟非字母/非数字/非空白字符
-        // 匹配 GPT-2 的 " ?[^\s\p{L}\p{N}]+" 模式
-        // 注意：排除数字（\p{N}），包括 Unicode 数字如 ½ (U+00BD)
-        if (text[i] == ' ' and i + 1 < text.len and
-            !isWhitespace(text[i + 1]) and
-            !isUnicodeLetter(text, i + 1) and
-            !isUnicodeDigit(text, i + 1)) {
-            const start = i;
-            i += 1;
-            i += utf8CharLen(text, i); // advance past first symbol char
-            while (i < text.len and
-                !isWhitespace(text[i]) and
-                !isUnicodeLetter(text, i) and
-                !isUnicodeDigit(text, i)) {
-                i += utf8CharLen(text, i);
-            }
-            const word = try result.allocator.dupe(u8, text[start..i]);
-            try result.words.append(result.allocator, word);
-            continue;
-        }
-
-        // 4. 空白序列
-        if (isWhitespace(text[i])) {
-            const start = i;
-            while (i < text.len and isWhitespace(text[i])) {
-                i += 1;
-            }
-            const word = try result.allocator.dupe(u8, text[start..i]);
-            try result.words.append(result.allocator, word);
-            continue;
-        }
-
-        // 5. 单词：可选前导非字母/非数字字符 + 字母序列
         if (isUnicodeLetter(text, i)) {
             const start = i;
             i += utf8CharLen(text, i);
@@ -336,24 +303,10 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // 检查是否有可选前导字符后跟字母序列
-        if (!isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
-            if (i + 1 < text.len and isUnicodeLetter(text, i + 1)) {
-                const start = i;
-                i += 1;
-                i += utf8CharLen(text, i); // advance past first letter
-                while (i < text.len and isUnicodeLetter(text, i)) {
-                    i += utf8CharLen(text, i);
-                }
-                const word = try result.allocator.dupe(u8, text[start..i]);
-                try result.words.append(result.allocator, word);
-                continue;
-            }
-        }
-
-        // 6. 数字序列
-        if (isUnicodeDigit(text, i)) {
+        // 3. GPT-2 " ?\p{N}+" 模式：可选空格 + 数字序列
+        if (text[i] == ' ' and i + 1 < text.len and isUnicodeDigit(text, i + 1)) {
             const start = i;
+            i += 1;
             i += utf8CharLen(text, i);
             while (i < text.len and isUnicodeDigit(text, i)) {
                 i += utf8CharLen(text, i);
@@ -362,16 +315,78 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             try result.words.append(result.allocator, word);
             continue;
         }
+        // 5. 空白序列：先尝试 \s+(?!\S)（尾随空白，后面有非空白时只取前 n-1 个），再尝试 \s+
+        if (isWhitespace(text[i])) {
+            // 计算连续空白字符数
+            var ws_count: usize = 0;
+            while (i + ws_count < text.len and isWhitespace(text[i + ws_count])) {
+                ws_count += 1;
+            }
 
-        // 7. 其他非空白、非字母、非数字字符序列
+            // \s+(?!\S)：如果空白后面有非空白字符，且空白数 > 1，只取前 n-1 个
+            // 这样剩下的一个空格可以被后面的 ?\p{L}+ 等模式匹配
+            if (ws_count > 1 and i + ws_count < text.len) {
+                const word = try result.allocator.dupe(u8, text[i .. i + ws_count - 1]);
+                try result.words.append(result.allocator, word);
+                i += ws_count - 1;
+                continue;
+            }
+
+            // \s+：普通空白序列
+            const word = try result.allocator.dupe(u8, text[i .. i + ws_count]);
+            try result.words.append(result.allocator, word);
+            i += ws_count;
+            continue;
+        }
+
+        // 4. GPT-2 " ?[^\s\p{L}\p{N}]+" 模式：可选空格 + 符号序列
+        if (text[i] == ' ' and i + 1 < text.len and
+            !isWhitespace(text[i + 1]) and
+            !isUnicodeLetter(text, i + 1) and
+            !isUnicodeDigit(text, i + 1))
         {
             const start = i;
-            while (i < text.len and !isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
+            i += 1;
+            i += utf8CharLen(text, i);
+            while (i < text.len and
+                !isWhitespace(text[i]) and
+                !isUnicodeLetter(text, i) and
+                !isUnicodeDigit(text, i))
+            {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+        if (!isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
+            const start = i;
+            i += utf8CharLen(text, i);
+            while (i < text.len and
+                !isWhitespace(text[i]) and
+                !isUnicodeLetter(text, i) and
+                !isUnicodeDigit(text, i))
+            {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 5. 空白序列
+        if (isWhitespace(text[i])) {
+            const start = i;
+            while (i < text.len and isWhitespace(text[i])) {
                 i += 1;
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
             try result.words.append(result.allocator, word);
+            continue;
         }
+
+        // Fallback: skip any unrecognized character
+        i += 1;
     }
 }
 
