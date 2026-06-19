@@ -166,7 +166,7 @@ fn preTokenizeFalcon(text: []const u8, result: *PreTokenized) !void {
         if (try tryMatchContractionOrWord(text, &i, result)) continue;
 
         // 3. Three-digit numbers: [0-9][0-9][0-9]
-        if (i + 2 < text.len and isDigit(text[i]) and isDigit(text[i+1]) and isDigit(text[i+2])) {
+        if (i + 2 < text.len and isUnicodeDigit(text, i) and isUnicodeDigit(text, i+1) and isUnicodeDigit(text, i+2)) {
             const start = i;
             i += 3;
             const word = try result.allocator.dupe(u8, text[start..i]);
@@ -293,19 +293,15 @@ fn preTokenizeDeepseekLlm(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // 4. Trailing whitespace: \s+$
+        // 4. Whitespace: capture standalone whitespace
         if (isWhitespace(text[i])) {
             const start = i;
             while (i < text.len and isWhitespace(text[i])) {
                 i += 1;
             }
-            if (i == text.len) {
-                const word = try result.allocator.dupe(u8, text[start..i]);
-                try result.words.append(result.allocator, word);
-                continue;
-            }
-            // Not trailing, put back
-            i = start;
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
         }
 
         // 5. CJK characters: [一-龥...]+
@@ -321,11 +317,11 @@ fn preTokenizeDeepseekLlm(text: []const u8, result: *PreTokenized) !void {
         }
 
         // 6. Numbers: \p{N}+
-        if (isDigit(text[i])) {
+        if (isUnicodeDigit(text, i)) {
             const start = i;
-            i += 1;
-            while (i < text.len and isDigit(text[i])) {
-                i += 1;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isUnicodeDigit(text, i)) {
+                i += utf8CharLen(text, i);
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
             try result.words.append(result.allocator, word);
@@ -412,10 +408,23 @@ fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
         }
 
         // 5. Single digit: \p{N}
-        if (isDigit(text[i])) {
-            const word = try result.allocator.dupe(u8, text[i..i+1]);
+        if (isUnicodeDigit(text, i)) {
+            const ch_len = utf8CharLen(text, i);
+            const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
             try result.words.append(result.allocator, word);
+            i += ch_len;
+            continue;
+        }
+
+        // 6. Whitespace: capture standalone whitespace
+        if (isWhitespace(text[i])) {
+            const start = i;
             i += 1;
+            while (i < text.len and isWhitespace(text[i])) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
             continue;
         }
 
@@ -429,14 +438,18 @@ fn preTokenizeDeepseek3Style(text: []const u8, result: *PreTokenized) !void {
     var i: usize = 0;
     while (i < text.len) {
         // 1. Numbers in groups of 1-3: \p{N}{1,3}
-        if (isDigit(text[i])) {
+        if (isUnicodeDigit(text, i)) {
             const start = i;
-            const count = @min(@as(usize, 3), text.len - i);
-            i += count;
-            // Make sure we don't split in the middle of a longer number
-            // Actually, \p{N}{1,3} means 1-3 digits, so we take exactly 1-3
-            const word = try result.allocator.dupe(u8, text[start..i]);
+            var count: usize = 0;
+            var pos = i;
+            while (pos < text.len and isUnicodeDigit(text, pos) and count < 3) {
+                const ch_len = utf8CharLen(text, pos);
+                pos += ch_len;
+                count += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..pos]);
             try result.words.append(result.allocator, word);
+            i = pos;
             continue;
         }
 
@@ -712,7 +725,7 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
             if (has_space) i += 1;
             i += utf8CharLen(text, i);
             while (i < text.len and !isWhitespace(text[i]) and
-                !isUnicodeLetter(text, i) and !isDigit(text[i])) {
+                !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
                 i += utf8CharLen(text, i);
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
@@ -793,7 +806,7 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
 
         // 2. [^\s\p{L}\p{N}]?\p{L}+ : 可选前导符号 + 字母序列
         // Check for optional leading punctuation/symbol before letters
-        if (!isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isDigit(text[i])) {
+        if (!isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
             // Possible leading symbol
             if (i + 1 < text.len and isUnicodeLetter(text, i + 1)) {
                 const start = i;
@@ -818,13 +831,35 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // 3. \p{N}{1,3} : 数字序列（1-3位）
-        if (isDigit(text[i])) {
+        // 3a. 可选空格 + 数字序列:  ?\p{N}{1,3}
+        if (text[i] == ' ' and i + 1 < text.len and isUnicodeDigit(text, i + 1)) {
             const start = i;
-            const count = @min(@as(usize, 3), text.len - i);
-            i += count;
-            const word = try result.allocator.dupe(u8, text[start..i]);
+            i += 1;
+            var count: usize = 0;
+            var pos = i;
+            while (pos < text.len and isUnicodeDigit(text, pos) and count < 3) {
+                const ch_len = utf8CharLen(text, pos);
+                pos += ch_len;
+                count += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..pos]);
             try result.words.append(result.allocator, word);
+            i = pos;
+            continue;
+        }
+        // 3b. \p{N}{1,3} : 数字序列（1-3位）
+        if (isUnicodeDigit(text, i)) {
+            const start = i;
+            var count: usize = 0;
+            var pos = i;
+            while (pos < text.len and isUnicodeDigit(text, pos) and count < 3) {
+                const ch_len = utf8CharLen(text, pos);
+                pos += ch_len;
+                count += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..pos]);
+            try result.words.append(result.allocator, word);
+            i = pos;
             continue;
         }
 
@@ -832,7 +867,7 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
         if (text[i] == ' ' and i + 1 < text.len and
             !isWhitespace(text[i + 1]) and
             !isUnicodeLetter(text, i + 1) and
-            !isDigit(text[i + 1]))
+            !isUnicodeDigit(text, i + 1))
         {
             const start = i;
             i += 1;
@@ -840,7 +875,7 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             while (i < text.len and
                 !isWhitespace(text[i]) and
                 !isUnicodeLetter(text, i) and
-                !isDigit(text[i]))
+                !isUnicodeDigit(text, i))
             {
                 i += utf8CharLen(text, i);
             }
@@ -848,13 +883,13 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             try result.words.append(result.allocator, word);
             continue;
         }
-        if (!isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isDigit(text[i])) {
+        if (!isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
             const start = i;
             i += utf8CharLen(text, i);
             while (i < text.len and
                 !isWhitespace(text[i]) and
                 !isUnicodeLetter(text, i) and
-                !isDigit(text[i]))
+                !isUnicodeDigit(text, i))
             {
                 i += utf8CharLen(text, i);
             }
