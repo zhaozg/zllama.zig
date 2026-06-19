@@ -146,6 +146,10 @@ zig build test
 | tinyllama-1.1B | Q4_K_M | CPU (6 线程) | Apple M2 | 53.8 TG |
 | Gemma 4 E2B | Q4_K_M | CPU (6 线程) | Apple M2 | 待测 |
 
+## 已知问题:
+
+- `zig build test -Doptimize=ReleaseSafe -Dbundle-ggml=true` 出现非法指令错误
+
 ## 📄 许可证
 
 本项目采用 MIT 许可证。ggml 部分遵循其原始许可证（MIT）。

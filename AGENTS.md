@@ -63,6 +63,12 @@
    - 单文件模块应保持清晰的接口和实现分离，避免过度复杂化。
    - 避免文件过大，不能超过 600 行，合理拆分功能模块（如算子、模型实现、核心引擎等）。
 
+10. CPU 能力发现
+   - `sysctl machdep.cpu.features` 输出:
+   ```
+machdep.cpu.features: FPU VME DE PSE TSC MSR PAE MCE CX8 APIC SEP MTRR PGE MCA CMOV PAT PSE36 CLFSH DS ACPI MMX FXSR SSE SSE2 SS HTT TM PBE SSE3 PCLMULQDQ DTES64 MON DSCPL VMX EST TM2 SSSE3 FMA CX16 TPR PDCM SSE4.1 SSE4.2 x2APIC MOVBE POPCNT AES PCID XSAVE OSXSAVE SEGLIM64 TSCTMR AVX1.0 RDRAND F16C
+   ```
+
 ## 🔍 软件工程实践：功能对齐与早期问题发现
 
 为保证开发质量和避免后期返工，在编码前、编码中和集成阶段必须遵循以下实践：

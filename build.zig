@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // -Dbundle-ggml: build ggml from source instead of using system-installed libraries
-    const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse true;
+    const bundle_ggml = b.option(bool, "bundle-ggml", "Build ggml from source instead of using system libraries") orelse false;
 
     // -Dno-galloc-realloc: assert-fail on any gallocr reallocation.
     // Useful for development to detect graph topology changes that would cause
@@ -1022,9 +1022,11 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
 
     // 宏定义
     lib_mod.addCMacro("GGML_USE_CPU", "1");
-    lib_mod.addCMacro("GGML_BACKEND_DL", "1");
-    lib_mod.addCMacro("GGML_VERSION", "\"0.15.1\"");
-    lib_mod.addCMacro("GGML_COMMIT", "\"f158c192\"");
+    lib_mod.addCMacro("GGML_SCHED_MAX_COPIES", "4");
+    lib_mod.addCMacro("GGML_VERSION", "\"0.15.2\"");
+    lib_mod.addCMacro("GGML_COMMIT", "\"707321c4\"");
+
+    lib_mod.addCMacro("NDEBUG", "1");
     // x86_64 优化标志（所有 CPU 后端文件共享）
     const x86_opt_flags: []const []const u8 = if (cpu_arch == .x86_64)
         &.{ "-mavx2", "-mfma", "-mf16c", "-mavx", "-msse4.2" }
@@ -1034,7 +1036,7 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     const c_base_flags = &.{ "-std=c11", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-missing-braces", "-Wno-implicit-function-declaration" };
 
     // C++ 文件基础标志
-    const cpp_base_flags = &.{ "-std=c++17", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-missing-braces" };
+    const cpp_base_flags = &.{ "-std=gnu++17", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-missing-braces" };
 
     // 系统库链接（通过模块）
     switch (os) {
@@ -1048,6 +1050,8 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
             lib_mod.addCMacro("GGML_USE_ACCELERATE", "1");
             lib_mod.addCMacro("ACCELERATE_NEW_LAPACK", "1");
             lib_mod.addCMacro("ACCELERATE_LAPACK_ILP64", "1");
+            lib_mod.addCMacro("_DARWIN_C_SOURCE", "1");
+            lib_mod.addCMacro("_XOPEN_SOURCE", "600");
         },
         .linux => {
             lib_mod.linkSystemLibrary("pthread", .{});

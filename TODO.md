@@ -34,6 +34,7 @@
   - [x] **mediaForward 回调审查**：`prefill.zig` Pass 2 前后打印 `causal=false`、`start_pos`、`n_tokens`、`embd_dim`；`gemma4.zig` 的 `transformerForward` 入口打印 `causal` 和 `kv_cache` 状态；`buildMediaOnly` 入口打印参数并注明 non-causal。
   - [x] **KV Cache 状态检查**：`prefill.zig` 的 Pass 1/2/3 各阶段 compute 完成后打印 `kv_cache_mgr.currentLen()`，确认媒体段处理前后 KV Cache 逐段递增。
   - [x] **Token 序列逐步验证**：`engine.zig` 的 `multimodalPrefill` 中打印 prefix/suffix token 的 head+tail 片段及 pos 范围；`prefill.zig` 的三阶段 info 日志已含完整位置范围。
+- [ ] 处理提交: 90472b3 对齐 src/vocab.zig, src/tokenizer/*.zig 中的 vocab 的遗留问题
 
 ## P2 — 扩展功能与模型支持
 
