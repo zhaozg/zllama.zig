@@ -162,10 +162,33 @@ fn preTokenizeFalcon(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // 2. Contractions and word patterns: 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+        // 2. Optional space + Unicode digits:  ?\p{N}+ (for digits like ½ ² ³)
+        if (text[i] == ' ' and i + 1 < text.len and isUnicodeDigit(text, i + 1)) {
+            const start = i;
+            i += 1;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isUnicodeDigit(text, i)) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+        if (isUnicodeDigit(text, i)) {
+            const start = i;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isUnicodeDigit(text, i)) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 3. Contractions and word patterns (ASCII only): 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
         if (try tryMatchContractionOrWord(text, &i, result)) continue;
 
-        // 3. Three-digit numbers: [0-9][0-9][0-9]
+        // 4. Three-digit numbers: [0-9][0-9][0-9]
         if (i + 2 < text.len and isUnicodeDigit(text, i) and isUnicodeDigit(text, i+1) and isUnicodeDigit(text, i+2)) {
             const start = i;
             i += 3;
@@ -183,7 +206,8 @@ fn preTokenizeFalcon(text: []const u8, result: *PreTokenized) !void {
 }
 
 /// MPT 风格预分词
-/// Uses GPT-2 style regex: 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+/// MPT 使用 GPT-2 风格 regex，与 GPT-2 共享相同的预分词逻辑。
+/// 参考 llama.cpp: LLAMA_VOCAB_PRE_TYPE_MPT uses the same regex as GPT-2
 fn preTokenizeMpt(text: []const u8, result: *PreTokenized) !void {
     try preTokenizeGpt2Style(text, result);
 }
@@ -279,7 +303,7 @@ fn preTokenizeDeepseekLlm(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // 3. Punctuation with optional space: \s?[!-/:-~！-／：-～‘-‟　-。]+
+        // 3. Punctuation with optional space: \s?[!-\/:-~！-／：-～‘-‟　-。]+
         if (isPunctuationOrSymbol(text[i])) {
             const has_space = (i > 0 and text[i-1] == ' ');
             const start = if (has_space) i - 1 else i;
@@ -334,10 +358,11 @@ fn preTokenizeDeepseekLlm(text: []const u8, result: *PreTokenized) !void {
 }
 
 /// DeepSeek-Coder 风格预分词
+/// regex: [\r\n] | \s?\p{L}+ | \s?\p{P}+ | [一-龥ࠀ-一가-퟿]+ | \p{N}
 fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
     var i: usize = 0;
     while (i < text.len) {
-        // 1. Newlines
+        // 1. Newlines: [\r\n]
         if (text[i] == '\r' or text[i] == '\n') {
             const start = i;
             i += 1;
@@ -395,7 +420,7 @@ fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // 4. CJK
+        // 4. CJK: [一-龥ࠀ-一가-퟿]+
         if (isCJK(text, i)) {
             const start = i;
             i += utf8CharLen(text, i);
@@ -416,10 +441,9 @@ fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // 6. Whitespace: capture standalone whitespace
+        // 6. Whitespace: capture standalone whitespace (after letters/punct/digits)
         if (isWhitespace(text[i])) {
             const start = i;
-            i += 1;
             while (i < text.len and isWhitespace(text[i])) {
                 i += 1;
             }
@@ -428,7 +452,7 @@ fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // Fallback
+        // Fallback: single character
         i += 1;
     }
 }
@@ -706,12 +730,12 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
         }
 
         // 3. 可选空格 + 数字序列:  ?\p{N}+
-        if (check_pos < text.len and isDigit(text[check_pos])) {
+        if (check_pos < text.len and isUnicodeDigit(text, check_pos)) {
             const start = i;
             if (has_space) i += 1;
-            i += 1;
-            while (i < text.len and isDigit(text[i])) {
-                i += 1;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isUnicodeDigit(text, i)) {
+                i += utf8CharLen(text, i);
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
             try result.words.append(result.allocator, word);
@@ -720,7 +744,7 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
 
         // 4. 可选空格 + 符号序列:  ?[^\s\p{L}\p{N}]+
         if (check_pos < text.len and !isWhitespace(text[check_pos]) and
-            !isUnicodeLetter(text, check_pos) and !isDigit(text[check_pos])) {
+            !isUnicodeLetter(text, check_pos) and !isUnicodeDigit(text, check_pos)) {
             const start = i;
             if (has_space) i += 1;
             i += utf8CharLen(text, i);
