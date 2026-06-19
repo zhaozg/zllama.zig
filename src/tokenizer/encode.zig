@@ -502,17 +502,15 @@ fn isBloomSeparator(c: u8) bool {
 /// Returns true if a match was found and appended
 fn tryMatchContractionOrWord(text: []const u8, i: *usize, result: *PreTokenized) !bool {
     // Contractions: 's, 't, 're, 've, 'm, 'll, 'd
+    // Note: only match the contraction suffix itself, not the preceding word.
+    // The preceding word is matched by the ?\p{L}+ pattern.
     if (i.* + 1 < text.len and text[i.*] == '\'') {
         const suffix = text[i.*+1..];
         if (suffix.len >= 1 and (suffix[0] == 's' or suffix[0] == 'S' or
             suffix[0] == 't' or suffix[0] == 'T' or
             suffix[0] == 'm' or suffix[0] == 'M' or
             suffix[0] == 'd' or suffix[0] == 'D')) {
-            var word_start = i.*;
-            while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
-                word_start -= 1;
-            }
-            const word = try result.allocator.dupe(u8, text[word_start..i.*+2]);
+            const word = try result.allocator.dupe(u8, text[i.*..i.*+2]);
             try result.words.append(result.allocator, word);
             i.* = i.* + 2;
             return true;
@@ -523,11 +521,7 @@ fn tryMatchContractionOrWord(text: []const u8, i: *usize, result: *PreTokenized)
             (suffix[0] == 'V' and suffix[1] == 'E') or
             (suffix[0] == 'l' and suffix[1] == 'l') or
             (suffix[0] == 'L' and suffix[1] == 'L'))) {
-            var word_start = i.*;
-            while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
-                word_start -= 1;
-            }
-            const word = try result.allocator.dupe(u8, text[word_start..i.*+3]);
+            const word = try result.allocator.dupe(u8, text[i.*..i.*+3]);
             try result.words.append(result.allocator, word);
             i.* = i.* + 3;
             return true;
@@ -654,18 +648,17 @@ fn tryMatchContractionOrWord(text: []const u8, i: *usize, result: *PreTokenized)
 fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
     var i: usize = 0;
     while (i < text.len) {
-        // 1. 检查收缩形式
+        // 1. 检查收缩形式（仅匹配收缩后缀本身，如 's, 't, 're, 've, 'm, 'll, 'd）
+        // 对应 regex: 's|'t|'re|'ve|'m|'ll|'d
+        // 注意：不包含前面的单词，前面的单词由 ?\p{L}+ 模式匹配
         if (i + 1 < text.len and text[i] == '\'') {
             const suffix = text[i+1..];
             if (suffix.len >= 1 and (suffix[0] == 's' or suffix[0] == 'S' or
                 suffix[0] == 't' or suffix[0] == 'T' or
                 suffix[0] == 'm' or suffix[0] == 'M' or
-                suffix[0] == 'd' or suffix[0] == 'D')) {
-                var word_start = i;
-                while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
-                    word_start -= 1;
-                }
-                const word = try result.allocator.dupe(u8, text[word_start..i+2]);
+                suffix[0] == 'd' or suffix[0] == 'D'))
+            {
+                const word = try result.allocator.dupe(u8, text[i..i+2]);
                 try result.words.append(result.allocator, word);
                 i = i + 2;
                 continue;
@@ -675,12 +668,9 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
                 (suffix[0] == 'v' and suffix[1] == 'e') or
                 (suffix[0] == 'V' and suffix[1] == 'E') or
                 (suffix[0] == 'l' and suffix[1] == 'l') or
-                (suffix[0] == 'L' and suffix[1] == 'L'))) {
-                var word_start = i;
-                while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
-                    word_start -= 1;
-                }
-                const word = try result.allocator.dupe(u8, text[word_start..i+3]);
+                (suffix[0] == 'L' and suffix[1] == 'L')))
+            {
+                const word = try result.allocator.dupe(u8, text[i..i+3]);
                 try result.words.append(result.allocator, word);
                 i = i + 3;
                 continue;
