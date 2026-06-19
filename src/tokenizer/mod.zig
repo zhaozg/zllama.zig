@@ -320,11 +320,17 @@ pub const Tokenizer = struct {
     // ========================================================================
 
     pub fn decode(self: *const Tokenizer, token_ids: []const u32, allocator: std.mem.Allocator) ![]u8 {
+        var token_types = self.tokenTypesList(allocator);
+        defer token_types.deinit(allocator);
+
+        var vocab_entries = self.vocabEntryList(allocator);
+        defer vocab_entries.deinit(allocator);
+
         const dec_config = decode_mod.DecodeConfig{
             .model = self.vocab.getType(),
             .special = self.vocab.getSpecial(),
-            .token_types = self.tokenTypesList(allocator),
-            .vocab = self.vocabEntryList(allocator),
+            .token_types = token_types,
+            .vocab = vocab_entries,
             .clean_spaces = self.vocab.getCleanSpaces(),
             .escape_whitespaces = self.vocab.getEscapeWhitespaces(),
             .unicode_to_byte = &self.bytes_to_unicode_map.reverse,

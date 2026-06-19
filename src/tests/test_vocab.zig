@@ -191,13 +191,13 @@ fn runVocabTest(
 
     // 解析测试数据
     const inputs = try parseInpFile(allocator, inp_content);
-    errdefer {
+    defer {
         for (inputs) |input| allocator.free(input);
         allocator.free(inputs);
     }
 
     const expected_outputs = try parseOutFile(allocator, out_content);
-    errdefer {
+    defer {
         for (expected_outputs) |output| allocator.free(output);
         allocator.free(expected_outputs);
     }

@@ -53,8 +53,11 @@ pub fn preTokenize(text: []const u8, pre_type: types.PreTokenizerType, allocator
         .default, .llama3 => {
             try preTokenizeGPT2(text, &result);
         },
-        .gpt2, .gemma4 => {
+        .gpt2 => {
             try preTokenizeGpt2Style(text, &result);
+        },
+        .gemma4 => {
+            try preTokenizeNewlineOnly(text, &result);
         },
         .qwen2, .qwen35 => {
             try preTokenizeQwen(text, &result);
@@ -395,6 +398,60 @@ fn preTokenizeQwen(text: []const u8, result: *PreTokenized) !void {
     try preTokenizeGPT2(text, result);
 }
 
+/// Gemma-4 风格预分词：仅按换行符分割
+/// 空格由 escape_whitespaces 在编码前全局替换为 ▁ (U+2581)
+/// 参考 llama.cpp LLAMA_VOCAB_PRE_TYPE_GEMMA4: regex "[^\n]+|[\n]+"
+fn preTokenizeNewlineOnly(text: []const u8, result: *PreTokenized) !void {
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            if (i > start) {
+                const word = try result.allocator.dupe(u8, text[start..i]);
+                try result.words.append(result.allocator, word);
+            }
+            start = i;
+            while (i < text.len and text[i] == '\n') {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if (i > start) {
+        const word = try result.allocator.dupe(u8, text[start..i]);
+        try result.words.append(result.allocator, word);
+    }
+}
+
+/// 全局空格转义：将文本中的所有空格 ' ' (0x20) 替换为 ▁ (U+2581, UTF-8: E2 96 81)
+/// 用于 gemma-4 等 SPM 风格 BPE 模型，在预分词前应用
+/// 参考 llama.cpp 的 llama_escape_whitespace()
+fn escapeWhitespace(text: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    var space_count: usize = 0;
+    for (text) |c| {
+        if (c == ' ') space_count += 1;
+    }
+    if (space_count == 0) return allocator.dupe(u8, text);
+
+    const escaped_len = text.len + space_count * 2; // space (1 byte) → ▁ (3 bytes)
+    var buf = try allocator.alloc(u8, escaped_len);
+    var j: usize = 0;
+    for (text) |c| {
+        if (c == ' ') {
+            buf[j] = 0xE2; j += 1;
+            buf[j] = 0x96; j += 1;
+            buf[j] = 0x81; j += 1;
+        } else {
+            buf[j] = c; j += 1;
+        }
+    }
+    return buf[0..j];
+}
+
 fn isWhitespace(c: u8) bool {
     return switch (c) {
         ' ', '\t', '\n', '\r', 0x0B, 0x0C => true,
@@ -657,10 +714,21 @@ pub fn encode(
     }
 
     // 1b. 常规预分词（无特殊 token 扫描）
-    var pre_tok = if (is_spm_model)
-        try preTokenizeSPM(text, config.allocator)
+    // 对于 SPM 风格 BPE 模型（gemma-4 等），先全局转义空格再预分词
+    // 参考 llama.cpp：escape_whitespaces 在 BPE tokenize 之前对整个文本调用
+    const needs_global_escape = config.escape_whitespaces and !is_spm_model;
+    const escaped_text: ?[]const u8 = if (needs_global_escape)
+        try escapeWhitespace(text, config.allocator)
     else
-        try preTokenize(text, config.pre_type, config.allocator);
+        null;
+    defer if (escaped_text) |et| config.allocator.free(et);
+
+    const effective_text = if (escaped_text) |et| et else text;
+
+    var pre_tok = if (is_spm_model)
+        try preTokenizeSPM(effective_text, config.allocator)
+    else
+        try preTokenize(effective_text, config.pre_type, config.allocator);
     defer pre_tok.deinit();
 
     // 2. 对每个词进行编码
@@ -693,10 +761,20 @@ fn encodeSegment(
 
     if (text.len == 0) return tokens;
 
-    var pre_tok = if (is_spm_model)
-        try preTokenizeSPM(text, config.allocator)
+    // 对于 SPM 风格 BPE 模型（gemma-4 等），先全局转义空格
+    const needs_global_escape = config.escape_whitespaces and !is_spm_model;
+    const escaped_text: ?[]const u8 = if (needs_global_escape)
+        try escapeWhitespace(text, config.allocator)
     else
-        try preTokenize(text, config.pre_type, config.allocator);
+        null;
+    defer if (escaped_text) |et| config.allocator.free(et);
+
+    const effective_text = if (escaped_text) |et| et else text;
+
+    var pre_tok = if (is_spm_model)
+        try preTokenizeSPM(effective_text, config.allocator)
+    else
+        try preTokenize(effective_text, config.pre_type, config.allocator);
     defer pre_tok.deinit();
 
     for (pre_tok.words.items) |word| {
