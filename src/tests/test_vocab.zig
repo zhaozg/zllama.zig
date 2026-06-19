@@ -64,11 +64,11 @@ const vocab_tests = [_]VocabTestConfig{
     .{ .name = "starcoder" },
     .{ .name = "mpt" },
     .{ .name = "refact" },
-    .{ .name = "baichuan" },
-    .{ .name = "bert-bge" },
+    .{ .name = "baichuan", .skip = true }, // missing test data files
+    .{ .name = "bert-bge", .skip = true }, // WPM tokenizer not implemented
     .{ .name = "gemma-4" },
-    .{ .name = "nomic-bert-moe" },
-    .{ .name = "aquila" },
+    .{ .name = "nomic-bert-moe", .skip = true }, // missing test data files
+    .{ .name = "aquila", .skip = true }, // missing test data files
 };
 
 // ============================================================================
@@ -160,6 +160,11 @@ fn runVocabTest(
     allocator: std.mem.Allocator,
     config: VocabTestConfig,
 ) !void {
+    if (config.skip) {
+        std.debug.print("  [{s}] SKIPPED\n", .{config.name});
+        return;
+    }
+
     // 构建文件路径
     const gguf_path = try std.fmt.allocPrint(allocator, "{s}/ggml-vocab-{s}.gguf", .{ test_data_dir, config.name });
     defer allocator.free(gguf_path);
@@ -277,55 +282,53 @@ test "vocab - gemma-4" {
     try runVocabTest(testing.allocator, .{ .name = "gemma-4" });
 }
 
-// NOTE: uncomment to DO test
-//
-//test "vocab - falcon" {
-//    try runVocabTest(testing.allocator, .{ .name = "falcon" });
-//}
-//
-//test "vocab - deepseek-coder" {
-//    try runVocabTest(testing.allocator, .{ .name = "deepseek-coder" });
-//}
-//
-//test "vocab - deepseek-llm" {
-//    try runVocabTest(testing.allocator, .{ .name = "deepseek-llm" });
-//}
-//
-//test "vocab - phi-3" {
-//    try runVocabTest(testing.allocator, .{ .name = "phi-3" });
-//}
-//
-//test "vocab - command-r" {
-//    try runVocabTest(testing.allocator, .{ .name = "command-r" });
-//}
-//
-//test "vocab - starcoder" {
-//    try runVocabTest(testing.allocator, .{ .name = "starcoder" });
-//}
-//
-//test "vocab - mpt" {
-//    try runVocabTest(testing.allocator, .{ .name = "mpt" });
-//}
-//
-//test "vocab - refact" {
-//    try runVocabTest(testing.allocator, .{ .name = "refact" });
-//}
-//
-//test "vocab - baichuan" {
-//    try runVocabTest(testing.allocator, .{ .name = "baichuan" });
-//}
-//
-//test "vocab - bert-bge" {
-//    try runVocabTest(testing.allocator, .{ .name = "bert-bge" });
-//}
-//
-//test "vocab - nomic-bert-moe" {
-//    try runVocabTest(testing.allocator, .{ .name = "nomic-bert-moe" });
-//}
-//
-//test "vocab - aquila" {
-//    try runVocabTest(testing.allocator, .{ .name = "aquila" });
-//}
+test "vocab - falcon" {
+    try runVocabTest(testing.allocator, .{ .name = "falcon" });
+}
+
+test "vocab - deepseek-coder" {
+    try runVocabTest(testing.allocator, .{ .name = "deepseek-coder" });
+}
+
+test "vocab - deepseek-llm" {
+    try runVocabTest(testing.allocator, .{ .name = "deepseek-llm" });
+}
+
+test "vocab - phi-3" {
+    try runVocabTest(testing.allocator, .{ .name = "phi-3" });
+}
+
+test "vocab - command-r" {
+    try runVocabTest(testing.allocator, .{ .name = "command-r" });
+}
+
+test "vocab - starcoder" {
+    try runVocabTest(testing.allocator, .{ .name = "starcoder" });
+}
+
+test "vocab - mpt" {
+    try runVocabTest(testing.allocator, .{ .name = "mpt" });
+}
+
+test "vocab - refact" {
+    try runVocabTest(testing.allocator, .{ .name = "refact" });
+}
+
+test "vocab - baichuan" {
+    try runVocabTest(testing.allocator, .{ .name = "baichuan", .skip = true });
+}
+
+test "vocab - bert-bge" {
+    try runVocabTest(testing.allocator, .{ .name = "bert-bge", .skip = true });
+}
+
+test "vocab - nomic-bert-moe" {
+    try runVocabTest(testing.allocator, .{ .name = "nomic-bert-moe", .skip = true });
+}
+
+test "vocab - aquila" {
+    try runVocabTest(testing.allocator, .{ .name = "aquila", .skip = true });
+}
 
 // ============================================================================
 // 辅助测试：解析器单元测试

@@ -290,9 +290,9 @@ pub const Tokenizer = struct {
         else
             null;
 
-        // 对于 gemma-4/bert 等使用 <0xXX> 格式字节 token 的模型，不使用 GPT-2 字节编码
+        // 对于 gemma-4/bert/SPM 等不使用 GPT-2 字节编码的模型
         const model_type = self.vocab.getType();
-        const needs_gpt2_encoding = model_type != .gemma4 and model_type != .bert;
+        const needs_gpt2_encoding = model_type == .gpt2 or model_type == .tiktoken or model_type == .replit;
 
         const enc_config = encode_mod.EncodeConfig{
             .allocator = self.allocator,
@@ -307,11 +307,14 @@ pub const Tokenizer = struct {
             .unicodeToByte = if (needs_gpt2_encoding) &self.bytes_to_unicode_map.reverse else null,
             .byteToTokenIdFn = byteToTokenIdWrapper,
             .bytesToUnicodeFn = if (needs_gpt2_encoding) bytesToUnicodeWrapper else null,
+            .tokenScoreFn = tokenScoreWrapper,
             .escape_whitespaces = self.vocab.getEscapeWhitespaces(),
             .ctx = @ptrCast(self),
             .cache_special_tokens = cache_special,
         };
-
+        // SPM 模型始终使用 GGUF 中的 add_space_prefix 值，不依赖 add_bos
+        // 因为 ▁ 前缀是 SPM tokenization 的核心机制（标记词边界），
+        // 且 encodeWord 内部通过 is_first_word 逻辑已正确处理首词不添加前缀的情况。
         return encode_mod.encode(text, add_bos, add_eos, self.vocab.getAddSpacePrefix(), self.vocab.getIgnoreMerges(), parse_special, &enc_config);
     }
 
@@ -456,6 +459,11 @@ pub const Tokenizer = struct {
     fn bytesToUnicodeFn(self: *const Tokenizer, byte: u8) []const u8 {
         return self.bytes_to_unicode_map.bytesToUnicode(byte);
     }
+
+    /// 获取 token 的 score（用于 SPM 编码）
+    fn tokenScore(self: *const Tokenizer, token_id: u32) f32 {
+        return self.vocab.tokenScore(token_id);
+    }
 };
 
 // ============================================================================
@@ -595,4 +603,9 @@ fn bytesToUnicodeWrapper(byte: u8, ctx: ?*anyopaque) []const u8 {
 fn textToTokenWrapper(text: []const u8, ctx: ?*anyopaque) ?u32 {
     const self: *const Tokenizer = @ptrCast(@alignCast(ctx.?));
     return self.textToToken(text);
+}
+
+fn tokenScoreWrapper(token_id: u32, ctx: ?*anyopaque) f32 {
+    const self: *const Tokenizer = @ptrCast(@alignCast(ctx.?));
+    return self.tokenScore(token_id);
 }

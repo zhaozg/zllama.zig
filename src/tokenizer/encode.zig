@@ -62,6 +62,27 @@ pub fn preTokenize(text: []const u8, pre_type: types.PreTokenizerType, allocator
         .qwen2, .qwen35 => {
             try preTokenizeQwen(text, &result);
         },
+        .falcon => {
+            try preTokenizeFalcon(text, &result);
+        },
+        .mpt => {
+            try preTokenizeMpt(text, &result);
+        },
+        .starcoder, .refact, .command_r, .smollm, .codeshell, .exaone, .minerva => {
+            try preTokenizeStarcoderStyle(text, &result);
+        },
+        .deepseek_llm => {
+            try preTokenizeDeepseekLlm(text, &result);
+        },
+        .deepseek_coder => {
+            try preTokenizeDeepseekCoder(text, &result);
+        },
+        .deepseek3_llm, .hunyuan_dense, .joyai_llm => {
+            try preTokenizeDeepseek3Style(text, &result);
+        },
+        .bloom, .poro, .gpt3_finnish => {
+            try preTokenizeBloomStyle(text, &result);
+        },
         else => {
             const word = try allocator.dupe(u8, text);
             try result.words.append(allocator, word);
@@ -124,6 +145,464 @@ pub fn preTokenizeSPM(text: []const u8, allocator: std.mem.Allocator) !PreTokeni
     return result;
 }
 
+/// Falcon 风格预分词
+/// regex: [\p{P}\$\+<=\>\^~\|`]+ | 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S) | [0-9][0-9][0-9]
+fn preTokenizeFalcon(text: []const u8, result: *PreTokenized) !void {
+    var i: usize = 0;
+    while (i < text.len) {
+        // 1. Punctuation and symbols: [\p{P}\$\+<=\>\^~\|`]+
+        if (isPunctuationOrSymbol(text[i])) {
+            const start = i;
+            i += 1;
+            while (i < text.len and isPunctuationOrSymbol(text[i])) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 2. Contractions and word patterns: 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+        if (try tryMatchContractionOrWord(text, &i, result)) continue;
+
+        // 3. Three-digit numbers: [0-9][0-9][0-9]
+        if (i + 2 < text.len and isDigit(text[i]) and isDigit(text[i+1]) and isDigit(text[i+2])) {
+            const start = i;
+            i += 3;
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // Fallback: single character
+        const ch_len = utf8CharLen(text, i);
+        const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
+        try result.words.append(result.allocator, word);
+        i += ch_len;
+    }
+}
+
+/// MPT 风格预分词
+/// Uses GPT-2 style regex: 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+fn preTokenizeMpt(text: []const u8, result: *PreTokenized) !void {
+    try preTokenizeGpt2Style(text, result);
+}
+
+/// Starcoder/Refact/Command-R 风格预分词
+/// regex: \p{N} | 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+fn preTokenizeStarcoderStyle(text: []const u8, result: *PreTokenized) !void {
+    var i: usize = 0;
+    while (i < text.len) {
+        // 1. Single digit: \p{N}
+        if (isDigit(text[i])) {
+            const word = try result.allocator.dupe(u8, text[i..i+1]);
+            try result.words.append(result.allocator, word);
+            i += 1;
+            continue;
+        }
+
+        // 2. Contractions and word patterns
+        if (try tryMatchContractionOrWord(text, &i, result)) continue;
+
+        // Fallback
+        const ch_len = utf8CharLen(text, i);
+        const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
+        try result.words.append(result.allocator, word);
+        i += ch_len;
+    }
+}
+
+/// DeepSeek-LLM 风格预分词
+fn preTokenizeDeepseekLlm(text: []const u8, result: *PreTokenized) !void {
+    var i: usize = 0;
+    while (i < text.len) {
+        // 1. Newlines: [\r\n]
+        if (text[i] == '\r' or text[i] == '\n') {
+            const start = i;
+            i += 1;
+            while (i < text.len and (text[i] == '\r' or text[i] == '\n')) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 2. Latin letters with optional space: \s?[A-Za-zµÀ-ÖØ-öø-ƺ...]+
+        if (isLatinLetter(text[i])) {
+            const has_space = (i > 0 and text[i-1] == ' ');
+            const start = if (has_space) i - 1 else i;
+            if (has_space) i += 0; // already at correct position
+            i += utf8CharLen(text, i);
+            while (i < text.len and isLatinLetter(text[i])) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 3. Punctuation with optional space: \s?[!-/:-~！-／：-～‘-‟　-。]+
+        if (isPunctuationOrSymbol(text[i])) {
+            const has_space = (i > 0 and text[i-1] == ' ');
+            const start = if (has_space) i - 1 else i;
+            if (has_space) i += 0;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isPunctuationOrSymbol(text[i])) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 4. Trailing whitespace: \s+$
+        if (isWhitespace(text[i])) {
+            const start = i;
+            while (i < text.len and isWhitespace(text[i])) {
+                i += 1;
+            }
+            if (i == text.len) {
+                const word = try result.allocator.dupe(u8, text[start..i]);
+                try result.words.append(result.allocator, word);
+                continue;
+            }
+            // Not trailing, put back
+            i = start;
+        }
+
+        // 5. CJK characters: [一-龥...]+
+        if (isCJK(text, i)) {
+            const start = i;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isCJK(text, i)) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 6. Numbers: \p{N}+
+        if (isDigit(text[i])) {
+            const start = i;
+            i += 1;
+            while (i < text.len and isDigit(text[i])) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // Fallback
+        i += 1;
+    }
+}
+
+/// DeepSeek-Coder 风格预分词
+fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
+    var i: usize = 0;
+    while (i < text.len) {
+        // 1. Newlines
+        if (text[i] == '\r' or text[i] == '\n') {
+            const start = i;
+            i += 1;
+            while (i < text.len and (text[i] == '\r' or text[i] == '\n')) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 2. Letters with optional space: \s?\p{L}+
+        if (text[i] == ' ' and i + 1 < text.len and isUnicodeLetter(text, i + 1)) {
+            const start = i;
+            i += 1;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isUnicodeLetter(text, i)) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+        if (isUnicodeLetter(text, i)) {
+            const start = i;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isUnicodeLetter(text, i)) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 3. Punctuation with optional space: \s?\p{P}+
+        if (text[i] == ' ' and i + 1 < text.len and isPunctuationOrSymbol(text[i + 1])) {
+            const start = i;
+            i += 1;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isPunctuationOrSymbol(text[i])) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+        if (isPunctuationOrSymbol(text[i])) {
+            const start = i;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isPunctuationOrSymbol(text[i])) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 4. CJK
+        if (isCJK(text, i)) {
+            const start = i;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isCJK(text, i)) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 5. Single digit: \p{N}
+        if (isDigit(text[i])) {
+            const word = try result.allocator.dupe(u8, text[i..i+1]);
+            try result.words.append(result.allocator, word);
+            i += 1;
+            continue;
+        }
+
+        // Fallback
+        i += 1;
+    }
+}
+
+/// DeepSeek3 / Hunyuan-Dense / JoyAI-LLM 风格预分词
+fn preTokenizeDeepseek3Style(text: []const u8, result: *PreTokenized) !void {
+    var i: usize = 0;
+    while (i < text.len) {
+        // 1. Numbers in groups of 1-3: \p{N}{1,3}
+        if (isDigit(text[i])) {
+            const start = i;
+            const count = @min(@as(usize, 3), text.len - i);
+            i += count;
+            // Make sure we don't split in the middle of a longer number
+            // Actually, \p{N}{1,3} means 1-3 digits, so we take exactly 1-3
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 2. CJK and Asian scripts
+        if (isCJK(text, i)) {
+            const start = i;
+            i += utf8CharLen(text, i);
+            while (i < text.len and isCJK(text, i)) {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 3. Main BPE pattern: punctuation+letters, letters, punctuation, whitespace
+        if (try tryMatchContractionOrWord(text, &i, result)) continue;
+
+        // Fallback
+        const ch_len = utf8CharLen(text, i);
+        const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
+        try result.words.append(result.allocator, word);
+        i += ch_len;
+    }
+}
+
+/// Bloom/Poro/GPT3-Finnish 风格预分词
+/// regex: ?[^(\s|.,!?…。，、।۔،)]+
+fn preTokenizeBloomStyle(text: []const u8, result: *PreTokenized) !void {
+    var i: usize = 0;
+    while (i < text.len) {
+        // Skip whitespace and punctuation separators
+        if (isWhitespace(text[i]) or isBloomSeparator(text[i])) {
+            const start = i;
+            i += 1;
+            while (i < text.len and (isWhitespace(text[i]) or isBloomSeparator(text[i]))) {
+                i += 1;
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // Collect non-separator characters
+        const start = i;
+        i += utf8CharLen(text, i);
+        while (i < text.len and !isWhitespace(text[i]) and !isBloomSeparator(text[i])) {
+            i += utf8CharLen(text, i);
+        }
+        const word = try result.allocator.dupe(u8, text[start..i]);
+        try result.words.append(result.allocator, word);
+    }
+}
+
+fn isBloomSeparator(c: u8) bool {
+    return switch (c) {
+        '.', ',', '!', '?' => true,
+        else => false,
+    };
+}
+
+/// Try to match contraction or word pattern (GPT-2 style)
+/// Returns true if a match was found and appended
+fn tryMatchContractionOrWord(text: []const u8, i: *usize, result: *PreTokenized) !bool {
+    // Contractions: 's, 't, 're, 've, 'm, 'll, 'd
+    if (i.* + 1 < text.len and text[i.*] == '\'') {
+        const suffix = text[i.*+1..];
+        if (suffix.len >= 1 and (suffix[0] == 's' or suffix[0] == 'S' or
+            suffix[0] == 't' or suffix[0] == 'T' or
+            suffix[0] == 'm' or suffix[0] == 'M' or
+            suffix[0] == 'd' or suffix[0] == 'D')) {
+            var word_start = i.*;
+            while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
+                word_start -= 1;
+            }
+            const word = try result.allocator.dupe(u8, text[word_start..i.*+2]);
+            try result.words.append(result.allocator, word);
+            i.* = i.* + 2;
+            return true;
+        }
+        if (suffix.len >= 2 and ((suffix[0] == 'r' and suffix[1] == 'e') or
+            (suffix[0] == 'R' and suffix[1] == 'E') or
+            (suffix[0] == 'v' and suffix[1] == 'e') or
+            (suffix[0] == 'V' and suffix[1] == 'E') or
+            (suffix[0] == 'l' and suffix[1] == 'l') or
+            (suffix[0] == 'L' and suffix[1] == 'L'))) {
+            var word_start = i.*;
+            while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
+                word_start -= 1;
+            }
+            const word = try result.allocator.dupe(u8, text[word_start..i.*+3]);
+            try result.words.append(result.allocator, word);
+            i.* = i.* + 3;
+            return true;
+        }
+    }
+
+    // Optional space + letters:  ?\p{L}+
+    if (text[i.*] == ' ' and i.* + 1 < text.len and isUnicodeLetter(text, i.* + 1)) {
+        const start = i.*;
+        i.* += 1;
+        i.* += utf8CharLen(text, i.*);
+        while (i.* < text.len and isUnicodeLetter(text, i.*)) {
+            i.* += utf8CharLen(text, i.*);
+        }
+        const word = try result.allocator.dupe(u8, text[start..i.*]);
+        try result.words.append(result.allocator, word);
+        return true;
+    }
+    if (isUnicodeLetter(text, i.*)) {
+        const start = i.*;
+        i.* += utf8CharLen(text, i.*);
+        while (i.* < text.len and isUnicodeLetter(text, i.*)) {
+            i.* += utf8CharLen(text, i.*);
+        }
+        const word = try result.allocator.dupe(u8, text[start..i.*]);
+        try result.words.append(result.allocator, word);
+        return true;
+    }
+
+    // Optional space + digits:  ?\p{N}+
+    if (text[i.*] == ' ' and i.* + 1 < text.len and isDigit(text[i.* + 1])) {
+        const start = i.*;
+        i.* += 1;
+        i.* += 1;
+        while (i.* < text.len and isDigit(text[i.*])) {
+            i.* += 1;
+        }
+        const word = try result.allocator.dupe(u8, text[start..i.*]);
+        try result.words.append(result.allocator, word);
+        return true;
+    }
+    if (isDigit(text[i.*])) {
+        const start = i.*;
+        i.* += 1;
+        while (i.* < text.len and isDigit(text[i.*])) {
+            i.* += 1;
+        }
+        const word = try result.allocator.dupe(u8, text[start..i.*]);
+        try result.words.append(result.allocator, word);
+        return true;
+    }
+
+    // Optional space + symbols:  ?[^\s\p{L}\p{N}]+
+    if (text[i.*] == ' ' and i.* + 1 < text.len and
+        !isWhitespace(text[i.* + 1]) and
+        !isUnicodeLetter(text, i.* + 1) and
+        !isDigit(text[i.* + 1]))
+    {
+        const start = i.*;
+        i.* += 1;
+        i.* += utf8CharLen(text, i.*);
+        while (i.* < text.len and
+            !isWhitespace(text[i.*]) and
+            !isUnicodeLetter(text, i.*) and
+            !isDigit(text[i.*]))
+        {
+            i.* += utf8CharLen(text, i.*);
+        }
+        const word = try result.allocator.dupe(u8, text[start..i.*]);
+        try result.words.append(result.allocator, word);
+        return true;
+    }
+    if (!isWhitespace(text[i.*]) and !isUnicodeLetter(text, i.*) and !isDigit(text[i.*])) {
+        const start = i.*;
+        i.* += utf8CharLen(text, i.*);
+        while (i.* < text.len and
+            !isWhitespace(text[i.*]) and
+            !isUnicodeLetter(text, i.*) and
+            !isDigit(text[i.*]))
+        {
+            i.* += utf8CharLen(text, i.*);
+        }
+        const word = try result.allocator.dupe(u8, text[start..i.*]);
+        try result.words.append(result.allocator, word);
+        return true;
+    }
+
+    // Whitespace: \s+(?!\S) or \s+
+    if (isWhitespace(text[i.*])) {
+        var ws_count: usize = 0;
+        while (i.* + ws_count < text.len and isWhitespace(text[i.* + ws_count])) {
+            ws_count += 1;
+        }
+
+        // \s+(?!\S): if whitespace is followed by non-whitespace and count > 1, take n-1
+        if (ws_count > 1 and i.* + ws_count < text.len) {
+            const word = try result.allocator.dupe(u8, text[i.* .. i.* + ws_count - 1]);
+            try result.words.append(result.allocator, word);
+            i.* += ws_count - 1;
+            return true;
+        }
+
+        // \s+: regular whitespace
+        const word = try result.allocator.dupe(u8, text[i.* .. i.* + ws_count]);
+        try result.words.append(result.allocator, word);
+        i.* += ws_count;
+        return true;
+    }
+
+    return false;
+}
+
 /// GPT-2 风格预分词（用于 gpt2/gemma4 pre_type）
 /// 使用 GPT-2 原始正则模式：
 /// 1. 收缩形式（'s, 't, 're, 've, 'm, 'll, 'd）
@@ -184,12 +663,12 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
         }
 
         // 3. 可选空格 + 数字序列:  ?\p{N}+
-        if (check_pos < text.len and isUnicodeDigit(text, check_pos)) {
+        if (check_pos < text.len and isDigit(text[check_pos])) {
             const start = i;
             if (has_space) i += 1;
-            i += utf8CharLen(text, i);
-            while (i < text.len and isUnicodeDigit(text, i)) {
-                i += utf8CharLen(text, i);
+            i += 1;
+            while (i < text.len and isDigit(text[i])) {
+                i += 1;
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
             try result.words.append(result.allocator, word);
@@ -198,12 +677,12 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
 
         // 4. 可选空格 + 符号序列:  ?[^\s\p{L}\p{N}]+
         if (check_pos < text.len and !isWhitespace(text[check_pos]) and
-            !isUnicodeLetter(text, check_pos) and !isUnicodeDigit(text, check_pos)) {
+            !isUnicodeLetter(text, check_pos) and !isDigit(text[check_pos])) {
             const start = i;
             if (has_space) i += 1;
             i += utf8CharLen(text, i);
             while (i < text.len and !isWhitespace(text[i]) and
-                !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
+                !isUnicodeLetter(text, i) and !isDigit(text[i])) {
                 i += utf8CharLen(text, i);
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
@@ -242,7 +721,7 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
 /// 使用 llama3 regex 模式：
 /// 1. 收缩形式（'s, 't, 're, 've, 'm, 'll, 'd）
 /// 2. [^\s\p{L}\p{N}]?\p{L}+ : 可选前导符号 + 字母序列
-/// 3. \p{N} : 数字序列（无空格前缀！）
+/// 3. \p{N}{1,3} : 数字序列（1-3位）
 /// 4.  ?[^\s\p{L}\p{N}]+ : 空格 + 符号序列
 /// 5. 空白序列：\s+
 /// 参考 llama.cpp 的 GPT-2 regex
@@ -282,18 +761,21 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             }
         }
 
-        // 2. GPT-2 " ?\p{L}+" 模式：可选空格 + 字母序列
-        // 先尝试带空格的版本（一个空格 + 字母），再尝试无空格版本（纯字母）
-        if (text[i] == ' ' and i + 1 < text.len and isUnicodeLetter(text, i + 1)) {
-            const start = i;
-            i += 1;
-            i += utf8CharLen(text, i);
-            while (i < text.len and isUnicodeLetter(text, i)) {
+        // 2. [^\s\p{L}\p{N}]?\p{L}+ : 可选前导符号 + 字母序列
+        // Check for optional leading punctuation/symbol before letters
+        if (!isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isDigit(text[i])) {
+            // Possible leading symbol
+            if (i + 1 < text.len and isUnicodeLetter(text, i + 1)) {
+                const start = i;
                 i += utf8CharLen(text, i);
+                i += utf8CharLen(text, i);
+                while (i < text.len and isUnicodeLetter(text, i)) {
+                    i += utf8CharLen(text, i);
+                }
+                const word = try result.allocator.dupe(u8, text[start..i]);
+                try result.words.append(result.allocator, word);
+                continue;
             }
-            const word = try result.allocator.dupe(u8, text[start..i]);
-            try result.words.append(result.allocator, word);
-            continue;
         }
         if (isUnicodeLetter(text, i)) {
             const start = i;
@@ -306,21 +788,54 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // 3. GPT-2 " ?\p{N}+" 模式：可选空格 + 数字序列
-        if (text[i] == ' ' and i + 1 < text.len and isUnicodeDigit(text, i + 1)) {
+        // 3. \p{N}{1,3} : 数字序列（1-3位）
+        if (isDigit(text[i])) {
+            const start = i;
+            const count = @min(@as(usize, 3), text.len - i);
+            i += count;
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 4.  ?[^\s\p{L}\p{N}]+ : 空格 + 符号序列
+        if (text[i] == ' ' and i + 1 < text.len and
+            !isWhitespace(text[i + 1]) and
+            !isUnicodeLetter(text, i + 1) and
+            !isDigit(text[i + 1]))
+        {
             const start = i;
             i += 1;
             i += utf8CharLen(text, i);
-            while (i < text.len and isUnicodeDigit(text, i)) {
+            while (i < text.len and
+                !isWhitespace(text[i]) and
+                !isUnicodeLetter(text, i) and
+                !isDigit(text[i]))
+            {
                 i += utf8CharLen(text, i);
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
             try result.words.append(result.allocator, word);
             continue;
         }
-        // 5. 空白序列：先尝试 \s+(?!\S)（尾随空白，后面有非空白时只取前 n-1 个），再尝试 \s+
+        if (!isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isDigit(text[i])) {
+            const start = i;
+            i += utf8CharLen(text, i);
+            while (i < text.len and
+                !isWhitespace(text[i]) and
+                !isUnicodeLetter(text, i) and
+                !isDigit(text[i]))
+            {
+                i += utf8CharLen(text, i);
+            }
+            const word = try result.allocator.dupe(u8, text[start..i]);
+            try result.words.append(result.allocator, word);
+            continue;
+        }
+
+        // 5. 空白序列：放在所有"可选空格"模式之后
+        //    先尝试 \s+(?!\S)（尾随空白，后面有非空白时只取前 n-1 个），再尝试 \s+
         if (isWhitespace(text[i])) {
-            // 计算连续空白字符数
             var ws_count: usize = 0;
             while (i + ws_count < text.len and isWhitespace(text[i + ws_count])) {
                 ws_count += 1;
@@ -339,52 +854,6 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
             const word = try result.allocator.dupe(u8, text[i .. i + ws_count]);
             try result.words.append(result.allocator, word);
             i += ws_count;
-            continue;
-        }
-
-        // 4. GPT-2 " ?[^\s\p{L}\p{N}]+" 模式：可选空格 + 符号序列
-        if (text[i] == ' ' and i + 1 < text.len and
-            !isWhitespace(text[i + 1]) and
-            !isUnicodeLetter(text, i + 1) and
-            !isUnicodeDigit(text, i + 1))
-        {
-            const start = i;
-            i += 1;
-            i += utf8CharLen(text, i);
-            while (i < text.len and
-                !isWhitespace(text[i]) and
-                !isUnicodeLetter(text, i) and
-                !isUnicodeDigit(text, i))
-            {
-                i += utf8CharLen(text, i);
-            }
-            const word = try result.allocator.dupe(u8, text[start..i]);
-            try result.words.append(result.allocator, word);
-            continue;
-        }
-        if (!isWhitespace(text[i]) and !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
-            const start = i;
-            i += utf8CharLen(text, i);
-            while (i < text.len and
-                !isWhitespace(text[i]) and
-                !isUnicodeLetter(text, i) and
-                !isUnicodeDigit(text, i))
-            {
-                i += utf8CharLen(text, i);
-            }
-            const word = try result.allocator.dupe(u8, text[start..i]);
-            try result.words.append(result.allocator, word);
-            continue;
-        }
-
-        // 5. 空白序列
-        if (isWhitespace(text[i])) {
-            const start = i;
-            while (i < text.len and isWhitespace(text[i])) {
-                i += 1;
-            }
-            const word = try result.allocator.dupe(u8, text[start..i]);
-            try result.words.append(result.allocator, word);
             continue;
         }
 
@@ -511,11 +980,23 @@ fn isDigit(c: u8) bool {
     };
 }
 
-fn isPunctuation(c: u8) bool {
+fn isPunctuationOrSymbol(c: u8) bool {
     return switch (c) {
         '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/', ':', ';', '<', '=', '>', '?', '@', '[', '\\', ']', '^', '_', '`', '{', '|', '}', '~' => true,
         else => false,
     };
+}
+
+fn isLatinLetter(c: u8) bool {
+    return isLetter(c) or c >= 0xC0; // rough approximation for Latin-1 supplement
+}
+
+fn isCJK(text: []const u8, pos: usize) bool {
+    if (pos >= text.len) return false;
+    const b = text[pos];
+    // CJK characters are in 3-byte UTF-8 range (0xE0-0xEF)
+    if (b >= 0xE0 and b < 0xF0) return true;
+    return false;
 }
 
 fn isAllWhitespace(s: []const u8) bool {
@@ -655,6 +1136,168 @@ fn findMatchingSpecial(text: []const u8, pos: usize, cache: []const mod.CacheSpe
 }
 
 // ============================================================================
+// SPM 编码（基于字符的 bigram 合并）
+// ============================================================================
+
+/// SPM bigram 用于优先级队列
+const SpmBigram = struct {
+    left: i32,
+    right: i32,
+    score: f32,
+    size: usize,
+
+    fn lessThan(context: void, a: @This(), b: @This()) std.math.Order {
+        _ = context;
+        // SPM: higher score = higher priority (less negative = more likely to merge)
+        // Matches llama.cpp: l.score < r.score means l has lower priority
+        if (a.score > b.score) return .lt;
+        if (a.score < b.score) return .gt;
+        if (a.left > b.left) return .lt;
+        if (a.left < b.left) return .gt;
+        return .eq;
+    }
+};
+
+/// SPM 符号
+const SpmSymbol = struct {
+    text: []const u8, // pointer into the original text
+    n: usize,
+    prev: i32,
+    next: i32,
+};
+
+/// SPM 编码：将文本编码为 token ID 列表
+/// 参考 llama.cpp 的 llm_tokenizer_spm_session::tokenize
+/// 流程：
+/// 1. 将文本拆分为 UTF-8 字符
+/// 2. 使用优先级队列反复合并 score 最高的相邻 token 对
+/// 3. 合并后的 token 字符串必须在词表中存在
+fn encodeSPM(
+    text: []const u8,
+    config: *const EncodeConfig,
+    allocator: std.mem.Allocator,
+) !std.ArrayListUnmanaged(u32) {
+    var tokens: std.ArrayListUnmanaged(u32) = .empty;
+
+    if (text.len == 0) return tokens;
+
+    // 1. 拆分为 UTF-8 字符
+    var symbols = std.ArrayListUnmanaged(SpmSymbol){ .items = &.{}, .capacity = 0 };
+    defer symbols.deinit(allocator);
+
+    var offs: usize = 0;
+    var index: i32 = 0;
+    while (offs < text.len) {
+        const ch_len = utf8CharLen(text, offs);
+        try symbols.append(allocator, SpmSymbol{
+            .text = text[offs..],
+            .n = ch_len,
+            .prev = index - 1,
+            .next = if (offs + ch_len >= text.len) -1 else index + 1,
+        });
+        offs += ch_len;
+        index += 1;
+    }
+
+    if (symbols.items.len == 0) return tokens;
+
+    // 2. 初始化优先级队列
+    var work_queue = std.PriorityQueue(SpmBigram, void, SpmBigram.lessThan).initContext({});
+    defer work_queue.deinit(allocator);
+
+    for (1..symbols.items.len) |i| {
+        tryAddSpmBigram(&symbols, &work_queue, @intCast(i - 1), @intCast(i), config);
+    }
+
+    // 3. 反复合并 score 最高的 pair
+    while (work_queue.count() > 0) {
+        const bigram = work_queue.pop().?;
+
+        const left_idx = @as(usize, @intCast(bigram.left));
+        const right_idx = @as(usize, @intCast(bigram.right));
+
+        // 检查符号是否已被合并
+        if (left_idx >= symbols.items.len or right_idx >= symbols.items.len) continue;
+        if (symbols.items[left_idx].next != bigram.right) continue;
+        if (symbols.items[right_idx].prev != bigram.left) continue;
+
+        // 检查 size 是否匹配
+        if (symbols.items[left_idx].n + symbols.items[right_idx].n != bigram.size) continue;
+
+        // 合并右符号到左符号
+        symbols.items[left_idx].n += symbols.items[right_idx].n;
+        symbols.items[right_idx].n = 0;
+
+        // 从链表中移除右符号
+        symbols.items[left_idx].next = symbols.items[right_idx].next;
+        if (symbols.items[right_idx].next >= 0) {
+            symbols.items[@as(usize, @intCast(symbols.items[right_idx].next))].prev = bigram.left;
+        }
+
+        // 添加新的 bigram
+        tryAddSpmBigram(&symbols, &work_queue, symbols.items[left_idx].prev, bigram.left, config);
+        tryAddSpmBigram(&symbols, &work_queue, bigram.left, symbols.items[left_idx].next, config);
+    }
+
+    // 4. 从符号链表重建 token 列表
+    {
+        var i: i32 = 0;
+        while (i >= 0) {
+            const idx = @as(usize, @intCast(i));
+            const sym = &symbols.items[idx];
+            if (sym.n > 0) {
+                const token_text = sym.text[0..sym.n];
+                // 查找 token
+                if (config.textToTokenFn(token_text, config.ctx)) |tid| {
+                    try tokens.append(allocator, tid);
+                } else {
+                    // 回退到字节 token
+                    for (token_text) |byte| {
+                        const tid = config.byteToTokenIdFn(byte, config.ctx);
+                        try tokens.append(allocator, tid);
+                    }
+                }
+            }
+            i = sym.next;
+        }
+    }
+
+    return tokens;
+}
+
+/// 尝试添加 SPM bigram 到优先级队列
+fn tryAddSpmBigram(
+    symbols: *std.ArrayListUnmanaged(SpmSymbol),
+    queue: *std.PriorityQueue(SpmBigram, void, SpmBigram.lessThan),
+    left: i32,
+    right: i32,
+    config: *const EncodeConfig,
+) void {
+    if (left < 0 or right < 0) return;
+    const left_idx = @as(usize, @intCast(left));
+    const right_idx = @as(usize, @intCast(right));
+    if (left_idx >= symbols.items.len or right_idx >= symbols.items.len) return;
+
+    const left_sym = &symbols.items[left_idx];
+    const right_sym = &symbols.items[right_idx];
+
+    // 构建合并后的文本
+    const merged_text = left_sym.text[0 .. left_sym.n + right_sym.n];
+
+    // 查找合并后的 token
+    const token_id = config.textToTokenFn(merged_text, config.ctx) orelse return;
+
+    const score = config.tokenScoreFn(token_id, config.ctx);
+
+    queue.push(config.allocator, SpmBigram{
+        .left = left,
+        .right = right,
+        .score = score,
+        .size = merged_text.len,
+    }) catch {};
+}
+
+// ============================================================================
 // 编码主函数
 // ============================================================================
 
@@ -713,36 +1356,59 @@ pub fn encode(
         return tokens;
     }
 
-    // 1b. 常规预分词（无特殊 token 扫描）
-    // 对于 SPM 风格 BPE 模型（gemma-4 等），先全局转义空格再预分词
-    // 参考 llama.cpp：escape_whitespaces 在 BPE tokenize 之前对整个文本调用
-    const needs_global_escape = config.escape_whitespaces and !is_spm_model;
-    const escaped_text: ?[]const u8 = if (needs_global_escape)
-        try escapeWhitespace(text, config.allocator)
-    else
-        null;
-    defer if (escaped_text) |et| config.allocator.free(et);
+    // 1b. 常规编码
+    if (is_spm_model) {
+        // SPM 模型：使用基于字符的 bigram 合并
+        if (text.len == 0) {
+            // Empty text: no tokens (unless add_bos/add_eos already handled)
+        } else {
+            // 1. 添加空格前缀（如果需要）
+            // 2. 转义空格（空格 → ▁）
+            // 3. 对整个文本进行 SPM 编码
+            var spm_text: []const u8 = text;
+            var spm_needs_free = false;
+            defer {
+                if (spm_needs_free) config.allocator.free(@constCast(spm_text));
+            }
 
-    const effective_text = if (escaped_text) |et| et else text;
+            // 添加空格前缀
+            if (add_space_prefix) {
+                spm_text = try std.fmt.allocPrint(config.allocator, " {s}", .{text});
+                spm_needs_free = true;
+            }
 
-    var pre_tok = if (is_spm_model)
-        try preTokenizeSPM(effective_text, config.allocator)
-    else
-        try preTokenize(effective_text, config.pre_type, config.allocator);
-    defer pre_tok.deinit();
+            // 转义空格（空格 → ▁）
+            const escaped = try escapeWhitespace(spm_text, config.allocator);
+            if (spm_needs_free) config.allocator.free(@constCast(spm_text));
+            spm_text = escaped;
+            spm_needs_free = true;
 
-    // 2. 对每个词进行编码
-    var is_first_word = true;
-    for (pre_tok.words.items) |word| {
-        if (is_spm_model and add_space_prefix and isAllWhitespace(word)) {
-            is_first_word = false;
-            continue;
+            // SPM 编码
+            var spm_tokens = try encodeSPM(spm_text, config, config.allocator);
+            defer spm_tokens.deinit(config.allocator);
+            try tokens.appendSlice(config.allocator, spm_tokens.items);
         }
+    } else {
+        // BPE 模型：使用预分词 + 逐词编码
+        const needs_global_escape = config.escape_whitespaces;
+        const escaped_text: ?[]const u8 = if (needs_global_escape)
+            try escapeWhitespace(text, config.allocator)
+        else
+            null;
+        defer if (escaped_text) |et| config.allocator.free(et);
 
-        var word_tokens = try encodeWord(word, add_space_prefix, ignore_merges, is_first_word, config);
-        defer word_tokens.deinit(config.allocator);
-        try tokens.appendSlice(config.allocator, word_tokens.items);
-        is_first_word = false;
+        const effective_text = if (escaped_text) |et| et else text;
+
+        var pre_tok = try preTokenize(effective_text, config.pre_type, config.allocator);
+        defer pre_tok.deinit();
+
+        var is_first_word = true;
+        for (pre_tok.words.items) |word| {
+            var word_tokens = try encodeWord(word, add_space_prefix, ignore_merges, is_first_word, config);
+            defer word_tokens.deinit(config.allocator);
+            try tokens.appendSlice(config.allocator, word_tokens.items);
+            is_first_word = false;
+        }
     }
 
     if (add_eos) {
@@ -764,7 +1430,7 @@ fn encodeSegment(
 
     if (text.len == 0) return tokens;
 
-    // 对于 SPM 风格 BPE 模型（gemma-4 等），先全局转义空格
+    // 对于 SPM 风格 BPE 模型（gemma-4 等），先全局转义空格再预分词
     const needs_global_escape = config.escape_whitespaces and !is_spm_model;
     const escaped_text: ?[]const u8 = if (needs_global_escape)
         try escapeWhitespace(text, config.allocator)
@@ -782,7 +1448,7 @@ fn encodeSegment(
 
     var is_first_word = true;
     for (pre_tok.words.items) |word| {
-        if (is_spm_model and add_space_prefix and isAllWhitespace(word)) {
+        if (is_spm_model and isAllWhitespace(word)) {
             is_first_word = false;
             continue;
         }
@@ -845,6 +1511,11 @@ fn encodeWord(
             }
             break :blk BaseText{ .text = word, .needs_free = false };
         } else {
+            // If word already starts with whitespace (captured by ?\p{L}+ etc.),
+            // don't add another space — it's already there from pre-tokenization.
+            if (word.len > 0 and isWhitespace(word[0])) {
+                break :blk BaseText{ .text = word, .needs_free = false };
+            }
             break :blk BaseText{
                 .text = try std.fmt.allocPrint(config.allocator, " {s}", .{word}),
                 .needs_free = true,
@@ -995,6 +1666,7 @@ pub const EncodeConfig = struct {
     byteToTokenIdFn: *const fn (byte: u8, ctx: ?*anyopaque) u32,
     bytesToUnicodeFn: ?*const fn (byte: u8, ctx: ?*anyopaque) []const u8 = null,
     unicodeToByte: ?*const std.StringHashMap(u8) = null,
+    tokenScoreFn: *const fn (token_id: u32, ctx: ?*anyopaque) f32 = undefined,
     escape_whitespaces: bool = false,
     ctx: ?*anyopaque,
     /// 缓存的特殊 token 列表（按 text 长度降序排列），用于 parse_special 模式
