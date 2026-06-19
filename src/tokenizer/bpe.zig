@@ -157,7 +157,6 @@ fn addNewBigram(
     ctx: ?*anyopaque,
     allocator: std.mem.Allocator,
 ) void {
-    _ = textToTokenFn;
     if (left < 0 or right < 0) return;
     const left_idx = @as(usize, @intCast(left));
     const right_idx = @as(usize, @intCast(right));
@@ -174,8 +173,12 @@ fn addNewBigram(
         return;
     };
 
-    // 始终入队，不检查 textToTokenFn（对齐 llama.cpp）
-    // llama.cpp 即使 merged token 不在词表中也入队，rank = INT_MAX
+    // 检查合并后的 token 是否在词表中
+    // 对齐 llama.cpp 行为：如果合并后的 token 不在词表中，则不入队
+    const merged_str = std.fmt.allocPrint(allocator, "{s}{s}", .{ left_str, right_str }) catch return;
+    defer allocator.free(merged_str);
+    if (textToTokenFn(merged_str, ctx) == null) return;
+
     queue.push(allocator, .{
         .left = left,
         .right = right,

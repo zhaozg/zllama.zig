@@ -1241,8 +1241,11 @@ const SpmBigram = struct {
         // Matches llama.cpp: l.score < r.score means l has lower priority
         if (a.score > b.score) return .lt;
         if (a.score < b.score) return .gt;
-        if (a.left > b.left) return .lt;
-        if (a.left < b.left) return .gt;
+        // When scores are equal, prefer leftmost pair (smaller left index)
+        // This matches llama.cpp behavior: leftmost pair gets merged first
+        // when scores are tied, ensuring correct tokenization of repeated chars
+        if (a.left < b.left) return .lt;
+        if (a.left > b.left) return .gt;
         return .eq;
     }
 };

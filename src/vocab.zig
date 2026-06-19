@@ -724,8 +724,13 @@ pub const Vocab = struct {
             }
 
             // byte→token 映射（跳过 <0xXX> 格式，留给第二遍）
+            // 注意：对于 GPT-2 风格的 BPE 模型（gpt2/tiktoken/replit），
+            // 字节 token 的文本是 GPT-2 编码后的字符（多字节），而不是原始字节。
+            // 因此不能通过 td.text.len == 1 来识别字节 token。
+            // byte→token 映射由 fixByteToTokenMapping 通过 GPT-2 编码反向映射建立。
+            const is_gpt2_bpe = self.type == .gpt2 or self.type == .tiktoken or self.type == .replit;
             const is_hex_byte = td.text.len == 6 and td.text[0] == '<' and td.text[1] == '0' and td.text[2] == 'x' and td.text[5] == '>';
-            if (!is_hex_byte) {
+            if (!is_hex_byte and !is_gpt2_bpe) {
                 if (td.type == .byte or (td.type == .normal and td.text.len == 1)) {
                     if (td.text.len == 1) {
                         self.byte_to_token[td.text[0]] = uid;
