@@ -27,8 +27,9 @@ const Bigram = struct {
     right: i32,
     rank: u32,
 
-    /// Zig PriorityQueue 是最小堆，按 rank 升序弹出（最低 rank = 最高优先级）
-    /// BPE 算法要求优先合并 rank 最小（最频繁）的 pair
+    /// Zig PriorityQueue 是最小堆（0.16），pop() 返回 lessThan 中 .lt 的元素
+    /// BPE 要求 rank 最小（最频繁）的 pair 先弹出合并
+    /// 因此：rank 较小 → .lt（优先级高，先弹出）
     fn lessThan(context: void, a: @This(), b: @This()) std.math.Order {
         _ = context;
         if (a.rank < b.rank) return .lt;
@@ -143,6 +144,8 @@ pub fn applyBpeMerges(
 }
 
 /// 添加 bigram 到优先级队列
+/// 对齐 llama.cpp: 即使 merged token 不在词表中，仍然入队（rank = maxInt）
+/// 因为多步 BPE 合并中，中间结果可能不在词表但最终结果在
 fn addNewBigram(
     symbols: *std.ArrayListUnmanaged(Symbol),
     queue: *std.PriorityQueue(Bigram, void, Bigram.lessThan),
@@ -154,6 +157,7 @@ fn addNewBigram(
     ctx: ?*anyopaque,
     allocator: std.mem.Allocator,
 ) void {
+    _ = textToTokenFn;
     if (left < 0 or right < 0) return;
     const left_idx = @as(usize, @intCast(left));
     const right_idx = @as(usize, @intCast(right));
@@ -170,13 +174,8 @@ fn addNewBigram(
         return;
     };
 
-    // 验证合并后的 token 在词表中存在
-    const merged = std.fmt.allocPrint(allocator, "{s}{s}", .{ left_str, right_str }) catch return;
-    defer allocator.free(merged);
-    if (textToTokenFn(merged, ctx) == null) {
-        return;
-    }
-
+    // 始终入队，不检查 textToTokenFn（对齐 llama.cpp）
+    // llama.cpp 即使 merged token 不在词表中也入队，rank = INT_MAX
     queue.push(allocator, .{
         .left = left,
         .right = right,

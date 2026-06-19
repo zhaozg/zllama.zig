@@ -732,14 +732,17 @@ pub fn encode(
     defer pre_tok.deinit();
 
     // 2. 对每个词进行编码
+    var is_first_word = true;
     for (pre_tok.words.items) |word| {
         if (is_spm_model and add_space_prefix and isAllWhitespace(word)) {
+            is_first_word = false;
             continue;
         }
 
-        var word_tokens = try encodeWord(word, add_space_prefix, ignore_merges, config);
+        var word_tokens = try encodeWord(word, add_space_prefix, ignore_merges, is_first_word, config);
         defer word_tokens.deinit(config.allocator);
         try tokens.appendSlice(config.allocator, word_tokens.items);
+        is_first_word = false;
     }
 
     if (add_eos) {
@@ -777,12 +780,17 @@ fn encodeSegment(
         try preTokenize(effective_text, config.pre_type, config.allocator);
     defer pre_tok.deinit();
 
+    var is_first_word = true;
     for (pre_tok.words.items) |word| {
-        if (is_spm_model and add_space_prefix and isAllWhitespace(word)) continue;
+        if (is_spm_model and add_space_prefix and isAllWhitespace(word)) {
+            is_first_word = false;
+            continue;
+        }
 
-        var word_tokens = try encodeWord(word, add_space_prefix, ignore_merges, config);
+        var word_tokens = try encodeWord(word, add_space_prefix, ignore_merges, is_first_word, config);
         defer word_tokens.deinit(config.allocator);
         try tokens.appendSlice(config.allocator, word_tokens.items);
+        is_first_word = false;
     }
 
     return tokens;
@@ -793,6 +801,7 @@ fn encodeWord(
     word: []const u8,
     add_space_prefix: bool,
     ignore_merges: bool,
+    is_first: bool,
     config: *const EncodeConfig,
 ) !std.ArrayListUnmanaged(u32) {
     var tokens: std.ArrayListUnmanaged(u32) = .empty;
@@ -801,11 +810,12 @@ fn encodeWord(
 
     // 步骤 1：确定基础文本（可能添加空格前缀）
     // 对于 escape_whitespaces 的模型（gemma-4 等），将空格转为 ▁ (U+2581)
+    // 对于 SPM 模型，首词不添加空格前缀（除非词本身以空格开头）
     const BaseText = struct {
         text: []const u8,
         needs_free: bool,
     };
-    const base = if (add_space_prefix) blk: {
+    const base = if (add_space_prefix and (!is_spm_model or !is_first)) blk: {
         if (is_spm_model) {
             if (word.len > 0 and isWhitespace(word[0])) {
                 var ws_end: usize = 1;
