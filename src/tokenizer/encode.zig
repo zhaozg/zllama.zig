@@ -190,14 +190,18 @@ fn preTokenizeMpt(text: []const u8, result: *PreTokenized) !void {
 
 /// Starcoder/Refact/Command-R 风格预分词
 /// regex: \p{N} | 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+///
+/// 注意：\p{N} 匹配单个 Unicode 数字字符（包括 ¼ ½ ¾ ² ³ ¹ 等），
+/// 在 tryMatchContractionOrWord 的 ?\p{N}+ 模式之前检查。
 fn preTokenizeStarcoderStyle(text: []const u8, result: *PreTokenized) !void {
     var i: usize = 0;
     while (i < text.len) {
-        // 1. Single digit: \p{N}
-        if (isDigit(text[i])) {
-            const word = try result.allocator.dupe(u8, text[i..i+1]);
+        // 1. Single digit: \p{N} (ASCII and Unicode digits like ¼ ½ ¾ ² ³ ¹)
+        if (isDigit(text[i]) or isUnicodeNumberChar(text, i)) {
+            const ch_len = if (isDigit(text[i])) @as(usize, 1) else utf8CharLen(text, i);
+            const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
             try result.words.append(result.allocator, word);
-            i += 1;
+            i += ch_len;
             continue;
         }
 
@@ -210,6 +214,39 @@ fn preTokenizeStarcoderStyle(text: []const u8, result: *PreTokenized) !void {
         try result.words.append(result.allocator, word);
         i += ch_len;
     }
+}
+
+/// 检测给定位置的 UTF-8 字符是否为 Unicode 数字字符 (\p{N})
+/// 保守实现：只匹配已知的 Unicode 数字字符，避免将 CJK/emoji 等 3 字节字符误判为数字
+/// 匹配的字符包括：
+///   - 2-byte: ² (U+00B2), ³ (U+00B3), ¹ (U+00B9), ¼ (U+00BC), ½ (U+00BD), ¾ (U+00BE)
+///   - 其他 Unicode 数字字符暂不扩展（避免误判）
+fn isUnicodeNumberChar(text: []const u8, pos: usize) bool {
+    if (pos >= text.len) return false;
+    const b = text[pos];
+
+    // ASCII digits are handled by isDigit in GPT-2 style patterns
+    if (b < 0x80) return false;
+
+    // Continuation bytes are not valid start of a character
+    if (b < 0xC0) return false;
+
+    // 2-byte UTF-8 (U+0080 ~ U+07FF)
+    if (b >= 0xC2 and b < 0xE0 and pos + 1 < text.len) {
+        const b2 = text[pos + 1];
+        // Common number characters: ² ³ ¹ ¼ ½ ¾ (U+00B2, B3, B9, BC, BD, BE)
+        if (b == 0xC2) {
+            return switch (b2) {
+                0xB2, 0xB3, 0xB9, 0xBC, 0xBD, 0xBE => true,
+                else => false,
+            };
+        }
+        return false;
+    }
+
+    // 3-byte and 4-byte: conservatively return false to avoid misclassifying
+    // CJK characters, emojis, etc. as digits
+    return false;
 }
 
 /// DeepSeek-LLM 风格预分词
@@ -547,7 +584,8 @@ fn tryMatchContractionOrWord(text: []const u8, i: *usize, result: *PreTokenized)
     if (text[i.*] == ' ' and i.* + 1 < text.len and
         !isWhitespace(text[i.* + 1]) and
         !isUnicodeLetter(text, i.* + 1) and
-        !isDigit(text[i.* + 1]))
+        !isDigit(text[i.* + 1]) and
+        !isUnicodeNumberChar(text, i.* + 1))
     {
         const start = i.*;
         i.* += 1;
@@ -555,7 +593,8 @@ fn tryMatchContractionOrWord(text: []const u8, i: *usize, result: *PreTokenized)
         while (i.* < text.len and
             !isWhitespace(text[i.*]) and
             !isUnicodeLetter(text, i.*) and
-            !isDigit(text[i.*]))
+            !isDigit(text[i.*]) and
+            !isUnicodeNumberChar(text, i.*))
         {
             i.* += utf8CharLen(text, i.*);
         }
@@ -563,13 +602,14 @@ fn tryMatchContractionOrWord(text: []const u8, i: *usize, result: *PreTokenized)
         try result.words.append(result.allocator, word);
         return true;
     }
-    if (!isWhitespace(text[i.*]) and !isUnicodeLetter(text, i.*) and !isDigit(text[i.*])) {
+    if (!isWhitespace(text[i.*]) and !isUnicodeLetter(text, i.*) and !isDigit(text[i.*]) and !isUnicodeNumberChar(text, i.*)) {
         const start = i.*;
         i.* += utf8CharLen(text, i.*);
         while (i.* < text.len and
             !isWhitespace(text[i.*]) and
             !isUnicodeLetter(text, i.*) and
-            !isDigit(text[i.*]))
+            !isDigit(text[i.*]) and
+            !isUnicodeNumberChar(text, i.*))
         {
             i.* += utf8CharLen(text, i.*);
         }
