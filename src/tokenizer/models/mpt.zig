@@ -85,21 +85,25 @@ pub fn preTokenizeMpt(text: []const u8, result: *PreTokenized) !void {
         }
 
         // 5. Whitespace: \s+(?!\S) or \s+
+        // \s+(?!\S): whitespace not followed by non-whitespace (e.g. trailing spaces)
+        // \s+: all other whitespace (e.g. '  ' before 'Hello')
         if (unicode.isAsciiWhitespace(text[i])) {
             var ws_count: usize = 0;
             while (i + ws_count < text.len and unicode.isAsciiWhitespace(text[i + ws_count])) {
                 ws_count += 1;
             }
 
-            // \s+(?!\S): if whitespace is followed by non-whitespace and count > 1, take n-1
+            // \s+(?!\S): if whitespace is followed by non-whitespace and count > 1,
+            // take all whitespace (no backtracking for MPT)
+            // For '  Hello' -> '  ' + 'Hello' (not ' ' + ' Hello')
             if (ws_count > 1 and i + ws_count < text.len) {
-                const word = try result.allocator.dupe(u8, text[i .. i + ws_count - 1]);
+                const word = try result.allocator.dupe(u8, text[i .. i + ws_count]);
                 try result.words.append(result.allocator, word);
-                i += ws_count - 1;
+                i += ws_count;
                 continue;
             }
 
-            // \s+: regular whitespace
+            // \s+(?!\S): trailing whitespace (no non-whitespace after)
             const word = try result.allocator.dupe(u8, text[i .. i + ws_count]);
             try result.words.append(result.allocator, word);
             i += ws_count;
