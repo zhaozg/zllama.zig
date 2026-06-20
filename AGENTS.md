@@ -195,6 +195,7 @@ const tokenizer = @import("tokenizer");
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf` works
    - `zig-out/bin/zllama -n 5 --model ~/.cache/models/Qwen3.5-4B-Q4_K_M.gguf` works
+   - `test zig build test -Doptimize=ReleaseSafe --summary all` without fails.
    - 多模态模型 gemma-4-E2B-it-Q4_K_M.gguf 的音频、图像主要输出对齐
       - llama-simple -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf --mmproj ~/.cache/models/mmproj-BF16.gguf --audio ~/.cache/models/hello.wav -p  "Transcribe the audio"
       - llama-simple -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf --mmproj ~/.cache/models/mmproj-BF16.gguf --image ~/.cache/models/hello.png --prompt "Describe this image"

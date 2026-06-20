@@ -70,11 +70,13 @@ pub const CliArgs = struct {
                 result.embed_normalize = std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
             } else if (std.mem.eql(u8, arg, "--chat-template")) {
                 result.chat_template_name = args_it.next() orelse return error.InvalidArgs;
-            } else if (std.mem.eql(u8, arg, "--system-prompt")) {} else if (std.mem.eql(u8, arg, "--no-chat-template")) {
+            } else if (std.mem.eql(u8, arg, "--system-prompt")) {
+                result.system_prompt = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--no-chat-template")) {
                 result.no_chat_template = true;
             } else if (std.mem.eql(u8, arg, "--no-jinja")) {
                 result.no_jinja = true;
-                result.no_chat_template = true;
+                // --no-jinja only disables Jinja rendering, does NOT disable chat template
             } else {
                 logger.warn("unknown argument '{s}'", .{arg});
             }
@@ -126,4 +128,3 @@ test "CliArgs parse" {
     try testing.expectEqual(@as(u32, 256), test_args.max_tokens);
     try testing.expectEqual(@as(f32, 0.7), test_args.temperature);
 }
-
