@@ -718,7 +718,11 @@ pub const Vocab = struct {
             const uid = @as(u32, @intCast(id));
 
             // text→token 映射
-            if (td.type == .normal or td.type == .control or td.type == .byte) {
+            // 添加所有类型的 token，包括 byte、unknown、user_defined、unused 等。
+            // 对于 BPE 模型，合并后的 token 可能是 unknown 或 unused 类型，
+            // 必须添加到 HashMap 中才能被 BPE 合并过程找到。
+            // 这与 llama.cpp 的行为一致，llama.cpp 的 vocab 查找不限制 token 类型。
+            {
                 const key = try allocator.dupe(u8, td.text);
                 try self.text_to_token.put(allocator, key, uid);
             }

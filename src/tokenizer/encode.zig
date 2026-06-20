@@ -1792,6 +1792,18 @@ fn encodeWord(
 ) !std.ArrayListUnmanaged(u32) {
     var tokens: std.ArrayListUnmanaged(u32) = .empty;
 
+    // 阶段 0：优先匹配原始单词（不添加任何前缀，不进行字节编码）
+    // 仅当单词以空白开头时执行此匹配，这意味着预分词器已经将空白包含在单词中
+    // （如 MPT 的 "  " 匹配 token 50276）。对于不以空白开头的单词，
+    // 后续的 add_space_prefix 会添加空格前缀，此时匹配原始单词可能得到错误结果
+    // （如 "½" 匹配到 token 121 而非正确的 GPT-2 编码形式 "Â½"）。
+    if (word.len > 0 and isWhitespace(word[0])) {
+        if (config.textToTokenFn(word, config.ctx)) |token_id| {
+            try tokens.append(config.allocator, token_id);
+            return tokens;
+        }
+    }
+
     const is_spm_model = config.model == .llama or config.model == .spm;
 
     // 步骤 1：确定基础文本（可能添加空格前缀）

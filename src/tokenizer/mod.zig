@@ -208,12 +208,11 @@ pub const Tokenizer = struct {
 
     fn buildTrie(self: *Tokenizer) !void {
         for (self.vocab.tokens, 0..) |td, id| {
-            // NOTE: 添加所有类型的 token 到 Trie，包括 byte 类型
-            // 对于 BPE 模型，字节 token（0-255）通常是 byte 类型，
-            // 必须添加到 Trie 中才能实现正确的贪婪匹配
-            if (td.type == .normal or td.type == .control or td.type == .byte) {
-                try trie.addToTrie(&self.trie_root, td.text, @intCast(id), self.allocator);
-            }
+            // 添加所有类型的 token 到 Trie，包括 byte、unknown、user_defined、unused 等。
+            // 对于 BPE 模型，合并后的 token 可能是 unknown 或 unused 类型，
+            // 必须添加到 Trie 中才能被 BPE 合并过程找到。
+            // 这与 llama.cpp 的行为一致，llama.cpp 的 vocab 查找不限制 token 类型。
+            try trie.addToTrie(&self.trie_root, td.text, @intCast(id), self.allocator);
         }
     }
 
