@@ -3,7 +3,12 @@
     .version = "0.1.0",
     .fingerprint = 0x95bab8c07dd20d65,
     .description = "Production-grade local inference engine for Qwen 3.5 / LLaMA 3 and multi-model architectures, built with Zig + ggml",
-    .dependencies = .{},
+    .dependencies = .{
+        .uucode = .{
+            .url = "https://github.com/jacobsandlund/uucode/archive/2826a37a4562284fdacd8fa029d49509cc9bffcd.tar.gz",
+            .hash = "uucode-0.2.0-ZZjBPlK5VADj7fdoq7G8LIHzD5o6FSkcBXXrRWr4jnrA",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

@@ -230,6 +230,23 @@ pub fn build(b: *std.Build) void {
     });
     vocab_mod.addImport("gguf", gguf_mod);
 
+    // ======================================================================
+    // uucode 模块（Unicode 属性查询）
+    // ======================================================================
+    const uucode_fields: []const []const u8 = &.{
+        "is_alphabetic",
+        "is_uppercase",
+        "is_lowercase",
+        "is_emoji",
+        "general_category",
+        "name",
+    };
+    const uucode_dep = b.dependency("uucode", .{
+        .target = target,
+        .optimize = optimize,
+        .fields = uucode_fields,
+    });
+    const uucode_mod = uucode_dep.module("uucode");
     const tokenizer_mod = b.createModule(.{
         .root_source_file = b.path("src/tokenizer/mod.zig"),
         .target = target,
@@ -239,7 +256,7 @@ pub fn build(b: *std.Build) void {
     tokenizer_mod.addImport("ggml", ggml_mod);
     tokenizer_mod.addImport("gguf", gguf_mod);
     tokenizer_mod.addImport("vocab", vocab_mod);
-
+    tokenizer_mod.addImport("uucode", uucode_mod);
     const sampler_mod = b.createModule(.{
         .root_source_file = b.path("src/sampler.zig"),
         .target = target,

@@ -28,10 +28,7 @@ pub const encode_mod = @import("encode.zig");
 pub const decode_mod = @import("decode.zig");
 pub const bpe = @import("bpe.zig");
 pub const utils = @import("utils.zig");
-
-// 向后兼容的类型别名（逐步弃用）
-pub const TokenizerModel = VocabType;
-pub const PreTokenizerType = PreType;
+pub const unicode = @import("unicode.zig");
 pub const SpecialTokens = SpecialTokenIds;
 pub const VocabEntry = types.VocabEntry;
 pub const TokenizerConfig = types.TokenizerConfig;

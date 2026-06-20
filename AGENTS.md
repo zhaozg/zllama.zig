@@ -63,11 +63,10 @@
    - 单文件模块应保持清晰的接口和实现分离，避免过度复杂化。
    - 避免文件过大，不能超过 600 行，合理拆分功能模块（如算子、模型实现、核心引擎等）。
 
-10. CPU 能力发现
-   - `sysctl machdep.cpu.features` 输出:
-   ```
-machdep.cpu.features: FPU VME DE PSE TSC MSR PAE MCE CX8 APIC SEP MTRR PGE MCA CMOV PAT PSE36 CLFSH DS ACPI MMX FXSR SSE SSE2 SS HTT TM PBE SSE3 PCLMULQDQ DTES64 MON DSCPL VMX EST TM2 SSSE3 FMA CX16 TPR PDCM SSE4.1 SSE4.2 x2APIC MOVBE POPCNT AES PCID XSAVE OSXSAVE SEGLIM64 TSCTMR AVX1.0 RDRAND F16C
-   ```
+10. 复用通用基础能力
+   - 选择原则: 代码实现成熟，生产级验证、服务知名zig应用(如: ghostty, zls, flow等)优先选择。
+   - 必需支持 zig 0.16
+   - 比如: [uucode](https://github.com/jacobsandlund/uucode)
 
 ## 🔍 软件工程实践：功能对齐与早期问题发现
 
