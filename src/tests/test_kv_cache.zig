@@ -73,9 +73,15 @@ test "KVCache getKView and getVView" {
     const k_view = kv.getKView(ctx, 0);
     const v_view = kv.getVView(ctx, 0);
 
-    // 验证视图形状
-    try testing.expect(k_view != undefined);
-    try testing.expect(v_view != undefined);
+    // 验证视图形状（避免在 ReleaseSafe 模式下比较非可选指针与 undefined）
+    const k_ne = k_view.ne();
+    const v_ne = v_view.ne();
+    try testing.expectEqual(@as(i64, 16), k_ne[0]);
+    try testing.expectEqual(@as(i64, 2), k_ne[1]);
+    try testing.expectEqual(@as(i64, 5), k_ne[2]);
+    try testing.expectEqual(@as(i64, 16), v_ne[0]);
+    try testing.expectEqual(@as(i64, 2), v_ne[1]);
+    try testing.expectEqual(@as(i64, 5), v_ne[2]);
 }
 
 test "KVCache setKv basic" {
