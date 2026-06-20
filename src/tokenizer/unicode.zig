@@ -17,8 +17,26 @@ const uucode = @import("uucode");
 pub const GeneralCategory = uucode.types.GeneralCategory;
 
 /// 判断 codepoint 是否为 Unicode 字母 (L* 类别)
+/// 使用 is_alphabetic 属性，该属性比 \p{L} 更宽泛，包括一些标记（Mark）字符
+/// （如高棉元音符号 Mc/Mn）。这与 llama.cpp 的 GPT-2 风格预分词器行为一致。
 pub inline fn isLetter(cp: u21) bool {
     return uucode.get(.is_alphabetic, cp);
+}
+
+/// 判断 codepoint 是否为严格的 Unicode 字母（仅 L* 类别）
+/// 使用 General Category 的 L* 类别，不包括标记（Mark）字符。
+/// 用于 DeepSeek 等需要严格 \p{L} 语义的预分词器。
+pub inline fn isLetterStrict(cp: u21) bool {
+    const cat = uucode.get(.general_category, cp);
+    return switch (cat) {
+        .letter_uppercase,
+        .letter_lowercase,
+        .letter_titlecase,
+        .letter_modifier,
+        .letter_other,
+        => true,
+        else => false,
+    };
 }
 
 /// 判断 codepoint 是否为 Unicode 大写字母 (Lu 类别)
@@ -33,8 +51,6 @@ pub inline fn isLowercase(cp: u21) bool {
 
 /// 判断 codepoint 是否为 Unicode 数字 (Nd, Nl, No 类别)
 /// 包括：ASCII 数字 (0-9)、上标/下标数字、分数数字、罗马数字等
-/// 判断 codepoint 是否为 Unicode 数字 (Nd, Nl, No 类别)
-/// 包括：ASCII 数字 (0-9)、上标/下标数字、分数数字、罗马数字等
 pub inline fn isDigit(cp: u21) bool {
     const cat = uucode.get(.general_category, cp);
     return cat == .number_decimal_digit or
@@ -47,6 +63,7 @@ pub inline fn isDigit(cp: u21) bool {
 pub inline fn isDecimalDigit(cp: u21) bool {
     return uucode.get(.general_category, cp) == .number_decimal_digit;
 }
+
 /// 判断 codepoint 是否为 Unicode 标点符号 (P* 类别)
 pub inline fn isPunctuation(cp: u21) bool {
     const cat = uucode.get(.general_category, cp);
@@ -193,6 +210,13 @@ pub fn isLetterAt(text: []const u8, pos: usize) bool {
     return isLetter(decoded.cp);
 }
 
+/// 判断 UTF-8 文本中指定位置的字符是否为严格的 Unicode 字母（仅 L* 类别）
+pub fn isLetterStrictAt(text: []const u8, pos: usize) bool {
+    const decoded = decodeCodepoint(text, pos);
+    if (decoded.len == 0) return false;
+    return isLetterStrict(decoded.cp);
+}
+
 /// 判断 codepoint 是否为 Latin 字母（用于 DeepSeek-LLM 等模型的预分词）
 /// 对应 llama.cpp 中 DeepSeek-LLM 的 Latin 字母范围：
 /// [A-Za-zµÀ-ÖØ-öø-ƺ...] 包括 Latin、Greek、Cyrillic 等字母
@@ -205,6 +229,14 @@ pub inline fn isLatinLetter(cp: u21) bool {
     return isLetter(cp);
 }
 
+/// 判断 codepoint 是否为严格的 Latin 字母（仅 L* 类别，不包括标记字符）
+/// 用于 DeepSeek-LLM 等需要严格 \p{L} 语义的预分词器。
+pub inline fn isLatinLetterStrict(cp: u21) bool {
+    if (isDigit(cp)) return false;
+    if (isCJK(cp)) return false;
+    if (isEmoji(cp)) return false;
+    return isLetterStrict(cp);
+}
 
 /// 判断 UTF-8 文本中指定位置的字符是否为 Unicode 数字
 pub fn isDigitAt(text: []const u8, pos: usize) bool {
@@ -219,8 +251,6 @@ pub fn isPunctuationAt(text: []const u8, pos: usize) bool {
     if (decoded.len == 0) return false;
     return isPunctuation(decoded.cp);
 }
-
-
 
 /// 判断 UTF-8 文本中指定位置的字符是否为 Unicode 标点或符号
 pub fn isPunctuationOrSymbolAt(text: []const u8, pos: usize) bool {
@@ -332,6 +362,33 @@ test "isLetter" {
     try std.testing.expect(isLetter(0x0627)); // ا
     // Emoji is NOT a letter
     try std.testing.expect(!isLetter(0x1F600)); // 😀
+    // Khmer consonant is a letter
+    try std.testing.expect(isLetter(0x1780)); // ក (Lo)
+    // Khmer vowel sign (Mc) is a letter (is_alphabetic=true)
+    try std.testing.expect(isLetter(0x17B6)); // ា (Mc)
+}
+
+test "isLetterStrict" {
+    // ASCII letters
+    try std.testing.expect(isLetterStrict('A'));
+    try std.testing.expect(isLetterStrict('z'));
+    // Non-letters
+    try std.testing.expect(!isLetterStrict('0'));
+    try std.testing.expect(!isLetterStrict(' '));
+    try std.testing.expect(!isLetterStrict('.'));
+    // Latin extended
+    try std.testing.expect(isLetterStrict(0x00C0)); // À
+    try std.testing.expect(isLetterStrict(0x00FF)); // ÿ
+    // CJK
+    try std.testing.expect(isLetterStrict(0x4E00)); // 一
+    // Emoji is NOT a letter
+    try std.testing.expect(!isLetterStrict(0x1F600)); // 😀
+    // Khmer consonant is a letter
+    try std.testing.expect(isLetterStrict(0x1780)); // ក (Lo)
+    // Khmer vowel sign (Mc) is NOT a letter (strict)
+    try std.testing.expect(!isLetterStrict(0x17B6)); // ា (Mc)
+    // Khmer sign (Mn) is NOT a letter (strict)
+    try std.testing.expect(!isLetterStrict(0x17CB)); // ់ (Mn)
 }
 
 test "isDigit" {
