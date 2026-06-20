@@ -77,22 +77,38 @@ pub fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
             }
         }
 
-        // 4. Optional space + punctuation: \s?\p{P}+
-        if (text[i] == ' ' and i + 1 < text.len and unicode.isPunctuationAt(text, i + 1)) {
-            const start = i;
-            i += 1;
-            i += unicode.charLen(text, i);
-            while (i < text.len and unicode.isPunctuationAt(text, i)) {
+        // 4. Optional space + non-letter/non-digit: \s?[^\s\p{L}\p{N}]+
+        // Matches punctuation, symbols (like =, +, -), etc.
+        if (text[i] == ' ' and i + 1 < text.len) {
+            const next_cp = unicode.decodeCodepoint(text, i + 1);
+            if (next_cp.len > 0 and
+                !unicode.isAsciiWhitespace(text[i + 1]) and
+                !unicode.isLetterStrict(next_cp.cp) and
+                !unicode.isDigit(next_cp.cp) and
+                !unicode.isEmoji(next_cp.cp))
+            {
+                const start = i;
+                i += 1;
                 i += unicode.charLen(text, i);
+                while (i < text.len) {
+                    const d = unicode.decodeCodepoint(text, i);
+                    if (d.len == 0 or
+                        unicode.isAsciiWhitespace(text[i]) or
+                        unicode.isLetterStrict(d.cp) or
+                        unicode.isDigit(d.cp) or
+                        unicode.isEmoji(d.cp)) break;
+                    i += d.len;
+                }
+                const word = try result.allocator.dupe(u8, text[start..i]);
+                try result.words.append(result.allocator, word);
+                continue;
             }
-            const word = try result.allocator.dupe(u8, text[start..i]);
-            try result.words.append(result.allocator, word);
-            continue;
         }
 
-        // 5. Whitespace with backtracking: \s+(?!\S) or \s+
-        // For '  Hello' -> ' ' + ' Hello' (backtrack 1 space for ?\p{L}+)
-        // For '   Hello' -> '  ' + ' Hello' (backtrack 1 space for ?\p{L}+)
+        // 5. Whitespace: \s+(?!\S) or \s+
+        // For deepseek-coder, \s+(?!\S) only backtracks when followed by
+        // a letter or digit (not punctuation/symbols), because punctuation
+        // is matched by step 7 (standalone punctuation), not by optional-space patterns.
         if (unicode.isAsciiWhitespace(text[i])) {
             var ws_count: usize = 0;
             while (i + ws_count < text.len and unicode.isAsciiWhitespace(text[i + ws_count])) {
@@ -100,10 +116,10 @@ pub fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
             }
 
             // Backtrack: if there are >1 whitespace chars and the next non-whitespace
-            // can be matched by ?\p{L}+ or ?\p{P}+, leave 1 space for the optional-space pattern
+            // can be matched by ?\p{L}+ or ?\p{N}+, leave 1 space for the optional-space pattern.
+            // Do NOT backtrack for punctuation/symbols - they are matched by standalone patterns.
             if (ws_count > 1 and i + ws_count < text.len) {
                 const can_match_optional = unicode.isLetterAt(text, i + ws_count) or
-                    unicode.isPunctuationAt(text, i + ws_count) or
                     unicode.isDigitAt(text, i + ws_count);
                 if (can_match_optional) {
                     const word = try result.allocator.dupe(u8, text[i .. i + ws_count - 1]);
@@ -136,16 +152,31 @@ pub fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
             }
         }
 
-        // 7. Punctuation: \p{P}+
-        if (unicode.isPunctuationAt(text, i)) {
-            const start = i;
-            i += unicode.charLen(text, i);
-            while (i < text.len and unicode.isPunctuationAt(text, i)) {
-                i += unicode.charLen(text, i);
+        // 7. Non-letter/non-digit/non-whitespace: [^\s\p{L}\p{N}]+
+        // Matches punctuation, symbols (like =, +, -, etc.)
+        if (i < text.len) {
+            const cp = unicode.decodeCodepoint(text, i);
+            if (cp.len > 0 and
+                !unicode.isAsciiWhitespace(text[i]) and
+                !unicode.isLetterStrict(cp.cp) and
+                !unicode.isDigit(cp.cp) and
+                !unicode.isEmoji(cp.cp))
+            {
+                const start = i;
+                i += cp.len;
+                while (i < text.len) {
+                    const d = unicode.decodeCodepoint(text, i);
+                    if (d.len == 0 or
+                        unicode.isAsciiWhitespace(text[i]) or
+                        unicode.isLetterStrict(d.cp) or
+                        unicode.isDigit(d.cp) or
+                        unicode.isEmoji(d.cp)) break;
+                    i += d.len;
+                }
+                const word = try result.allocator.dupe(u8, text[start..i]);
+                try result.words.append(result.allocator, word);
+                continue;
             }
-            const word = try result.allocator.dupe(u8, text[start..i]);
-            try result.words.append(result.allocator, word);
-            continue;
         }
 
         // 8. CJK: [一-龥ࠀ-一가-퟿]+
