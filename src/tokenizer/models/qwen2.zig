@@ -106,6 +106,26 @@ pub fn preTokenizeQwen2Style(text: []const u8, result: *PreTokenized) !void {
                 ws_count += 1;
             }
 
+            // \s*[\r\n]+：优先匹配包含换行符的空白序列
+            // 找到最后一个 \r 或 \n 的位置，匹配到该位置+1
+            var last_newline: ?usize = null;
+            {
+                var j: usize = 0;
+                while (j < ws_count) {
+                    if (text[i + j] == '\r' or text[i + j] == '\n') {
+                        last_newline = j + 1;
+                    }
+                    j += 1;
+                }
+            }
+            if (last_newline) |nl_end| {
+                // 匹配 \s*[\r\n]+：从当前位置到最后一个换行符（含）
+                const word = try result.allocator.dupe(u8, text[i .. i + nl_end]);
+                try result.words.append(result.allocator, word);
+                i += nl_end;
+                continue;
+            }
+
             // \s+(?!\S)：如果空白后面有非空白字符，且空白数 > 1，只取前 n-1 个
             if (ws_count > 1 and i + ws_count < text.len) {
                 const word = try result.allocator.dupe(u8, text[i .. i + ws_count - 1]);
@@ -114,7 +134,7 @@ pub fn preTokenizeQwen2Style(text: []const u8, result: *PreTokenized) !void {
                 continue;
             }
 
-            // \s+：普通空白序列
+            // \s+：普通空白序列（纯空格/制表符，不含换行符）
             const word = try result.allocator.dupe(u8, text[i .. i + ws_count]);
             try result.words.append(result.allocator, word);
             i += ws_count;
