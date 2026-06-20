@@ -4,7 +4,7 @@
 
 ```
 ❯ zig build test-vocab -Doptimize=ReleaseSafe
-Build Summary: 4/6 steps succeeded (1 failed); 19/23 tests passed (4 failed)
+Build Summary: 4/6 steps succeeded (1 failed); 20/23 tests passed (3 failed)
 ```
 
 ## falcon 修复完成 ✅
@@ -22,8 +22,8 @@ error: 'test_vocab.test.vocab - falcon' failed:
 ### 问题分析
 
 llama.cpp 的 falcon 预分词器使用三个正则表达式按顺序应用：
-1. `[\p{P}\$+<=>\^~\|`]+` - 标点符号
-2. `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)` - GPT-2 主模式
+1. `[\\p{P}\\$+<=>\\^~\\|`]+` - 标点符号
+2. `'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)` - GPT-2 主模式
 3. `[0-9][0-9][0-9]` - 三位数字分组
 
 第三个正则 `[0-9][0-9][0-9]` 在 GPT-2 模式之后应用，将已分组的数字进一步拆分为最多3位一组。
@@ -36,21 +36,34 @@ llama.cpp 的 falcon 预分词器使用三个正则表达式按顺序应用：
 - 删除步骤8（三位数字匹配），因为步骤2已处理
 - 添加 `countAsciiDigits` 辅助函数
 
+## mpt 修复完成 ✅
+
+修复前：
+```
+[mpt] Test #28: '    Hello\n    Hello' -> expected 5 tokens, got 4 tokens
+Expected tokens: 50274 12092 187 50274 12092 
+Got tokens: 50274 12092 1760 12092 
+```
+
+修复后：**46 tests passed** ✅
+
+### 问题分析
+
+MPT 使用与 GPT-2 相同的正则表达式，但预分词行为不同：
+- GPT-2 的 `\s+(?!\S)` 规则会取 n-1 个空白字符，留下最后一个给下一次迭代
+- MPT 需要将连续的同类型空白分组，但不同类型空白分开处理
+
+### 修复方法
+
+在 `src/tokenizer/models/mpt.zig` 中重写了空白处理逻辑：
+- 连续换行符合并，如果后面恰好有一个空格且该空格后面是空白，则包含该空格
+- 连续空格合并
+- 单个空格后面是制表符时，空格和制表符合并
+- 连续制表符合并
+- 其他空白按单个字符处理
+
 ## 剩余失败（预存在问题）
 
 1. **llama-bpe** - Test #45: 167 vs 168 tokens（差1个token）
 2. **qwen2** - Test #45: 181 vs 182 tokens（差1个token）
 3. **qwen35** - Test #45: 181 vs 182 tokens（差1个token）
-4. **mpt** - Test #28: 测试数据过时，当前 llama.cpp 输出与测试数据不一致
-
-### mpt 测试数据过时说明
-
-通过对比当前 llama.cpp 的输出与测试数据，发现 mpt 的测试数据（`ggml-vocab-mpt.gguf.out`）已过时。
-当前 llama.cpp 对多个测试用例的输出与测试数据不一致，包括：
-- Test #7-9: 空行序列的输出不同
-- Test #10: `\t` 输出 `[186]` 而非 `[186 187]`
-- Test #28: `\n    Hello\n    Hello\n` 输出 7 tokens 而非 5 tokens
-- Test #30: `\n =` 输出 `[426]` 而非 `[187 426]`
-- Test #45: 首 token 不同
-
-这些差异表明测试数据需要重新生成。
