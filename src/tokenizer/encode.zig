@@ -194,7 +194,7 @@ fn preTokenizeFalcon(text: []const u8, result: *PreTokenized) !void {
         if (try tryMatchContractionOrWord(text, &i, result)) continue;
 
         // 4. Three-digit numbers: [0-9][0-9][0-9]
-        if (i + 2 < text.len and isUnicodeDigit(text, i) and isUnicodeDigit(text, i+1) and isUnicodeDigit(text, i+2)) {
+        if (i + 2 < text.len and isUnicodeDigit(text, i) and isUnicodeDigit(text, i + 1) and isUnicodeDigit(text, i + 2)) {
             const start = i;
             i += 3;
             const word = try result.allocator.dupe(u8, text[start..i]);
@@ -204,7 +204,7 @@ fn preTokenizeFalcon(text: []const u8, result: *PreTokenized) !void {
 
         // Fallback: single character
         const ch_len = utf8CharLen(text, i);
-        const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
+        const word = try result.allocator.dupe(u8, text[i .. i + ch_len]);
         try result.words.append(result.allocator, word);
         i += ch_len;
     }
@@ -220,13 +220,13 @@ fn preTokenizeMpt(text: []const u8, result: *PreTokenized) !void {
     while (i < text.len) {
         // 1. 检查收缩形式（仅匹配收缩后缀本身）
         if (i + 1 < text.len and text[i] == '\'') {
-            const suffix = text[i+1..];
+            const suffix = text[i + 1 ..];
             if (suffix.len >= 1 and (suffix[0] == 's' or suffix[0] == 'S' or
                 suffix[0] == 't' or suffix[0] == 'T' or
                 suffix[0] == 'm' or suffix[0] == 'M' or
                 suffix[0] == 'd' or suffix[0] == 'D'))
             {
-                const word = try result.allocator.dupe(u8, text[i..i+2]);
+                const word = try result.allocator.dupe(u8, text[i .. i + 2]);
                 try result.words.append(result.allocator, word);
                 i = i + 2;
                 continue;
@@ -238,7 +238,7 @@ fn preTokenizeMpt(text: []const u8, result: *PreTokenized) !void {
                 (suffix[0] == 'l' and suffix[1] == 'l') or
                 (suffix[0] == 'L' and suffix[1] == 'L')))
             {
-                const word = try result.allocator.dupe(u8, text[i..i+3]);
+                const word = try result.allocator.dupe(u8, text[i .. i + 3]);
                 try result.words.append(result.allocator, word);
                 i = i + 3;
                 continue;
@@ -275,12 +275,14 @@ fn preTokenizeMpt(text: []const u8, result: *PreTokenized) !void {
 
         // 4. 可选空格 + 符号序列:  ?[^\s\p{L}\p{N}]+
         if (check_pos < text.len and !isWhitespace(text[check_pos]) and
-            !isUnicodeLetter(text, check_pos) and !isUnicodeDigit(text, check_pos)) {
+            !isUnicodeLetter(text, check_pos) and !isUnicodeDigit(text, check_pos))
+        {
             const start = i;
             if (has_space) i += 1;
             i += utf8CharLen(text, i);
             while (i < text.len and !isWhitespace(text[i]) and
-                !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
+                !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i))
+            {
                 i += utf8CharLen(text, i);
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
@@ -315,7 +317,7 @@ fn preTokenizeStarcoderStyle(text: []const u8, result: *PreTokenized) !void {
         // 1. Single digit: \p{N} (ASCII and Unicode digits like ¼ ½ ¾ ² ³ ¹)
         if (isDigit(text[i]) or isUnicodeNumberChar(text, i)) {
             const ch_len = if (isDigit(text[i])) @as(usize, 1) else utf8CharLen(text, i);
-            const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
+            const word = try result.allocator.dupe(u8, text[i .. i + ch_len]);
             try result.words.append(result.allocator, word);
             i += ch_len;
             continue;
@@ -326,7 +328,7 @@ fn preTokenizeStarcoderStyle(text: []const u8, result: *PreTokenized) !void {
 
         // Fallback
         const ch_len = utf8CharLen(text, i);
-        const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
+        const word = try result.allocator.dupe(u8, text[i .. i + ch_len]);
         try result.words.append(result.allocator, word);
         i += ch_len;
     }
@@ -457,8 +459,8 @@ fn preTokenizeDeepseekLlm(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // Fallback
-        i += 1;
+        // Fallback: single UTF-8 character
+        i += utf8CharLen(text, i);
     }
 }
 
@@ -540,7 +542,7 @@ fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
         // 5. Single digit: \p{N}
         if (isUnicodeDigit(text, i)) {
             const ch_len = utf8CharLen(text, i);
-            const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
+            const word = try result.allocator.dupe(u8, text[i .. i + ch_len]);
             try result.words.append(result.allocator, word);
             i += ch_len;
             continue;
@@ -557,8 +559,8 @@ fn preTokenizeDeepseekCoder(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-        // Fallback: single character
-        i += 1;
+        // Fallback: single UTF-8 character
+        i += utf8CharLen(text, i);
     }
 }
 
@@ -599,7 +601,7 @@ fn preTokenizeDeepseek3Style(text: []const u8, result: *PreTokenized) !void {
 
         // Fallback
         const ch_len = utf8CharLen(text, i);
-        const word = try result.allocator.dupe(u8, text[i..i+ch_len]);
+        const word = try result.allocator.dupe(u8, text[i .. i + ch_len]);
         try result.words.append(result.allocator, word);
         i += ch_len;
     }
@@ -647,12 +649,13 @@ fn tryMatchContractionOrWord(text: []const u8, i: *usize, result: *PreTokenized)
     // Note: only match the contraction suffix itself, not the preceding word.
     // The preceding word is matched by the ?\p{L}+ pattern.
     if (i.* + 1 < text.len and text[i.*] == '\'') {
-        const suffix = text[i.*+1..];
+        const suffix = text[i.* + 1 ..];
         if (suffix.len >= 1 and (suffix[0] == 's' or suffix[0] == 'S' or
             suffix[0] == 't' or suffix[0] == 'T' or
             suffix[0] == 'm' or suffix[0] == 'M' or
-            suffix[0] == 'd' or suffix[0] == 'D')) {
-            const word = try result.allocator.dupe(u8, text[i.*..i.*+2]);
+            suffix[0] == 'd' or suffix[0] == 'D'))
+        {
+            const word = try result.allocator.dupe(u8, text[i.* .. i.* + 2]);
             try result.words.append(result.allocator, word);
             i.* = i.* + 2;
             return true;
@@ -662,8 +665,9 @@ fn tryMatchContractionOrWord(text: []const u8, i: *usize, result: *PreTokenized)
             (suffix[0] == 'v' and suffix[1] == 'e') or
             (suffix[0] == 'V' and suffix[1] == 'E') or
             (suffix[0] == 'l' and suffix[1] == 'l') or
-            (suffix[0] == 'L' and suffix[1] == 'L'))) {
-            const word = try result.allocator.dupe(u8, text[i.*..i.*+3]);
+            (suffix[0] == 'L' and suffix[1] == 'L')))
+        {
+            const word = try result.allocator.dupe(u8, text[i.* .. i.* + 3]);
             try result.words.append(result.allocator, word);
             i.* = i.* + 3;
             return true;
@@ -794,13 +798,13 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
         // 对应 regex: 's|'t|'re|'ve|'m|'ll|'d
         // 注意：不包含前面的单词，前面的单词由 ?\p{L}+ 模式匹配
         if (i + 1 < text.len and text[i] == '\'') {
-            const suffix = text[i+1..];
+            const suffix = text[i + 1 ..];
             if (suffix.len >= 1 and (suffix[0] == 's' or suffix[0] == 'S' or
                 suffix[0] == 't' or suffix[0] == 'T' or
                 suffix[0] == 'm' or suffix[0] == 'M' or
                 suffix[0] == 'd' or suffix[0] == 'D'))
             {
-                const word = try result.allocator.dupe(u8, text[i..i+2]);
+                const word = try result.allocator.dupe(u8, text[i .. i + 2]);
                 try result.words.append(result.allocator, word);
                 i = i + 2;
                 continue;
@@ -812,7 +816,7 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
                 (suffix[0] == 'l' and suffix[1] == 'l') or
                 (suffix[0] == 'L' and suffix[1] == 'L')))
             {
-                const word = try result.allocator.dupe(u8, text[i..i+3]);
+                const word = try result.allocator.dupe(u8, text[i .. i + 3]);
                 try result.words.append(result.allocator, word);
                 i = i + 3;
                 continue;
@@ -849,12 +853,14 @@ fn preTokenizeGpt2Style(text: []const u8, result: *PreTokenized) !void {
 
         // 4. 可选空格 + 符号序列:  ?[^\s\p{L}\p{N}]+
         if (check_pos < text.len and !isWhitespace(text[check_pos]) and
-            !isUnicodeLetter(text, check_pos) and !isUnicodeDigit(text, check_pos)) {
+            !isUnicodeLetter(text, check_pos) and !isUnicodeDigit(text, check_pos))
+        {
             const start = i;
             if (has_space) i += 1;
             i += utf8CharLen(text, i);
             while (i < text.len and !isWhitespace(text[i]) and
-                !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
+                !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i))
+            {
                 i += utf8CharLen(text, i);
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
@@ -900,13 +906,13 @@ fn preTokenizeGpt2StyleNoSpace(text: []const u8, result: *PreTokenized) !void {
         // 对应 regex: 's|'t|'re|'ve|'m|'ll|'d
         // 注意：不包含前面的单词，前面的单词由 ?\p{L}+ 模式匹配
         if (i + 1 < text.len and text[i] == '\'') {
-            const suffix = text[i+1..];
+            const suffix = text[i + 1 ..];
             if (suffix.len >= 1 and (suffix[0] == 's' or suffix[0] == 'S' or
                 suffix[0] == 't' or suffix[0] == 'T' or
                 suffix[0] == 'm' or suffix[0] == 'M' or
                 suffix[0] == 'd' or suffix[0] == 'D'))
             {
-                const word = try result.allocator.dupe(u8, text[i..i+2]);
+                const word = try result.allocator.dupe(u8, text[i .. i + 2]);
                 try result.words.append(result.allocator, word);
                 i = i + 2;
                 continue;
@@ -918,7 +924,7 @@ fn preTokenizeGpt2StyleNoSpace(text: []const u8, result: *PreTokenized) !void {
                 (suffix[0] == 'l' and suffix[1] == 'l') or
                 (suffix[0] == 'L' and suffix[1] == 'L')))
             {
-                const word = try result.allocator.dupe(u8, text[i..i+3]);
+                const word = try result.allocator.dupe(u8, text[i .. i + 3]);
                 try result.words.append(result.allocator, word);
                 i = i + 3;
                 continue;
@@ -972,12 +978,14 @@ fn preTokenizeGpt2StyleNoSpace(text: []const u8, result: *PreTokenized) !void {
 
         // 5. 可选空格 + 符号序列:  ?[^\s\p{L}\p{N}]+
         if (check_pos < text.len and !isWhitespace(text[check_pos]) and
-            !isUnicodeLetter(text, check_pos) and !isUnicodeDigit(text, check_pos)) {
+            !isUnicodeLetter(text, check_pos) and !isUnicodeDigit(text, check_pos))
+        {
             const start = i;
             if (has_space) i += 1;
             i += utf8CharLen(text, i);
             while (i < text.len and !isWhitespace(text[i]) and
-                !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i)) {
+                !isUnicodeLetter(text, i) and !isUnicodeDigit(text, i))
+            {
                 i += utf8CharLen(text, i);
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
@@ -1025,16 +1033,17 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
     while (i < text.len) {
         // 1. 检查收缩形式：'s, 't, 're, 've, 'm, 'll, 'd
         if (i + 1 < text.len and text[i] == '\'') {
-            const suffix = text[i+1..];
+            const suffix = text[i + 1 ..];
             if (suffix.len >= 1 and (suffix[0] == 's' or suffix[0] == 'S' or
                 suffix[0] == 't' or suffix[0] == 'T' or
                 suffix[0] == 'm' or suffix[0] == 'M' or
-                suffix[0] == 'd' or suffix[0] == 'D')) {
+                suffix[0] == 'd' or suffix[0] == 'D'))
+            {
                 var word_start = i;
                 while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
                     word_start -= 1;
                 }
-                const word = try result.allocator.dupe(u8, text[word_start..i+2]);
+                const word = try result.allocator.dupe(u8, text[word_start .. i + 2]);
                 try result.words.append(result.allocator, word);
                 i = i + 2;
                 continue;
@@ -1044,12 +1053,13 @@ fn preTokenizeGPT2(text: []const u8, result: *PreTokenized) !void {
                 (suffix[0] == 'v' and suffix[1] == 'e') or
                 (suffix[0] == 'V' and suffix[1] == 'E') or
                 (suffix[0] == 'l' and suffix[1] == 'l') or
-                (suffix[0] == 'L' and suffix[1] == 'L'))) {
+                (suffix[0] == 'L' and suffix[1] == 'L')))
+            {
                 var word_start = i;
                 while (word_start > 0 and !isWhitespace(text[word_start - 1])) {
                     word_start -= 1;
                 }
-                const word = try result.allocator.dupe(u8, text[word_start..i+3]);
+                const word = try result.allocator.dupe(u8, text[word_start .. i + 3]);
                 try result.words.append(result.allocator, word);
                 i = i + 3;
                 continue;
@@ -1228,11 +1238,15 @@ fn escapeWhitespace(text: []const u8, allocator: std.mem.Allocator) ![]u8 {
     var j: usize = 0;
     for (text) |c| {
         if (c == ' ') {
-            buf[j] = 0xE2; j += 1;
-            buf[j] = 0x96; j += 1;
-            buf[j] = 0x81; j += 1;
+            buf[j] = 0xE2;
+            j += 1;
+            buf[j] = 0x96;
+            j += 1;
+            buf[j] = 0x81;
+            j += 1;
         } else {
-            buf[j] = c; j += 1;
+            buf[j] = c;
+            j += 1;
         }
     }
     return buf[0..j];
@@ -1254,6 +1268,10 @@ fn isLetter(c: u8) bool {
 
 /// 检测给定位置的 UTF-8 字符是否为 Unicode 字母 (\p{L})
 /// 支持多字节 UTF-8 序列，用于 GPT-2 预分词器
+/// 注意：4 字节字符（0xF0-0xF7）通常是 emoji 或其他符号，不是字母。
+/// 保守起见，仅将 2 字节（Latin 扩展）和 3 字节（CJK 等）视为字母，
+/// 4 字节字符视为非字母。这与 llama.cpp 的 \p{L} Unicode 属性一致，
+/// 因为 emoji（如 🦙 U+1F999）属于 "Other Symbol" (So) 类别，不是字母。
 fn isUnicodeLetter(text: []const u8, pos: usize) bool {
     if (pos >= text.len) return false;
     const b = text[pos];
@@ -1267,8 +1285,12 @@ fn isUnicodeLetter(text: []const u8, pos: usize) bool {
         if (b >= 0xC3) return true;
         return false;
     }
-    // 3-byte (0xE0-0xEF) and 4-byte (0xF0-0xF7): likely letters/CJK
-    return true;
+    // 3-byte (0xE0-0xEF): CJK, Arabic, Cyrillic supplement, etc. — all letters
+    if (b < 0xF0) return true;
+    // 4-byte (0xF0-0xF7): emoji, rare CJK, ancient scripts, etc.
+    // Most 4-byte characters are NOT letters (emoji are "Other Symbol").
+    // Conservatively return false to match llama.cpp behavior.
+    return false;
 }
 
 /// 检测给定位置的 UTF-8 字符是否为 Unicode 数字 (\p{N})
@@ -1401,7 +1423,10 @@ fn partitionSpecialTokens(
                 // 检查覆盖范围是否与其他特殊 token 重叠（只有未覆盖的区域才匹配）
                 var all_free = true;
                 for (pos..pos + st.text.len) |j| {
-                    if (covered[j]) { all_free = false; break; }
+                    if (covered[j]) {
+                        all_free = false;
+                        break;
+                    }
                 }
                 if (all_free) {
                     // 检查属性：control 和 unknown token 仅在 parse_special 时匹配
