@@ -38,7 +38,19 @@ llama.cpp 的 falcon 预分词器使用三个正则表达式按顺序应用：
 
 ## 剩余失败（预存在问题）
 
-1. **llama-bpe** - Test #45: 167 vs 168 tokens
-2. **qwen2** - Test #45: 181 vs 182 tokens  
-3. **qwen35** - Test #45: 181 vs 182 tokens
-4. **mpt** - Test #28: whitespace handling issue
+1. **llama-bpe** - Test #45: 167 vs 168 tokens（差1个token）
+2. **qwen2** - Test #45: 181 vs 182 tokens（差1个token）
+3. **qwen35** - Test #45: 181 vs 182 tokens（差1个token）
+4. **mpt** - Test #28: 测试数据过时，当前 llama.cpp 输出与测试数据不一致
+
+### mpt 测试数据过时说明
+
+通过对比当前 llama.cpp 的输出与测试数据，发现 mpt 的测试数据（`ggml-vocab-mpt.gguf.out`）已过时。
+当前 llama.cpp 对多个测试用例的输出与测试数据不一致，包括：
+- Test #7-9: 空行序列的输出不同
+- Test #10: `\t` 输出 `[186]` 而非 `[186 187]`
+- Test #28: `\n    Hello\n    Hello\n` 输出 7 tokens 而非 5 tokens
+- Test #30: `\n =` 输出 `[426]` 而非 `[187 426]`
+- Test #45: 首 token 不同
+
+这些差异表明测试数据需要重新生成。
