@@ -25,12 +25,24 @@ pub fn preTokenizeFalcon(text: []const u8, result: *PreTokenized) !void {
 
         // 2. Optional space + Unicode digits:  ?\p{N}+ (for digits like ½ ² ³)
         // Must come before standalone whitespace to match ' ½' as one token
+        // Note: ASCII digits (0-9) are grouped in chunks of at most 3 to match
+        // llama.cpp's falcon regex: [0-9][0-9][0-9] applied after the GPT-2 pattern.
+        // Non-ASCII digits (Unicode digits like ½ ² ³) are grouped all together.
         if (text[i] == ' ' and i + 1 < text.len and unicode.isDigitAt(text, i + 1)) {
             const start = i;
             i += 1;
-            i += unicode.charLen(text, i);
-            while (i < text.len and unicode.isDigitAt(text, i)) {
+            // Check if this is an ASCII digit sequence
+            if (unicode.isAsciiDigit(text[i])) {
+                // Match at most 3 ASCII digits
+                const digit_count = countAsciiDigits(text, i);
+                const take = @min(digit_count, @as(usize, 3));
+                i += take;
+            } else {
+                // Non-ASCII digit: match all consecutive Unicode digits
                 i += unicode.charLen(text, i);
+                while (i < text.len and unicode.isDigitAt(text, i)) {
+                    i += unicode.charLen(text, i);
+                }
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
             try result.words.append(result.allocator, word);
@@ -38,9 +50,18 @@ pub fn preTokenizeFalcon(text: []const u8, result: *PreTokenized) !void {
         }
         if (unicode.isDigitAt(text, i)) {
             const start = i;
-            i += unicode.charLen(text, i);
-            while (i < text.len and unicode.isDigitAt(text, i)) {
+            // Check if this is an ASCII digit sequence
+            if (unicode.isAsciiDigit(text[i])) {
+                // Match at most 3 ASCII digits
+                const digit_count = countAsciiDigits(text, i);
+                const take = @min(digit_count, @as(usize, 3));
+                i += take;
+            } else {
+                // Non-ASCII digit: match all consecutive Unicode digits
                 i += unicode.charLen(text, i);
+                while (i < text.len and unicode.isDigitAt(text, i)) {
+                    i += unicode.charLen(text, i);
+                }
             }
             const word = try result.allocator.dupe(u8, text[start..i]);
             try result.words.append(result.allocator, word);
@@ -153,19 +174,21 @@ pub fn preTokenizeFalcon(text: []const u8, result: *PreTokenized) !void {
         // 7. Contractions and word patterns (ASCII only): 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
         if (try tryMatchContractionOrWord(text, &i, result)) continue;
 
-        // 8. Three-digit numbers: [0-9][0-9][0-9]
-        if (i + 2 < text.len and unicode.isDigitAt(text, i) and unicode.isDigitAt(text, i + 1) and unicode.isDigitAt(text, i + 2)) {
-            const start = i;
-            i += 3;
-            const word = try result.allocator.dupe(u8, text[start..i]);
-            try result.words.append(result.allocator, word);
-            continue;
-        }
-
         // Fallback: single character
         const ch_len = unicode.charLen(text, i);
         const word = try result.allocator.dupe(u8, text[i .. i + ch_len]);
         try result.words.append(result.allocator, word);
         i += ch_len;
     }
+}
+
+/// Count consecutive ASCII digits (0-9) starting from position `start`.
+fn countAsciiDigits(text: []const u8, start: usize) usize {
+    var count: usize = 0;
+    var pos = start;
+    while (pos < text.len and unicode.isAsciiDigit(text[pos])) {
+        pos += 1;
+        count += 1;
+    }
+    return count;
 }

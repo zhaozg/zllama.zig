@@ -1,65 +1,44 @@
 # test-vocab 修复
 
-## 当前状态 (2024-06-20)
+## 当前状态
 
 ```
 ❯ zig build test-vocab -Doptimize=ReleaseSafe
-Build Summary: 4/6 steps succeeded (1 failed); 17/23 tests passed (6 failed)
+Build Summary: 4/6 steps succeeded (1 failed); 19/23 tests passed (4 failed)
 ```
 
-## 已修复的问题
+## falcon 修复完成 ✅
 
-### ✅ deepseek-coder / deepseek-llm Test #18 (`🦙.cpp`)
-- 添加 Emoji 优先分支，确保 Emoji 被识别为独立单词
+修复前：
+```
+error: 'test_vocab.test.vocab - falcon' failed:
+         [falcon] Test #32, token #20: expected 17419, got 1313
+         Input: 'Hello, y'all! How are you 😁 ?我想在apple工作1314151天～'
+       expected 17419, found 1313
+```
 
-### ✅ deepseek-coder / deepseek-llm Test #21（高棉文）
-- 添加 `isLetterStrict()` 函数（使用 L* 类别），字母分支改用严格字母判断
+修复后：**46 tests passed** ✅
 
-### ✅ llama-bpe / qwen2 / qwen35 Test #21（高棉文）
-- 保留 `isLetter()` 使用 `is_alphabetic` 属性，确保 GPT-2 风格预分词器行为不变
+### 问题分析
 
-### ✅ deepseek-llm 全部 46 个测试通过
+llama.cpp 的 falcon 预分词器使用三个正则表达式按顺序应用：
+1. `[\p{P}\$+<=>\^~\|`]+` - 标点符号
+2. `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)` - GPT-2 主模式
+3. `[0-9][0-9][0-9]` - 三位数字分组
 
-## 当前失败（6 个）
+第三个正则 `[0-9][0-9][0-9]` 在 GPT-2 模式之后应用，将已分组的数字进一步拆分为最多3位一组。
 
-### falcon Test #32
-- 输入包含 emoji、CJK、数字混合
-- token #20 期望 `17419`，实际 `1313`
-- 可能是数字预分词或 BPE 编码问题
+### 修复方法
 
-### deepseek-coder Test #30
-- 输入 `'\n        ='`，期望 `[185, 405]`，实际 `[185, 207, 28]`
-- 测试数据可能过时（当前 llama.cpp 输出 `[185, 294, 28]`）
+在 `src/tokenizer/models/falcon.zig` 中：
+- 修改步骤2的数字匹配逻辑：ASCII 数字（0-9）每次最多匹配3位
+- 非 ASCII 数字（Unicode 数字如 ½ ² ³）保持原样（全部匹配）
+- 删除步骤8（三位数字匹配），因为步骤2已处理
+- 添加 `countAsciiDigits` 辅助函数
 
-### mpt Test #28
-- 输入 `'\n    Hello\n    Hello\n'`，期望 5 tokens，实际 4 tokens
-- 测试数据可能过时（当前 llama.cpp 输出 7 tokens）
+## 剩余失败（预存在问题）
 
-### llama-bpe / qwen2 / qwen35 Test #45
-- 长文本测试，差 1 个 token
-- 可能是预分词器对某些边界情况的处理与 llama.cpp 不一致
-
-## 测试状态
-
-| 测试 | 状态 | 说明 |
-|------|------|------|
-| llama-spm | ✅ 通过 | 46 tests passed |
-| llama-bpe | ❌ 失败 | Test #45 长文本 |
-| qwen2 | ❌ 失败 | Test #45 长文本 |
-| qwen35 | ❌ 失败 | Test #45 长文本 |
-| gpt-2 | ✅ 通过 | 46 tests passed |
-| gemma-4 | ✅ 通过 | 46 tests passed |
-| falcon | ❌ 失败 | Test #32 token #20 |
-| deepseek-coder | ❌ 失败 | Test #30 |
-| deepseek-llm | ✅ 通过 | **全部 46 个测试通过！** |
-| phi-3 | ✅ 通过 | 46 tests passed |
-| command-r | ✅ 通过 | 46 tests passed |
-| starcoder | ✅ 通过 | 46 tests passed |
-| mpt | ❌ 失败 | Test #28 |
-| refact | ✅ 通过 | 46 tests passed |
-| baichuan | ⏭️ 跳过 | 缺少测试数据 |
-| bert-bge | ⏭️ 跳过 | WPM 未实现 |
-| nomic-bert-moe | ⏭️ 跳过 | 缺少测试数据 |
-| aquila | ⏭️ 跳过 | 缺少测试数据 |
-
-**总计：17/23 通过（6 失败），相比修复前 9/23 通过有显著提升。**
+1. **llama-bpe** - Test #45: 167 vs 168 tokens
+2. **qwen2** - Test #45: 181 vs 182 tokens  
+3. **qwen35** - Test #45: 181 vs 182 tokens
+4. **mpt** - Test #28: whitespace handling issue
