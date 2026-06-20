@@ -193,12 +193,34 @@ pub fn isLetterAt(text: []const u8, pos: usize) bool {
     return isLetter(decoded.cp);
 }
 
+/// 判断 codepoint 是否为 Latin 字母（用于 DeepSeek-LLM 等模型的预分词）
+/// 对应 llama.cpp 中 DeepSeek-LLM 的 Latin 字母范围：
+/// [A-Za-zµÀ-ÖØ-öø-ƺ...] 包括 Latin、Greek、Cyrillic 等字母
+/// 但不包括 CJK 表意文字和数字
+pub inline fn isLatinLetter(cp: u21) bool {
+    // Must be a letter (alphabetic) but not CJK, not a digit, and not emoji
+    if (isDigit(cp)) return false;
+    if (isCJK(cp)) return false;
+    if (isEmoji(cp)) return false;
+    return isLetter(cp);
+}
+
+
 /// 判断 UTF-8 文本中指定位置的字符是否为 Unicode 数字
 pub fn isDigitAt(text: []const u8, pos: usize) bool {
     const decoded = decodeCodepoint(text, pos);
     if (decoded.len == 0) return false;
     return isDigit(decoded.cp);
 }
+
+/// 判断 UTF-8 文本中指定位置的字符是否为 Unicode 标点
+pub fn isPunctuationAt(text: []const u8, pos: usize) bool {
+    const decoded = decodeCodepoint(text, pos);
+    if (decoded.len == 0) return false;
+    return isPunctuation(decoded.cp);
+}
+
+
 
 /// 判断 UTF-8 文本中指定位置的字符是否为 Unicode 标点或符号
 pub fn isPunctuationOrSymbolAt(text: []const u8, pos: usize) bool {
