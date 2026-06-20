@@ -29,6 +29,7 @@ pub const decode_mod = @import("decode.zig");
 pub const bpe = @import("bpe.zig");
 pub const utils = @import("utils.zig");
 pub const unicode = @import("unicode.zig");
+pub const PreTokenized = @import("encode.zig").PreTokenized;
 pub const SpecialTokens = SpecialTokenIds;
 pub const VocabEntry = types.VocabEntry;
 pub const TokenizerConfig = types.TokenizerConfig;
