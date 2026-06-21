@@ -66,7 +66,12 @@ test "expandPlaceholders: audio with tokens" {
     // expandPlaceholders only expands placeholder tokens, not surrounding text
     const text = "<|audio|>";
     var expanded = try chat_template.expandPlaceholders(
-        testing.allocator, text, 0, 100, 0, 20,
+        testing.allocator,
+        text,
+        0,
+        100,
+        0,
+        20,
     );
     defer expanded.deinit();
 

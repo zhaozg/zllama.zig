@@ -70,7 +70,6 @@ pub fn preTokenizeLlama3(text: []const u8, result: *PreTokenized) !void {
             continue;
         }
 
-
         // 4. 数字序列（1-3位，不包含前导空格）: \p{N}{1,3}
         if (unicode.isDigitAt(text, i)) {
             const start = i;

@@ -113,8 +113,6 @@ pub const MetadataValue = struct {
             else => null,
         };
     }
-
-
 };
 
 /// GGUF 张量数据类型
@@ -151,7 +149,6 @@ pub const TensorDataType = enum(u32) {
     _,
 
     /// 返回该数据类型每个元素的字节数（近似值，量化类型为块大小平均）
-
     /// 返回该数据类型每个元素的字节数（近似值，量化类型为块大小平均）
     pub fn typeSize(self: TensorDataType) usize {
         return switch (self) {

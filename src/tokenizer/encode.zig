@@ -36,7 +36,6 @@ const preTokenizeQwen = @import("models/qwen.zig").preTokenizeQwen;
 const preTokenizeNewlineOnly = @import("models/newline_only.zig").preTokenizeNewlineOnly;
 const tryMatchContractionOrWord = @import("models/tryMatchContractionOrWord.zig").tryMatchContractionOrWord;
 
-
 const log = std.log.scoped(.tokenizer);
 
 /// SPM 空格标记：▁ (U+2581)，UTF-8 编码为 0xE2 0x96 0x81
@@ -195,8 +194,6 @@ fn escapeWhitespace(text: []const u8, allocator: std.mem.Allocator) ![]u8 {
     }
     return buf[0..j];
 }
-
-
 
 /// 获取给定位置 UTF-8 字符的字节长度
 // ============================================================================

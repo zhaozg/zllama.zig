@@ -422,9 +422,7 @@ pub fn getTokenText(tok: *const tokenizer.Tokenizer, id: u32) []const u8 {
     return "?";
 }
 
-
 /// 检查 token 是否为 EOG token（通过名称匹配）
-
 /// 检查 token 是否为 EOG token（通过名称匹配）
 pub fn isEogToken(tok: *const tokenizer.Tokenizer, id: u32) bool {
     const eog_names = [_][]const u8{

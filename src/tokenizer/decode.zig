@@ -189,7 +189,7 @@ fn decodeGPT2Token(
             continue;
         }
 
-        const cp_slice = token_str[i..i+cp_len];
+        const cp_slice = token_str[i .. i + cp_len];
 
         // 检查是否是 ASCII（直接输出）
         if (cp_len == 1 and byte < 0x80) {

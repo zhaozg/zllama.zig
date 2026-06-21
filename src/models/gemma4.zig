@@ -752,10 +752,14 @@ pub const Gemma4Model = struct {
             });
             log.debug("  embed preview[0..{d}]: {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}", .{
                 @min(n_preview, @as(usize, 8)),
-                eo_data[0], if (n_total > 1) eo_data[1] else @as(f32, 0),
-                if (n_total > 2) eo_data[2] else @as(f32, 0), if (n_total > 3) eo_data[3] else @as(f32, 0),
-                if (n_total > 4) eo_data[4] else @as(f32, 0), if (n_total > 5) eo_data[5] else @as(f32, 0),
-                if (n_total > 6) eo_data[6] else @as(f32, 0), if (n_total > 7) eo_data[7] else @as(f32, 0),
+                eo_data[0],
+                if (n_total > 1) eo_data[1] else @as(f32, 0),
+                if (n_total > 2) eo_data[2] else @as(f32, 0),
+                if (n_total > 3) eo_data[3] else @as(f32, 0),
+                if (n_total > 4) eo_data[4] else @as(f32, 0),
+                if (n_total > 5) eo_data[5] else @as(f32, 0),
+                if (n_total > 6) eo_data[6] else @as(f32, 0),
+                if (n_total > 7) eo_data[7] else @as(f32, 0),
             });
             log.debug("  all_zero={} has_nan={}", .{ all_zero, has_nan });
             if (all_zero) log.warn("  ⚠ embd_override is ALL ZEROS!", .{});

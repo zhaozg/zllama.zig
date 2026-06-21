@@ -67,10 +67,10 @@ pub const GraphDumper = struct {
         const n_nodes = graph.nNodes();
         try out.appendSlice(allocator, "=== Graph Dump: ");
         {
-                var num_buf: [32]u8 = undefined;
-                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{n_nodes});
-                try out.appendSlice(allocator, num_str);
-            }
+            var num_buf: [32]u8 = undefined;
+            const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{n_nodes});
+            try out.appendSlice(allocator, num_str);
+        }
         try out.appendSlice(allocator, " nodes ===\n\n");
 
         var i: i32 = 0;
@@ -162,11 +162,9 @@ pub const GraphDumper = struct {
         }
 
         try out.appendSlice(allocator, "}\n");
-
     }
     /// JSON 格式输出
     fn dumpJson(
-
         _: *GraphDumper,
         graph: *ggml.CGraph,
         out: *std.ArrayListUnmanaged(u8),
@@ -176,10 +174,10 @@ pub const GraphDumper = struct {
         try out.appendSlice(allocator, "{\n");
         try out.appendSlice(allocator, "  \"n_nodes\": ");
         {
-                var num_buf: [32]u8 = undefined;
-                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{n_nodes});
-                try out.appendSlice(allocator, num_str);
-            }
+            var num_buf: [32]u8 = undefined;
+            const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{n_nodes});
+            try out.appendSlice(allocator, num_str);
+        }
         try out.appendSlice(allocator, ",\n");
         try out.appendSlice(allocator, "  \"nodes\": [\n");
 
@@ -241,7 +239,6 @@ pub const GraphDumper = struct {
 // ============================================================================
 
 /// 构建模型推理图并返回
-
 /// Estimate the memory size needed for the computation graph
 fn estimateGraphSize(params: *const model_if.ModelParams) usize {
     // Base: 1MB for overhead
@@ -430,7 +427,6 @@ pub fn main(init: std.process.Init) !void {
     const stdout_file = std.Io.File.stdout();
     try stdout_file.writeStreamingAll(io, out_buf.items);
 }
-
 
 // 测试
 // ============================================================================

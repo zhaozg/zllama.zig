@@ -22,7 +22,6 @@ const attention = @import("attention");
 const embed = @import("embed");
 const weight_loader = @import("weight_loader");
 
-
 const model = @import("../model.zig");
 
 const log = std.log.scoped(.gemma3);
@@ -91,8 +90,6 @@ pub const Gemma3Weights = struct {
         allocator.free(self.layers);
     }
 };
-
-
 
 // ============================================================================
 // Gemma 3 模型
@@ -383,11 +380,11 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Gemma
     p.base.n_vocab = gguf_file.getU32("gemma3.vocab_size") orelse
         gguf_file.getU32("llama.vocab_size") orelse
         blk: {
-        if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
-            if (val.value_type == .array) break :blk @intCast(val.array_val.len);
-        }
-        break :blk 0;
-    };
+            if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
+                if (val.value_type == .array) break :blk @intCast(val.array_val.len);
+            }
+            break :blk 0;
+        };
     p.base.n_embd = gguf_file.getU32("gemma3.embedding_length") orelse
         gguf_file.getU32("llama.embedding_length") orelse 0;
     p.base.n_head = gguf_file.getU32("gemma3.attention.head_count") orelse
@@ -467,7 +464,7 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Gemma
 
     log.info("Gemma3: vocab={d}, embd={d}, heads={d}, kv_heads={d}, layers={d}, ff={d}, swa={d}, softcap={d}", .{
         p.base.n_vocab, p.base.n_embd, p.base.n_head, p.base.n_kv_head,
-        p.base.n_layer, p.base.n_ff, p.n_swa, p.final_logit_softcapping,
+        p.base.n_layer, p.base.n_ff,   p.n_swa,       p.final_logit_softcapping,
     });
     log.info("Gemma3: head_dim={d}, head_dim_k={d}, head_dim_v={d}, rope_dim={d}", .{
         p.base.n_head_dim, p.base.n_head_dim_k, p.base.n_head_dim_v, p.base.rope_dim,
@@ -563,7 +560,6 @@ fn loadWeights(
         .layers = layers,
     };
 }
-
 
 // ============================================================================
 // 测试

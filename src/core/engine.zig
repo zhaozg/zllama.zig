@@ -280,7 +280,7 @@ pub const InferenceEngine = struct {
         defer tmpl.deinit(self.allocator);
         const system = if (self.system_prompt.len > 0) self.system_prompt else null;
         const result = tmpl.apply(self.allocator, chat_history, system, true);
-        logger.info("Prompt base on template: {s}", .{ try result });
+        logger.info("Prompt base on template: {s}", .{try result});
         return result;
     }
 
@@ -470,8 +470,16 @@ pub const InferenceEngine = struct {
 
         const dr = try self.runDecodeLoop(io, first_token, prefill.pos, max_tokens, .{
             .buildStep = undefined,
-            .sample = struct { fn f(_: *anyopaque, l: *ggml.Tensor) i32 { return sampler.Sampler.sampleGreedy(l); } }.f,
-            .skipToken = struct { fn f(c: *anyopaque, t: i32) bool { return (@as(*InferenceEngine, @ptrCast(@alignCast(c)))).tok.isSkipToken(@intCast(t)); } }.f,
+            .sample = struct {
+                fn f(_: *anyopaque, l: *ggml.Tensor) i32 {
+                    return sampler.Sampler.sampleGreedy(l);
+                }
+            }.f,
+            .skipToken = struct {
+                fn f(c: *anyopaque, t: i32) bool {
+                    return (@as(*InferenceEngine, @ptrCast(@alignCast(c)))).tok.isSkipToken(@intCast(t));
+                }
+            }.f,
             .onComplete = null,
         }, @ptrCast(self));
 
@@ -539,7 +547,10 @@ pub const InferenceEngine = struct {
 
         var line_buf: [4096]u8 = undefined;
         var history = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
-        defer { for (history.items) |item| self.allocator.free(item); history.deinit(self.allocator); }
+        defer {
+            for (history.items) |item| self.allocator.free(item);
+            history.deinit(self.allocator);
+        }
         var chat_history = std.ArrayListUnmanaged(chat_template.ChatMessage){ .items = &.{}, .capacity = 0 };
         defer chat_history.deinit(self.allocator);
 
@@ -547,7 +558,10 @@ pub const InferenceEngine = struct {
             try stdout.writeStreamingAll(io, ">>> ");
             var reader = stdin.reader(io, &line_buf);
             const line_slice = reader.interface.takeDelimiterExclusive('\n') catch |err| {
-                if (err == error.EndOfStream) { try stdout.writeStreamingAll(io, "\n"); break; }
+                if (err == error.EndOfStream) {
+                    try stdout.writeStreamingAll(io, "\n");
+                    break;
+                }
                 return err;
             };
             const line = std.mem.trimEnd(u8, line_slice, "\r");
@@ -559,29 +573,47 @@ pub const InferenceEngine = struct {
 
             if (line[0] == '/') {
                 if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) {
-                    try stdout.writeStreamingAll(io, "Bye.\n"); break;
+                    try stdout.writeStreamingAll(io, "Bye.\n");
+                    break;
                 } else if (std.mem.eql(u8, line, "/help")) {
                     try stdout.writeStreamingAll(io, "Available commands:\n  /help  /clear  /exit  /reset  /new  /image  /audio\n");
                 } else if (std.mem.eql(u8, line, "/clear")) {
                     try stdout.writeStreamingAll(io, "\x1b[2J\x1b[H");
                 } else if (std.mem.eql(u8, line, "/reset")) {
-                    self.kv_cache_mgr.reset(); self.model.resetSSMStates();
+                    self.kv_cache_mgr.reset();
+                    self.model.resetSSMStates();
                     try stdout.writeStreamingAll(io, "KV cache and SSM states reset.\n");
                 } else if (std.mem.eql(u8, line, "/new")) {
-                    chat_history.clearAndFree(self.allocator); self.kv_cache_mgr.reset(); self.model.resetSSMStates();
+                    chat_history.clearAndFree(self.allocator);
+                    self.kv_cache_mgr.reset();
+                    self.model.resetSSMStates();
                     try stdout.writeStreamingAll(io, "New conversation started.\n");
                 } else if (std.mem.startsWith(u8, line, "/image ")) {
-                    const rest = line[7..]; const sp = std.mem.indexOf(u8, rest, " ") orelse { try stdout.writeStreamingAll(io, "Usage: /image <path> <prompt>\n"); continue; };
+                    const rest = line[7..];
+                    const sp = std.mem.indexOf(u8, rest, " ") orelse {
+                        try stdout.writeStreamingAll(io, "Usage: /image <path> <prompt>\n");
+                        continue;
+                    };
                     try stdout.writeStreamingAll(io, "Processing image...\n");
-                    try chat_history.append(self.allocator, chat_template.ChatMessage.withMedia("user", rest[sp+1..], .{ .type = .image, .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } } }));
-                    self.generateWithImage(io, rest[sp+1..], @ptrCast(@constCast(rest[0..sp])), 256) catch { try stdout.writeStreamingAll(io, "Image processing failed.\n"); };
-                    try stdout.writeStreamingAll(io, "\n"); continue;
+                    try chat_history.append(self.allocator, chat_template.ChatMessage.withMedia("user", rest[sp + 1 ..], .{ .type = .image, .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } } }));
+                    self.generateWithImage(io, rest[sp + 1 ..], @ptrCast(@constCast(rest[0..sp])), 256) catch {
+                        try stdout.writeStreamingAll(io, "Image processing failed.\n");
+                    };
+                    try stdout.writeStreamingAll(io, "\n");
+                    continue;
                 } else if (std.mem.startsWith(u8, line, "/audio ")) {
-                    const rest = line[7..]; const sp = std.mem.indexOf(u8, rest, " ") orelse { try stdout.writeStreamingAll(io, "Usage: /audio <path> <prompt>\n"); continue; };
+                    const rest = line[7..];
+                    const sp = std.mem.indexOf(u8, rest, " ") orelse {
+                        try stdout.writeStreamingAll(io, "Usage: /audio <path> <prompt>\n");
+                        continue;
+                    };
                     try stdout.writeStreamingAll(io, "Processing audio...\n");
-                    try chat_history.append(self.allocator, chat_template.ChatMessage.withMedia("user", rest[sp+1..], .{ .type = .audio, .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } } }));
-                    self.generateWithAudio(io, rest[sp+1..], @ptrCast(@constCast(rest[0..sp])), 256) catch { try stdout.writeStreamingAll(io, "Audio processing failed.\n"); };
-                    try stdout.writeStreamingAll(io, "\n"); continue;
+                    try chat_history.append(self.allocator, chat_template.ChatMessage.withMedia("user", rest[sp + 1 ..], .{ .type = .audio, .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } } }));
+                    self.generateWithAudio(io, rest[sp + 1 ..], @ptrCast(@constCast(rest[0..sp])), 256) catch {
+                        try stdout.writeStreamingAll(io, "Audio processing failed.\n");
+                    };
+                    try stdout.writeStreamingAll(io, "\n");
+                    continue;
                 } else {
                     try stdout.writeStreamingAll(io, "Unknown command. Try /help.\n");
                 }
@@ -593,7 +625,8 @@ pub const InferenceEngine = struct {
             const formatted_prompt = try self.applyChatTemplateMultiTurn(chat_history.items);
             defer self.allocator.free(formatted_prompt);
 
-            self.kv_cache_mgr.reset(); self.model.resetSSMStates();
+            self.kv_cache_mgr.reset();
+            self.model.resetSSMStates();
             var input_tokens = try self.tok.encode(formatted_prompt, true, true);
             defer input_tokens.deinit(self.allocator);
 
@@ -647,7 +680,10 @@ pub const InferenceEngine = struct {
     pub fn generateWithImage(self: *InferenceEngine, io: std.Io, prompt: []const u8, image_path: [:0]const u8, max_tokens: u32) !void {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_vision) return error.VisionNotSupported;
-        if (self.arch != .gemma4) { logger.warn("Vision only supported for Gemma4.", .{}); return self.generate(io, prompt, max_tokens); }
+        if (self.arch != .gemma4) {
+            logger.warn("Vision only supported for Gemma4.", .{});
+            return self.generate(io, prompt, max_tokens);
+        }
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
 
         const target_size: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.image_size else 896;
@@ -658,7 +694,10 @@ pub const InferenceEngine = struct {
         self.ctx_graph.setNoAlloc(false);
         var vision_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
         const vision_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, vision_graph, .{
-            .media_type = .image, .image_data = img.data, .image_width = img.width, .image_height = img.height,
+            .media_type = .image,
+            .image_data = img.data,
+            .image_width = img.width,
+            .image_height = img.height,
         });
         self.ctx_graph.setNoAlloc(true);
         const buft = ggml.backendCpuBufferType();
@@ -715,7 +754,10 @@ pub const InferenceEngine = struct {
     pub fn generateWithAudio(self: *InferenceEngine, io: std.Io, prompt: []const u8, audio_path: [:0]const u8, max_tokens: u32) !void {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_audio) return error.AudioNotSupported;
-        if (self.arch != .gemma4) { logger.warn("Audio only supported for Gemma4.", .{}); return self.generate(io, prompt, max_tokens); }
+        if (self.arch != .gemma4) {
+            logger.warn("Audio only supported for Gemma4.", .{});
+            return self.generate(io, prompt, max_tokens);
+        }
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
 
         const wav_result = try preprocess.loadWav(self.allocator, io, audio_path);
@@ -729,7 +771,10 @@ pub const InferenceEngine = struct {
         self.ctx_graph.setNoAlloc(false);
         var audio_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
         const audio_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, audio_graph, .{
-            .media_type = .audio, .mel_data = mel.data, .mel_bins = mel.n_mel_bins, .mel_frames = mel.n_frames,
+            .media_type = .audio,
+            .mel_data = mel.data,
+            .mel_bins = mel.n_mel_bins,
+            .mel_frames = mel.n_frames,
             .audio_length_sec = @as(f32, @floatFromInt(wav_result.info.num_samples)) / @as(f32, @floatFromInt(wav_result.info.sample_rate)),
         });
         self.ctx_graph.setNoAlloc(true);
@@ -862,7 +907,12 @@ pub const InferenceEngine = struct {
 
         var best_idx: i32 = 0;
         var best_val: f32 = pr.logits[0];
-        for (pr.logits, 0..) |v, j| { if (v > best_val) { best_val = v; best_idx = @intCast(j); } }
+        for (pr.logits, 0..) |v, j| {
+            if (v > best_val) {
+                best_val = v;
+                best_idx = @intCast(j);
+            }
+        }
         self.allocator.free(pr.logits);
 
         try self.reserveDecodeGallocr();
@@ -931,7 +981,10 @@ pub const InferenceEngine = struct {
         }
 
         const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;
-        if (!self.benchmark) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, "\n"); }
+        if (!self.benchmark) {
+            const sf = std.Io.File.stdout();
+            try sf.writeStreamingAll(io, "\n");
+        }
         if (gen_count > 0) logger.info("Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
     }
 
@@ -970,7 +1023,7 @@ pub const InferenceEngine = struct {
         if (media_positions.items.len == 0) {
             logger.warn("tokenizeWithMediaPlaceholders: no media token {d} found in prompt!", .{media_token_id});
         }
-            // 返回原始 token 序列（无展开）
+        // 返回原始 token 序列（无展开）
         // Step 3: 构建新的 token 序列，将每个媒体 token 替换为 N 个相同的 token
         // 使用新分配来避免复杂的原地操作
         const total_new_tokens = all_tokens.items.len + media_positions.items.len * (media_token_count - 1);

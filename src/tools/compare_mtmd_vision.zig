@@ -319,10 +319,20 @@ pub const MtmdVisionComparator = struct {
         }.f;
 
         const pr = try prefill.threeStagePrefill(
-            graph_ctx, model, @ptrCast(@alignCast(gemma4_model)), &mediaForwardFn,
-            &kv_cache_mgr, prefix_tokens, image_token_id, vision_token_count,
-            vision_embd_data, vision_embd_dim, suffix_tokens,
-            params, n_threads, self.allocator,
+            graph_ctx,
+            model,
+            @ptrCast(@alignCast(gemma4_model)),
+            &mediaForwardFn,
+            &kv_cache_mgr,
+            prefix_tokens,
+            image_token_id,
+            vision_token_count,
+            vision_embd_data,
+            vision_embd_dim,
+            suffix_tokens,
+            params,
+            n_threads,
+            self.allocator,
         );
         const our_logits = pr.logits;
 
@@ -431,10 +441,16 @@ fn calcArgmaxMatch(a: []const f32, b: []const f32) ArgmaxResult {
     var idx_ours: usize = 0;
     var idx_ref: usize = 0;
     for (a, 0..) |v, i| {
-        if (v > max_ours) { max_ours = v; idx_ours = i; }
+        if (v > max_ours) {
+            max_ours = v;
+            idx_ours = i;
+        }
     }
     for (b, 0..) |v, i| {
-        if (v > max_ref) { max_ref = v; idx_ref = i; }
+        if (v > max_ref) {
+            max_ref = v;
+            idx_ref = i;
+        }
     }
     return .{ .ours = idx_ours, .ref = idx_ref, .match = idx_ours == idx_ref };
 }

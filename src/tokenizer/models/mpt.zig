@@ -149,7 +149,7 @@ pub fn preTokenizeMpt(text: []const u8, result: *PreTokenized) !void {
                 continue;
             }
             // 其他空白（回车等）按单个字符处理
-            const word = try result.allocator.dupe(u8, text[i..i+1]);
+            const word = try result.allocator.dupe(u8, text[i .. i + 1]);
             try result.words.append(result.allocator, word);
             i += 1;
             continue;

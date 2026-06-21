@@ -128,13 +128,13 @@ pub const VisionEncoder = struct {
         if (gguf_file.getF32("gemma4.vision.rope_theta")) |v| params.rope_theta = v;
         // 检测编码器类型 — 与权重加载使用相同的命名前缀
         const enc_type: EncoderType = if (gguf_file.findTensor("v.patch_norm.1.weight") != null or
-                                           gguf_file.findTensor("patch_norm_1.weight") != null)
+            gguf_file.findTensor("patch_norm_1.weight") != null)
             .gemma4uv
         else
             .gemma4v;
         log.info("Loading vision encoder: type={s}, size={d}, patch={d}, embd={d}, heads={d}, layers={d}", .{
             @tagName(enc_type), params.image_size, params.patch_size,
-            params.n_embd, params.n_head, params.n_layer,
+            params.n_embd,      params.n_head,     params.n_layer,
         });
         // 加载 Patch embedding (v.patch_embd.*)
         const patch_embd = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;

@@ -159,7 +159,6 @@ pub fn loadPPM(
 }
 
 /// 从原始 RGB 字节数组创建处理后的图像（不做 resize）
-
 /// 通用图像加载器 — 自动检测格式（PPM / JPEG / PNG / BMP / GIF / TGA）
 ///
 /// PPM (P6) 使用内置解析器，其他格式委托给 stb_image。
@@ -438,7 +437,7 @@ pub fn loadWav(
 
     // 解析 chunks
     while (pos + 8 <= raw.len) {
-        const chunk_id = raw[pos..pos + 4];
+        const chunk_id = raw[pos .. pos + 4];
         const chunk_size = std.mem.readInt(u32, @ptrCast(raw.ptr + pos + 4), .little);
         pos += 8;
 
@@ -497,8 +496,7 @@ pub fn loadWav(
         return error.UnsupportedChannels;
     }
 
-    log.info("Loaded WAV: {d} Hz, {d} ch, {d} bits, {d} samples ({d})",
-        .{ sample_rate, num_channels, bits_per_sample, num_samples, @as(f64, @floatFromInt(num_samples)) / @as(f64, @floatFromInt(sample_rate)) });
+    log.info("Loaded WAV: {d} Hz, {d} ch, {d} bits, {d} samples ({d})", .{ sample_rate, num_channels, bits_per_sample, num_samples, @as(f64, @floatFromInt(num_samples)) / @as(f64, @floatFromInt(sample_rate)) });
 
     return .{
         .samples = samples,

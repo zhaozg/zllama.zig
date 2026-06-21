@@ -128,8 +128,8 @@ pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model_if.Architectur
     if (arch) |a| {
         if (a == .qwen2 and
             (gguf_file.getString("general.pooling_type") != null or
-            gguf_file.getU32("qwen3.pooling_type") != null or
-            gguf_file.getU32("qwen2.pooling_type") != null))
+                gguf_file.getU32("qwen3.pooling_type") != null or
+                gguf_file.getU32("qwen2.pooling_type") != null))
         {
             log.info("Detected embedding model (pooling_type present), architecture: embedding_qwen2", .{});
             return .embedding_qwen2;

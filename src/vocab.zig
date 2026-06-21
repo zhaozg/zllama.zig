@@ -361,7 +361,7 @@ pub const Vocab = struct {
 
         log.info("Vocab type: '{s}' → {s}, pre: '{s}' → {s}", .{
             vocab_type_str, vocab_type.toString(),
-            pre_type_str, pre_type.toString(),
+            pre_type_str,   pre_type.toString(),
         });
 
         // 读取 token 字符串数组
@@ -611,33 +611,77 @@ pub const Vocab = struct {
     // 特殊 token ID 访问器
     // ========================================================================
 
-    pub fn tokenBos(self: *const Vocab) u32 { return self.special.bos; }
-    pub fn tokenEos(self: *const Vocab) u32 { return self.special.eos; }
-    pub fn tokenUnk(self: *const Vocab) u32 { return self.special.unk; }
-    pub fn tokenPad(self: *const Vocab) u32 { return self.special.pad; }
-    pub fn tokenSep(self: *const Vocab) u32 { return self.special.sep; }
-    pub fn tokenCls(self: *const Vocab) u32 { return self.special.cls; }
-    pub fn tokenMask(self: *const Vocab) u32 { return self.special.mask; }
-    pub fn tokenEot(self: *const Vocab) u32 { return self.special.eot; }
-    pub fn tokenEom(self: *const Vocab) u32 { return self.special.eom; }
-    pub fn tokenNl(self: *const Vocab) u32 { return self.special.nl; }
+    pub fn tokenBos(self: *const Vocab) u32 {
+        return self.special.bos;
+    }
+    pub fn tokenEos(self: *const Vocab) u32 {
+        return self.special.eos;
+    }
+    pub fn tokenUnk(self: *const Vocab) u32 {
+        return self.special.unk;
+    }
+    pub fn tokenPad(self: *const Vocab) u32 {
+        return self.special.pad;
+    }
+    pub fn tokenSep(self: *const Vocab) u32 {
+        return self.special.sep;
+    }
+    pub fn tokenCls(self: *const Vocab) u32 {
+        return self.special.cls;
+    }
+    pub fn tokenMask(self: *const Vocab) u32 {
+        return self.special.mask;
+    }
+    pub fn tokenEot(self: *const Vocab) u32 {
+        return self.special.eot;
+    }
+    pub fn tokenEom(self: *const Vocab) u32 {
+        return self.special.eom;
+    }
+    pub fn tokenNl(self: *const Vocab) u32 {
+        return self.special.nl;
+    }
 
     // ========================================================================
     // 配置访问器
     // ========================================================================
 
-    pub fn getAddSpacePrefix(self: *const Vocab) bool { return self.add_space_prefix; }
-    pub fn getAddBos(self: *const Vocab) bool { return self.add_bos; }
-    pub fn getAddEos(self: *const Vocab) bool { return self.add_eos; }
-    pub fn getAddSep(self: *const Vocab) bool { return self.add_sep; }
-    pub fn getIgnoreMerges(self: *const Vocab) bool { return self.ignore_merges; }
-    pub fn getCleanSpaces(self: *const Vocab) bool { return self.clean_spaces; }
-    pub fn getRemoveExtraWhitespaces(self: *const Vocab) bool { return self.remove_extra_whitespaces; }
-    pub fn getEscapeWhitespaces(self: *const Vocab) bool { return self.escape_whitespaces; }
-    pub fn getTreatWhitespaceAsSuffix(self: *const Vocab) bool { return self.treat_whitespace_as_suffix; }
-    pub fn getType(self: *const Vocab) VocabType { return self.type; }
-    pub fn getPreType(self: *const Vocab) PreType { return self.pre_type; }
-    pub fn getSpecial(self: *const Vocab) SpecialTokenIds { return self.special; }
+    pub fn getAddSpacePrefix(self: *const Vocab) bool {
+        return self.add_space_prefix;
+    }
+    pub fn getAddBos(self: *const Vocab) bool {
+        return self.add_bos;
+    }
+    pub fn getAddEos(self: *const Vocab) bool {
+        return self.add_eos;
+    }
+    pub fn getAddSep(self: *const Vocab) bool {
+        return self.add_sep;
+    }
+    pub fn getIgnoreMerges(self: *const Vocab) bool {
+        return self.ignore_merges;
+    }
+    pub fn getCleanSpaces(self: *const Vocab) bool {
+        return self.clean_spaces;
+    }
+    pub fn getRemoveExtraWhitespaces(self: *const Vocab) bool {
+        return self.remove_extra_whitespaces;
+    }
+    pub fn getEscapeWhitespaces(self: *const Vocab) bool {
+        return self.escape_whitespaces;
+    }
+    pub fn getTreatWhitespaceAsSuffix(self: *const Vocab) bool {
+        return self.treat_whitespace_as_suffix;
+    }
+    pub fn getType(self: *const Vocab) VocabType {
+        return self.type;
+    }
+    pub fn getPreType(self: *const Vocab) PreType {
+        return self.pre_type;
+    }
+    pub fn getSpecial(self: *const Vocab) SpecialTokenIds {
+        return self.special;
+    }
 
     // ========================================================================
     // 内部：初始化
@@ -672,7 +716,7 @@ pub const Vocab = struct {
             },
             .gemma4 => {
                 self.add_space_prefix = false;
-                self.escape_whitespaces = true;  // gemma-4 使用 ▁ (U+2581) 代替空格
+                self.escape_whitespaces = true; // gemma-4 使用 ▁ (U+2581) 代替空格
                 self.ignore_merges = false;
                 self.add_bos = false;
             },
@@ -783,13 +827,16 @@ pub const Vocab = struct {
 
         // 通过名称匹配收集 EOG tokens
         const eog_names = [_][]const u8{
-            "<|endoftext|>", "<|im_end|>", "<|im_start|>",
-            "<|fim_pad|>", "<|repo_name|>", "<|file_sep|>",
-            "<|eot_id|>", "<|end|>", "<|END|>", "<EOS>", "<EOT>",
-            "<end_of_text>", "<|end_of_text|>", "<end_of_utterance>",
-            "<eos>", "<|return|>", "<|call|>", "<|flush|>", "<|calls|>",
-            "<end_of_turn>", "</s>", "<|eom_id|>", "[EOT]", "[EOS]",
-            "<|tool_response>", "<｜end▁of▁sentence｜>",
+            "<|endoftext|>",    "<|im_end|>",         "<|im_start|>",
+            "<|fim_pad|>",      "<|repo_name|>",      "<|file_sep|>",
+            "<|eot_id|>",       "<|end|>",            "<|END|>",
+            "<EOS>",            "<EOT>",              "<end_of_text>",
+            "<|end_of_text|>",  "<end_of_utterance>", "<eos>",
+            "<|return|>",       "<|call|>",           "<|flush|>",
+            "<|calls|>",        "<end_of_turn>",      "</s>",
+            "<|eom_id|>",       "[EOT]",              "[EOS]",
+            "<|tool_response>",
+            "<｜end▁of▁sentence｜>",
         };
 
         for (self.tokens, 0..) |td, id| {

@@ -82,8 +82,7 @@ pub const Loader = struct {
             gguf_file.getU32("qwen2.rope.dimension_count", 0) orelse
             gguf_file.getU32("qwen35.rope.dimension_count", 0) orelse params.n_head_dim;
 
-        log.info("Model params: n_vocab={d}, n_embd={d}, n_head={d}, n_kv_head={d}, n_layer={d}, n_ff={d}",
-            .{ params.n_vocab, params.n_embd, params.n_head, params.n_kv_head, params.n_layer, params.n_ff });
+        log.info("Model params: n_vocab={d}, n_embd={d}, n_head={d}, n_kv_head={d}, n_layer={d}, n_ff={d}", .{ params.n_vocab, params.n_embd, params.n_head, params.n_kv_head, params.n_layer, params.n_ff });
 
         return Loader{
             .allocator = allocator,

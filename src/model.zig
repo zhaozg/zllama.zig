@@ -112,7 +112,6 @@ pub const ModelParams = struct {
 /// 模型虚表
 ///
 /// 每个模型实现提供此虚表，注册表通过虚表调用模型方法。
-
 /// 模型权重基础结构
 /// 包含所有模型共享的权重张量
 pub const ModelWeights = struct {
@@ -163,7 +162,6 @@ pub const ModelVTable = struct {
     setKVCacheContext: ?*const fn (ptr: *anyopaque, ctx: *ggml.Context) void = null,
     deinit: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void,
 };
-
 
 /// 模型能力描述
 /// 描述模型支持哪些输入模态

@@ -65,7 +65,12 @@ test "expandPlaceholders: image with tokens" {
     // expandPlaceholders only expands placeholder tokens, not surrounding text
     const text = "<|image|>";
     var expanded = try chat_template.expandPlaceholders(
-        testing.allocator, text, 200, 0, 1024, 0,
+        testing.allocator,
+        text,
+        200,
+        0,
+        1024,
+        0,
     );
     defer expanded.deinit();
 
@@ -80,7 +85,12 @@ test "expandPlaceholders: image with tokens" {
 test "expandPlaceholders: two placeholders with tokens" {
     const text = "<|image|><|audio|>";
     var expanded = try chat_template.expandPlaceholders(
-        testing.allocator, text, 200, 100, 1024, 20,
+        testing.allocator,
+        text,
+        200,
+        100,
+        1024,
+        20,
     );
     defer expanded.deinit();
 
@@ -146,10 +156,10 @@ test "bilinearResizeRGB: 2x2 to 1x1" {
     const src_w: u32 = 2;
     const src_h: u32 = 2;
     const src = [_]u8{
-        255, 0,   0,   // R
-        0,   255, 0,   // G
-        0,   0,   255, // B
-        255, 255, 0,   // Y
+        255, 0, 0, // R
+        0, 255, 0, // G
+        0, 0, 255, // B
+        255, 255, 0, // Y
     };
     const dst_w: u32 = 1;
     const dst_h: u32 = 1;

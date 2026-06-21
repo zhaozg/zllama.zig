@@ -92,8 +92,7 @@ pub const ReferenceGenerator = struct {
         defer model.deinit(self.allocator);
 
         const params = model.getParams();
-        log.info("Model params: n_vocab={d}, n_embd={d}, n_layer={d}, n_head={d}",
-            .{ params.n_vocab, params.n_embd, params.n_layer, params.n_head });
+        log.info("Model params: n_vocab={d}, n_embd={d}, n_layer={d}, n_head={d}", .{ params.n_vocab, params.n_embd, params.n_layer, params.n_head });
 
         // 4. Tokenize prompt
         const tokenizer = @import("tokenizer");
@@ -340,7 +339,6 @@ pub fn main(init: std.process.Init) !void {
         result.logits[0], result.logits[1], result.logits[2], result.logits[3], result.logits[4],
     });
 }
-
 
 // 测试
 // ============================================================================

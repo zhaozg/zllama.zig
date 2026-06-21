@@ -81,10 +81,10 @@ pub fn buildMultiPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i3
     const nt = @as(usize, @intCast(n_tokens));
     for (0..nt) |i| {
         const pos: i32 = @as(i32, @intCast(i)) + start_pos;
-        pos_slice[i] = pos;           // time position
-        pos_slice[nt + i] = pos;      // height position
-        pos_slice[2 * nt + i] = pos;  // width position
-        pos_slice[3 * nt + i] = pos;  // extra position
+        pos_slice[i] = pos; // time position
+        pos_slice[nt + i] = pos; // height position
+        pos_slice[2 * nt + i] = pos; // width position
+        pos_slice[3 * nt + i] = pos; // extra position
     }
     return pos_tensor;
 }

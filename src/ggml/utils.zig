@@ -105,8 +105,6 @@ pub const LogLevel = enum(c_uint) {
     }
 };
 
-
-
 fn defaultLogCallback(level: c_uint, text: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
     _ = user_data;
     const log_level: LogLevel = @enumFromInt(level);
@@ -140,8 +138,6 @@ pub fn writeToFd(fd: i32, data: []const u8) usize {
     // 但为了避免在业务代码中 @cImport，我们在 ggml 封装层中提供此功能
     return c.write(fd, data.ptr, data.len);
 }
-
-
 
 const testing = std.testing;
 

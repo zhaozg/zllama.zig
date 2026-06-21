@@ -50,8 +50,12 @@ pub const MemoryContext = struct {
         reset_ssm: *const fn (data: *anyopaque) void = &resetSSMNotSupported,
     };
 
-    fn getConvStateNotSupported(_: *anyopaque, _: usize) ?*ggml.Tensor { return null; }
-    fn getSSMStateNotSupported(_: *anyopaque, _: usize) ?*ggml.Tensor { return null; }
+    fn getConvStateNotSupported(_: *anyopaque, _: usize) ?*ggml.Tensor {
+        return null;
+    }
+    fn getSSMStateNotSupported(_: *anyopaque, _: usize) ?*ggml.Tensor {
+        return null;
+    }
     fn resetSSMNotSupported(_: *anyopaque) void {}
 
     pub fn deinit(self: *MemoryContext) void {
@@ -172,18 +176,12 @@ pub const KVCacheMemory = struct {
         const max_len: i64 = @intCast(self.max_seq_len);
 
         // 写入 K
-        const k_dst = ctx.view3d(layer_data.k, hdim, nkv, @intCast(n_tokens),
-            @intCast(nkv * @sizeOf(f32)),
-            @intCast(max_len * @sizeOf(f32)),
-            @intCast(offset * @sizeOf(f32)));
+        const k_dst = ctx.view3d(layer_data.k, hdim, nkv, @intCast(n_tokens), @intCast(nkv * @sizeOf(f32)), @intCast(max_len * @sizeOf(f32)), @intCast(offset * @sizeOf(f32)));
         const k_cpy = ggml.cpy(ctx, new_k, k_dst);
         graph.buildForwardExpand(k_cpy);
 
         // 写入 V
-        const v_dst = ctx.view3d(layer_data.v, hdim, nkv, @intCast(n_tokens),
-            @intCast(nkv * @sizeOf(f32)),
-            @intCast(max_len * @sizeOf(f32)),
-            @intCast(offset * @sizeOf(f32)));
+        const v_dst = ctx.view3d(layer_data.v, hdim, nkv, @intCast(n_tokens), @intCast(nkv * @sizeOf(f32)), @intCast(max_len * @sizeOf(f32)), @intCast(offset * @sizeOf(f32)));
         const v_cpy = ggml.cpy(ctx, new_v, v_dst);
         graph.buildForwardExpand(v_cpy);
 
@@ -225,11 +223,11 @@ pub const KVCacheMemory = struct {
 
 /// SSM 状态参数
 pub const SSMStateParams = struct {
-    d_conv: u32 = 4,       // conv kernel size
-    d_state: u32 = 128,     // state dimension
-    d_inner: u32 = 2048,    // inner dimension
-    n_group: u32 = 16,      // number of groups
-    dt_rank: u32 = 16,      // time step rank
+    d_conv: u32 = 4, // conv kernel size
+    d_state: u32 = 128, // state dimension
+    d_inner: u32 = 2048, // inner dimension
+    n_group: u32 = 16, // number of groups
+    dt_rank: u32 = 16, // time step rank
 };
 
 /// 混合内存实现 — 统一管理 KV Cache + SSM 状态
@@ -369,16 +367,10 @@ pub const HybridMemory = struct {
         const nkv: i64 = @intCast(self.n_kv_head);
         const max_len: i64 = @intCast(self.max_seq_len);
 
-        const k_dst = ctx.view3d(layer_data.k, hdim, nkv, @intCast(n_tokens),
-            @intCast(nkv * @sizeOf(f32)),
-            @intCast(max_len * @sizeOf(f32)),
-            @intCast(offset * @sizeOf(f32)));
+        const k_dst = ctx.view3d(layer_data.k, hdim, nkv, @intCast(n_tokens), @intCast(nkv * @sizeOf(f32)), @intCast(max_len * @sizeOf(f32)), @intCast(offset * @sizeOf(f32)));
         graph.buildForwardExpand(ggml.cpy(ctx, new_k, k_dst));
 
-        const v_dst = ctx.view3d(layer_data.v, hdim, nkv, @intCast(n_tokens),
-            @intCast(nkv * @sizeOf(f32)),
-            @intCast(max_len * @sizeOf(f32)),
-            @intCast(offset * @sizeOf(f32)));
+        const v_dst = ctx.view3d(layer_data.v, hdim, nkv, @intCast(n_tokens), @intCast(nkv * @sizeOf(f32)), @intCast(max_len * @sizeOf(f32)), @intCast(offset * @sizeOf(f32)));
         graph.buildForwardExpand(ggml.cpy(ctx, new_v, v_dst));
 
         layer_data.current_len += n_tokens;

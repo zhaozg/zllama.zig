@@ -58,8 +58,7 @@ pub fn clsPool(ctx: *ggml.Context, hidden: *ggml.Tensor) *ggml.Tensor {
     const n_embd = hidden.ne()[0];
     _ = hidden.ne()[1];
     // 取第 0 列: [n_embd, 1]
-    const result = ctx.view2d(hidden, n_embd, 1,
-        hidden.nb()[1], // nb1: stride for column dim
+    const result = ctx.view2d(hidden, n_embd, 1, hidden.nb()[1], // nb1: stride for column dim
         0); // offset 0 = first column
     result.setName("pooling.cls");
     return result;
@@ -74,9 +73,7 @@ pub fn lastPool(ctx: *ggml.Context, hidden: *ggml.Tensor) *ggml.Tensor {
     const n_tokens = hidden.ne()[1];
     // 偏移量为 (n_tokens - 1) * nb[1]
     const offset: usize = @intCast((n_tokens - 1) * @as(i64, @intCast(hidden.nb()[1])));
-    const result = ctx.view2d(hidden, n_embd, 1,
-        hidden.nb()[1],
-        offset);
+    const result = ctx.view2d(hidden, n_embd, 1, hidden.nb()[1], offset);
     result.setName("pooling.last");
     return result;
 }

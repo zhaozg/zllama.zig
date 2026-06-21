@@ -119,9 +119,12 @@ pub fn printBenchmark(result: BenchmarkResult) void {
         result.n_threads,
         result.n_prompt_tokens,
         result.n_decode,
-        result.pp_time_s, pp_speed,
-        result.tg_time_s, tg_speed,
-        total_time_s, avg_speed,
+        result.pp_time_s,
+        pp_speed,
+        result.tg_time_s,
+        tg_speed,
+        total_time_s,
+        avg_speed,
     });
 }
 

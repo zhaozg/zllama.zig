@@ -228,10 +228,9 @@ pub fn tokenizeWithPlaceholders(
             log.debug("    expanded tokens[{d}..{d}): {any}", .{ start_idx, end_idx, tokens.items[start_idx..end_idx] });
         } else {
             log.debug("    expanded tokens[{d}..{d}+{d}..{d}): head={any} ... tail={any}", .{
-                start_idx, start_idx + max_preview,
-                end_idx - max_tail, end_idx,
-                tokens.items[start_idx .. start_idx + max_preview],
-                tokens.items[end_idx - max_tail .. end_idx],
+                start_idx,                                          start_idx + max_preview,
+                end_idx - max_tail,                                 end_idx,
+                tokens.items[start_idx .. start_idx + max_preview], tokens.items[end_idx - max_tail .. end_idx],
             });
         }
     }
@@ -467,8 +466,14 @@ test "tokenizeWithPlaceholders: image only" {
     }.tokenize;
 
     var result = try tokenizeWithPlaceholders(
-        testing.allocator, text, null, &tokenizer_fn,
-        258880, 258881, 784, 20,
+        testing.allocator,
+        text,
+        null,
+        &tokenizer_fn,
+        258880,
+        258881,
+        784,
+        20,
     );
     defer result.deinit();
 
@@ -492,8 +497,14 @@ test "tokenizeWithPlaceholders: text before and after" {
     }.tokenize;
 
     var result = try tokenizeWithPlaceholders(
-        testing.allocator, text, null, &tokenizer_fn,
-        258880, 258881, 784, 20,
+        testing.allocator,
+        text,
+        null,
+        &tokenizer_fn,
+        258880,
+        258881,
+        784,
+        20,
     );
     defer result.deinit();
 
@@ -525,8 +536,14 @@ test "tokenizeWithPlaceholders: two placeholders with text" {
     }.tokenize;
 
     var result = try tokenizeWithPlaceholders(
-        testing.allocator, text, null, &tokenizer_fn,
-        258880, 258881, 3, 2,
+        testing.allocator,
+        text,
+        null,
+        &tokenizer_fn,
+        258880,
+        258881,
+        3,
+        2,
     );
     defer result.deinit();
 

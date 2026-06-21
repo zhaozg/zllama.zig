@@ -378,8 +378,9 @@ pub const Tokenizer = struct {
     }
 
     const eog_token_names = [_][]const u8{
-        "<|endoftext|>", "<|im_end|>", "<|eot_id|>", "<|eom_id|>",
-        "<|end|>", "<end_of_turn>", "</s>", "<｜end▁of▁sentence｜>",
+        "<|endoftext|>", "<|im_end|>",    "<|eot_id|>", "<|eom_id|>",
+        "<|end|>",       "<end_of_turn>", "</s>",
+        "<｜end▁of▁sentence｜>",
     };
 
     pub fn isEogText(self: *const Tokenizer, text: []const u8) bool {
@@ -391,7 +392,7 @@ pub const Tokenizer = struct {
     }
 
     const skip_token_names = [_][]const u8{
-        "<|channel|>", "<|channel>", "<channel|>",
+        "<|channel|>",     "<|channel>",    "<channel|>",
         "<start_of_turn>", "<end_of_turn>",
     };
 
@@ -482,7 +483,7 @@ fn decodeTiktokenSingle(ts: []const u8, buf: []u8) usize {
             if (hex_str.len == 2) {
                 const byte = std.fmt.parseInt(u8, hex_str, 16) catch {
                     const copy_len = @min(end + 1, buf.len - written);
-                    @memcpy(buf[written..written+copy_len], rem[0..copy_len]);
+                    @memcpy(buf[written .. written + copy_len], rem[0..copy_len]);
                     written += copy_len;
                     rem = rem[end + 1 ..];
                     continue;
@@ -513,7 +514,7 @@ fn decodeGpt2Single(ts: []const u8, unicode_to_byte: *const std.StringHashMap(u8
             i += 1;
             continue;
         }
-        const cp_slice = ts[i..i+cp_len];
+        const cp_slice = ts[i .. i + cp_len];
         if (cp_len == 1 and byte < 0x80) {
             buf[written] = byte;
             written += 1;
@@ -527,7 +528,7 @@ fn decodeGpt2Single(ts: []const u8, unicode_to_byte: *const std.StringHashMap(u8
             continue;
         }
         const copy_len = @min(cp_len, buf.len - written);
-        @memcpy(buf[written..written+copy_len], cp_slice[0..copy_len]);
+        @memcpy(buf[written .. written + copy_len], cp_slice[0..copy_len]);
         written += copy_len;
         i += cp_len;
     }
@@ -559,13 +560,13 @@ fn decodeSPMSingle(ts: []const u8, buf: []u8) usize {
             i += 1;
             continue;
         }
-        if (i + 2 < ts.len and ts[i] == 0xE2 and ts[i+1] == 0x96 and ts[i+2] == 0x81) {
+        if (i + 2 < ts.len and ts[i] == 0xE2 and ts[i + 1] == 0x96 and ts[i + 2] == 0x81) {
             buf[written] = ' ';
             written += 1;
             i += 3;
             continue;
         }
-        if (i + 1 < ts.len and ts[i] == 0xC4 and ts[i+1] == 0xA0) {
+        if (i + 1 < ts.len and ts[i] == 0xC4 and ts[i + 1] == 0xA0) {
             buf[written] = ' ';
             written += 1;
             i += 2;

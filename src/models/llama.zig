@@ -149,7 +149,6 @@ pub const LlamaModel = struct {
             q = rope_result.q;
             k = rope_result.k;
 
-
             // 处理 KV Cache
             if (kv_cache_mgr) |cache| {
                 cache.setKv(ctx, graph, i, k, v, @intCast(n_tokens_i64));

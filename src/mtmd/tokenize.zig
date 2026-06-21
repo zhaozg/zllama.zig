@@ -14,17 +14,27 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, text: mtmd
     while (remaining.len > 0) {
         if (std.mem.indexOf(u8, remaining, marker)) |idx| {
             if (idx > 0) try addTextChunk(ctx, allocator, &chunks, remaining[0..idx], text.parse_special);
-            if (i_bm >= bitmaps.len) { log.debug("More markers than bitmaps", .{}); return error.MarkerBitmapMismatch; }
-            const bm = bitmaps[i_bm]; i_bm += 1;
-            if (bm.is_audio) { try addAudioChunk(ctx, allocator, &chunks, bm); }
-            else { try addImageChunk(ctx, allocator, &chunks, bm, &n_images_added); }
+            if (i_bm >= bitmaps.len) {
+                log.debug("More markers than bitmaps", .{});
+                return error.MarkerBitmapMismatch;
+            }
+            const bm = bitmaps[i_bm];
+            i_bm += 1;
+            if (bm.is_audio) {
+                try addAudioChunk(ctx, allocator, &chunks, bm);
+            } else {
+                try addImageChunk(ctx, allocator, &chunks, bm, &n_images_added);
+            }
             remaining = remaining[idx + marker.len ..];
         } else {
             if (remaining.len > 0) try addTextChunk(ctx, allocator, &chunks, remaining, text.parse_special);
             break;
         }
     }
-    if (i_bm != bitmaps.len) { log.debug("Mismatch: {d} vs {d}", .{ i_bm, bitmaps.len }); return error.MarkerBitmapMismatch; }
+    if (i_bm != bitmaps.len) {
+        log.debug("Mismatch: {d} vs {d}", .{ i_bm, bitmaps.len });
+        return error.MarkerBitmapMismatch;
+    }
     return chunks;
 }
 
@@ -45,7 +55,8 @@ fn addTextChunk(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, chunks: *m
         const last = &chunks.entries.items[chunks.entries.items.len - 1];
         const old = last.tokens_text orelse &.{};
         const merged = try allocator.alloc(i32, old.len + tokens.items.len);
-        @memcpy(merged[0..old.len], old); @memcpy(merged[old.len..], tokens.items);
+        @memcpy(merged[0..old.len], old);
+        @memcpy(merged[old.len..], tokens.items);
         if (last.tokens_text) |t| allocator.free(t);
         last.tokens_text = merged;
     } else {
@@ -57,8 +68,14 @@ fn addTextChunk(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, chunks: *m
 fn addImageChunk(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, chunks: *mtmd.InputChunks, bm: mtmd.Bitmap, n_images_added: *u32) !void {
     if (!ctx.supportVision()) return error.VisionNotSupported;
     if (ctx.img_beg.len > 0) try addTextChunk(ctx, allocator, chunks, ctx.img_beg, true);
-    var n_tokens: u32 = 0; var nx: u32 = 0; var ny: u32 = 0;
-    if (ctx.mm_manager.vision_encoder) |*enc| { n_tokens = enc.estimateOutputTokens(bm.nx, bm.ny); nx = n_tokens; ny = 1; }
+    var n_tokens: u32 = 0;
+    var nx: u32 = 0;
+    var ny: u32 = 0;
+    if (ctx.mm_manager.vision_encoder) |*enc| {
+        n_tokens = enc.estimateOutputTokens(bm.nx, bm.ny);
+        nx = n_tokens;
+        ny = 1;
+    }
     try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = nx, .ny = ny, .pos = ctx.pos_type, .image_idx = n_images_added.*, .id = bm.id, .patch_count = 1 }, .id = bm.id });
     if (ctx.img_end.len > 0) try addTextChunk(ctx, allocator, chunks, ctx.img_end, true);
     n_images_added.* += 1;

@@ -112,8 +112,8 @@ pub const AccelFFT = struct {
             .imagp = self.split_buf.ptr + n / 2,
         };
         for (0..n / 2) |i| {
-            split.realp[i] = buf[2 * i];       // even samples
-            split.imagp[i] = buf[2 * i + 1];   // odd samples
+            split.realp[i] = buf[2 * i]; // even samples
+            split.imagp[i] = buf[2 * i + 1]; // odd samples
         }
 
         // 3. 前向 FFT

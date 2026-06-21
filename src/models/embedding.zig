@@ -47,14 +47,18 @@ pub const EmbeddingModel = struct {
         if (gguf_file.getString("general.pooling_type")) |pt_str| {
             self.pooling_type = pooling.PoolingType.fromString(pt_str);
         } else if (gguf_file.getU32("qwen3.pooling_type")) |pt_val| {
-            self.pooling_type = switch (pt_val) { 2 => .cls, 3 => .last, else => .mean };
+            self.pooling_type = switch (pt_val) {
+                2 => .cls,
+                3 => .last,
+                else => .mean,
+            };
         }
         self.ctx_weights = try ggml.Context.initNoAlloc(weight_loader.estimateMemSize(gguf_file));
         const qwen2_weights = try qwen2.loadWeights(gguf_file, self.ctx_weights, &qwen2_params, allocator);
         self.weights = EmbeddingWeights{ .base = qwen2_weights.base, .layers = qwen2_weights.layers };
         log.info("Embedding: layers={d}, embd={d}, heads={d}, kv_heads={d}, head_dim={d}", .{
-            self.params.n_layer, self.params.n_embd,
-            self.params.n_head, self.params.n_kv_head,
+            self.params.n_layer,    self.params.n_embd,
+            self.params.n_head,     self.params.n_kv_head,
             self.params.n_head_dim,
         });
         log.info("Pooling: {s}, normalize: {}", .{ @tagName(self.pooling_type), self.normalize_output });
@@ -174,14 +178,17 @@ pub const EmbeddingModel = struct {
         cur = rms_norm.rmsNorm(ctx, cur, w.base.output_norm_weight, p.norm_eps);
         cur.setName("output_norm");
         cur = pooling.poolHidden(ctx, cur, self.pooling_type);
-        if (self.normalize_output) { cur = pooling.normalize(ctx, cur); }
+        if (self.normalize_output) {
+            cur = pooling.normalize(ctx, cur);
+        }
         cur.setName("embedding_vector");
         graph.buildForwardExpand(cur);
         return cur;
     }
 
     pub fn buildGraph(self: *EmbeddingModel, builder: *graph_builder.GraphBuilder, input_tokens: *ggml.Tensor, n_tokens: i32, mem_ctx: ?*memory.MemoryContext, start_pos: i32) !*ggml.Tensor {
-        _ = mem_ctx; _ = start_pos;
+        _ = mem_ctx;
+        _ = start_pos;
         return self.forward(builder.ctx, builder.gf, input_tokens, n_tokens);
     }
 
@@ -198,12 +205,15 @@ pub const EmbeddingModel = struct {
     }
     fn buildGraphAdapter(data: *anyopaque, builder: *graph_builder.GraphBuilder, input_tokens: *ggml.Tensor, n_tokens: i32, mem_ctx: ?*anyopaque, start_pos: i32) !*ggml.Tensor {
         const self = @as(*EmbeddingModel, @ptrCast(@alignCast(data)));
-        _ = mem_ctx; _ = start_pos;
+        _ = mem_ctx;
+        _ = start_pos;
         return self.forward(builder.ctx, builder.gf, input_tokens, n_tokens);
     }
     fn getParamsAdapter(data: *anyopaque) *const model.ModelParams {
         const self = @as(*EmbeddingModel, @ptrCast(@alignCast(data)));
         return &self.params;
     }
-    fn resetSSMStatesAdapter(data: *anyopaque) void { _ = data; }
+    fn resetSSMStatesAdapter(data: *anyopaque) void {
+        _ = data;
+    }
 };

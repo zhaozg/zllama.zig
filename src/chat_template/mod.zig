@@ -762,7 +762,6 @@ test "Template.apply: gemma4" {
         "<|turn>user\n1+1=?<turn|>\n<|turn>model\n",
         result,
     );
-
 }
 
 test "Template.apply: gemma4 with system" {
@@ -778,7 +777,6 @@ test "Template.apply: gemma4 with system" {
         "<|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nHello<turn|>\n<|turn>model\n",
         result,
     );
-
 }
 
 test "Template.apply: gemma4 multi-turn" {
@@ -797,7 +795,6 @@ test "Template.apply: gemma4 multi-turn" {
         "<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n",
         result,
     );
-
 }
 
 test "Template.apply: gemma4 multi-turn with system" {
@@ -816,7 +813,6 @@ test "Template.apply: gemma4 multi-turn with system" {
         "<|turn>system\nYou are helpful.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nHow are you?<turn|>\n<|turn>model\n",
         result,
     );
-
 }
 
 test "Template.apply: gemma4 strip thinking" {
@@ -836,7 +832,6 @@ test "Template.apply: gemma4 strip thinking" {
         "<|turn>user\n1+1=?<turn|>\n<|turn>model\nThe answer is 2.<turn|>\n<|turn>model\n",
         result,
     );
-
 }
 
 test "Template.apply: gemma4 system role message" {
@@ -855,7 +850,6 @@ test "Template.apply: gemma4 system role message" {
         "<|turn>system\nYou are a math tutor.<turn|>\n<|turn>user\n1+1=?<turn|>\n<|turn>model\n",
         result,
     );
-
 }
 
 test "Template.apply: multi-turn mistral_v7" {
@@ -1185,9 +1179,14 @@ test "full multimodal pipeline: template render + placeholder scan" {
     }.tokenize;
 
     var expanded = try tokenizeWithPlaceholders(
-        testing.allocator, formatted, null, &tokenizer_fn,
-        1, 2, // image_token_id, audio_token_id
-        0, 3, // image_token_count, audio_token_count
+        testing.allocator,
+        formatted,
+        null,
+        &tokenizer_fn,
+        1,
+        2, // image_token_id, audio_token_id
+        0,
+        3, // image_token_count, audio_token_count
     );
     defer expanded.deinit();
     try testing.expectEqual(@as(usize, 1), expanded.offsets.len);
@@ -1257,6 +1256,6 @@ test "multimodal: Jinja messagesToList does not double-add placeholder" {
     // Should have exactly one <|image|>, not two
     const first = std.mem.indexOf(u8, result, "<|image|>");
     try testing.expect(first != null);
-    const second = std.mem.indexOf(u8, result[first.? + 1..], "<|image|>");
+    const second = std.mem.indexOf(u8, result[first.? + 1 ..], "<|image|>");
     try testing.expectEqual(@as(?usize, null), second);
 }
