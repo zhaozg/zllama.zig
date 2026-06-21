@@ -321,6 +321,7 @@ WAV 文件 (16-bit PCM)
 | k_scale 计算 | `logf(1+expf(1))/logf(2)` | `@log2(1+@exp(1))` | ✅ 等价 |
 | norm_eps | 硬编码 1e-6 | 从 GGUF 读取 | ✅ 通常相同 |
 | 输入填充 | `ggml_set_input` | `ggml_set_input` | ✅ 一致（均采用 ggml_set_input 方式） |
+| per-layer embedding | 使用 padding token (ID=0) | 使用 padding token (ID=0) | ✅ 一致 |
 | FFT | CPU/kissfft | macOS Accelerate | 🟡 需跨平台后备 |
 | pre_emphasis 系数 | 0.0 (gemma4a) | 0.0 | ✅ 一致 |
 
