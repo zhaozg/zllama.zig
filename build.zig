@@ -772,6 +772,37 @@ pub fn build(b: *std.Build) void {
         test_mtmd_step.dependOn(&run_t.step);
     }
 
+    const test_audio_step = b.step("test-audio", "Run audio processing tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_audio.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("chat_template", chat_template_mod);
+        mod.addImport("preprocess", mm_preprocess_mod);
+        const t = addTestWithRpath(b, "test-audio", mod);
+        const run_t = b.addRunArtifact(t);
+        test_audio_step.dependOn(&run_t.step);
+    }
+
+    const test_vision_step = b.step("test-vision", "Run vision processing tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_vision.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("chat_template", chat_template_mod);
+        mod.addImport("preprocess", mm_preprocess_mod);
+        const t = addTestWithRpath(b, "test-vision", mod);
+        const run_t = b.addRunArtifact(t);
+        test_vision_step.dependOn(&run_t.step);
+    }
+
     const test_compare_logits_step = b.step("test-compare-logits", "Run compare_logits tests only");
     {
         const compare_logits_mod = b.createModule(.{
@@ -976,6 +1007,10 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| run_cmd.addArgs(args);
         _ = b.step("compare-mtmd-audio", "Run zllama-compare-mtmd-audio tool");
     }
+
+
+    // ======================================================================
+    // 安装与运行
 
     // ======================================================================
     // 安装与运行

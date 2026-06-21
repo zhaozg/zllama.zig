@@ -385,7 +385,7 @@ pub const Gemma4Graph = struct {
             @min(p.base.rope_dim, @as(u32, @intCast(head_dim)));
         const rope_dim: i64 = @intCast(rope_dim_full);
 
-        log.debug("Layer {d}: is_swa={}, has_kv={}, head_dim={d}", .{ il, layer_is_swa, layer.has_kv, head_dim });
+        // log.debug("Layer {d}: is_swa={}, has_kv={}, head_dim={d}", .{ il, layer_is_swa, layer.has_kv, head_dim });
 
         // --- Pre-attention RMSNorm ---
         const attn_input = rms_norm.rmsNorm(ctx, self.cur, layer.attn_norm_weight, p.base.norm_eps);

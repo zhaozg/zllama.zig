@@ -38,4 +38,6 @@ comptime {
     _ = @import("tests/test_vocab.zig");
     _ = @import("tests/test_embed.zig");
     _ = @import("tests/test_mtmd.zig");
+    _ = @import("tests/test_audio.zig");
+    _ = @import("tests/test_vision.zig");
 }
