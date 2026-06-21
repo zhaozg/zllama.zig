@@ -48,6 +48,7 @@ pub const add = @import("ops.zig").add;
 pub const neg = @import("ops.zig").neg;
 pub const exp = @import("ops.zig").exp;
 pub const cpy = @import("ops.zig").cpy;
+pub const cast = @import("ops.zig").cast;
 pub const rmsNorm = @import("ops.zig").rmsNorm;
 pub const l2Norm = @import("ops.zig").l2Norm;
 pub const ropeExt = @import("ops.zig").ropeExt;

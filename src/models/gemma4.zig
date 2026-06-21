@@ -357,21 +357,21 @@ pub const Gemma4Graph = struct {
             }
         } else {
             // Multimodal embedding path without input_tokens: use padding token (ID=0).
-            // This path is taken when buildMediaOnly passes null (legacy path).
-            // The pad_token tensor is created as a view into the context's memory.
+            // Matches llama.cpp gemma4.cpp build_inp_per_layer() else branch:
+            //   ggml_view_1d(ctx0, model.per_layer_tok_embd, embd_size, 0)
+            //   -> cast to F32 -> scale -> reshape to [n_embd_per_layer, n_layer, 1]
+            // The padding token is row 0 of per_layer_tok_embd.
+            // ggml_add with proj ([n_embd_pl, n_layer, n_tokens]) will broadcast
+            // this [n_embd_pl, n_layer, 1] tensor automatically.
             if (w.per_layer_token_embd) |pl_embd| {
-                // Create a zero-initialized tensor for padding token IDs.
-                // Note: this requires setNoAlloc(false) on the context before calling.
-                const pad_token = try ctx.newTensor1d(.i32, n_tokens_i64);
-                {
-                    const data = pad_token.dataBytes();
-                    const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_tokens_i64))];
-                    @memset(slice, 0); // padding token ID = 0
-                }
-                inp_pl = ggml.getRows(ctx, pl_embd, pad_token);
-                inp_pl = ggml.reshape3d(ctx, inp_pl, n_embd_pl, n_layer_i64, n_tokens_i64);
+                log.debug("buildPerLayerInputs: multimodal path, pl_embd type={s} ne=[{d},{d}]", .{ pl_embd.dataType().name(), pl_embd.ne()[0], pl_embd.ne()[1] });
+                const embd_size = pl_embd.ne()[0]; // n_embd_per_layer * n_layer
+                const padding = ctx.view1d(pl_embd, embd_size, 0);
+                inp_pl = ggml.cast(ctx, padding, .f32);
                 inp_pl = ggml.scale(ctx, inp_pl, @sqrt(@as(f32, @floatFromInt(p.n_embd_per_layer))));
+                inp_pl = ggml.reshape3d(ctx, inp_pl, n_embd_pl, n_layer_i64, 1);
             } else {
+                log.debug("buildPerLayerInputs: multimodal path, per_layer_token_embd is null, returning null", .{});
                 return null;
             }
         }

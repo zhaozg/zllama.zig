@@ -5,6 +5,7 @@
 const std = @import("std");
 const cmod = @import("c.zig");
 const c = cmod.c;
+const Type = cmod.Type;
 const Context = @import("context.zig").Context;
 const Tensor = @import("tensor.zig").Tensor;
 
@@ -34,6 +35,10 @@ pub fn exp(ctx: *Context, a: *Tensor) *Tensor {
 
 pub fn cpy(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_cpy(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn cast(ctx: *Context, a: *Tensor, typ: Type) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_cast(@ptrCast(ctx), @ptrCast(@alignCast(a)), @intFromEnum(typ))));
 }
 
 // ============================================================================
