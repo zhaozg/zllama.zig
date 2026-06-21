@@ -244,10 +244,23 @@ pub const InferenceEngine = struct {
         const source = self.chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
         var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
         defer tmpl.deinit(self.allocator);
+
+        // If media is present, ensure the placeholder marker is in the content.
+        // This is needed because:
+        //   - Built-in presets (gemma4.zig) use appendMediaContent() which adds the marker
+        //   - Jinja rendering only sees msg.content (no media field), so the marker
+        //     must already be embedded in the content string
+        const effective_prompt = if (media) |m| blk: {
+            break :blk try chat_template.ensurePlaceholderInContent(user_prompt, m.type, self.allocator);
+        } else user_prompt;
+        // Only free if ensurePlaceholderInContent allocated new memory
+        const needs_free = media != null and effective_prompt.ptr != user_prompt.ptr;
+        defer if (needs_free) self.allocator.free(effective_prompt);
+
         const messages = if (media) |m| [_]chat_template.ChatMessage{
-            chat_template.ChatMessage.withMedia("user", user_prompt, m),
+            chat_template.ChatMessage.withMedia("user", effective_prompt, m),
         } else [_]chat_template.ChatMessage{
-            chat_template.ChatMessage.init("user", user_prompt),
+            chat_template.ChatMessage.init("user", effective_prompt),
         };
         const system = if (self.system_prompt.len > 0) self.system_prompt else null;
         return tmpl.apply(self.allocator, &messages, system, true);

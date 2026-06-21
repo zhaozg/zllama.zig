@@ -742,6 +742,5 @@ zig build test-vision    # 仅视觉测试
 - [llama.cpp mtmd 实现](deps/llama.cpp/tools/mtmd/)
 - [Gemma 4 技术报告](https://ai.google.dev/gemma)
 - [GGUF 规范](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
-- [问题分析笔记](NOTE.md)
 - [mtmd 参考 logits 生成工具](tools/mtmd_ref_logits.cpp)
 - [本项目的待办事项](TODO.md)
