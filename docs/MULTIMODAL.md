@@ -1,7 +1,7 @@
 # 多模态推理模块 — MULTIMODAL
 
 > 参考：[llama.cpp tools/mtmd](deps/llama.cpp/tools/mtmd/)、Gemma 4 多模态实现
-> 当前状态：视觉/音频编码器实现完整，三阶段 prefill 已实现，端到端推理已验证。
+> 当前状态：视觉/音频编码器实现完整，三阶段 prefill 已实现，端到端推理已验证（audio ✅, vision ✅）。
 > **核心调用**：`src/main.zig` → `InferenceEngine.generateWithImage()` / `generateWithAudio()`。
 
 ---
