@@ -2,7 +2,7 @@
 
 > 参考：[llama.cpp tools/mtmd](deps/llama.cpp/tools/mtmd/)、Gemma 4 多模态实现
 > 当前状态：视觉/音频编码器实现完整，三阶段 prefill 已实现，端到端推理已验证。
-> **核心变化**：独立工具 `zllama-audio` / `zllama-vision` 已移除，功能统一到 `src/main.zig` → `InferenceEngine.generateWithImage()` / `generateWithAudio()`。
+> **核心调用**：`src/main.zig` → `InferenceEngine.generateWithImage()` / `generateWithAudio()`。
 
 ---
 
@@ -320,7 +320,7 @@ WAV 文件 (16-bit PCM)
 | Q/K/V permute 布局 | (0,3,1,2) | (0,2,1,3) | ✅ 数学等价（H/B 轴交换） |
 | k_scale 计算 | `logf(1+expf(1))/logf(2)` | `@log2(1+@exp(1))` | ✅ 等价 |
 | norm_eps | 硬编码 1e-6 | 从 GGUF 读取 | ✅ 通常相同 |
-| 输入填充 | `ggml_set_input` | 直接填充 | ✅ 功能等价 |
+| 输入填充 | `ggml_set_input` | `ggml_set_input` | ✅ 一致（均采用 ggml_set_input 方式） |
 | FFT | CPU/kissfft | macOS Accelerate | 🟡 需跨平台后备 |
 | pre_emphasis 系数 | 0.0 (gemma4a) | 0.0 | ✅ 一致 |
 
@@ -708,7 +708,8 @@ Gemma 4 使用 `MTMD_POS_TYPE_NORMAL`，所有维度（t, x, y, z）都使用相
 
 ### 8. 独立工具已移除
 
-`src/tools/zllama-audio.zig` 和 `src/tools/zllama-vision.zig` 已移除。其功能完全由 `src/core/engine.zig` 中的 `InferenceEngine.generateWithAudio()` 和 `InferenceEngine.generateWithImage()` 提供。音频/视觉推理通过统一的 `zllama` CLI 入口使用：
+音频/视觉推理通过统一的 `zllama` CLI 入口使用：
+其功能完全由 `src/core/engine.zig` 中的 `InferenceEngine.generateWithAudio()` 和 `InferenceEngine.generateWithImage()` 提供。
 
 ```bash
 # 视觉推理

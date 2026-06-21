@@ -845,7 +845,16 @@ pub const InferenceEngine = struct {
                 if (v != 0.0) all_zero = false;
                 if (std.math.isNan(v)) has_nan = true;
             }
-            logger.debug("Embedding validation: total={d} preview={any} all_zero={} has_nan={}", .{ n_total, embd_heap[0..n_preview], all_zero, has_nan });
+            logger.info("Embedding validation: total={d} preview={d:.4} {d:.4} {d:.4} {d:.4} {d:.4} all_zero={} has_nan={}", .{
+                n_total,
+                if (n_preview > 0) embd_heap[0] else @as(f32, 0),
+                if (n_preview > 1) embd_heap[1] else @as(f32, 0),
+                if (n_preview > 2) embd_heap[2] else @as(f32, 0),
+                if (n_preview > 3) embd_heap[3] else @as(f32, 0),
+                if (n_preview > 4) embd_heap[4] else @as(f32, 0),
+                all_zero,
+                has_nan,
+            });
             if (all_zero) logger.warn("  ⚠ all embedding values are ZERO!", .{});
             if (has_nan) logger.warn("  ⚠ embedding contains NaN!", .{});
         }

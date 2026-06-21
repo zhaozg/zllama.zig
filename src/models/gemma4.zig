@@ -261,7 +261,7 @@ pub const Gemma4Graph = struct {
         n_tokens: i32,
         kv_cache_mgr: ?*kv_cache.KVCache,
         start_pos: i32,
-        input_tokens: *ggml.Tensor,
+        _input_tokens: *ggml.Tensor,
     ) !*ggml.Tensor {
         const p = self.params;
         const w = self.weights;
@@ -277,15 +277,23 @@ pub const Gemma4Graph = struct {
         }
         log.debug("  ✓ embedding dimension check passed", .{});
 
+        _ = _input_tokens; // unused in multimodal path; per-layer uses padding token
+
         const scaled = embd_override; // Already in model embedding space — NO scale
         scaled.setName("inp_media");
 
         const pos_tensor = rope.buildPositionTensor(self.ctx, @intCast(n_tokens), start_pos);
 
         var g = Self.init(self.ctx, self.gf, p, w, scaled, pos_tensor);
-        // Per-layer embedding uses the placeholder token (258881), which was
-        // trained for multimodal content. DO NOT skip it.
-        return try g.transformerForward(n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, false);
+        // For multimodal embedding path, use padding token (ID=0) per-layer embedding
+        // instead of the placeholder token's embedding. This matches llama.cpp behavior
+        // where ubatch.token is null (embedding path), so build_inp_per_layer uses
+        // padding token (row 0) from per_layer_tok_embd.
+        // Reference: llama.cpp gemma4.cpp build_inp_per_layer() else branch
+        // Ensure context allows allocation for per-layer input tensors
+        self.ctx.setNoAlloc(false);
+        defer self.ctx.setNoAlloc(true);
+        return try g.transformerForward(n_tokens_i64, start_pos, kv_cache_mgr, null, false);
     }
 
     // ====================================================================
@@ -329,27 +337,60 @@ pub const Gemma4Graph = struct {
         const p = self.params;
         const w = self.weights;
 
-        if (p.n_embd_per_layer == 0 or input_tokens == null) return null;
+        if (p.n_embd_per_layer == 0) return null;
 
         const n_embd_pl: i64 = @intCast(p.n_embd_per_layer);
         const n_layer_i64: i64 = @intCast(p.base.n_layer);
         const ctx = self.ctx;
         const gf = self.gf;
 
-        var inp_pl = ggml.getRows(ctx, w.per_layer_token_embd.?, input_tokens.?);
-        inp_pl = ggml.reshape3d(ctx, inp_pl, n_embd_pl, n_layer_i64, n_tokens_i64);
-        inp_pl = ggml.scale(ctx, inp_pl, @sqrt(@as(f32, @floatFromInt(p.n_embd_per_layer))));
+        // Per-layer token embedding lookup.
+        // For text path (input_tokens != null): use actual token IDs.
+        // For multimodal path (input_tokens == null): use padding token (ID=0).
+        // This matches llama.cpp gemma4.cpp build_inp_per_layer() behavior.
+        var inp_pl: *ggml.Tensor = undefined;
+        if (input_tokens) |tokens| {
+            if (w.per_layer_token_embd) |pl_embd| {
+                inp_pl = ggml.getRows(ctx, pl_embd, tokens);
+                inp_pl = ggml.reshape3d(ctx, inp_pl, n_embd_pl, n_layer_i64, n_tokens_i64);
+                inp_pl = ggml.scale(ctx, inp_pl, @sqrt(@as(f32, @floatFromInt(p.n_embd_per_layer))));
+            } else {
+                return null;
+            }
+        } else {
+            // Multimodal embedding path: use padding token (ID=0) per-layer embedding.
+            // This matches llama.cpp behavior where ubatch.token is null (embedding path),
+            // so build_inp_per_layer uses padding token (row 0) from per_layer_tok_embd.
+            // Reference: llama.cpp gemma4.cpp build_inp_per_layer() else branch
+            if (w.per_layer_token_embd) |pl_embd| {
+                const pad_token = try ctx.newTensor1d(.i32, n_tokens_i64);
+                {
+                    const data = pad_token.dataBytes();
+                    const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_tokens_i64))];
+                    @memset(slice, 0); // padding token ID = 0
+                }
+                inp_pl = ggml.getRows(ctx, pl_embd, pad_token);
+                inp_pl = ggml.reshape3d(ctx, inp_pl, n_embd_pl, n_layer_i64, n_tokens_i64);
+                inp_pl = ggml.scale(ctx, inp_pl, @sqrt(@as(f32, @floatFromInt(p.n_embd_per_layer))));
+            } else {
+                return null;
+            }
+        }
 
-        var proj = ggml.mulMat(ctx, w.per_layer_model_proj.?, cur_in);
-        proj = ggml.scale(ctx, proj, 1.0 / @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
-        proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
-        proj = ggml.reshape2d(ctx, proj, n_embd_pl, n_layer_i64 * n_tokens_i64);
-        proj = ggml.rmsNorm(ctx, proj, p.base.norm_eps);
-        proj = ggml.mul(ctx, proj, ggml.reshape2d(ctx, w.per_layer_proj_norm.?, n_embd_pl, 1));
-        proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
+        if (w.per_layer_model_proj) |proj_w| {
+            var proj = ggml.mulMat(ctx, proj_w, cur_in);
+            proj = ggml.scale(ctx, proj, 1.0 / @sqrt(@as(f32, @floatFromInt(p.base.n_embd))));
+            proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
+            proj = ggml.reshape2d(ctx, proj, n_embd_pl, n_layer_i64 * n_tokens_i64);
+            proj = ggml.rmsNorm(ctx, proj, p.base.norm_eps);
+            if (w.per_layer_proj_norm) |proj_norm| {
+                proj = ggml.mul(ctx, proj, ggml.reshape2d(ctx, proj_norm, n_embd_pl, 1));
+            }
+            proj = ggml.reshape3d(ctx, proj, n_embd_pl, n_layer_i64, n_tokens_i64);
 
-        inp_pl = ggml.add(ctx, proj, inp_pl);
-        inp_pl = ggml.scale(ctx, inp_pl, 1.0 / @sqrt(2.0));
+            inp_pl = ggml.add(ctx, proj, inp_pl);
+            inp_pl = ggml.scale(ctx, inp_pl, 1.0 / @sqrt(2.0));
+        }
 
         inp_pl = ggml.cont(ctx, ggml.permute(ctx, inp_pl, 0, 2, 1, 3));
         inp_pl.setName("inp_per_layer");

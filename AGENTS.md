@@ -68,6 +68,9 @@
    - 必需支持 zig 0.16
    - 比如: [uucode](https://github.com/jacobsandlund/uucode)
 
+11. 如何运行 llama-cli
+   - 如果你要调用 `llama-cli`, 你必需通过 `echo /exit | llama-cli ...` 的方式调用， 确保它能够正常退出。
+
 ## 🔍 软件工程实践：功能对齐与早期问题发现
 
 为保证开发质量和避免后期返工，在编码前、编码中和集成阶段必须遵循以下实践：
