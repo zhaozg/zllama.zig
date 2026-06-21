@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
+const gguf = @import("gguf");
 const fft_mod = @import("fft");
 const math = std.math;
 const stb_image = @import("stb_image");
@@ -32,10 +33,10 @@ pub const AUDIO_HOP_LENGTH: u32 = 160;
 pub const AUDIO_N_FFT: u32 = 512;
 /// Mel 滤波器组数量
 pub const AUDIO_N_MEL_BINS: u32 = 128;
-/// Mel 最低频率
-pub const AUDIO_MEL_F_MIN: f32 = 80.0;
-/// Mel 最高频率
-pub const AUDIO_MEL_F_MAX: f32 = 7600.0;
+/// Mel 最低频率 (gemma4a uses 0.0, full range)
+pub const AUDIO_MEL_F_MIN: f32 = 0.0;
+/// Mel 最高频率 (gemma4a uses sr/2)
+pub const AUDIO_MEL_F_MAX: f32 = 8000.0;
 /// 预加重系数 (gemma4a disables pre-emphasis)
 pub const AUDIO_PRE_EMPHASIS: f32 = 0.0;
 /// 对数偏移（防止 log(0)，matches gemma4a mel_floor=0.001）
@@ -56,6 +57,17 @@ pub const AudioPreprocessParams = struct {
     /// 从音频编码器参数构建（部分参数从 GGUF 元数据加载）
     pub fn fromAudioEncoder(n_mel_bins: u32) AudioPreprocessParams {
         return .{ .n_mel_bins = n_mel_bins };
+    }
+
+    /// 从 GGUF 元数据加载音频预处理参数
+    pub fn fromGGUF(gguf_file: *const gguf.GGUFFile) AudioPreprocessParams {
+        var p = AudioPreprocessParams{};
+        if (gguf_file.getU32("clip.audio.num_mel_bins")) |v| p.n_mel_bins = v;
+        if (gguf_file.getU32("clip.audio.sample_rate")) |v| p.sample_rate = v;
+        if (gguf_file.getU32("clip.audio.n_fft")) |v| p.n_fft = v;
+        if (gguf_file.getU32("clip.audio.hop_length")) |v| p.hop_length = v;
+        if (gguf_file.getU32("clip.audio.window_length")) |v| p.frame_length = v;
+        return p;
     }
 };
 
@@ -507,6 +519,7 @@ pub fn loadWav(
 // ============================================================================
 
 /// 预计算 Mel 滤波器组权重矩阵 [n_mel_bins, n_fft/2+1]
+/// 使用 HTK Mel 尺度（与 llama.cpp gemma4a 一致）
 fn computeMelFilterbank(
     allocator: std.mem.Allocator,
     n_mel_bins: u32,
@@ -519,14 +532,13 @@ fn computeMelFilterbank(
     const filterbank = try allocator.alloc(f32, @as(usize, n_mel_bins) * n_freqs);
     @memset(filterbank, 0.0);
 
-    // Hz -> Mel
+    // HTK Mel scale: mel = 2595 * log10(1 + f/700)
     const hzToMel = struct {
         fn call(hz: f32) f32 {
             return 2595.0 * math.log10(1.0 + hz / 700.0);
         }
     }.call;
 
-    // Mel -> Hz
     const melToHz = struct {
         fn call(mel: f32) f32 {
             return 700.0 * (math.pow(f32, 10.0, mel / 2595.0) - 1.0);
@@ -536,7 +548,7 @@ fn computeMelFilterbank(
     const mel_min = hzToMel(f_min);
     const mel_max = hzToMel(f_max);
 
-    // 在 Mel 尺度上均匀分布 n_mel_bins + 2 个点（包含中心频率两侧的边界点）
+    // 在 Mel 尺度上均匀分布 n_mel_bins + 2 个点
     const mel_step = (mel_max - mel_min) / @as(f32, @floatFromInt(n_mel_bins + 1));
 
     // 每个滤波器的中心频率（Hz）
@@ -600,15 +612,16 @@ pub const ProcessedAudio = struct {
 
 /// 从 PCM F32 音频样本计算 Mel 频谱
 ///
-/// 处理步骤：
-/// 1. 预加重（pre-emphasis）系数 0.97
+/// 处理步骤（匹配 llama.cpp gemma4a 预处理器）：
+/// 1. 半因果左填充（pad_left = window_len/2）
 /// 2. 短时傅里叶变换（STFT）
-///    - 帧长（frame_length）= 20ms @ 16kHz = 400 samples
-///    - 帧移（hop_length）= 10ms @ 16kHz = 160 samples
-///    - Hann 窗口
+///    - 帧长（frame_length）= 400 samples (25ms @ 16kHz)
+///    - 帧移（hop_length）= 160 samples (10ms @ 16kHz)
+///    - Hann 窗口（零填充到 FFT 大小）
 ///    - FFT 点数 = 512 (n_fft)
-/// 3. Mel 滤波器组（128 bins, 80-7600 Hz）
-/// 4. log10 压缩
+///    - 幅度谱（use_magnitude=true）
+/// 3. Mel 滤波器组（HTK 尺度, 128 bins, 0-8000 Hz）
+/// 4. 自然对数压缩（use_natural_log=true）
 pub fn computeMelSpectrogram(
     allocator: std.mem.Allocator,
     audio_data: []const f32,
@@ -624,49 +637,51 @@ pub fn computeMelSpectrogram(
     const hop_length: u32 = params.hop_length;
     const n_freqs: u32 = n_fft / 2 + 1;
     const n_mel_bins: u32 = params.n_mel_bins;
-    const pre_emphasis: f32 = params.pre_emphasis;
     const log_offset: f32 = params.log_offset;
 
-    // Step 1: 预加重
-    var pre_emph = try allocator.alloc(f32, audio_data.len);
-    defer allocator.free(pre_emph);
-    pre_emph[0] = audio_data[0];
-    for (1..audio_data.len) |i| {
-        pre_emph[i] = audio_data[i] - pre_emphasis * audio_data[i - 1];
-    }
+    // Step 1: 半因果左填充（匹配 llama.cpp gemma4a）
+    // gemma4a 使用 no_padding=true + 手动左填充 pad_left = window_len/2
+    const pad_left: usize = frame_length / 2;
+    const n_padded = audio_data.len + pad_left;
+    var padded = try allocator.alloc(f32, n_padded);
+    defer allocator.free(padded);
+    @memset(padded[0..pad_left], 0.0);
+    @memcpy(padded[pad_left..], audio_data);
 
     // 初始化 Accelerate FFT 引擎（Hann 窗 + 重用缓冲区）
     var fft_engine = try fft_mod.AccelFFT.init(allocator, n_fft);
     defer fft_engine.deinit();
 
-    // 预计算 Mel 滤波器组
+    // 预计算 Mel 滤波器组（HTK 尺度）
     const filterbank = try computeMelFilterbank(allocator, n_mel_bins, n_fft, sample_rate, f_min, f_max);
     defer allocator.free(filterbank);
 
     // Step 2: STFT - 计算帧数
-    const n_frames: u32 = if (pre_emph.len >= frame_length)
-        @as(u32, @intCast((pre_emph.len - frame_length) / hop_length)) + 1
+    // 匹配 llama.cpp: (n_samples - frame_size) / frame_step + 1
+    const n_frames: u32 = if (n_padded >= frame_length)
+        @as(u32, @intCast((n_padded - frame_length) / hop_length)) + 1
     else
         0;
 
     if (n_frames == 0) return error.AudioTooShort;
 
-    // 输出: [n_mel_bins, n_frames]
+    // 输出: [n_mel_bins, n_frames]（mel-major 布局，匹配 llama.cpp）
     const mel_out = try allocator.alloc(f32, @as(usize, n_mel_bins) * @as(usize, n_frames));
 
     const spectrum = try allocator.alloc(f32, @intCast(n_freqs));
     defer allocator.free(spectrum);
 
     // 逐帧处理
-    var frame_buf: [400]f32 = undefined;
+    var frame_buf: [512]f32 = undefined;
     for (0..n_frames) |fi| {
         const start: usize = fi * @as(usize, hop_length);
 
-        // 提取帧（AccelFFT 内部自动零填充 + 加窗）
-        const frame_end = @min(start + frame_length, pre_emph.len);
-        @memcpy(frame_buf[0 .. frame_end - start], pre_emph[start..frame_end]);
+        // 提取帧（零填充到 FFT 大小）
+        const frame_end = @min(start + frame_length, n_padded);
+        @memset(frame_buf[0..n_fft], 0.0);
+        @memcpy(frame_buf[0 .. frame_end - start], padded[start..frame_end]);
 
-        // 使用 Accelerate vDSP 计算功率谱（自动零填充、加窗、FFT、|·|²）
+        // 使用 Accelerate vDSP 计算幅度谱
         fft_engine.powerSpectrum(frame_buf[0 .. frame_end - start], spectrum);
 
         // Step 3: Mel 滤波器组
@@ -676,7 +691,7 @@ pub fn computeMelSpectrogram(
             for (0..@as(usize, n_freqs)) |k| {
                 mel_val += row[k] * spectrum[k];
             }
-            // Step 4: natural log compression (use_natural_log=true for gemma4a)
+            // Step 4: 自然对数压缩（use_natural_log=true for gemma4a）
             mel_out[m * @as(usize, n_frames) + fi] = @log(@max(mel_val, log_offset));
         }
     }

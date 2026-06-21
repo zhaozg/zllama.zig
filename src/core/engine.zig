@@ -684,7 +684,9 @@ pub const InferenceEngine = struct {
 
         logger.info("formatted_prompt: {s}", .{formatted_prompt});
 
-        var expanded = try chat_template.tokenizeWithPlaceholders(self.allocator, formatted_prompt, @ptrCast(&self.tok), tokenizeTextSegment, image_token_id, 0, @intCast(n_vision_tokens), 0);
+        // 使用新的 tokenize 方法：先正常 tokenize（含 parse_special），
+        // 然后在 token 序列中找到 <|image|> 特殊 token 的位置并展开
+        var expanded = try self.tokenizeWithMediaPlaceholders(formatted_prompt, image_token_id, @intCast(n_vision_tokens));
         defer expanded.deinit();
         logger.info("Vision input: {d} prefix tokens + {d} image tokens + {d} suffix tokens = {d} total", .{
             if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else @as(u32, 0),
@@ -697,8 +699,6 @@ pub const InferenceEngine = struct {
 
     // ========================================================================
     // Public API: audio generation
-    // ========================================================================
-
     pub fn generateWithAudio(self: *InferenceEngine, io: std.Io, prompt: []const u8, audio_path: [:0]const u8, max_tokens: u32) !void {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_audio) return error.AudioNotSupported;
@@ -756,7 +756,9 @@ pub const InferenceEngine = struct {
 
         logger.info("formatted_prompt: {s}", .{formatted_prompt});
 
-        var expanded = try chat_template.tokenizeWithPlaceholders(self.allocator, formatted_prompt, @ptrCast(&self.tok), tokenizeTextSegment, 0, audio_token_id, 0, @intCast(n_audio_tokens));
+        // 使用新的 tokenize 方法：先正常 tokenize（含 parse_special），
+        // 然后在 token 序列中找到 <|audio|> 特殊 token 的位置并展开
+        var expanded = try self.tokenizeWithMediaPlaceholders(formatted_prompt, audio_token_id, @intCast(n_audio_tokens));
         defer expanded.deinit();
         logger.info("Audio input: {d} prefix tokens + {d} audio tokens + {d} suffix tokens = {d} total", .{
             if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else @as(u32, 0),
@@ -909,6 +911,93 @@ pub const InferenceEngine = struct {
         const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;
         if (!self.benchmark) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, "\n"); }
         if (gen_count > 0) logger.info("Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
+    }
+
+    /// 新的多模态 tokenize 方法：
+    /// 1. 对整个 formatted_prompt 进行 tokenize（含 parse_special=true）
+    /// 2. 在 token 序列中找到媒体特殊 token 的位置
+    /// 3. 将其替换为 N 个相同的特殊 token（重复 N 次）
+    ///
+    /// 这与旧的 tokenizeWithPlaceholders 不同，后者在 tokenizer 编码之前
+    /// 扫描占位符字符串，导致 parse_special 无法正确编码特殊 token。
+    fn tokenizeWithMediaPlaceholders(
+        self: *InferenceEngine,
+        formatted_prompt: []const u8,
+        media_token_id: u32,
+        media_token_count: u32,
+    ) !chat_template.TokenizedSegments {
+        // Step 1: 对整个 formatted_prompt 进行 tokenize（含 parse_special=true）
+        var all_tokens = try self.tok.encode(formatted_prompt, false, true);
+        errdefer all_tokens.deinit(self.allocator);
+
+        // Step 2: 在 token 序列中找到媒体特殊 token 的位置
+        // 注意：<|image|> 或 <|audio|> 在 parse_special 模式下会被编码为单个特殊 token
+        var offsets = std.ArrayListUnmanaged(chat_template.PlaceholderInfo){ .items = &.{}, .capacity = 0 };
+        errdefer offsets.deinit(self.allocator);
+
+        // 先扫描所有媒体 token 的位置
+        var media_positions = std.ArrayListUnmanaged(usize){ .items = &.{}, .capacity = 0 };
+        defer media_positions.deinit(self.allocator);
+
+        for (all_tokens.items, 0..) |token, pos| {
+            if (token == media_token_id) {
+                try media_positions.append(self.allocator, pos);
+            }
+        }
+
+        if (media_positions.items.len == 0) {
+            logger.warn("tokenizeWithMediaPlaceholders: no media token {d} found in prompt!", .{media_token_id});
+        }
+            // 返回原始 token 序列（无展开）
+        // Step 3: 构建新的 token 序列，将每个媒体 token 替换为 N 个相同的 token
+        // 使用新分配来避免复杂的原地操作
+        const total_new_tokens = all_tokens.items.len + media_positions.items.len * (media_token_count - 1);
+        var new_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
+        errdefer new_tokens.deinit(self.allocator);
+        try new_tokens.ensureTotalCapacityPrecise(self.allocator, total_new_tokens);
+        errdefer new_tokens.deinit(self.allocator);
+        try new_tokens.ensureTotalCapacityPrecise(self.allocator, total_new_tokens);
+        errdefer new_tokens.deinit(self.allocator);
+
+        var src_idx: usize = 0;
+        for (media_positions.items, 0..) |media_pos, media_idx| {
+            // 复制媒体 token 之前的 token
+            while (src_idx < media_pos) {
+                try new_tokens.append(self.allocator, all_tokens.items[src_idx]);
+                src_idx += 1;
+            }
+            // 记录偏移
+            try offsets.append(self.allocator, .{
+                .start = 0,
+                .length = 0,
+                .media_type = .image,
+                .token_count = media_token_count,
+                .token_offset = @intCast(new_tokens.items.len),
+            });
+            // 展开媒体 token 为 N 个相同的 token
+            for (0..media_token_count) |_| {
+                try new_tokens.append(self.allocator, media_token_id);
+            }
+            src_idx += 1; // 跳过原来的媒体 token
+            _ = media_idx;
+        }
+        // 复制剩余的 token
+        while (src_idx < all_tokens.items.len) {
+            try new_tokens.append(self.allocator, all_tokens.items[src_idx]);
+            src_idx += 1;
+        }
+        logger.info("tokenizeWithMediaPlaceholders: {d} -> {d} tokens, {d} media placeholders expanded to {d} tokens each", .{
+            all_tokens.items.len, new_tokens.items.len, offsets.items.len, media_token_count,
+        });
+
+        // 释放旧的 token 列表，返回新的
+        all_tokens.deinit(self.allocator);
+
+        return chat_template.TokenizedSegments{
+            .tokens = new_tokens,
+            .offsets = try offsets.toOwnedSlice(self.allocator),
+            .allocator = self.allocator,
+        };
     }
 };
 
