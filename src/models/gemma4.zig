@@ -263,6 +263,7 @@ pub const Gemma4Graph = struct {
         start_pos: i32,
         input_tokens: *ggml.Tensor,
     ) !*ggml.Tensor {
+        _ = input_tokens;
         const p = self.params;
         const w = self.weights;
         const n_tokens_i64: i64 = n_tokens;
@@ -283,15 +284,16 @@ pub const Gemma4Graph = struct {
         const pos_tensor = rope.buildPositionTensor(self.ctx, @intCast(n_tokens), start_pos);
 
         var g = Self.init(self.ctx, self.gf, p, w, scaled, pos_tensor);
-        // For multimodal embedding path, use the placeholder token IDs from input_tokens
-        // for per-layer embedding lookup. This matches llama.cpp behavior where
-        // ubatch.token is null (embedding path), so build_inp_per_layer uses
-        // padding token (row 0) from per_layer_tok_embd.
-        // Reference: llama.cpp gemma4.cpp build_inp_per_layer() else branch
-        // Note: We pass input_tokens (placeholder token IDs) for per-layer embedding lookup.
+        // For multimodal embedding path, pass null for input_tokens so that
+        // buildPerLayerInputs uses the padding token (row 0) from per_layer_tok_embd.
+        // This matches llama.cpp gemma4.cpp build_inp_per_layer() behavior where
+        // ubatch.token is null (embedding path), so it uses padding token (row 0).
+        // Reference: llama.cpp gemma4.cpp build_inp_per_layer() else branch:
+        //   ggml_view_1d(ctx0, model.per_layer_tok_embd, embd_size, 0)
+        //   -> cast to F32 -> scale -> reshape to [n_embd_per_layer, n_layer, 1]
         // The ggml context must NOT be in setNoAlloc(false) mode here — the graph is built
         // with view tensors and the actual allocation happens via Gallocr.
-        return try g.transformerForward(n_tokens_i64, start_pos, kv_cache_mgr, input_tokens, false);
+        return try g.transformerForward(n_tokens_i64, start_pos, kv_cache_mgr, null, false);
     }
 
     // ====================================================================

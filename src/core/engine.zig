@@ -1053,16 +1053,56 @@ pub const InferenceEngine = struct {
         if (media_positions.items.len == 0) {
             logger.warn("tokenizeWithMediaPlaceholders: no media token {d} found in prompt!", .{media_token_id});
         }
-        // 返回原始 token 序列（无展开）
-        // Step 3: 构建新的 token 序列，将每个媒体 token 替换为 N 个相同的 token
-        // 使用新分配来避免复杂的原地操作
-        const total_new_tokens = all_tokens.items.len + media_positions.items.len * (media_token_count - 1);
+
+        // 获取媒体开始/结束标记（与 llama.cpp add_media 对应）
+        // 这些标记告诉模型"接下来是图像/音频嵌入"
+        const beg_marker: []const u8 = blk: {
+            if (self.mtmd_context) |ctx| {
+                break :blk switch (media_type) {
+                    .image => ctx.img_beg,
+                    .audio => ctx.aud_beg,
+                    .none => "",
+                };
+            }
+            break :blk "";
+        };
+        const end_marker: []const u8 = blk: {
+            if (self.mtmd_context) |ctx| {
+                break :blk switch (media_type) {
+                    .image => ctx.img_end,
+                    .audio => ctx.aud_end,
+                    .none => "",
+                };
+            }
+            break :blk "";
+        };
+
+        // Tokenize 开始/结束标记
+        var beg_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
+        defer beg_tokens.deinit(self.allocator);
+        if (beg_marker.len > 0) {
+            var encoded = try self.tok.encode(beg_marker, false, true);
+            defer encoded.deinit(self.allocator);
+            try beg_tokens.appendSlice(self.allocator, encoded.items);
+        }
+
+        var end_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
+        defer end_tokens.deinit(self.allocator);
+        if (end_marker.len > 0) {
+            var encoded = try self.tok.encode(end_marker, false, true);
+            defer encoded.deinit(self.allocator);
+            try end_tokens.appendSlice(self.allocator, encoded.items);
+        }
+
+        // Step 3: 构建新的 token 序列，将每个媒体 token 替换为:
+        //   [beg_tokens] + [media_token_id × media_token_count] + [end_tokens]
+        // 这匹配 llama.cpp add_media 的行为:
+        //   add_text(img_beg) + chunk + add_text(img_end)
+        const extra_per_media = beg_tokens.items.len + end_tokens.items.len;
+        const total_new_tokens = all_tokens.items.len + media_positions.items.len * (media_token_count - 1 + extra_per_media);
         var new_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
         errdefer new_tokens.deinit(self.allocator);
         try new_tokens.ensureTotalCapacityPrecise(self.allocator, total_new_tokens);
-        errdefer new_tokens.deinit(self.allocator);
-        try new_tokens.ensureTotalCapacityPrecise(self.allocator, total_new_tokens);
-        errdefer new_tokens.deinit(self.allocator);
 
         var src_idx: usize = 0;
         for (media_positions.items, 0..) |media_pos, media_idx| {
@@ -1071,7 +1111,13 @@ pub const InferenceEngine = struct {
                 try new_tokens.append(self.allocator, all_tokens.items[src_idx]);
                 src_idx += 1;
             }
-            // 记录偏移
+
+            // 添加开始标记（如 <|image>）
+            for (beg_tokens.items) |t| {
+                try new_tokens.append(self.allocator, t);
+            }
+
+            // 记录偏移（指向媒体嵌入开始位置）
             try offsets.append(self.allocator, .{
                 .start = 0,
                 .length = 0,
@@ -1079,10 +1125,17 @@ pub const InferenceEngine = struct {
                 .token_count = media_token_count,
                 .token_offset = @intCast(new_tokens.items.len),
             });
-            // 展开媒体 token 为 N 个相同的 token
+
+            // 展开媒体 token 为 N 个相同的 token（这些将被替换为实际嵌入）
             for (0..media_token_count) |_| {
                 try new_tokens.append(self.allocator, media_token_id);
             }
+
+            // 添加结束标记（如 <image|>）
+            for (end_tokens.items) |t| {
+                try new_tokens.append(self.allocator, t);
+            }
+
             src_idx += 1; // 跳过原来的媒体 token
             _ = media_idx;
         }
@@ -1091,8 +1144,9 @@ pub const InferenceEngine = struct {
             try new_tokens.append(self.allocator, all_tokens.items[src_idx]);
             src_idx += 1;
         }
-        logger.info("tokenizeWithMediaPlaceholders: {d} -> {d} tokens, {d} media placeholders expanded to {d} tokens each", .{
+        logger.info("tokenizeWithMediaPlaceholders: {d} -> {d} tokens, {d} media placeholders expanded to {d} tokens each (beg={d} end={d} tokens)", .{
             all_tokens.items.len, new_tokens.items.len, offsets.items.len, media_token_count,
+            beg_tokens.items.len, end_tokens.items.len,
         });
 
         // 释放旧的 token 列表，返回新的
