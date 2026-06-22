@@ -1,7 +1,7 @@
 //! mtmd tokenizer
 const std = @import("std");
 const tokenizer = @import("tokenizer");
-const mtmd = @import("mtmd");
+const mtmd = @import("mm");
 const log = std.log.scoped(.mtmd_tokenize);
 
 pub fn tokenize(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, text: mtmd.InputText, bitmaps: []const mtmd.Bitmap) !mtmd.InputChunks {

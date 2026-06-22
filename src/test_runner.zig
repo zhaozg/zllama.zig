@@ -15,7 +15,7 @@ comptime {
     _ = @import("sampler");
     _ = @import("kv_cache");
     _ = @import("graph_context");
-    _ = @import("mm");
+    _ = @import("mtmd");
     _ = @import("preprocess");
     _ = @import("engine_common");
     _ = @import("prefill");

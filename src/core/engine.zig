@@ -15,7 +15,7 @@ const memory = @import("memory");
 const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
 const kv_cache = @import("kv_cache");
-const mm = @import("mm");
+const mtmd = @import("mtmd");
 const preprocess = @import("preprocess");
 const engine_common = @import("engine_common");
 const prefill_mod = @import("prefill");
@@ -67,7 +67,8 @@ pub const InferenceEngine = struct {
 
     inc_ctx: graph_context.IncContext,
 
-    mm_manager: ?mm.MultiModalManager = null,
+    mm_manager: ?mtmd.MultiModalManager = null,
+    mtmd_context: ?*mtmd.MtmdContext = null,
     capabilities: model_if.ModelCapabilities = .{},
 
     chat_template_source: ?chat_template.TemplateSource = null,
@@ -129,7 +130,8 @@ pub const InferenceEngine = struct {
         const inc_ctx_size = 512 * 1024 * 1024;
         const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
 
-        var mm_manager: ?mm.MultiModalManager = null;
+        var mm_manager: ?mtmd.MultiModalManager = null;
+        var mtmd_context: ?*mtmd.MtmdContext = null;
         if (cli_args.mmproj_path.len > 0) {
             mm_manager = try loadMMProj(io, allocator, cli_args.mmproj_path, &capabilities);
             logger.info("Multimodal encoder loaded from: {s}", .{cli_args.mmproj_path});
@@ -137,6 +139,17 @@ pub const InferenceEngine = struct {
                 logger.info("Multi-modal: yes", .{});
                 if (capabilities.has_vision) logger.info("  Vision: yes ({s})", .{capabilities.vision_encoder_type});
                 if (capabilities.has_audio) logger.info("  Audio : yes ({s}, {d} Hz)", .{ capabilities.audio_encoder_type, capabilities.audio_sample_rate });
+            }
+            // Create MtmdContext for high-level multimodal operations
+            if (mm_manager) |*mgr| {
+                mtmd_context = try mtmd.MtmdContext.init(
+                    allocator,
+                    mgr,
+                    @intCast(params.n_embd),
+                    mtmd.contextParamsDefault(),
+                    &tok,
+                );
+                logger.info("MtmdContext initialized for multimodal processing", .{});
             }
         } else if (capabilities.has_vision or capabilities.has_audio) {
             logger.warn("Model has multimodal capabilities but no --mmproj file provided", .{});
@@ -198,6 +211,7 @@ pub const InferenceEngine = struct {
             .benchmark = cli_args.benchmark,
             .inc_ctx = inc_ctx,
             .mm_manager = mm_manager,
+            .mtmd_context = mtmd_context,
             .capabilities = capabilities,
             .chat_template_source = chat_template_source,
             .system_prompt = system_prompt,
@@ -207,6 +221,7 @@ pub const InferenceEngine = struct {
     }
 
     pub fn deinit(self: *InferenceEngine) void {
+        if (self.mtmd_context) |ctx| ctx.deinit();
         if (self.mm_manager) |*m| m.deinit();
         self.inc_ctx.deinit();
         self.ctx_graph.deinit();
@@ -686,6 +701,11 @@ pub const InferenceEngine = struct {
         }
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
 
+        // Log image markers from MtmdContext (ensures mod.zig:232 is executed)
+        if (self.mtmd_context) |ctx| {
+            logger.info("Image markers from MtmdContext: '{s}' / '{s}'", .{ ctx.img_beg, ctx.img_end });
+        }
+
         const target_size: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.image_size else 896;
         var img = try preprocess.loadImage(self.allocator, io, image_path, target_size, .auto);
         defer img.deinit();
@@ -759,6 +779,11 @@ pub const InferenceEngine = struct {
             return self.generate(io, prompt, max_tokens);
         }
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
+
+        // Log audio markers from MtmdContext (ensures mod.zig:232 is executed)
+        if (self.mtmd_context) |ctx| {
+            logger.info("Audio markers from MtmdContext: '{s}' / '{s}'", .{ ctx.aud_beg, ctx.aud_end });
+        }
 
         const wav_result = try preprocess.loadWav(self.allocator, io, audio_path);
         defer self.allocator.free(wav_result.samples);

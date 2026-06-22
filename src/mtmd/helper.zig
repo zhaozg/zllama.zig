@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
-const mtmd = @import("mtmd");
+const mtmd = @import("mm");
 const preprocess = @import("preprocess");
 const stb_image = @import("stb_image");
 

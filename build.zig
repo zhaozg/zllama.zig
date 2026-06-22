@@ -20,7 +20,6 @@ pub fn build(b: *std.Build) void {
     // Build minja from source (C++ bridge around Google minja for Jinja2 templates)
     const minja_lib = buildMinjaFromSource(b, target, optimize);
 
-
     // ======================================================================
     // ggml 模块（C 绑定 + 安全封装）
     // ======================================================================
@@ -34,8 +33,8 @@ pub fn build(b: *std.Build) void {
     if (bundle_ggml) {
         // 从源码构建时：严格使用 deps/ggml 中的头文件，链接自建静态库
         // -I 标志优先级高于系统路径（/usr/local/include），确保头文件不冲突
-        ggml_mod.addIncludePath(b.path("deps/ggml/include"));      // 公共 API: ggml.h, ggml-cpu.h, ggml-backend.h, ggml-alloc.h, gguf.h
-        ggml_mod.addIncludePath(b.path("deps/ggml/src"));          // 内部实现: ggml-impl.h, ggml-common.h, ggml-backend-impl.h, ggml-threading.h
+        ggml_mod.addIncludePath(b.path("deps/ggml/include")); // 公共 API: ggml.h, ggml-cpu.h, ggml-backend.h, ggml-alloc.h, gguf.h
+        ggml_mod.addIncludePath(b.path("deps/ggml/src")); // 内部实现: ggml-impl.h, ggml-common.h, ggml-backend-impl.h, ggml-threading.h
         ggml_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu")); // CPU 后端内部: ggml-cpu-impl.h, traits.h, quants.h 等
         ggml_mod.addCMacro("GGML_USE_CPU", "1");
         if (no_galloc_realloc) {
@@ -293,7 +292,6 @@ pub fn build(b: *std.Build) void {
     chat_template_mod.addImport("types", chat_template_types_mod);
     chat_template_mod.addImport("multimodal", chat_template_multimodal_mod);
 
-
     // 注册 chat_template 各模板实现子模块
     {
         const tmpl = b.createModule(.{ .root_source_file = b.path("src/chat_template/chatml.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -358,7 +356,6 @@ pub fn build(b: *std.Build) void {
     // Let chat_template module import minja for Jinja rendering fallback
     chat_template_mod.addImport("minja", minja_mod);
 
-
     // ======================================================================
     // 多模态模块
     // ======================================================================
@@ -401,7 +398,7 @@ pub fn build(b: *std.Build) void {
     utils_mod.addImport("tokenizer", tokenizer_mod);
 
     const mm_manager_mod = b.createModule(.{
-        .root_source_file = b.path("src/mtmd/manager.zig"),
+        .root_source_file = b.path("src/mtmd/mod.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -411,7 +408,7 @@ pub fn build(b: *std.Build) void {
     mm_manager_mod.addImport("model", model_mod);
     mm_manager_mod.addImport("audio", mm_audio_mod);
     mm_manager_mod.addImport("vision", mm_vision_mod);
-    mm_manager_mod.addImport("vision", mm_vision_mod);
+    mm_manager_mod.addImport("tokenizer", tokenizer_mod);
 
     const mm_preprocess_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/preprocess.zig"),
@@ -434,20 +431,7 @@ pub fn build(b: *std.Build) void {
 
     mm_preprocess_mod.addImport("stb_image", stb_image_mod);
 
-    // mtmd 模块（多模态解码）
-    const mtmd_mod = b.createModule(.{
-        .root_source_file = b.path("src/mtmd/mod.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    mtmd_mod.addImport("ggml", ggml_mod);
-    mtmd_mod.addImport("gguf", gguf_mod);
-    mtmd_mod.addImport("model", model_mod);
-    mtmd_mod.addImport("mm", mm_manager_mod);
-    mtmd_mod.addImport("preprocess", mm_preprocess_mod);
-    mtmd_mod.addImport("tokenizer", tokenizer_mod);
-    // mtmd 子模块（helper 和 tokenize 通过相对路径导入）
+    // mtmd 子模块（helper 和 tokenize 通过 mm 模块导入 mod.zig）
     {
         const helper_mod = b.createModule(.{
             .root_source_file = b.path("src/mtmd/helper.zig"),
@@ -456,10 +440,10 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         helper_mod.addImport("ggml", ggml_mod);
-        helper_mod.addImport("mtmd", mtmd_mod);
+        helper_mod.addImport("mm", mm_manager_mod);
         helper_mod.addImport("preprocess", mm_preprocess_mod);
         helper_mod.addImport("stb_image", stb_image_mod);
-        mtmd_mod.addImport("helper", helper_mod);
+        mm_manager_mod.addImport("helper", helper_mod);
     }
     {
         const tokenize_mod = b.createModule(.{
@@ -471,10 +455,9 @@ pub fn build(b: *std.Build) void {
         tokenize_mod.addImport("ggml", ggml_mod);
         tokenize_mod.addImport("gguf", gguf_mod);
         tokenize_mod.addImport("tokenizer", tokenizer_mod);
-        tokenize_mod.addImport("mtmd", mtmd_mod);
-        mtmd_mod.addImport("tokenize", tokenize_mod);
+        tokenize_mod.addImport("mm", mm_manager_mod);
+        mm_manager_mod.addImport("tokenize", tokenize_mod);
     }
-
     // 主可执行文件 zllama
     // ======================================================================
     const exe_mod = b.createModule(.{
@@ -500,6 +483,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("engine_common", engine_common_mod);
     exe_mod.addImport("chat_template", chat_template_mod);
     exe_mod.addImport("prefill", prefill_mod);
+    exe_mod.addImport("mtmd", mm_manager_mod);
 
     const exe = b.addExecutable(.{
         .name = "zllama",
@@ -550,6 +534,7 @@ pub fn build(b: *std.Build) void {
     simple_mod.addImport("mm", mm_manager_mod);
     simple_mod.addImport("preprocess", mm_preprocess_mod);
     simple_mod.addImport("chat_template", chat_template_mod);
+    simple_mod.addImport("mtmd", mm_manager_mod);
     const simple_exe = b.addExecutable(.{
         .name = "zllama-simple",
         .root_module = simple_mod,
@@ -590,6 +575,7 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("weight_loader", weight_loader_mod);
     test_root_mod.addImport("stb_image", stb_image_mod);
     test_root_mod.addImport("utils", utils_mod);
+    test_root_mod.addImport("mtmd", mm_manager_mod);
 
     // 测试工具模块（src/tests/utils.zig），与 src/utils.zig 不同
     const test_utils_mod_for_root = b.createModule(.{
@@ -613,7 +599,7 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("compare_logits", compare_logits_mod_for_root);
 
     // mtmd 模块（用于 test_mtmd.zig）
-    test_root_mod.addImport("mtmd", mtmd_mod);
+    test_root_mod.addImport("mtmd", mm_manager_mod);
 
     const unit_tests = b.addTest(.{
         .root_module = test_root_mod,
@@ -765,7 +751,7 @@ pub fn build(b: *std.Build) void {
         });
         mod.addImport("model", model_mod);
         mod.addImport("mm", mm_manager_mod);
-        mod.addImport("mtmd", mtmd_mod);
+        mod.addImport("mtmd", mm_manager_mod);
         const t = addTestWithRpath(b, "test-mtmd", mod);
         const run_t = b.addRunArtifact(t);
         test_mtmd_step.dependOn(&run_t.step);
@@ -821,8 +807,6 @@ pub fn build(b: *std.Build) void {
         const run_t = b.addRunArtifact(t);
         test_compare_logits_step.dependOn(&run_t.step);
     }
-
-
 
     // ======================================================================
     // 工具可执行文件
@@ -955,6 +939,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("sampler", sampler_mod);
         mod.addImport("kv_cache", kv_cache_mod);
         mod.addImport("mm", mm_manager_mod);
+        mod.addImport("mtmd", mm_manager_mod);
         mod.addImport("preprocess", mm_preprocess_mod);
         mod.addImport("chat_template", chat_template_mod);
         mod.addImport("engine_common", engine_common_mod);
@@ -990,6 +975,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("sampler", sampler_mod);
         mod.addImport("kv_cache", kv_cache_mod);
         mod.addImport("mm", mm_manager_mod);
+        mod.addImport("mtmd", mm_manager_mod);
         mod.addImport("preprocess", mm_preprocess_mod);
         mod.addImport("chat_template", chat_template_mod);
         mod.addImport("engine_common", engine_common_mod);
@@ -1006,7 +992,6 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| run_cmd.addArgs(args);
         _ = b.step("compare-mtmd-audio", "Run zllama-compare-mtmd-audio tool");
     }
-
 
     // ======================================================================
     // 安装与运行
@@ -1066,9 +1051,9 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
 
     // 头文件路径 — 全部从 deps/ggml/ 解析（-I 优先级 > 系统 /usr/local/include）
     // 绝不使用系统安装的 ggml 头文件，避免版本不一致导致的 ABI 损坏
-    lib_mod.addIncludePath(b.path("deps/ggml/include"));         // 公共 API: ggml.h, ggml-cpu.h, ggml-backend.h, ggml-alloc.h, gguf.h
-    lib_mod.addIncludePath(b.path("deps/ggml/src"));             // 内部实现: ggml-impl.h, ggml-common.h, ggml-backend-impl.h, ggml-threading.h, ggml-quants.h
-    lib_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu"));    // CPU 后端内部: ggml-cpu-impl.h, traits.h, quants.h, ops.h, vec.h, simd-mappings.h 等
+    lib_mod.addIncludePath(b.path("deps/ggml/include")); // 公共 API: ggml.h, ggml-cpu.h, ggml-backend.h, ggml-alloc.h, gguf.h
+    lib_mod.addIncludePath(b.path("deps/ggml/src")); // 内部实现: ggml-impl.h, ggml-common.h, ggml-backend-impl.h, ggml-threading.h, ggml-quants.h
+    lib_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu")); // CPU 后端内部: ggml-cpu-impl.h, traits.h, quants.h, ops.h, vec.h, simd-mappings.h 等
     lib_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu/amx")); // AMX 内部: amx.h, mmq.h, common.h
 
     // 宏定义
@@ -1206,7 +1191,6 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
 
     return lib;
 }
-
 
 /// 构建 minja 静态库（C++ Jinja2 模板引擎桥接层）。
 /// 返回一个 Step.Compile，可通过 Module.linkLibrary() 链接。

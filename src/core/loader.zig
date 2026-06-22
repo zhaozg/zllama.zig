@@ -12,7 +12,7 @@ const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
 const model_if = @import("model");
-const mm = @import("mm");
+const mm = @import("mtmd");
 
 const log = std.log.scoped(.loader);
 
