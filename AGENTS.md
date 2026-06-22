@@ -52,6 +52,10 @@
    - 使用 **`mmap`**（通过 ggml 后端文件加载）避免模型数据全量驻留物理内存。
    - KV Cache 预分配固定大小张量（`[max_seq_len, n_kv_heads, head_dim]`），增量写入通过 `ggml_view_*` 切片，**禁止每 token 复制历史缓存**。
    - 默认启用 `ggml_graph_plan` + 线程池（物理核心数的 2/3 ~ 3/4）。
+   - 内存对齐与分配：ggml_tensor 对内存对齐有严格要求（通常 32 或 64 字节）。
+      - 在 Zig 中分配音频/图像 buffer 时，需使用 std.mem.Allocator 的对齐分配方法（如 alignedAlloc）。
+   - 类型映射：确保 Zig 的 f32 严格对应 C 的 float，c_int 对应 i32。
+      - 避免使用 Zig 的 f64 传递 Mel 频谱数据。
 
 8. **测试与可调试性**
    - 提供与 `llama.cpp` 或 HuggingFace 输出对比的测试用例（短 prompt）。

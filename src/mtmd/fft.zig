@@ -49,18 +49,15 @@ pub const AccelFFT = struct {
         const window = try allocator.alloc(f32, n);
         errdefer allocator.free(window);
         @memset(window, 0.0);
-        // Use 400-point Hann window (matches llama.cpp hparams.audio_window_len)
-        const frame_len: usize = 400; // Matches llama.cpp hparams.audio_window_len
-        for (0..frame_len) |i| {
-            window[i] = 0.5 - 0.5 * @cos(2.0 * std.math.pi * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(frame_len)));
-        }
-        // Remaining 112 entries are already zero (window zero-padded to FFT size)
+        // Hann window is now generated dynamically in computeMelSpectrogram
+        // to match the exact window_len from AudioPreprocessParams.
+        // The window buffer is reused for each frame via vDSP_vmul.
 
         const split_buf = try allocator.alloc(f32, n); // n floats for interleaved complex storage
         errdefer allocator.free(split_buf);
         const frame_buf = try allocator.alloc(f32, n);
 
-        log.info("AccelFFT: n={d} log2n={d} window=400+zero-pad", .{ n, log2n });
+        log.info("AccelFFT: n={d} log2n={d}", .{ n, log2n });
 
         return AccelFFT{
             .allocator = allocator,
@@ -85,25 +82,22 @@ pub const AccelFFT = struct {
     /// 计算实数帧的幅度谱（magnitude, 匹配 llama.cpp use_magnitude=true）
     ///
     /// 处理流程：
-    /// 1. 零填充 + 加窗
+    /// 1. 零填充（帧数据已由调用者加窗）
     /// 2. 转换到分割复数格式
     /// 3. 执行前向实数 FFT (vDSP_fft_zrip)
     /// 4. 计算幅度平方 → 功率谱
     ///
-    /// @param frame 输入音频帧（长度 ≤ self.n，自动零填充）
+    /// @param frame 输入音频帧（已加窗，长度 ≤ self.n，自动零填充）
     /// @param spectrum 输出功率谱 [n/2 + 1]
     pub fn powerSpectrum(self: *AccelFFT, frame: []const f32, spectrum: []f32) void {
         const n = self.n;
         std.debug.assert(spectrum.len >= n / 2 + 1);
 
-        // 1. 零填充并加窗
+        // 1. 零填充（帧数据已由调用者应用 Hann 窗口）
         const buf = self.frame_buf;
         const copy_len = @min(frame.len, n);
         @memcpy(buf[0..copy_len], frame[0..copy_len]);
         @memset(buf[copy_len..n], 0);
-
-        // 应用窗函数（不缩放，匹配 llama.cpp 行为）
-        vdsp.vDSP_vmul(buf.ptr, 1, self.window.ptr, 1, buf.ptr, 1, n);
 
         // 2. 转换到分割复数格式（vDSP_fft_zrip 需要 even/odd 分割）
         //    vDSP_fft_zrip expects: realp[i] = x[2*i], imagp[i] = x[2*i+1]

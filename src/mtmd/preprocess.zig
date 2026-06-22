@@ -25,8 +25,11 @@ const log = std.log.scoped(.mm_preprocess);
 
 /// 默认音频采样率 (Gemma4 E2B)
 pub const AUDIO_SAMPLE_RATE: u32 = 16000;
-/// STFT 帧长 (25ms @ 16kHz, matches llama.cpp gemma4a win_length=400)
-pub const AUDIO_FRAME_LENGTH: u32 = 400;
+/// STFT 窗口长度 (20ms @ 16kHz, matches llama.cpp gemma4a window_len=320)
+/// NOTE: gemma4a uses window_len=320 (20ms), NOT 400 (25ms).
+/// Reference: llama.cpp clip.cpp line 1618:
+///   hparams.audio_window_len = 320;  // 20ms frame (NOT 25ms/400)
+pub const AUDIO_FRAME_LENGTH: u32 = 320;
 /// STFT 帧移 (10ms @ 16kHz)
 pub const AUDIO_HOP_LENGTH: u32 = 160;
 /// FFT 点数（2 的幂）
@@ -639,12 +642,39 @@ pub fn computeMelSpectrogram(
 
     // Step 1: 半因果左填充（匹配 llama.cpp gemma4a）
     // gemma4a 使用 no_padding=true + 手动左填充 pad_left = window_len/2
-    const pad_left: usize = frame_length / 2;
-    const n_padded = audio_data.len + pad_left;
+    // 然后根据帧数计算调整 total_pad 以确保有足够的样本
+    // Reference: llama.cpp mtmd-audio.cpp lines 888-895
+    const pad_left: u32 = frame_length / 2;
+
+    // Step 2: STFT - 计算帧数（先计算，确定 total_pad）
+    // 匹配 llama.cpp gemma4a preprocess():
+    //   pt_frames = (n_with_left - (window_len + 1)) / hop + 1
+    //   n_padded_needed = (pt_frames - 1) * hop + fft_size
+    //   total_pad = max(n_padded_needed - chunk_len, pad_left)
+    //   n_samples = total_pad + chunk_len
+    //   out.n_len = (n_samples - frame_size) / frame_step + 1
+    // where frame_size = n_fft (512), window_len = frame_length (320)
+    // Reference: llama.cpp mtmd-audio.cpp lines 888-895, 439
+    const frame_size: u32 = n_fft;
+    const n_with_left: u32 = @as(u32, @intCast(audio_data.len)) + pad_left;
+    const pt_frames: u32 = if (n_with_left >= frame_length + 1)
+        @as(u32, @intCast((n_with_left - (frame_length + 1)) / hop_length)) + 1
+    else
+        0;
+    const n_padded_needed: u32 = (pt_frames -| 1) * hop_length + frame_size;
+    const total_pad: u32 = @max(n_padded_needed -| @as(u32, @intCast(audio_data.len)), pad_left);
+    const n_samples_padded: u32 = total_pad + @as(u32, @intCast(audio_data.len));
+    const n_frames: u32 = if (n_samples_padded >= frame_size)
+        @as(u32, @intCast((n_samples_padded - frame_size) / hop_length)) + 1
+    else
+        0;
+
+    // 分配填充缓冲区
+    const n_padded = audio_data.len + total_pad;
     var padded = try allocator.alloc(f32, n_padded);
     defer allocator.free(padded);
-    @memset(padded[0..pad_left], 0.0);
-    @memcpy(padded[pad_left..], audio_data);
+    @memset(padded[0..total_pad], 0.0);
+    @memcpy(padded[total_pad..], audio_data);
 
     // 初始化 Accelerate FFT 引擎（Hann 窗 + 重用缓冲区）
     var fft_engine = try fft_mod.AccelFFT.init(allocator, n_fft);
@@ -654,13 +684,6 @@ pub fn computeMelSpectrogram(
     const filterbank = try computeMelFilterbank(allocator, n_mel_bins, n_fft, sample_rate, f_min, f_max);
     defer allocator.free(filterbank);
 
-    // Step 2: STFT - 计算帧数
-    // 匹配 llama.cpp: (n_samples - frame_size) / frame_step + 1
-    const n_frames: u32 = if (n_padded >= frame_length)
-        @as(u32, @intCast((n_padded - frame_length) / hop_length)) + 1
-    else
-        0;
-
     if (n_frames == 0) return error.AudioTooShort;
 
     // 输出: [n_mel_bins, n_frames]（mel-major 布局，匹配 llama.cpp）
@@ -669,18 +692,40 @@ pub fn computeMelSpectrogram(
     const spectrum = try allocator.alloc(f32, @intCast(n_freqs));
     defer allocator.free(spectrum);
 
+    // 预计算 Hann 窗口（零填充到 FFT 大小）
+    // 匹配 llama.cpp gemma4a initialize():
+    //   cache.hann_window.assign(hparams.audio_n_fft, 0.0f);
+    //   for (i < audio_window_len) hann_window[i] = 0.5 - 0.5*cos(2*PI*i/window_len);
+    // Reference: llama.cpp mtmd-audio.cpp lines 869-872
+    var hann_window: [512]f32 = undefined;
+    @memset(&hann_window, 0.0);
+    {
+        const win_len: f32 = @floatFromInt(frame_length);
+        for (0..frame_length) |i| {
+            hann_window[i] = 0.5 - 0.5 * @cos(2.0 * math.pi * @as(f32, @floatFromInt(i)) / win_len);
+        }
+    }
+
     // 逐帧处理
     var frame_buf: [512]f32 = undefined;
     for (0..n_frames) |fi| {
         const start: usize = fi * @as(usize, hop_length);
 
-        // 提取帧（零填充到 FFT 大小）
-        const frame_end = @min(start + frame_length, n_padded);
-        @memset(frame_buf[0..n_fft], 0.0);
-        @memcpy(frame_buf[0 .. frame_end - start], padded[start..frame_end]);
+        // 提取帧并应用 Hann 窗口（零填充到 FFT 大小）
+        // 匹配 llama.cpp log_mel_spectrogram_worker_thread:
+        //   for (j < min(frame_size, n_samples - offset))
+        //     fft_in[j] = hann[j] * samples[offset + j];
+        //   fill rest with zeros
+        // Reference: llama.cpp mtmd-audio.cpp lines 308-316
+        @memset(&frame_buf, 0.0);
+        const copy_len = @min(frame_size, n_samples_padded - start);
+        const copy_actual = @min(copy_len, frame_length);
+        for (0..copy_actual) |j| {
+            frame_buf[j] = hann_window[j] * padded[start + j];
+        }
 
         // 使用 Accelerate vDSP 计算幅度谱
-        fft_engine.powerSpectrum(frame_buf[0 .. frame_end - start], spectrum);
+        fft_engine.powerSpectrum(frame_buf[0..frame_size], spectrum);
 
         // Step 3: Mel 滤波器组
         for (0..@as(usize, n_mel_bins)) |m| {
