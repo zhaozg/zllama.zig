@@ -72,13 +72,15 @@ src/
 │   ├── multimodal.zig
 │   └── types.zig
 │
-├── mm/                           # 多模态（保持，可选合并 fft）
-│   ├── mod.zig
-│   ├── manager.zig
-│   ├── audio.zig
-│   ├── vision.zig
-│   ├── preprocess.zig            # 合并 fft.zig 逻辑
-│   └── (fft.zig 可删除)
+├── mtmd/                         # 多模态解码模块
+│   ├── mod.zig                   # 模块根：MtmdContext、基础类型
+│   ├── manager.zig               # MultiModalManager（编码器管理）
+│   ├── audio.zig                 # 音频编码器（Conformer）
+│   ├── vision.zig                # 视觉编码器（ViT/SigLIP）
+│   ├── preprocess.zig            # 预处理（图像resize、Mel频谱）
+│   ├── fft.zig                   # FFT 实现（Accelerate vDSP）
+│   ├── helper.zig                # 辅助函数（chunk评估、文件加载）
+│   └── tokenize.zig              # 多模态分词（文本/图像/音频混合）
 │
 ├── ggml/                         # ggml 绑定（保持原结构）
 │   ├── mod.zig

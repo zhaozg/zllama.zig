@@ -1,4 +1,10 @@
 //! mtmd — Multi-modal decoding module
+//!
+//! 高层多模态上下文，包装 MultiModalManager 并提供：
+//! - 媒体标记管理（<|image|> / <|audio|> 等）
+//! - Chunk 化输入处理（text / image / audio 混合）
+//! - 能力检测与查询
+//!
 //! Reference: deps/llama.cpp/tools/mtmd/mtmd.h
 
 const std = @import("std");
@@ -8,7 +14,6 @@ const model = @import("model");
 const mm = @import("mm");
 const preprocess = @import("preprocess");
 const tokenizer = @import("tokenizer");
-const utils = @import("utils");
 
 const log = std.log.scoped(.mtmd);
 
@@ -18,6 +23,10 @@ pub const helper = @import("helper");
 pub const tokenize = @import("tokenize");
 pub const manager = mm;
 pub const preprocess_mod = preprocess;
+
+// ============================================================================
+// 基础类型定义
+// ============================================================================
 
 pub const ChunkType = enum(u8) { text, image, audio };
 pub const PosType = enum(u8) { normal, mrope, hunyuanvl };
@@ -32,12 +41,15 @@ pub const ContextParams = struct {
     image_min_tokens: i32 = -1,
     image_max_tokens: i32 = -1,
 };
+
 pub fn defaultMarker() []const u8 {
     return "<__media__>";
 }
+
 pub fn contextParamsDefault() ContextParams {
     return .{};
 }
+
 pub const Caps = struct { inp_vision: bool = false, inp_audio: bool = false };
 
 pub const Bitmap = struct {
@@ -47,6 +59,7 @@ pub const Bitmap = struct {
     id: ?[]const u8 = null,
     data: ?[]const u8 = null,
     allocator: ?std.mem.Allocator = null,
+
     pub fn initImage(nx: u32, ny: u32, data: ?[]const u8) Bitmap {
         return .{ .nx = nx, .ny = ny, .data = data };
     }
@@ -82,6 +95,7 @@ pub const ImageTokens = struct {
     id: ?[]const u8 = null,
     patches: ?*anyopaque = null,
     patch_count: u32 = 0,
+
     pub fn nTokens(self: ImageTokens) u32 {
         return switch (self.pos) {
             .hunyuanvl => (self.nx + 1) * self.ny + 2,
@@ -99,6 +113,7 @@ pub const InputChunk = struct {
     tokens_image: ?ImageTokens = null,
     tokens_audio_n: u32 = 0,
     id: ?[]const u8 = null,
+
     pub fn nPos(self: InputChunk) u32 {
         return switch (self.chunk_type) {
             .text => @intCast(self.tokens_text.?.len),
@@ -124,6 +139,7 @@ pub const InputChunk = struct {
 pub const InputChunks = struct {
     entries: std.ArrayList(InputChunk),
     allocator: std.mem.Allocator,
+
     pub fn init(a: std.mem.Allocator) InputChunks {
         return .{ .entries = std.ArrayList(InputChunk).initCapacity(a, 0) catch @panic("OOM"), .allocator = a };
     }
@@ -156,6 +172,36 @@ pub const InputChunks = struct {
 
 pub const InputText = struct { text: []const u8, add_special: bool = true, parse_special: bool = true };
 
+// ============================================================================
+// 媒体标记辅助函数
+// ============================================================================
+
+/// 根据能力检测结果确定图像标记
+fn resolveImageMarkers(caps: *const model.ModelCapabilities) struct { beg: []const u8, end: []const u8 } {
+    if (!caps.has_vision) return .{ .beg = "", .end = "" };
+    if (std.mem.eql(u8, caps.vision_encoder_type, "gemma4v") or
+        std.mem.eql(u8, caps.vision_encoder_type, "gemma4uv"))
+    {
+        return .{ .beg = "<|image>", .end = "<image|>" };
+    }
+    return .{ .beg = "<start_of_image>", .end = "<end_of_image>" };
+}
+
+/// 根据能力检测结果确定音频标记
+fn resolveAudioMarkers(caps: *const model.ModelCapabilities) struct { beg: []const u8, end: []const u8 } {
+    if (!caps.has_audio) return .{ .beg = "", .end = "" };
+    if (std.mem.eql(u8, caps.audio_encoder_type, "gemma4a") or
+        std.mem.eql(u8, caps.audio_encoder_type, "gemma4ua"))
+    {
+        return .{ .beg = "<|audio>", .end = "<audio|>" };
+    }
+    return .{ .beg = "", .end = "" };
+}
+
+// ============================================================================
+// MtmdContext — 多模态上下文
+// ============================================================================
+
 pub const MtmdContext = struct {
     allocator: std.mem.Allocator,
     mm_manager: *mm.MultiModalManager,
@@ -171,40 +217,59 @@ pub const MtmdContext = struct {
     pos_type: PosType = .normal,
     output_embd: ?[]f32 = null,
 
-    pub fn init(allocator: std.mem.Allocator, mmproj_path: []const u8, io: std.Io, text_n_embd: i32, params: ContextParams, tok: ?*tokenizer.Tokenizer) !*MtmdContext {
+    /// 从已有的 MultiModalManager 初始化 MtmdContext（堆分配）
+    /// 调用者负责通过 deinit() 释放
+    pub fn init(
+        allocator: std.mem.Allocator,
+        mm_manager: *mm.MultiModalManager,
+        text_n_embd: i32,
+        params: ContextParams,
+        tok: ?*tokenizer.Tokenizer,
+    ) !*MtmdContext {
+        const caps = mm_manager.capabilities;
+        const img = resolveImageMarkers(&caps);
+        const aud = resolveAudioMarkers(&caps);
+        log.info("Image markers: {s}{s}", .{ img.beg, img.end });
+        log.info("Audio markers: {s}{s}", .{ aud.beg, aud.end });
+        const self = try allocator.create(MtmdContext);
+        self.* = .{
+            .allocator = allocator,
+            .mm_manager = mm_manager,
+            .caps = caps,
+            .params = params,
+            .n_embd_text = text_n_embd,
+            .tok = tok,
+            .media_marker = params.media_marker,
+            .img_beg = img.beg,
+            .img_end = img.end,
+            .aud_beg = aud.beg,
+            .aud_end = aud.end,
+            .pos_type = .normal,
+        };
+        return self;
+    }
+
+    /// 从 mmproj 文件路径初始化 MtmdContext（便捷方法）
+    /// 内部打开 GGUF 文件、检测能力、创建 MultiModalManager
+    pub fn initFromPath(
+        allocator: std.mem.Allocator,
+        mmproj_path: []const u8,
+        io: std.Io,
+        text_n_embd: i32,
+        params: ContextParams,
+        tok: ?*tokenizer.Tokenizer,
+    ) !*MtmdContext {
         const cwd = std.Io.Dir.cwd();
         const file = try cwd.openFile(io, mmproj_path, .{ .mode = .read_only });
         defer file.close(io);
         var gf = try gguf.GGUFFile.init(allocator, file, io);
         defer gf.deinit();
-        const caps = try detectCapabilities(&gf);
+        const caps = mm.MultiModalManager.detectFromGGUF(&gf);
         const buf_size: usize = 512 * 1024 * 1024;
         const ctx = try ggml.Context.init(allocator, buf_size, false);
         const mgr = try allocator.create(mm.MultiModalManager);
         mgr.* = try mm.MultiModalManager.init(allocator, &gf, ctx, caps);
-        const pos_type: PosType = .normal;
-        var ib: []const u8 = "";
-        var ie: []const u8 = "";
-        var ab: []const u8 = "";
-        var ae: []const u8 = "";
-        if (caps.has_vision) {
-            if (std.mem.eql(u8, caps.vision_encoder_type, "gemma4v") or std.mem.eql(u8, caps.vision_encoder_type, "gemma4uv")) {
-                ib = "<|image>";
-                ie = "<image|>";
-            } else {
-                ib = "<start_of_image>";
-                ie = "<end_of_image>";
-            }
-        }
-        if (caps.has_audio) {
-            if (std.mem.eql(u8, caps.audio_encoder_type, "gemma4a") or std.mem.eql(u8, caps.audio_encoder_type, "gemma4ua")) {
-                ab = "<|audio>";
-                ae = "<audio|>";
-            }
-        }
-        const self = try allocator.create(MtmdContext);
-        self.* = .{ .allocator = allocator, .mm_manager = mgr, .caps = caps, .params = params, .n_embd_text = text_n_embd, .tok = tok, .media_marker = params.media_marker, .img_beg = ib, .img_end = ie, .aud_beg = ab, .aud_end = ae, .pos_type = pos_type };
-        return self;
+        return try MtmdContext.init(allocator, mgr, text_n_embd, params, tok);
     }
 
     pub fn deinit(self: *MtmdContext) void {
@@ -241,32 +306,13 @@ pub const MtmdContext = struct {
     }
 };
 
-fn detectCapabilities(gf: *const gguf.GGUFFile) !model.ModelCapabilities {
-    var caps = model.ModelCapabilities{};
-    if (gf.findTensor("v.patch_embd.weight") != null or gf.findTensor("v.position_embd.weight") != null) {
-        caps.has_vision = true;
-        // 与 vision.zig 加载代码保持一致的命名前缀
-        caps.vision_encoder_type = if (gf.findTensor("v.patch_norm.1.weight") != null or
-            gf.findTensor("patch_norm_1.weight") != null)
-            "gemma4uv"
-        else
-            "gemma4v";
-    }
-    if (gf.findTensor("a.conv1d.0.weight") != null or gf.findTensor("a.input_projection.weight") != null) {
-        caps.has_audio = true;
-        caps.audio_encoder_type = "gemma4a";
-        caps.audio_sample_rate = 16000;
-        if (gf.getU32("gemma4.audio.sample_rate")) |v| caps.audio_sample_rate = @intCast(v);
-    }
-    return caps;
-}
-
+/// 从 mmproj 文件快速检测能力（不创建完整上下文）
 pub fn getCapFromFile(allocator: std.mem.Allocator, mmproj_path: []const u8, io: std.Io) !Caps {
     const cwd = std.Io.Dir.cwd();
     const file = try cwd.openFile(io, mmproj_path, .{ .mode = .read_only });
     defer file.close(io);
     var gf = try gguf.GGUFFile.init(allocator, file, io);
     defer gf.deinit();
-    const caps = try detectCapabilities(&gf);
+    const caps = mm.MultiModalManager.detectFromGGUF(&gf);
     return .{ .inp_vision = caps.has_vision, .inp_audio = caps.has_audio };
 }

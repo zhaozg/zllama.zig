@@ -83,16 +83,12 @@ fn createTestContext(allocator: std.mem.Allocator) !*mtmd.MtmdContext {
     const caps = model.ModelCapabilities{ .has_vision = true, .vision_encoder_type = "gemma4v" };
     const mgr = try allocator.create(mm.MultiModalManager);
     mgr.* = .{ .allocator = allocator, .capabilities = caps, .audio_encoder = null, .vision_encoder = null };
-    const ctx = try allocator.create(mtmd.MtmdContext);
-    ctx.* = .{ .allocator = allocator, .mm_manager = mgr, .caps = caps, .params = mtmd.contextParamsDefault(), .n_embd_text = 2560, .tok = null, .media_marker = "<__media__>", .img_beg = "<|image>", .img_end = "<image|>" };
-    return ctx;
+    return try mtmd.MtmdContext.init(allocator, mgr, 2560, mtmd.contextParamsDefault(), null);
 }
 
 fn createTestContextAudio(allocator: std.mem.Allocator) !*mtmd.MtmdContext {
     const caps = model.ModelCapabilities{ .has_audio = true, .audio_encoder_type = "gemma4a", .audio_sample_rate = 16000 };
     const mgr = try allocator.create(mm.MultiModalManager);
     mgr.* = .{ .allocator = allocator, .capabilities = caps, .audio_encoder = null, .vision_encoder = null };
-    const ctx = try allocator.create(mtmd.MtmdContext);
-    ctx.* = .{ .allocator = allocator, .mm_manager = mgr, .caps = caps, .params = mtmd.contextParamsDefault(), .n_embd_text = 2560, .tok = null, .media_marker = "<__media__>", .aud_beg = "<|audio>", .aud_end = "<audio|>" };
-    return ctx;
+    return try mtmd.MtmdContext.init(allocator, mgr, 2560, mtmd.contextParamsDefault(), null);
 }

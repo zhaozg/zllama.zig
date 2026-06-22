@@ -193,26 +193,21 @@ pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]con
     var gguf_file = try gguf.parse(gguf_data, allocator);
     defer gguf_file.deinit();
 
-    // Detect capabilities from mmproj file
-    if (gguf_file.findTensor("a.conv1d.0.weight") != null or
-        gguf_file.findTensor("a.pre_encode.out.weight") != null or
-        gguf_file.findTensor("mm.a.input_projection.weight") != null)
-    {
+    // Detect capabilities from mmproj file using shared detection logic
+    const detected = mm.MultiModalManager.detectFromGGUF(&gguf_file);
+    if (detected.has_audio) {
         capabilities.has_audio = true;
         if (capabilities.audio_encoder_type.len == 0) {
-            capabilities.audio_encoder_type = "Conformer (E2B)";
+            capabilities.audio_encoder_type = detected.audio_encoder_type;
         }
         if (capabilities.audio_sample_rate == 0) {
-            capabilities.audio_sample_rate = 16000;
+            capabilities.audio_sample_rate = detected.audio_sample_rate;
         }
     }
-    if (gguf_file.findTensor("v.patch_embd.weight") != null or
-        gguf_file.findTensor("mm.input_projection.weight") != null or
-        gguf_file.findTensor("mm.soft_emb_norm.weight") != null)
-    {
+    if (detected.has_vision) {
         capabilities.has_vision = true;
         if (capabilities.vision_encoder_type.len == 0) {
-            capabilities.vision_encoder_type = "ViT (SigLIP/Gemma4V)";
+            capabilities.vision_encoder_type = detected.vision_encoder_type;
         }
     }
 

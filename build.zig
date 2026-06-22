@@ -436,7 +436,7 @@ pub fn build(b: *std.Build) void {
 
     // mtmd 模块（多模态解码）
     const mtmd_mod = b.createModule(.{
-        .root_source_file = b.path("src/mtmd.zig"),
+        .root_source_file = b.path("src/mtmd/mod.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -447,7 +447,6 @@ pub fn build(b: *std.Build) void {
     mtmd_mod.addImport("mm", mm_manager_mod);
     mtmd_mod.addImport("preprocess", mm_preprocess_mod);
     mtmd_mod.addImport("tokenizer", tokenizer_mod);
-    mtmd_mod.addImport("utils", utils_mod);
     // mtmd 子模块（helper 和 tokenize 通过相对路径导入）
     {
         const helper_mod = b.createModule(.{

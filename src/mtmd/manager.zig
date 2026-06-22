@@ -49,6 +49,36 @@ pub const MultiModalManager = struct {
     audio_encoder: ?audio.AudioEncoder = null,
     vision_encoder: ?vision.VisionEncoder = null,
 
+    /// 从 GGUF 文件检测多模态能力
+    /// 检查 mmproj 文件中是否存在视觉/音频编码器相关的张量
+    pub fn detectFromGGUF(gf: *const gguf.GGUFFile) model.ModelCapabilities {
+        var caps = model.ModelCapabilities{};
+        if (gf.findTensor("v.patch_embd.weight") != null or
+            gf.findTensor("v.position_embd.weight") != null or
+            gf.findTensor("mm.input_projection.weight") != null or
+            gf.findTensor("mm.soft_emb_norm.weight") != null)
+        {
+            caps.has_vision = true;
+            // 与 vision.zig 加载代码保持一致的命名前缀
+            caps.vision_encoder_type = if (gf.findTensor("v.patch_norm.1.weight") != null or
+                gf.findTensor("patch_norm_1.weight") != null)
+                "gemma4uv"
+            else
+                "gemma4v";
+        }
+        if (gf.findTensor("a.conv1d.0.weight") != null or
+            gf.findTensor("a.input_projection.weight") != null or
+            gf.findTensor("a.pre_encode.out.weight") != null or
+            gf.findTensor("mm.a.input_projection.weight") != null)
+        {
+            caps.has_audio = true;
+            caps.audio_encoder_type = "gemma4a";
+            caps.audio_sample_rate = 16000;
+            if (gf.getU32("gemma4.audio.sample_rate")) |v| caps.audio_sample_rate = @intCast(v);
+        }
+        return caps;
+    }
+
     /// 初始化多模态管理器
     /// @param gguf_file 包含多模态编码器权重的 GGUF 文件（通常为 mmproj 文件）
     /// @param ctx ggml 权重上下文
