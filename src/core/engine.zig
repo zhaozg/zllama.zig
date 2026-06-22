@@ -223,7 +223,8 @@ pub const InferenceEngine = struct {
     pub fn deinit(self: *InferenceEngine) void {
         if (self.mtmd_context) |ctx| {
             ctx.deinit();
-        } else if (self.mm_manager) |*m| {
+        }
+        if (self.mm_manager) |*m| {
             m.deinit();
         }
         self.inc_ctx.deinit();

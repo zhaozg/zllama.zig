@@ -45,6 +45,7 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
     .{ .scope = .gemma4, .level = .info },
     .{ .scope = .mtmd, .level = .info },
     .{ .scope = .prefill, .level = .debug },
+    .{ .scope = .multimodal, .level = .debug },
     .{ .scope = .vision_encoder, .level = .info },
 } };
 
