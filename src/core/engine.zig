@@ -762,7 +762,7 @@ pub const InferenceEngine = struct {
 
         // 使用新的 tokenize 方法：先正常 tokenize（含 parse_special），
         // 然后在 token 序列中找到 <|image|> 特殊 token 的位置并展开
-        var expanded = try self.tokenizeWithMediaPlaceholders(formatted_prompt, image_token_id, @intCast(n_vision_tokens));
+        var expanded = try self.tokenizeWithMediaPlaceholders(formatted_prompt, image_token_id, @intCast(n_vision_tokens), .image);
         defer expanded.deinit();
         logger.info("Vision input: {d} prefix tokens + {d} image tokens + {d} suffix tokens = {d} total", .{
             if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else @as(u32, 0),
@@ -845,7 +845,7 @@ pub const InferenceEngine = struct {
 
         // 使用新的 tokenize 方法：先正常 tokenize（含 parse_special），
         // 然后在 token 序列中找到 <|audio|> 特殊 token 的位置并展开
-        var expanded = try self.tokenizeWithMediaPlaceholders(formatted_prompt, audio_token_id, @intCast(n_audio_tokens));
+        var expanded = try self.tokenizeWithMediaPlaceholders(formatted_prompt, audio_token_id, @intCast(n_audio_tokens), .audio);
         defer expanded.deinit();
         logger.info("Audio input: {d} prefix tokens + {d} audio tokens + {d} suffix tokens = {d} total", .{
             if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else @as(u32, 0),
@@ -1029,6 +1029,7 @@ pub const InferenceEngine = struct {
         formatted_prompt: []const u8,
         media_token_id: u32,
         media_token_count: u32,
+        media_type: chat_template.MediaType,
     ) !chat_template.TokenizedSegments {
         // Step 1: 对整个 formatted_prompt 进行 tokenize（含 parse_special=true）
         var all_tokens = try self.tok.encode(formatted_prompt, false, true);
@@ -1074,7 +1075,7 @@ pub const InferenceEngine = struct {
             try offsets.append(self.allocator, .{
                 .start = 0,
                 .length = 0,
-                .media_type = .image,
+                .media_type = media_type,
                 .token_count = media_token_count,
                 .token_offset = @intCast(new_tokens.items.len),
             });
