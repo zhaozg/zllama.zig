@@ -173,7 +173,7 @@ pub const ModelCapabilities = struct {
     /// 是否支持音频输入（音频编码器，如 Conformer）
     has_audio: bool = false,
     /// 音频采样率（Hz），如 16000
-    audio_sample_rate: i32 = -1,
+    audio_sample_rate: i32 = 0,
     /// 视觉编码器类型名称
     vision_encoder_type: []const u8 = "",
     /// 音频编码器类型名称

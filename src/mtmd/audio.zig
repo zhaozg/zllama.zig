@@ -36,18 +36,20 @@ pub const AudioEncoderParams = struct {
     n_head: u32 = 8,
     /// 每头维度
     d_head: u32 = 64,
-    /// Conformer 层数
-    n_layer: u32 = 16,
+    /// Conformer 层数 (Gemma 4 E2B 使用 12 层)
+    n_layer: u32 = 12,
     /// FFN 中间维度
     n_ff: u32 = 2048,
-    /// 输出投影维度（匹配 LLM 嵌入维度）
+    /// 输出投影维度（匹配 LLM 嵌入维度，从 GGUF 元数据加载）
+    /// Gemma 4 4B: 1536, Gemma 4 9B: 2560
     n_output_embd: u32 = 2560,
     /// 音频采样率
     sample_rate: u32 = 16000,
     /// 最大音频长度（秒）
     max_audio_length_sec: f32 = 30.0,
     /// 归一化 epsilon (loaded from GGUF: clip.audio.attention.layer_norm_epsilon)
-    norm_eps: f32 = 1e-5,
+    /// Gemma 4 所有模型（文本/视觉/音频）均使用 1e-6
+    norm_eps: f32 = 1e-6,
 };
 
 // ============================================================================
@@ -539,8 +541,19 @@ pub const AudioEncoder = struct {
     /// 估算编码后的 token 数量
     /// Gemma 4 E2B 的 Conformer 使用 2 层步长为 2 的子采样，
     /// 因此每 4 帧 mel 特征产生 1 个输出 token
+    /// Mel 帧数计算：n_frames = (n_samples + pad_left - frame_size) / hop + 1
+    /// 其中 pad_left = frame_length/2 = 160, frame_size = n_fft = 512, hop = 160
+    /// 简化：n_frames ≈ n_samples / 160
+    /// 输出 tokens = n_frames / 4
     pub fn estimateOutputTokens(self: *const AudioEncoder, audio_length_sec: f32) u32 {
-        const n_frames: u32 = @intFromFloat(@as(f32, @floatFromInt(self.params.sample_rate)) * audio_length_sec / 160.0);
+        const n_samples: u32 = @intFromFloat(@as(f32, @floatFromInt(self.params.sample_rate)) * audio_length_sec);
+        const pad_left: u32 = 160; // frame_length / 2
+        const hop: u32 = 160;
+        const n_with_left = n_samples + pad_left;
+        const n_frames: u32 = if (n_with_left >= 321) // frame_length + 1
+            (n_with_left - 321) / hop + 1
+        else
+            0;
         return n_frames / 4;
     }
 

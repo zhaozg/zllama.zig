@@ -25,8 +25,7 @@ pub const AccelFFT = struct {
     setup: vdsp.FFTSetup,
     log2n: u32,
     n: u32,
-    /// Hann 窗函数 [n]（400 点 + 零填充，匹配 llama.cpp）
-    window: []f32,
+    /// 分割复数缓冲区 [n/2]，重用避免逐帧分配
     /// 分割复数缓冲区 [n/2]，重用避免逐帧分配
     split_buf: []f32,
     /// 帧填充缓冲区 [n]，重用避免逐帧分配
@@ -45,17 +44,15 @@ pub const AccelFFT = struct {
         const setup = vdsp.vDSP_create_fftsetup(log2n, vdsp.kFFTRadix2);
         if (setup == null) return error.FftSetupFailed;
         errdefer vdsp.vDSP_destroy_fftsetup(setup);
-        // 生成 Hann 窗函数（匹配 llama.cpp: 400 点窗 + 零填充到 512）
-        const window = try allocator.alloc(f32, n);
-        errdefer allocator.free(window);
-        @memset(window, 0.0);
-        // Hann window is now generated dynamically in computeMelSpectrogram
-        // to match the exact window_len from AudioPreprocessParams.
-        // The window buffer is reused for each frame via vDSP_vmul.
 
-        const split_buf = try allocator.alloc(f32, n); // n floats for interleaved complex storage
+        // Hann window is generated dynamically in computeMelSpectrogram
+        // to match the exact window_len from AudioPreprocessParams.
+        // The frame_buf is reused for each frame.
+
+        const split_buf = try allocator.alloc(f32, n);
         errdefer allocator.free(split_buf);
         const frame_buf = try allocator.alloc(f32, n);
+        errdefer allocator.free(frame_buf);
 
         log.info("AccelFFT: n={d} log2n={d}", .{ n, log2n });
 
@@ -64,16 +61,15 @@ pub const AccelFFT = struct {
             .setup = setup,
             .log2n = @intCast(log2n),
             .n = n,
-            .window = window,
             .split_buf = split_buf,
             .frame_buf = frame_buf,
         };
     }
 
+
     /// 释放 FFT 引擎所有资源
     pub fn deinit(self: *AccelFFT) void {
         vdsp.vDSP_destroy_fftsetup(self.setup);
-        self.allocator.free(self.window);
         self.allocator.free(self.split_buf);
         self.allocator.free(self.frame_buf);
         self.* = undefined;
@@ -124,11 +120,13 @@ pub const AccelFFT = struct {
         spectrum[n / 2] = split.imagp[0] * split.imagp[0];
 
         // Convert power → magnitude (sqrt of power).
-        // vDSP_fft_zrip applies internal 2x scaling → divide by 2.
-        // This matches numpy's np.abs(np.fft.rfft(x)).
-        const half: f32 = 0.5;
+        // vDSP_fft_zrip output is NOT internally scaled (unlike vDSP_fft_zip).
+        // To match numpy's np.abs(np.fft.rfft(x)) / n_fft:
+        //   magnitude = sqrt(power) / n_fft
+        // Reference: llama.cpp mtmd-audio.cpp log_mel_spectrogram_worker_thread
+        const inv_n: f32 = 1.0 / @as(f32, @floatFromInt(n));
         for (spectrum[0 .. n / 2 + 1]) |*s| {
-            s.* = half * @sqrt(@max(s.*, 0.0));
+            s.* = inv_n * @sqrt(@max(s.*, 0.0));
         }
     }
 };

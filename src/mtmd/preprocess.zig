@@ -614,11 +614,14 @@ pub const ProcessedAudio = struct {
 /// 从 PCM F32 音频样本计算 Mel 频谱
 ///
 /// 处理步骤（匹配 llama.cpp gemma4a 预处理器）：
+/// 处理步骤（匹配 llama.cpp gemma4a 预处理器）：
 /// 1. 半因果左填充（pad_left = window_len/2）
 /// 2. 短时傅里叶变换（STFT）
-///    - 帧长（frame_length）= 400 samples (25ms @ 16kHz)
+///    - 帧长（frame_length）= 320 samples (20ms @ 16kHz)
 ///    - 帧移（hop_length）= 160 samples (10ms @ 16kHz)
 ///    - Hann 窗口（零填充到 FFT 大小）
+///    - FFT 点数 = 512 (n_fft)
+///    - 幅度谱（use_magnitude=true）
 ///    - FFT 点数 = 512 (n_fft)
 ///    - 幅度谱（use_magnitude=true）
 /// 3. Mel 滤波器组（HTK 尺度, 128 bins, 0-8000 Hz）

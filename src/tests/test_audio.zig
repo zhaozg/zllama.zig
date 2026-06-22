@@ -132,11 +132,14 @@ test "ChatMessage withMedia: audio" {
 
 test "Mel filterbank: basic properties" {
     // Create a sine wave with enough samples for 1 frame.
-    // With pad_left=frame_length/2=200 and frame_length=400:
-    //   n_frames = (n_padded - 400) / 160 + 1
-    //   For 1 frame: (n_padded - 400) / 160 + 1 = 1 → n_padded = 400
-    //   So n_samples = 400 - pad_left = 200
-    const n_samples = 200;
+    // With pad_left=frame_length/2=160 and frame_length=320:
+    //   pt_frames = (n_with_left - (frame_length+1)) / hop + 1
+    //   For 1 frame: (n_samples + 160 - 321) / 160 + 1 = 1 -> n_samples = 320
+    //   n_padded_needed = (1-1)*160 + 512 = 512
+    //   total_pad = max(512-320, 160) = 192
+    //   n_samples_padded = 192 + 320 = 512
+    //   n_frames = (512 - 512) / 160 + 1 = 1
+    const n_samples = 320;
     var sine_samples = try testing.allocator.alloc(f32, n_samples);
     defer testing.allocator.free(sine_samples);
 
@@ -147,7 +150,7 @@ test "Mel filterbank: basic properties" {
 
     const params = preprocess.AudioPreprocessParams{
         .sample_rate = 16000,
-        .frame_length = 400,
+        .frame_length = 320,
         .hop_length = 160,
         .n_fft = 512,
         .n_mel_bins = 16,
@@ -160,7 +163,7 @@ test "Mel filterbank: basic properties" {
     var mel = try preprocess.computeMelSpectrogram(testing.allocator, sine_samples, 16000, params);
     defer mel.deinit();
 
-    // With 200 samples + 200 pad_left = 400 padded, exactly 1 frame
+    // With 320 samples + 192 pad = 512 padded, exactly 1 frame
     try testing.expectEqual(@as(u32, 1), mel.n_frames);
     try testing.expectEqual(@as(u32, 16), mel.n_mel_bins);
     try testing.expect(mel.data.len == 16);
