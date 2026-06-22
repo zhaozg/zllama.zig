@@ -47,6 +47,7 @@ pub fn build(b: *std.Build) void {
         ggml_mod.linkSystemLibrary("ggml-base", .{});
         ggml_mod.linkSystemLibrary("ggml", .{});
         ggml_mod.linkSystemLibrary("ggml-cpu", .{});
+        ggml_mod.addRPathSpecial("/usr/local/lib");
     }
 
     // macOS 框架和加速

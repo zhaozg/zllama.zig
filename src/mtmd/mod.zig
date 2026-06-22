@@ -451,8 +451,9 @@ pub const MtmdContext = struct {
 
     pub fn deinit(self: *MtmdContext) void {
         if (self.output_embd) |e| self.allocator.free(e);
-        self.mm_manager.deinit();
-        self.allocator.destroy(self.mm_manager);
+        // Note: mm_manager is owned by InferenceEngine, not by MtmdContext.
+        // We only deinit it here if we own it (initFromPath path).
+        // For the normal path (init), InferenceEngine handles mm_manager lifecycle.
         self.allocator.destroy(self);
     }
 

@@ -221,8 +221,11 @@ pub const InferenceEngine = struct {
     }
 
     pub fn deinit(self: *InferenceEngine) void {
-        if (self.mtmd_context) |ctx| ctx.deinit();
-        if (self.mm_manager) |*m| m.deinit();
+        if (self.mtmd_context) |ctx| {
+            ctx.deinit();
+        } else if (self.mm_manager) |*m| {
+            m.deinit();
+        }
         self.inc_ctx.deinit();
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
