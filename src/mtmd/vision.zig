@@ -15,6 +15,11 @@
 //! - Gemma4UV: 统一视觉编码器（gemma4uv, 带额外 patch 归一化）
 //!
 //! 参考: llama.cpp tools/mtmd/models/gemma4v.cpp, gemma4uv.cpp
+//!
+//! ⚠️ GGUF 键名说明:
+//! mmproj GGUF 文件使用 `clip.vision.*` 前缀的键名（非 `gemma4.vision.*`）。
+//! 例如: clip.vision.image_size, clip.vision.patch_size, clip.vision.embedding_length 等。
+//! 参考: llama.cpp tools/mtmd/clip.cpp 中 clip_hparams 的加载逻辑。
 const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
@@ -25,20 +30,35 @@ const log = std.log.scoped(.vision_encoder);
 // ============================================================================
 pub const VisionEncoderParams = struct {
     /// 输入图像尺寸（正方形，边长）
-    image_size: u32 = 896,
+    /// 来自 GGUF: clip.vision.image_size (mmproj 文件)
+    /// Gemma 4 E2B: 224
+    image_size: u32 = 224,
     /// Patch 大小
-    patch_size: u32 = 14,
+    /// 来自 GGUF: clip.vision.patch_size
+    /// Gemma 4 E2B: 16
+    patch_size: u32 = 16,
     /// 嵌入维度
-    n_embd: u32 = 1152,
+    /// 来自 GGUF: clip.vision.embedding_length
+    /// Gemma 4 E2B: 768
+    n_embd: u32 = 768,
     /// 注意力头数
-    n_head: u32 = 16,
+    /// 来自 GGUF: clip.vision.attention.head_count
+    /// Gemma 4 E2B: 12
+    n_head: u32 = 12,
     /// ViT 层数
-    n_layer: u32 = 27,
+    /// 来自 GGUF: clip.vision.block_count
+    /// Gemma 4 E2B: 16
+    n_layer: u32 = 16,
     /// FFN 中间维度
-    n_ff: u32 = 4304,
+    /// 来自 GGUF: clip.vision.feed_forward_length
+    /// Gemma 4 E2B: 3072
+    n_ff: u32 = 3072,
     /// 输出投影维度（匹配 LLM 嵌入维度）
-    n_output_embd: u32 = 2560,
+    /// 来自 GGUF: clip.vision.projection_dim
+    /// Gemma 4 E2B: 1536 (匹配 LLM n_embd)
+    n_output_embd: u32 = 1536,
     /// Pooling kernel size（每侧合并数）
+    /// Gemma 4 E2B: 2 (from n_merge)
     n_merge: u32 = 2,
     /// RoPE theta
     rope_theta: f32 = 10000.0,
@@ -82,8 +102,8 @@ pub const VisionEncoderWeights = struct {
     patch_norm_1_b: ?*ggml.Tensor = null,
     patch_norm_2_w: ?*ggml.Tensor = null,
     patch_norm_2_b: ?*ggml.Tensor = null,
-    patch_norm_3_w: ?*ggml.Tensor = null, // pos_norm
-    patch_norm_3_b: ?*ggml.Tensor = null, // pos_norm
+    patch_norm_3_w: ?*ggml.Tensor = null,
+    patch_norm_3_b: ?*ggml.Tensor = null,
     // 位置编码
     position_embeddings: ?*ggml.Tensor = null,
     // ViT 层
@@ -110,7 +130,13 @@ pub const VisionEncoder = struct {
     weights: VisionEncoderWeights,
     encoder_type: EncoderType,
     ctx_weights: *ggml.Context,
+    /// 图像归一化参数（来自 GGUF clip.vision.image_mean / image_std）
+    image_mean: [3]f32 = .{ 0.0, 0.0, 0.0 },
+    image_std: [3]f32 = .{ 1.0, 1.0, 1.0 },
+
     /// 从 GGUF 文件初始化视觉编码器
+    /// 注意: mmproj GGUF 使用 `clip.vision.*` 前缀的键名（非 `gemma4.vision.*`）
+    /// 参考: llama.cpp tools/mtmd/clip.cpp 中 clip_hparams 的加载逻辑
     pub fn init(
         gguf_file: *const gguf.GGUFFile,
         ctx: *ggml.Context,
@@ -118,23 +144,49 @@ pub const VisionEncoder = struct {
     ) !VisionEncoder {
         var params = VisionEncoderParams{};
         // 从 GGUF 元数据读取参数
-        if (gguf_file.getU32("gemma4.vision.image_size")) |v| params.image_size = v;
-        if (gguf_file.getU32("gemma4.vision.patch_size")) |v| params.patch_size = v;
-        if (gguf_file.getU32("gemma4.vision.embedding_length")) |v| params.n_embd = v;
-        if (gguf_file.getU32("gemma4.vision.attention_head_count")) |v| params.n_head = v;
-        if (gguf_file.getU32("gemma4.vision.block_count")) |v| params.n_layer = v;
-        if (gguf_file.getU32("gemma4.vision.feed_forward_length")) |v| params.n_ff = v;
-        if (gguf_file.getU32("gemma4.vision.projection_dim")) |v| params.n_merge = v;
-        if (gguf_file.getF32("gemma4.vision.rope_theta")) |v| params.rope_theta = v;
+        // mmproj GGUF 使用 clip.vision.* 前缀
+        // 同时也尝试 gemma4.vision.* 前缀以兼容不同格式
+        if (gguf_file.getU32("clip.vision.image_size")) |v| params.image_size = v else if (gguf_file.getU32("gemma4.vision.image_size")) |v| params.image_size = v;
+
+        if (gguf_file.getU32("clip.vision.patch_size")) |v| params.patch_size = v else if (gguf_file.getU32("gemma4.vision.patch_size")) |v| params.patch_size = v;
+
+        if (gguf_file.getU32("clip.vision.embedding_length")) |v| params.n_embd = v else if (gguf_file.getU32("gemma4.vision.embedding_length")) |v| params.n_embd = v;
+
+        if (gguf_file.getU32("clip.vision.attention.head_count")) |v| params.n_head = v else if (gguf_file.getU32("gemma4.vision.attention_head_count")) |v| params.n_head = v;
+
+        if (gguf_file.getU32("clip.vision.block_count")) |v| params.n_layer = v else if (gguf_file.getU32("gemma4.vision.block_count")) |v| params.n_layer = v;
+
+        if (gguf_file.getU32("clip.vision.feed_forward_length")) |v| params.n_ff = v else if (gguf_file.getU32("gemma4.vision.feed_forward_length")) |v| params.n_ff = v;
+
+        // projection_dim 是输出投影维度（匹配 LLM n_embd），不是 n_merge
+        if (gguf_file.getU32("clip.vision.projection_dim")) |v| params.n_output_embd = v else if (gguf_file.getU32("gemma4.vision.projection_dim")) |v| params.n_output_embd = v;
+
+        if (gguf_file.getF32("clip.vision.attention.layer_norm_epsilon")) |v| params.norm_eps = v else if (gguf_file.getF32("gemma4.vision.rope_theta")) |v| params.rope_theta = v;
+
+        // 读取图像归一化参数（存储在 VisionEncoder 上，非 params）
+        var image_mean: [3]f32 = .{ 0.0, 0.0, 0.0 };
+        var image_std: [3]f32 = .{ 1.0, 1.0, 1.0 };
+        if (gguf_file.getF32Array("clip.vision.image_mean", 3)) |mean| {
+            for (mean, 0..) |v, i| image_mean[i] = v;
+        }
+        if (gguf_file.getF32Array("clip.vision.image_std", 3)) |std_val| {
+            for (std_val, 0..) |v, i| image_std[i] = v;
+        }
+
         // 检测编码器类型 — 与权重加载使用相同的命名前缀
         const enc_type: EncoderType = if (gguf_file.findTensor("v.patch_norm.1.weight") != null or
             gguf_file.findTensor("patch_norm_1.weight") != null)
             .gemma4uv
         else
             .gemma4v;
-        log.info("Loading vision encoder: type={s}, size={d}, patch={d}, embd={d}, heads={d}, layers={d}", .{
-            @tagName(enc_type), params.image_size, params.patch_size,
-            params.n_embd,      params.n_head,     params.n_layer,
+        log.info("Loading vision encoder: type={s}, size={d}, patch={d}, embd={d}, heads={d}, layers={d}, output_embd={d}", .{
+            @tagName(enc_type),   params.image_size, params.patch_size,
+            params.n_embd,        params.n_head,     params.n_layer,
+            params.n_output_embd,
+        });
+        log.info("  image_mean=[{d:.4},{d:.4},{d:.4}] image_std=[{d:.4},{d:.4},{d:.4}]", .{
+            image_mean[0], image_mean[1], image_mean[2],
+            image_std[0],  image_std[1],  image_std[2],
         });
         // 加载 Patch embedding (v.patch_embd.*)
         const patch_embd = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;
@@ -188,6 +240,8 @@ pub const VisionEncoder = struct {
             },
             .encoder_type = enc_type,
             .ctx_weights = ctx,
+            .image_mean = image_mean,
+            .image_std = image_std,
         };
     }
     /// 编码 RGB 图像数据，返回视觉嵌入 tokens
@@ -224,25 +278,35 @@ pub const VisionEncoder = struct {
         var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(img_width), @intCast(img_height), 3);
         inp.setName("vision_input");
         // Fill tensor with image data: HWC u8 [0,255] -> WHC f32 [0,1]
+        // Then apply normalization: (pixel/255.0 - mean) / std
         {
             const src = image_data;
             const W: usize = @intCast(img_width);
             const H: usize = @intCast(img_height);
             const wh: usize = W * H;
             const dst = inp.dataF32();
+            const mean_r = self.image_mean[0];
+            const mean_g = self.image_mean[1];
+            const mean_b = self.image_mean[2];
+            const std_r = self.image_std[0];
+            const std_g = self.image_std[1];
+            const std_b = self.image_std[2];
             for (0..H) |y| {
                 for (0..W) |x| {
                     const src_idx = (y * W + x) * 3;
                     const dst_base = y * W + x;
-                    dst[dst_base] = @as(f32, @floatFromInt(src[src_idx + 0])) / 255.0;
-                    dst[dst_base + wh] = @as(f32, @floatFromInt(src[src_idx + 1])) / 255.0;
-                    dst[dst_base + 2 * wh] = @as(f32, @floatFromInt(src[src_idx + 2])) / 255.0;
+                    // Normalize: (pixel/255.0 - mean) / std
+                    // Matches llama.cpp clip-impl.h normalize() + from_u8()
+                    dst[dst_base] = (@as(f32, @floatFromInt(src[src_idx + 0])) / 255.0 - mean_r) / std_r;
+                    dst[dst_base + wh] = (@as(f32, @floatFromInt(src[src_idx + 1])) / 255.0 - mean_g) / std_g;
+                    dst[dst_base + 2 * wh] = (@as(f32, @floatFromInt(src[src_idx + 2])) / 255.0 - mean_b) / std_b;
                 }
             }
         }
         switch (self.encoder_type) {
             .gemma4v => {
-                // 标准化: patches * 2 - 1
+                // Scale: patches * 2 - 1
+                // Matches llama.cpp gemma4v.cpp: ggml_scale_bias(ctx0, inp_raw, 2.0f, -1.0f)
                 inp = ggml.scale(ctx, inp, 2.0);
                 {
                     const bias = try ctx.newTensor1d(ggml.Type.f32, 1);
@@ -261,8 +325,12 @@ pub const VisionEncoder = struct {
                     n_patches = n_patches_x * n_patches_y;
                     inp = inp.conv2d(ctx, pe, kw, kh, 0, 0, 1, 1);
                     // Reshape to [n_embd, n_patches] — matches llama.cpp convention
-                    inp = inp.reshape2d(ctx, effective_n_embd, n_patches);
-                    inp = inp.cont(ctx);
+                    // llama.cpp: reshape_3d -> transpose -> cont
+                    // inp = ggml_reshape_3d(ctx0, inp, n_patches, n_embd, n_batch);
+                    // inp = ggml_cont(ctx0, ggml_transpose(ctx0, inp));
+                    inp = inp.reshape3d(ctx, n_patches, effective_n_embd, 1);
+                    inp = ggml.cont(ctx, ggml.transpose(ctx, inp));
+                    inp.setName("inp_patches");
                 }
             },
             .gemma4uv => {

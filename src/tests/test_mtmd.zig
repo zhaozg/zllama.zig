@@ -45,49 +45,63 @@ test "DecoderPos: normal" {
 }
 
 test "tokenize: text only" {
-    const ctx = try createTestContext(testing.allocator);
-    defer ctx.deinit();
+    var tc = try createTestContext(testing.allocator);
+    defer tc.deinit();
     const input = mtmd.InputText{ .text = "Hello", .add_special = false };
-    var chunks = try mtmd.tokenize.tokenize(ctx, testing.allocator, input, &.{});
+    var chunks = try mtmd.tokenize.tokenize(tc.ctx, testing.allocator, input, &.{});
     defer chunks.deinit();
     try testing.expectEqual(@as(usize, 1), chunks.size());
 }
 
 test "tokenize: marker mismatch" {
-    const ctx = try createTestContext(testing.allocator);
-    defer ctx.deinit();
+    var tc = try createTestContext(testing.allocator);
+    defer tc.deinit();
     const input = mtmd.InputText{ .text = "<__media__>", .add_special = false };
-    try testing.expectError(error.MarkerBitmapMismatch, mtmd.tokenize.tokenize(ctx, testing.allocator, input, &.{}));
+    try testing.expectError(error.MarkerBitmapMismatch, mtmd.tokenize.tokenize(tc.ctx, testing.allocator, input, &.{}));
 }
 
 test "tokenize: image marker" {
-    const ctx = try createTestContext(testing.allocator);
-    defer ctx.deinit();
+    var tc = try createTestContext(testing.allocator);
+    defer tc.deinit();
     const input = mtmd.InputText{ .text = "Look: <__media__>", .add_special = false };
-    var chunks = try mtmd.tokenize.tokenize(ctx, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderImage(224, 224)});
+    var chunks = try mtmd.tokenize.tokenize(tc.ctx, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderImage(224, 224)});
     defer chunks.deinit();
     try testing.expect(chunks.size() >= 2);
 }
 
 test "tokenize: audio marker" {
-    const ctx = try createTestContextAudio(testing.allocator);
-    defer ctx.deinit();
+    var tc = try createTestContextAudio(testing.allocator);
+    defer tc.deinit();
     const input = mtmd.InputText{ .text = "Listen: <__media__>", .add_special = false };
-    var chunks = try mtmd.tokenize.tokenize(ctx, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderAudio(16000)});
+    var chunks = try mtmd.tokenize.tokenize(tc.ctx, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderAudio(16000)});
     defer chunks.deinit();
     try testing.expect(chunks.size() >= 2);
 }
 
-fn createTestContext(allocator: std.mem.Allocator) !*mtmd.MtmdContext {
+const TestContext = struct {
+    ctx: *mtmd.MtmdContext,
+    mgr: *mtmd.MultiModalManager,
+
+    fn deinit(self: *TestContext) void {
+        const allocator = self.ctx.allocator;
+        self.mgr.deinit();
+        self.ctx.deinit();
+        allocator.destroy(self.mgr);
+    }
+};
+
+fn createTestContext(allocator: std.mem.Allocator) !TestContext {
     const caps = model.ModelCapabilities{ .has_vision = true, .vision_encoder_type = "gemma4v" };
     const mgr = try allocator.create(mtmd.MultiModalManager);
     mgr.* = .{ .allocator = allocator, .capabilities = caps, .audio_encoder = null, .vision_encoder = null };
-    return try mtmd.MtmdContext.init(allocator, mgr, 2560, mtmd.contextParamsDefault(), null);
+    const ctx = try mtmd.MtmdContext.init(allocator, mgr, 2560, mtmd.contextParamsDefault(), null);
+    return TestContext{ .ctx = ctx, .mgr = mgr };
 }
 
-fn createTestContextAudio(allocator: std.mem.Allocator) !*mtmd.MtmdContext {
+fn createTestContextAudio(allocator: std.mem.Allocator) !TestContext {
     const caps = model.ModelCapabilities{ .has_audio = true, .audio_encoder_type = "gemma4a", .audio_sample_rate = 16000 };
     const mgr = try allocator.create(mtmd.MultiModalManager);
     mgr.* = .{ .allocator = allocator, .capabilities = caps, .audio_encoder = null, .vision_encoder = null };
-    return try mtmd.MtmdContext.init(allocator, mgr, 2560, mtmd.contextParamsDefault(), null);
+    const ctx = try mtmd.MtmdContext.init(allocator, mgr, 2560, mtmd.contextParamsDefault(), null);
+    return TestContext{ .ctx = ctx, .mgr = mgr };
 }

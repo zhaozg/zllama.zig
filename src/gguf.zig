@@ -301,6 +301,25 @@ pub const GGUFFile = struct {
         return result.items;
     }
 
+    /// 按 key 获取元数据 f32 数组值
+    pub fn getF32Array(self: *const GGUFFile, key: []const u8, expected_len: usize) ?[]const f32 {
+        const val = self.metadata.get(key) orelse return null;
+        if (val.value_type != .array) return null;
+        const arr = val.array_val;
+        if (arr.len != expected_len) return null;
+        // Use the arena allocator (cast away const since ArenaAllocator.allocator() takes *ArenaAllocator)
+        const arena_ptr = @as(*std.heap.ArenaAllocator, @constCast(&self.arena));
+        var result = std.ArrayList(f32).initCapacity(arena_ptr.allocator(), expected_len) catch return null;
+        for (arr) |item| {
+            if (item.asF32()) |v| {
+                result.append(arena_ptr.allocator(), v) catch return null;
+            } else {
+                return null;
+            }
+        }
+        return result.items;
+    }
+
     /// 按名称查找张量描述符
     pub fn findTensor(self: *const GGUFFile, name: []const u8) ?*const TensorInfo {
         for (self.tensors.items) |*t| {
