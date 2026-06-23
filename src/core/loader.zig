@@ -13,6 +13,7 @@ const ggml = @import("ggml");
 const gguf = @import("gguf");
 const model_if = @import("model");
 const mm = @import("mtmd");
+const engine_common = @import("engine_common");
 
 const log = std.log.scoped(.loader);
 
@@ -166,29 +167,12 @@ pub const Loader = struct {
 
 /// Load multimodal projector from separate GGUF file
 /// Also detects audio/vision capabilities from the mmproj GGUF file.
+/// Uses mmap for zero-copy loading when possible.
 pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]const u8, capabilities: *model_if.ModelCapabilities) !mm.MultiModalManager {
-    const cwd = std.Io.Dir.cwd();
-    const file = try cwd.openFile(io, mmproj_path, .{ .mode = .read_only });
-    defer file.close(io);
-
-    const stat = try file.stat(io);
-    const file_size = @as(usize, @intCast(stat.size));
-    const gguf_data = try allocator.alloc(u8, file_size);
-    defer allocator.free(gguf_data);
-
-    {
-        var offset: u64 = 0;
-        const chunk_size: usize = 64 * 1024 * 1024;
-        while (offset < file_size) {
-            const end = @min(offset + chunk_size, file_size);
-            const len = end - offset;
-            const bytes_read = try file.readPositionalAll(io, gguf_data[offset..][0..len], offset);
-            if (bytes_read != len) {
-                return error.FileReadError;
-            }
-            offset += bytes_read;
-        }
-    }
+    // 使用 mmap 加载 mmproj 文件（零拷贝，启动更快）
+    var mapped_file = try engine_common.mmapFile(io, allocator, mmproj_path);
+    defer mapped_file.deinit(io);
+    const gguf_data = mapped_file.data;
 
     var gguf_file = try gguf.parse(gguf_data, allocator);
     defer gguf_file.deinit();
