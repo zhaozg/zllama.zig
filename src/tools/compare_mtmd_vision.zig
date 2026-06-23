@@ -170,7 +170,7 @@ pub const MtmdVisionComparator = struct {
 
         // 6. 加载并预处理图像
         const target_size: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.image_size else 896;
-        var img = try preprocess.loadImage(self.allocator, io, self.config.image_path, target_size, .auto);
+        var img = try preprocess.loadImage(self.allocator, io, self.config.image_path, target_size, null);
         defer img.deinit();
 
         if (img.width == 0 or img.height == 0) {

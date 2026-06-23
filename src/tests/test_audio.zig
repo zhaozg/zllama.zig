@@ -10,6 +10,7 @@ const std = @import("std");
 const testing = std.testing;
 const chat_template = @import("chat_template");
 const preprocess = @import("preprocess");
+const audio_mod = @import("audio");
 
 // Access types through chat_template module (re-exports)
 const MediaType = chat_template.MediaType;
@@ -148,7 +149,7 @@ test "Mel filterbank: basic properties" {
         sine_samples[i] = @sin(2.0 * std.math.pi * freq * @as(f32, @floatFromInt(i)) / 16000.0);
     }
 
-    const params = preprocess.AudioPreprocessParams{
+    const params = audio_mod.AudioPreprocessParams{
         .sample_rate = 16000,
         .frame_length = 320,
         .hop_length = 160,
@@ -160,7 +161,7 @@ test "Mel filterbank: basic properties" {
         .log_offset = 0.001,
     };
 
-    var mel = try preprocess.computeMelSpectrogram(testing.allocator, sine_samples, 16000, params);
+    var mel = try audio_mod.computeMelSpectrogram(testing.allocator, sine_samples, 16000, params);
     defer mel.deinit();
 
     // With 320 samples + 192 pad = 512 padded, exactly 1 frame

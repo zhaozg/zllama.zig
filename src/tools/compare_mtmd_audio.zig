@@ -23,7 +23,7 @@ const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
 const kv_cache = @import("kv_cache");
 const mm = @import("mtmd");
-const preprocess = @import("preprocess");
+const audio_mod = mm.audio_mod;
 const chat_template = @import("chat_template");
 const engine_common = @import("engine_common");
 const prefill = @import("prefill");
@@ -171,8 +171,7 @@ pub const MtmdAudioComparator = struct {
 
         log.info("Audio encoder loaded: {s} ({d} Hz)", .{ capabilities.audio_encoder_type, capabilities.audio_sample_rate });
 
-        // 6. 加载 WAV 音频文件
-        const wav_result = try preprocess.loadWav(self.allocator, io, self.config.audio_path);
+        const wav_result = try audio_mod.loadWav(self.allocator, io, self.config.audio_path);
         const wav_samples = wav_result.samples;
         const wav_info = wav_result.info;
         defer self.allocator.free(wav_samples);
@@ -188,11 +187,10 @@ pub const MtmdAudioComparator = struct {
             return error.EmptyAudio;
         }
 
-        // 7. 计算 Mel 频谱
-        const preprocess_params = preprocess.AudioPreprocessParams.fromAudioEncoder(
-            if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else preprocess.AUDIO_N_MEL_BINS,
+        const preprocess_params = audio_mod.AudioPreprocessParams.fromAudioEncoder(
+            if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else audio_mod.AUDIO_N_MEL_BINS,
         );
-        var mel = try preprocess.computeMelSpectrogram(self.allocator, wav_samples, wav_info.sample_rate, preprocess_params);
+        var mel = try audio_mod.computeMelSpectrogram(self.allocator, wav_samples, wav_info.sample_rate, preprocess_params);
         defer mel.deinit();
         log.info("Mel spectrogram: {d} frames x {d} bins", .{ mel.n_frames, mel.n_mel_bins });
 

@@ -218,7 +218,7 @@ test "imageToTensor: siglip normalization" {
         .allocator = testing.allocator,
     };
 
-    const tensor = try preprocess.imageToTensor(ctx, &img, .siglip);
+    const tensor = try preprocess.imageToTensor(ctx, &img, .div255);
     const data = tensor.dataF32();
 
     // For 1x1 image, data is [R, G, B] regardless of layout
@@ -246,7 +246,7 @@ test "imageToTensor: none normalization (passthrough)" {
         .allocator = testing.allocator,
     };
 
-    const tensor = try preprocess.imageToTensor(ctx, &img, .none);
+    const tensor = try preprocess.imageToTensor(ctx, &img, .div255);
     const data = tensor.dataF32();
 
     try testing.expectApproxEqAbs(@as(f32, 100.0), data[0], 1e-5);

@@ -17,6 +17,7 @@ const sampler = @import("sampler");
 const kv_cache = @import("kv_cache");
 const mtmd = @import("mtmd");
 const preprocess = @import("preprocess");
+const audio_mod = mtmd.audio_mod;
 const engine_common = @import("engine_common");
 const prefill_mod = @import("prefill");
 
@@ -831,7 +832,7 @@ pub const InferenceEngine = struct {
         }
 
         const target_size: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.image_size else 896;
-        var img = try preprocess.loadImage(self.allocator, io, image_path, target_size, .auto);
+        var img = try preprocess.loadImage(self.allocator, io, image_path, target_size, null);
         defer img.deinit();
         if (img.width == 0 or img.height == 0) return error.EmptyImage;
 
@@ -908,13 +909,12 @@ pub const InferenceEngine = struct {
         if (self.mtmd_context) |ctx| {
             logger.info("Audio markers from MtmdContext: '{s}' / '{s}'", .{ ctx.aud_beg, ctx.aud_end });
         }
-
-        const wav_result = try preprocess.loadWav(self.allocator, io, audio_path);
+        const wav_result = try audio_mod.loadWav(self.allocator, io, audio_path);
         defer self.allocator.free(wav_result.samples);
         if (wav_result.samples.len == 0) return error.EmptyAudio;
 
-        const preprocess_params = preprocess.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else preprocess.AUDIO_N_MEL_BINS);
-        var mel = try preprocess.computeMelSpectrogram(self.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
+        const preprocess_params = audio_mod.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else audio_mod.AUDIO_N_MEL_BINS);
+        var mel = try audio_mod.computeMelSpectrogram(self.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
         defer mel.deinit();
 
         self.ctx_graph.setNoAlloc(false);

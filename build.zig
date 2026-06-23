@@ -360,25 +360,6 @@ pub fn build(b: *std.Build) void {
     // ======================================================================
     // 多模态模块
     // ======================================================================
-    const mm_audio_mod = b.createModule(.{
-        .root_source_file = b.path("src/mtmd/audio.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    mm_audio_mod.addImport("ggml", ggml_mod);
-    mm_audio_mod.addImport("gguf", gguf_mod);
-    mm_audio_mod.addImport("weight_loader", weight_loader_mod);
-
-    const mm_vision_mod = b.createModule(.{
-        .root_source_file = b.path("src/mtmd/vision.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    mm_vision_mod.addImport("ggml", ggml_mod);
-    mm_vision_mod.addImport("gguf", gguf_mod);
-    mm_vision_mod.addImport("weight_loader", weight_loader_mod);
 
     const fft_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/fft.zig"),
@@ -387,6 +368,28 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     fft_mod.linkFramework("Accelerate", .{});
+
+    const mm_audio_mod = b.createModule(.{
+        .root_source_file = b.path("src/mtmd/audio/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mm_audio_mod.addImport("ggml", ggml_mod);
+    mm_audio_mod.addImport("gguf", gguf_mod);
+    mm_audio_mod.addImport("weight_loader", weight_loader_mod);
+    mm_audio_mod.addImport("fft", fft_mod);
+
+
+    const mm_vision_mod = b.createModule(.{
+        .root_source_file = b.path("src/mtmd/vision/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mm_vision_mod.addImport("ggml", ggml_mod);
+    mm_vision_mod.addImport("gguf", gguf_mod);
+    mm_vision_mod.addImport("weight_loader", weight_loader_mod);
 
     const utils_mod = b.createModule(.{
         .root_source_file = b.path("src/utils.zig"),
@@ -532,6 +535,7 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("kv_cache", kv_cache_mod);
     test_root_mod.addImport("graph_context", graph_context_mod);
     test_root_mod.addImport("mm", mm_manager_mod);
+    test_root_mod.addImport("audio", mm_audio_mod);
     test_root_mod.addImport("preprocess", mm_preprocess_mod);
     test_root_mod.addImport("engine_common", engine_common_mod);
     test_root_mod.addImport("prefill", prefill_mod);
@@ -737,6 +741,7 @@ pub fn build(b: *std.Build) void {
         });
         mod.addImport("chat_template", chat_template_mod);
         mod.addImport("preprocess", mm_preprocess_mod);
+        mod.addImport("audio", mm_audio_mod);
         const t = addTestWithRpath(b, "test-audio", mod);
         const run_t = b.addRunArtifact(t);
         test_audio_step.dependOn(&run_t.step);

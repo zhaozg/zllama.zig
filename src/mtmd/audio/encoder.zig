@@ -1,8 +1,8 @@
-//! 音频编码器模块
+//! Conformer 音频编码器
 //!
 //! 提供对 Gemma 4 E2B 内建 Conformer 音频编码器的支持。
 //! 该编码器能够直接处理最长 30 秒的 16kHz 单声道音频输入，
-//! 将原始 PCM 音频转换为模型可理解的音频嵌入 tokens。
+//! 将 Mel 频谱特征转换为模型可理解的音频嵌入 tokens。
 //!
 //! 架构: Conformer（卷积增强 Transformer）
 //! - 子采样 Conv2D（2 层，步长 2）
@@ -18,39 +18,10 @@
 const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
-
 const weight_loader = @import("weight_loader");
+const config_mod = @import("config.zig");
 
 const log = std.log.scoped(.audio_encoder);
-
-// ============================================================================
-// 音频编码器超参数
-// ============================================================================
-
-pub const AudioEncoderParams = struct {
-    /// 输入特征维度（mel bins）
-    n_mel_bins: u32 = 128,
-    /// 模型嵌入维度
-    n_embd: u32 = 512,
-    /// 注意力头数
-    n_head: u32 = 8,
-    /// 每头维度
-    d_head: u32 = 64,
-    /// Conformer 层数 (Gemma 4 E2B 使用 12 层)
-    n_layer: u32 = 12,
-    /// FFN 中间维度
-    n_ff: u32 = 2048,
-    /// 输出投影维度（匹配 LLM 嵌入维度，从 GGUF 元数据加载）
-    /// Gemma 4 4B: 1536, Gemma 4 9B: 2560
-    n_output_embd: u32 = 2560,
-    /// 音频采样率
-    sample_rate: u32 = 16000,
-    /// 最大音频长度（秒）
-    max_audio_length_sec: f32 = 30.0,
-    /// 归一化 epsilon (loaded from GGUF: clip.audio.attention.layer_norm_epsilon)
-    /// Gemma 4 所有模型（文本/视觉/音频）均使用 1e-6
-    norm_eps: f32 = 1e-6,
-};
 
 // ============================================================================
 // Conformer 层权重
@@ -103,7 +74,7 @@ pub const ConformerLayerWeights = struct {
 // ============================================================================
 
 pub const AudioEncoderWeights = struct {
-    params: AudioEncoderParams,
+    params: config_mod.AudioEncoderParams,
 
     // 子采样卷积 (a.conv1d.{0,1}.*)
     sscp_conv_w: [2]?*ggml.Tensor = .{ null, null },
@@ -130,7 +101,7 @@ pub const AudioEncoderWeights = struct {
 // ============================================================================
 
 pub const AudioEncoder = struct {
-    params: AudioEncoderParams,
+    params: config_mod.AudioEncoderParams,
     weights: AudioEncoderWeights,
     ctx_weights: *ggml.Context,
 
@@ -140,7 +111,7 @@ pub const AudioEncoder = struct {
         ctx: *ggml.Context,
         allocator: std.mem.Allocator,
     ) !AudioEncoder {
-        var params = AudioEncoderParams{};
+        var params = config_mod.AudioEncoderParams{};
 
         // 从 GGUF 元数据读取参数
         if (gguf_file.getU32("clip.audio.embedding_length")) |v| params.n_embd = v;
@@ -233,7 +204,7 @@ pub const AudioEncoder = struct {
     /// 编码音频数据，返回嵌入 tokens
     /// @param ctx ggml 计算上下文
     /// @param graph 计算图
-    /// @param audio_data PCM F32 音频样本 [n_mel_bins, n_frames]
+    /// @param mel_data PCM F32 音频样本 [n_mel_bins, n_frames]
     /// @returns 音频嵌入 [n_output_embd, n_tokens]
     pub fn encode(
         self: *const AudioEncoder,
@@ -247,6 +218,7 @@ pub const AudioEncoder = struct {
         const p = self.params;
         const norm_eps = p.norm_eps;
         const res_weight: f32 = 0.5;
+
         // 1. Create input tensor matching llama.cpp layout
         //    llama.cpp: inp = build_inp_raw(1) with shape [n_mel, n_frames]
         //    then: cur = transpose(inp) → [n_mel, n_frames] (for conv2d W=mel, H=frames)
@@ -379,12 +351,11 @@ pub const AudioEncoder = struct {
                 }
 
                 // Q blocking: [D, H, N] -> pad to Np -> reshape [D, H, C, B]
-                // ggml_permute: ne[axis_i] = old.ne[i]. permute(0,2,1,3): ne[0]=D, ne[2]=H, ne[1]=C, ne[3]=B → [D,C,H,B]
                 Qcur = Qcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_seq)), 0); // [D, H, Np]
                 Qcur = Qcur.reshape4d(ctx, d_head_i, n_head_i, C, B); // [D, H, C, B]
                 Qcur = Qcur.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, C, H, B]
 
-                // K/V block context extraction via overlapping view (matching C++ extract_blocks lambda)
+                // K/V block context extraction via overlapping view
                 const pad_kv: i64 = S * B - n_pos_i;
                 Kcur = Kcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0); // [D, H, S*B]
                 Kcur = Kcur.roll(ctx, 0, 0, P, 0); // left-pad by P
@@ -434,14 +405,12 @@ pub const AudioEncoder = struct {
                 scores = scores.tanh(ctx);
                 scores = scores.scale(ctx, softcap);
 
-                // Blocked attention mask: [S, C, B] broadcasts to [S, C, H, B] (ggml pads trailing dims with 1)
+                // Blocked attention mask: [S, C, B] broadcasts to [S, C, H, B]
                 scores = scores.add(ctx, kq_mask);
 
                 const attn = scores.softMax(ctx); // [S, C, H, B]
 
                 // attn @ V: attn=[S,C,H,B], Vblk=[B,D,H,S]
-                // Vt = Vblk.permute(3,2,1,0) → [S,H,D,B]: ne[0]=S, ne[2]=D%H=0, ne[3]=B%B=0
-                // attn @ Vt → [C, H, D, B] then permute(1,3,0,2) → [D, C, B, H]
                 const Vt = Vblk.permute(ctx, 3, 2, 1, 0).cont(ctx); // [B,D,H,S] → [S,H,D,B]
                 var x = attn.mulMat(ctx, Vt); // [C, H, D, B]
                 x = x.permute(ctx, 1, 3, 0, 2).cont(ctx); // [C,H,D,B] → [D,C,B,H]
@@ -541,10 +510,6 @@ pub const AudioEncoder = struct {
     /// 估算编码后的 token 数量
     /// Gemma 4 E2B 的 Conformer 使用 2 层步长为 2 的子采样，
     /// 因此每 4 帧 mel 特征产生 1 个输出 token
-    /// Mel 帧数计算：n_frames = (n_samples + pad_left - frame_size) / hop + 1
-    /// 其中 pad_left = frame_length/2 = 160, frame_size = n_fft = 512, hop = 160
-    /// 简化：n_frames ≈ n_samples / 160
-    /// 输出 tokens = n_frames / 4
     pub fn estimateOutputTokens(self: *const AudioEncoder, audio_length_sec: f32) u32 {
         const n_samples: u32 = @intFromFloat(@as(f32, @floatFromInt(self.params.sample_rate)) * audio_length_sec);
         const pad_left: u32 = 160; // frame_length / 2
@@ -565,6 +530,7 @@ pub const AudioEncoder = struct {
 // ============================================================================
 // 辅助函数
 // ============================================================================
+
 fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
     return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
 }
@@ -617,6 +583,7 @@ fn loadConformerLayer(
 
     return layer;
 }
+
 fn findLayerWeight(
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
@@ -640,7 +607,6 @@ fn ffnSilu(ctx: *ggml.Context, x: *ggml.Tensor, up_w: *ggml.Tensor, down_w: *ggm
 /// Fill a 2D tensor [n_embd, n_pos] with sinusoidal position encodings.
 /// Used for Relative Position Encoding (RPE) in Conformer attention.
 /// Matches llama.cpp clip.cpp: positions are in DESCENDING order (max_past, max_past-1, ..., 0).
-/// Matrix layout: data[p * n_embd + dim] encodes position `max_past - p` at dimension `dim`.
 fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_past: usize) void {
     const data = tensor.dataF32();
     const num_timescales = n_embd / 2;
@@ -648,8 +614,6 @@ fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_p
 
     for (0..n_pos) |p| {
         // Position in DESCENDING order: max_past, max_past-1, ..., 0
-        // This matches llama.cpp clip.cpp line 4255:
-        //   float position = (float)(max_past - p);
         const position: f32 = @floatFromInt(max_past - p);
         for (0..num_timescales) |i| {
             const inv_ts: f32 = @exp(-@as(f32, @floatFromInt(i)) * log_timescale_increment);
@@ -662,7 +626,6 @@ fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_p
 
 /// Fill a 3D attention mask tensor [S, C, B] for chunked self-attention.
 /// Matches llama.cpp clip.cpp lines 4244-4263.
-/// Uses -1e9 (not -inf) for masked positions, matching C++ initialization.
 fn fillChunkedAttentionMask(
     tensor: *ggml.Tensor,
     n_ctx: usize,
