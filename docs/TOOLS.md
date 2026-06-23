@@ -20,8 +20,8 @@
 
 ## 1. zllama — 主推理引擎
 
-**源码**: `src/main.zig`  
-**构建产物**: `zig-out/bin/zllama`  
+**源码**: `src/main.zig`
+**构建产物**: `zig-out/bin/zllama`
 **构建命令**: `zig build`（默认构建）
 
 主推理引擎，支持多模型架构的文本生成。
@@ -59,13 +59,13 @@ zllama -m ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
 ---
 
-## 2. zllama-simple — LLM 交互式对话
+## 2. zllama — LLM 交互式对话
 
-**源码**: `src/simple_main.zig`  
-**构建产物**: `zig-out/bin/zllama-simple`  
+**源码**: `src/main.zig`
+**构建产物**: `zig-out/bin/zllama`
 **构建命令**: `zig build`（默认构建）
 
-轻量级 LLM 引擎（单文件），支持：
+LLM 引擎，支持：
 - 文本对话模式（--chat-template）
 - 图像多模态输入（--image，需要 --mmproj）
 - 长上下文（>=32K token）
@@ -116,8 +116,8 @@ zllama-simple -m ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf --chat-templa
 
 ## 3. zllama-tokenize — 分词器工具
 
-**源码**: `src/tokenize_main.zig`  
-**构建产物**: `zig-out/bin/zllama-tokenize`  
+**源码**: `src/tokenize_main.zig`
+**构建产物**: `zig-out/bin/zllama-tokenize`
 **构建命令**: `zig build`（默认构建）
 
 使用给定模型的 tokenizer 对输入文本进行分词，输出 token ID 或 token 字符串。
@@ -165,8 +165,8 @@ zllama-tokenize -m Qwen3.5-4B.Q4_K_M.gguf -f input.txt -v
 
 ## 4. zllama-dump-graph — 计算图导出
 
-**源码**: `src/tools/dump_graph.zig`  
-**构建产物**: `zig-out/bin/zllama-dump-graph`  
+**源码**: `src/tools/dump_graph.zig`
+**构建产物**: `zig-out/bin/zllama-dump-graph`
 **构建命令**: `zig build dump-graph`
 
 导出模型推理计算图，支持多种格式。用于调试和理解模型内部计算流程。
@@ -210,8 +210,8 @@ zllama-dump-graph -m Qwen3.5-4B.Q4_K_M.gguf -f json | jq '.nodes | length'
 
 ## 5. zllama-gen-ref — 参考 logits 生成
 
-**源码**: `src/tools/generate_reference.zig`  
-**构建产物**: `zig-out/bin/zllama-gen-ref`  
+**源码**: `src/tools/generate_reference.zig`
+**构建产物**: `zig-out/bin/zllama-gen-ref`
 **构建命令**: `zig build gen-ref`
 
 运行模型推理，将 token 的 logits 输出保存到文件，作为后续对比验证的金标准（Golden Master）。
@@ -263,8 +263,8 @@ done
 
 ## 6. zllama-compare-logits — Logits 对比
 
-**源码**: `src/tools/compare_logits.zig`  
-**构建产物**: `zig-out/bin/zllama-compare-logits`  
+**源码**: `src/tools/compare_logits.zig`
+**构建产物**: `zig-out/bin/zllama-compare-logits`
 **构建命令**: `zig build compare-logits`
 
 比较两组 logits 文件，计算多种数值指标，验证实现正确性。
@@ -311,8 +311,8 @@ zllama-compare-logits --ref ref_llamacpp.bin --test ref.bin
 
 ## 7. zllama-compare-llamacpp — llama.cpp 对齐验证
 
-**源码**: `src/tools/compare_with_llamacpp.zig`  
-**构建产物**: `zig-out/bin/zllama-compare-llamacpp`  
+**源码**: `src/tools/compare_with_llamacpp.zig`
+**构建产物**: `zig-out/bin/zllama-compare-llamacpp`
 **构建命令**: `zig build compare-llamacpp`
 
 集成式验证工具：加载模型 → 推理 → 与 llama.cpp 参考 logits 对比，一步完成。
@@ -360,8 +360,8 @@ zllama-compare-llamacpp --model model.gguf --prompt "Hello" --ref-logits ref.bin
 
 ## 8. zllama-compare-mtmd-vision — 多模态视觉验证
 
-**源码**: `src/tools/compare_mtmd_vision.zig`  
-**构建产物**: `zig-out/bin/zllama-compare-mtmd-vision`  
+**源码**: `src/tools/compare_mtmd_vision.zig`
+**构建产物**: `zig-out/bin/zllama-compare-mtmd-vision`
 **构建命令**: `zig build compare-mtmd-vision`
 
 多模态视觉编码器输出质量验证。需要模型文件 + mmproj 投影器 + 图像文件。

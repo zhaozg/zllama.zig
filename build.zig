@@ -511,37 +511,6 @@ pub fn build(b: *std.Build) void {
     });
 
     // ======================================================================
-    // zllama-simple
-    // ======================================================================
-    const simple_mod = b.createModule(.{
-        .root_source_file = b.path("src/simple_main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    simple_mod.addImport("ggml", ggml_mod);
-    simple_mod.addImport("gguf", gguf_mod);
-    simple_mod.addImport("model", model_mod);
-    simple_mod.addImport("registry", registry_mod);
-    simple_mod.addImport("graph_builder", graph_builder_mod);
-    simple_mod.addImport("memory", memory_mod);
-    simple_mod.addImport("tokenizer", tokenizer_mod);
-    simple_mod.addImport("sampler", sampler_mod);
-    simple_mod.addImport("kv_cache", kv_cache_mod);
-    simple_mod.addImport("stb_image", stb_image_mod);
-    simple_mod.addImport("engine_common", engine_common_mod);
-
-    simple_mod.addImport("graph_context", graph_context_mod);
-    simple_mod.addImport("mm", mm_manager_mod);
-    simple_mod.addImport("preprocess", mm_preprocess_mod);
-    simple_mod.addImport("chat_template", chat_template_mod);
-    simple_mod.addImport("mtmd", mm_manager_mod);
-    const simple_exe = b.addExecutable(.{
-        .name = "zllama-simple",
-        .root_module = simple_mod,
-    });
-
-    // ======================================================================
     // 测试
     // ======================================================================
     const test_step = b.step("test", "Run all tests");
@@ -996,13 +965,9 @@ pub fn build(b: *std.Build) void {
 
     // ======================================================================
     // 安装与运行
-
-    // ======================================================================
-    // 安装与运行
     // ======================================================================
     b.installArtifact(exe);
     b.installArtifact(tokenize_exe);
-    b.installArtifact(simple_exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -1019,14 +984,6 @@ pub fn build(b: *std.Build) void {
     }
     const tokenize_run_step = b.step("tokenize", "Run zllama-tokenize tool");
     tokenize_run_step.dependOn(&tokenize_run_cmd.step);
-
-    const simple_run_cmd = b.addRunArtifact(simple_exe);
-    simple_run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        simple_run_cmd.addArgs(args);
-    }
-    const simple_run_step = b.step("simple", "Run zllama-simple tool");
-    simple_run_step.dependOn(&simple_run_cmd.step);
 }
 
 // ============================================================================

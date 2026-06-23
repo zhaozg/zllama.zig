@@ -62,6 +62,7 @@ pub const InferenceEngine = struct {
     kv_cache_mgr: kv_cache.KVCache,
     n_threads: i32,
     verbose: bool,
+    verbose_prompt: bool,
     benchmark: bool,
     gguf_data: []u8,
 
@@ -207,6 +208,7 @@ pub const InferenceEngine = struct {
             .kv_cache_mgr = kv_cache_mgr,
             .n_threads = n_threads,
             .verbose = cli_args.verbose,
+            .verbose_prompt = cli_args.verbose_prompt,
             .gguf_data = gguf_data,
             .benchmark = cli_args.benchmark,
             .inc_ctx = inc_ctx,
@@ -468,6 +470,63 @@ pub const InferenceEngine = struct {
     // Public API: text-only generation
     // ========================================================================
 
+    /// Print verbose prompt information: token IDs, decoded text, and logits preview.
+    fn printVerbosePrompt(self: *InferenceEngine, io: std.Io, input_tokens: []const u32, logits: []const f32) !void {
+        const stderr_file = std.Io.File.stderr();
+
+        // Use a local buffer for formatted output
+        var line_buf: [4096]u8 = undefined;
+
+        // Print header
+        const header = "\n========== Verbose Prompt ==========\n";
+        _ = try stderr_file.writeStreamingAll(io, header);
+
+        // Print each prompt token with ID and decoded text
+        {
+            var count_buf: [128]u8 = undefined;
+            const count_line = try std.fmt.bufPrint(&count_buf, "--- Prompt tokens ({d} total) ---\n", .{input_tokens.len});
+            _ = try stderr_file.writeStreamingAll(io, count_line);
+        }
+        for (input_tokens, 0..) |token_id, i| {
+            var dec_buf: [128]u8 = undefined;
+            const n = try self.tok.decodeSingle(token_id, &dec_buf);
+            const display = if (n > 0) dec_buf[0..n] else "(special)";
+            const line = try std.fmt.bufPrint(&line_buf, "{d:6}: token {d:6} -> '{s}'\n", .{ i, token_id, display });
+            _ = try stderr_file.writeStreamingAll(io, line);
+        }
+
+        // Print logits preview (top-10 values)
+        {
+            const logits_header = "\n--- Logits preview (last token, top-10) ---\n";
+            _ = try stderr_file.writeStreamingAll(io, logits_header);
+        }
+
+        // Find top-k logits
+        const top_k: usize = @min(10, logits.len);
+        var indices = try self.allocator.alloc(usize, logits.len);
+        defer self.allocator.free(indices);
+        for (0..logits.len) |i| indices[i] = i;
+
+        // Partial sort: find top-k
+        std.mem.sort(usize, indices, logits, struct {
+            fn lessThan(ctx: []const f32, a: usize, b: usize) bool {
+                return ctx[a] > ctx[b];
+            }
+        }.lessThan);
+
+        for (0..top_k) |i| {
+            const idx = indices[i];
+            var dec_buf: [128]u8 = undefined;
+            const n = try self.tok.decodeSingle(@intCast(idx), &dec_buf);
+            const display = if (n > 0) dec_buf[0..n] else "(special)";
+            const line = try std.fmt.bufPrint(&line_buf, "  {d:6}: token {d:6} -> '{s}' (logit={d:.4})\n", .{ i, idx, display, logits[idx] });
+            _ = try stderr_file.writeStreamingAll(io, line);
+        }
+
+        const footer = "========================================\n\n";
+        _ = try stderr_file.writeStreamingAll(io, footer);
+    }
+
     pub fn generate(self: *InferenceEngine, io: std.Io, prompt: []const u8, max_tokens: u32) !void {
         const formatted_prompt = try self.applyChatTemplate(prompt);
         defer self.allocator.free(formatted_prompt);
@@ -482,6 +541,11 @@ pub const InferenceEngine = struct {
 
         const prefill = try self.textPrefill(input_tokens.items);
         defer self.allocator.free(prefill.logits);
+
+        // Print verbose prompt if requested
+        if (self.verbose_prompt) {
+            try self.printVerbosePrompt(io, input_tokens.items, prefill.logits);
+        }
 
         const first_token = sampler.Sampler.sampleGreedyFromLogits(prefill.logits);
         try self.streamPromptTokens(io, input_tokens.items);
@@ -933,6 +997,11 @@ pub const InferenceEngine = struct {
             if (has_nan) logger.warn("  ⚠ embedding contains NaN!", .{});
         }
         const pr = try prefill_mod.threeStagePrefill(self.ctx_graph, self.model, @ptrCast(@alignCast(gemma4_model)), &mediaForwardFn, &self.kv_cache_mgr, prefix_tokens, media_token_id, @intCast(media_count), embd_heap, embd_dim, suffix_tokens, &self.params, self.n_threads, self.allocator);
+
+        // Print verbose prompt if requested
+        if (self.verbose_prompt) {
+            try self.printVerbosePrompt(io, expanded.tokens.items, pr.logits);
+        }
 
         var best_idx: i32 = 0;
         var best_val: f32 = pr.logits[0];

@@ -71,7 +71,6 @@
 zllama.zig/
 ├── src/
 │   ├── main.zig           # CLI 入口（Juicy Main）
-│   ├── simple_main.zig    # 简化推理入口
 │   ├── ggml.zig           # ggml C API 安全封装 + Tensor 方法式算子
 │   ├── gguf.zig           # GGUF v2/v3 解析器
 │   ├── model.zig          # 模型抽象接口定义

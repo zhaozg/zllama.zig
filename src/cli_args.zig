@@ -11,6 +11,7 @@ pub const CliArgs = struct {
     top_p: f32 = 0.9,
     n_threads: i32 = 0,
     verbose: bool = false,
+    verbose_prompt: bool = false,
     debug: bool = false,
     help: bool = false,
     benchmark: bool = false,
@@ -51,6 +52,8 @@ pub const CliArgs = struct {
                 result.n_threads = std.fmt.parseInt(i32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
                 result.verbose = true;
+            } else if (std.mem.eql(u8, arg, "--verbose-prompt")) {
+                result.verbose_prompt = true;
             } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
                 result.debug = true;
             } else if (std.mem.eql(u8, arg, "--chat") or std.mem.eql(u8, arg, "-c")) {
@@ -96,6 +99,7 @@ pub const CliArgs = struct {
             \\  -p, --prompt <文本>    输入提示词
             \\  -n, --max-tokens <N>  最大生成token数 (默认: 256)
             \\  -v, --verbose         详细日志输出 (info 级别)
+            \\  --verbose-prompt      打印详细的 prompt token 序列和 logits 预览
             \\  -d, --debug           调试日志输出 (debug 级别)
             \\  --benchmark           benchmark 模式
             \\  -c, --chat            交互式聊天模式
