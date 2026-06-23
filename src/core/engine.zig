@@ -470,8 +470,11 @@ pub const InferenceEngine = struct {
     // Public API: text-only generation
     // ========================================================================
 
-    /// Print verbose prompt information: token IDs, decoded text, and logits preview.
-    fn printVerbosePrompt(self: *InferenceEngine, io: std.Io, input_tokens: []const u32, logits: []const f32) !void {
+    /// Print verbose prompt information: prompt text, token IDs, decoded text, and logits preview.
+    /// Matches llama.cpp's --verbose-prompt output format.
+    /// If `media_offsets` is provided, media placeholder regions in the token sequence
+    /// are displayed as `<__media_<type>_<count>tokens__>` instead of repeating the same token.
+    fn printVerbosePrompt(self: *InferenceEngine, io: std.Io, prompt_text: ?[]const u8, input_tokens: []const u32, logits: []const f32, media_offsets: ?[]const chat_template.PlaceholderInfo) !void {
         const stderr_file = std.Io.File.stderr();
 
         // Use a local buffer for formatted output
@@ -481,21 +484,69 @@ pub const InferenceEngine = struct {
         const header = "\n========== Verbose Prompt ==========\n";
         _ = try stderr_file.writeStreamingAll(io, header);
 
-        // Print each prompt token with ID and decoded text
-        {
-            var count_buf: [128]u8 = undefined;
-            const count_line = try std.fmt.bufPrint(&count_buf, "--- Prompt tokens ({d} total) ---\n", .{input_tokens.len});
-            _ = try stderr_file.writeStreamingAll(io, count_line);
-        }
-        for (input_tokens, 0..) |token_id, i| {
-            var dec_buf: [128]u8 = undefined;
-            const n = try self.tok.decodeSingle(token_id, &dec_buf);
-            const display = if (n > 0) dec_buf[0..n] else "(special)";
-            const line = try std.fmt.bufPrint(&line_buf, "{d:6}: token {d:6} -> '{s}'\n", .{ i, token_id, display });
-            _ = try stderr_file.writeStreamingAll(io, line);
+        // Print original prompt text (like llama.cpp: LOG_INF("%s: prompt: '%s'\n", ...))
+        if (prompt_text) |text| {
+            const prompt_line = try std.fmt.bufPrint(&line_buf, "prompt: '{s}'\n", .{text});
+            _ = try stderr_file.writeStreamingAll(io, prompt_line);
         }
 
-        // Print logits preview (top-10 values)
+        // Print token count (like llama.cpp: "number of tokens in prompt = %zu")
+        {
+            var count_buf: [128]u8 = undefined;
+            const count_line = try std.fmt.bufPrint(&count_buf, "number of tokens in prompt = {d}\n", .{input_tokens.len});
+            _ = try stderr_file.writeStreamingAll(io, count_line);
+        }
+
+        // Print each prompt token with ID and decoded text (like llama.cpp: "%6d -> '%s'")
+        // For special tokens (like media placeholders), try to show the actual token text.
+        // If media_offsets is provided, collapse media placeholder regions into a single line.
+        if (media_offsets) |offsets| {
+            var off_idx: usize = 0;
+            var i: usize = 0;
+            while (i < input_tokens.len) : (i += 1) {
+                // Check if current position is the start of a media placeholder region
+                if (off_idx < offsets.len and i == offsets[off_idx].token_offset) {
+                    const info = offsets[off_idx];
+                    const media_label = switch (info.media_type) {
+                        .image => "image",
+                        .audio => "audio",
+                        .none => "media",
+                    };
+                    const line = try std.fmt.bufPrint(&line_buf, "{d:6}: token {d:6} -> '<__media_{s}_{d}tokens__>'  (placeholder, {d} tokens)\n", .{
+                        i, input_tokens[i], media_label, info.token_count, info.token_count,
+                    });
+                    _ = try stderr_file.writeStreamingAll(io, line);
+                    i += info.token_count - 1;
+                    off_idx += 1;
+                } else {
+                    var dec_buf: [128]u8 = undefined;
+                    const n = try self.tok.decodeSingle(input_tokens[i], &dec_buf);
+                    const display = if (n > 0) dec_buf[0..n] else blk: {
+                        if (self.tok.vocab.tokenText(input_tokens[i])) |text| {
+                            break :blk text;
+                        }
+                        break :blk "(special)";
+                    };
+                    const line = try std.fmt.bufPrint(&line_buf, "{d:6} -> '{s}'\n", .{ input_tokens[i], display });
+                    _ = try stderr_file.writeStreamingAll(io, line);
+                }
+            }
+        } else {
+            for (input_tokens) |token_id| {
+                var dec_buf: [128]u8 = undefined;
+                const n = try self.tok.decodeSingle(token_id, &dec_buf);
+                const display = if (n > 0) dec_buf[0..n] else blk: {
+                    if (self.tok.vocab.tokenText(token_id)) |text| {
+                        break :blk text;
+                    }
+                    break :blk "(special)";
+                };
+                const line = try std.fmt.bufPrint(&line_buf, "{d:6} -> '{s}'\n", .{ token_id, display });
+                _ = try stderr_file.writeStreamingAll(io, line);
+            }
+        }
+
+        // Print logits preview (top-10 values) — zllama-specific enhancement
         {
             const logits_header = "\n--- Logits preview (last token, top-10) ---\n";
             _ = try stderr_file.writeStreamingAll(io, logits_header);
@@ -518,7 +569,12 @@ pub const InferenceEngine = struct {
             const idx = indices[i];
             var dec_buf: [128]u8 = undefined;
             const n = try self.tok.decodeSingle(@intCast(idx), &dec_buf);
-            const display = if (n > 0) dec_buf[0..n] else "(special)";
+            const display = if (n > 0) dec_buf[0..n] else blk: {
+                if (self.tok.vocab.tokenText(@intCast(idx))) |text| {
+                    break :blk text;
+                }
+                break :blk "(special)";
+            };
             const line = try std.fmt.bufPrint(&line_buf, "  {d:6}: token {d:6} -> '{s}' (logit={d:.4})\n", .{ i, idx, display, logits[idx] });
             _ = try stderr_file.writeStreamingAll(io, line);
         }
@@ -544,7 +600,7 @@ pub const InferenceEngine = struct {
 
         // Print verbose prompt if requested
         if (self.verbose_prompt) {
-            try self.printVerbosePrompt(io, input_tokens.items, prefill.logits);
+            try self.printVerbosePrompt(io, formatted_prompt, input_tokens.items, prefill.logits, null);
         }
 
         const first_token = sampler.Sampler.sampleGreedyFromLogits(prefill.logits);
@@ -834,7 +890,7 @@ pub const InferenceEngine = struct {
             if (expanded.offsets.len > 0) @as(u32, @intCast(expanded.tokens.items.len)) - expanded.offsets[0].token_offset - expanded.offsets[0].token_count else @as(u32, @intCast(expanded.tokens.items.len)),
             expanded.tokens.items.len,
         });
-        try self.multimodalPrefill(io, gemma4_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens);
+        try self.multimodalPrefill(io, gemma4_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt);
     }
 
     // ========================================================================
@@ -917,14 +973,14 @@ pub const InferenceEngine = struct {
             if (expanded.offsets.len > 0) @as(u32, @intCast(expanded.tokens.items.len)) - expanded.offsets[0].token_offset - expanded.offsets[0].token_count else @as(u32, @intCast(expanded.tokens.items.len)),
             expanded.tokens.items.len,
         });
-        try self.multimodalPrefill(io, gemma4_model, &expanded, audio_token_id, @intCast(n_audio_tokens), audio_embeddings, max_tokens);
+        try self.multimodalPrefill(io, gemma4_model, &expanded, audio_token_id, @intCast(n_audio_tokens), audio_embeddings, max_tokens, formatted_prompt);
     }
 
     // ========================================================================
     // Shared: three-stage multimodal prefill + decode
     // ========================================================================
 
-    fn multimodalPrefill(self: *InferenceEngine, io: std.Io, gemma4_model: *model_if.gemma4.Gemma4Model, expanded: *chat_template.TokenizedSegments, media_token_id: u32, n_media_tokens: i32, media_embeddings: *ggml.Tensor, max_tokens: u32) !void {
+    fn multimodalPrefill(self: *InferenceEngine, io: std.Io, gemma4_model: *model_if.gemma4.Gemma4Model, expanded: *chat_template.TokenizedSegments, media_token_id: u32, n_media_tokens: i32, media_embeddings: *ggml.Tensor, max_tokens: u32, prompt_text: ?[]const u8) !void {
         const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
         const media_offset: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else 0;
         const media_count: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_count else @intCast(n_media_tokens);
@@ -1000,7 +1056,7 @@ pub const InferenceEngine = struct {
 
         // Print verbose prompt if requested
         if (self.verbose_prompt) {
-            try self.printVerbosePrompt(io, expanded.tokens.items, pr.logits);
+            try self.printVerbosePrompt(io, prompt_text, expanded.tokens.items, pr.logits, expanded.offsets);
         }
 
         var best_idx: i32 = 0;
