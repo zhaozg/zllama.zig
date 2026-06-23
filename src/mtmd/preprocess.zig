@@ -280,6 +280,10 @@ pub const ImageNormalize = enum {
     div255,
     /// 使用 ImageNet 均值和标准差
     imagenet,
+    /// SigLIP 风格：除以 255 再映射到 [-1, 1]：pixel = (x/255)*2 - 1
+    siglip,
+    /// 不归一化，保留原始 [0, 255] 范围
+    none,
 };
 
 /// 将 ProcessedImage 转换为 ggml F32 张量 [3, height, width]
@@ -303,6 +307,16 @@ pub fn imageToTensor(
         .div255 => {
             for (0..pixel_count) |i| {
                 data[i] = @as(f32, @floatFromInt(image.data[i])) / 255.0;
+            }
+        },
+        .siglip => {
+            for (0..pixel_count) |i| {
+                data[i] = (@as(f32, @floatFromInt(image.data[i])) / 255.0) * 2.0 - 1.0;
+            }
+        },
+        .none => {
+            for (0..pixel_count) |i| {
+                data[i] = @as(f32, @floatFromInt(image.data[i]));
             }
         },
         .imagenet => {
