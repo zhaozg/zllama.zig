@@ -351,7 +351,7 @@ pub const VisionEncoder = struct {
     fn applyViTBlocks(
         self: *const VisionEncoder,
         ctx: *ggml.Context,
-        cur: *ggml.Tensor,
+        inp: *ggml.Tensor,
         effective_n_embd: i64,
         effective_n_head: i64,
         d_head: i64,
@@ -359,55 +359,117 @@ pub const VisionEncoder = struct {
         n_patches_x: i64,
         n_patches_y: i64,
     ) *ggml.Tensor {
-        _ = effective_n_embd;
-        _ = effective_n_head;
-        _ = n_patches;
-        _ = n_patches_x;
-        _ = n_patches_y;
         const w = self.weights;
         const p = self.params;
+        _ = n_patches_y;
+        // Create position index tensors for 2D RoPE (matches llama.cpp gemma4v.cpp)
+        ctx.setNoAlloc(false);
+        const pos_x_t = ctx.newTensor1d(ggml.Type.i32, n_patches) catch unreachable;
+        pos_x_t.setName("vit_pos_x");
+        const pos_y_t = ctx.newTensor1d(ggml.Type.i32, n_patches) catch unreachable;
+        pos_y_t.setName("vit_pos_y");
+        {
+            const px = pos_x_t.dataI32();
+            const py = pos_y_t.dataI32();
+            for (0..@as(usize, @intCast(n_patches))) |i| {
+                px[i] = @mod(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
+                py[i] = @divTrunc(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
+            }
+        }
 
-        var result = cur;
+        const n_batch: i64 = 1;
+        const d_head_half: i64 = @divExact(d_head, 2);
+        const rope_theta: f32 = p.rope_theta;
+
+        // Flatten to [n_embd, n_pos * B] for ViT layers
+        var inpL = inp.reshape2d(ctx, effective_n_embd, n_patches * n_batch);
+        ctx.setNoAlloc(true);
 
         for (w.layers) |*layer| {
-            // Self-attention with RoPE
-            if (layer.q_w != null and layer.k_w != null and layer.v_w != null and layer.o_w != null) {
-                // Pre-norm
-                var attn_in = result;
-                if (layer.ln_1_w) |ln1_w| {
-                    attn_in = attn_in.rmsNorm(ctx, p.norm_eps);
-                    attn_in = attn_in.mul(ctx, postprocess.reshapeForBroadcast(ctx, ln1_w));
-                    if (layer.ln_1_b) |ln1_b| {
-                        attn_in = attn_in.add(ctx, ln1_b);
-                    }
+            var cur = inpL;
+
+            // --- Pre-attention RMSNorm ---
+            var attn_in = cur;
+            if (layer.ln_1_w) |ln1_w| {
+                attn_in = attn_in.rmsNorm(ctx, p.norm_eps);
+                attn_in = attn_in.mul(ctx, postprocess.reshapeForBroadcast(ctx, ln1_w));
+                if (layer.ln_1_b) |ln1_b| {
+                    attn_in = attn_in.add(ctx, ln1_b);
+                }
+            }
+
+            // --- Self-attention with 2D RoPE ---
+            {
+                // DEBUG: print weight shapes
+                var Qcur = layer.q_w.?.mulMat(ctx, attn_in);
+                var Kcur = layer.k_w.?.mulMat(ctx, attn_in);
+                var Vcur = layer.v_w.?.mulMat(ctx, attn_in);
+
+                Qcur = Qcur.reshape4d(ctx, d_head, effective_n_head, n_patches, n_batch);
+                Kcur = Kcur.reshape4d(ctx, d_head, effective_n_head, n_patches, n_batch);
+                Vcur = Vcur.reshape4d(ctx, d_head, effective_n_head, n_patches, n_batch);
+
+                // 2D RoPE: first half uses pos_x, second half uses pos_y
+                {
+                    const first_q = Qcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Qcur.nb()[1], Qcur.nb()[2], Qcur.nb()[3], 0);
+                    const first_k = Kcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Kcur.nb()[1], Kcur.nb()[2], Kcur.nb()[3], 0);
+                    const rope_first_q = first_q.ropeExt(ctx, pos_x_t, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+                    const rope_first_k = first_k.ropeExt(ctx, pos_x_t, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+
+                    const offset: usize = @intCast(d_head_half * @sizeOf(f32));
+                    const second_q = Qcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Qcur.nb()[1], Qcur.nb()[2], Qcur.nb()[3], offset);
+                    const second_k = Kcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Kcur.nb()[1], Kcur.nb()[2], Kcur.nb()[3], offset);
+                    const rope_second_q = second_q.ropeExt(ctx, pos_y_t, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+                    const rope_second_k = second_k.ropeExt(ctx, pos_y_t, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+
+                    Qcur = rope_first_q.concat(ctx, rope_second_q, 0);
+                    Kcur = rope_first_k.concat(ctx, rope_second_k, 0);
                 }
 
-                // Q, K, V projections: weight-first mulMat
-                var Q = layer.q_w.?.mulMat(ctx, attn_in);
-                const K = layer.k_w.?.mulMat(ctx, attn_in);
-                var V = layer.v_w.?.mulMat(ctx, attn_in);
+                // Vcur RMSNorm (gemma4v-specific, matches llama.cpp)
+                if (self.encoder_type == .gemma4v) {
+                    Vcur = Vcur.rmsNorm(ctx, p.norm_eps);
+                }
 
-                // Scores: Q @ K
-                var scores = Q.mulMat(ctx, K);
-                scores = scores.scale(ctx, 1.0 / @sqrt(@as(f32, @floatFromInt(d_head))));
-                scores = scores.softMax(ctx);
+                // Per-head attention (n_head is small for ViT, ~16)
+                var head_outputs: [64]*ggml.Tensor = undefined;
+                for (0..@as(usize, @intCast(effective_n_head))) |h| {
+                    const h_off: usize = h * @as(usize, @intCast(d_head)) * @sizeOf(f32);
+                    const Qh = Qcur.view2d(ctx, d_head, n_patches, Qcur.nb()[2], h_off);
 
-                // Output: scores @ V^T
-                const Vt = V.permute(ctx, 1, 0, 2, 3).cont(ctx);
-                var x = scores.mulMat(ctx, Vt);
+                    const Kh = Kcur.view2d(ctx, d_head, n_patches, Kcur.nb()[2], h_off);
+                    const Vh = Vcur.view2d(ctx, d_head, n_patches, Vcur.nb()[2], h_off);
 
-                // Output projection
-                const xt = x.permute(ctx, 1, 0, 2, 3).cont(ctx);
-                x = layer.o_w.?.mulMat(ctx, xt);
+                    // ggml_mul_mat(A, B) = A^T @ B. Pass Qh, Kh directly for Q^T @ K
+                    var scores = Qh.mulMat(ctx, Kh); // [n_patches, d_head]^T @ [d_head, n_patches] → [n_patches, n_patches]
+                    scores = scores.scale(ctx, 1.0 / @sqrt(@as(f32, @floatFromInt(d_head))));
+                    scores = scores.softMax(ctx);
+
+                    // For scores @ V: mul_mat(V^T, scores^T) = V @ scores^T = (scores @ V^T)^T
+                    // We want [d_head, n_patches] per head for concat along dim 0
+                    const Vt = Vh.permute(ctx, 1, 0, 2, 3).cont(ctx);
+                    const scores_t = scores.permute(ctx, 1, 0, 2, 3).cont(ctx);
+                    const out_h = Vt.mulMat(ctx, scores_t); // [d_head, n_patches]
+                    head_outputs[h] = out_h;
+                }
+
+                var x = head_outputs[0];
+                for (1..@as(usize, @intCast(effective_n_head))) |h| {
+                    x = x.concat(ctx, head_outputs[h], 0);
+                }
+
+                x = layer.o_w.?.mulMat(ctx, x);
                 if (layer.o_b) |ob| {
                     x = x.add(ctx, ob);
                 }
-                result = result.add(ctx, x);
+                cur = cur.add(ctx, x);
             }
 
-            // FFN
-            if (layer.ff_up_w != null and layer.ff_down_w != null) {
-                var ffn_in = result;
+            inpL = cur;
+
+            // --- FFN ---
+            {
+                var ffn_in = cur;
                 if (layer.ln_2_w) |ln2_w| {
                     ffn_in = ffn_in.rmsNorm(ctx, p.norm_eps);
                     ffn_in = ffn_in.mul(ctx, postprocess.reshapeForBroadcast(ctx, ln2_w));
@@ -422,11 +484,13 @@ pub const VisionEncoder = struct {
                     .gelu => h.gelu(ctx),
                 };
                 const ffn_out = layer.ff_down_w.?.mulMat(ctx, activated);
-                result = result.add(ctx, ffn_out);
+                cur = cur.add(ctx, ffn_out);
             }
+
+            inpL = cur;
         }
 
-        return result;
+        return inpL;
     }
 
     /// 应用 Pooling（平均池化下采样）
