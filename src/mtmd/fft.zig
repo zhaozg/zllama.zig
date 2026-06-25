@@ -66,7 +66,6 @@ pub const AccelFFT = struct {
         };
     }
 
-
     /// 释放 FFT 引擎所有资源
     pub fn deinit(self: *AccelFFT) void {
         vdsp.vDSP_destroy_fftsetup(self.setup);
@@ -75,16 +74,16 @@ pub const AccelFFT = struct {
         self.* = undefined;
     }
 
-    /// 计算实数帧的功率谱（power spectrum, 匹配 llama.cpp use_magnitude=false）
+    /// 计算实数帧的频谱幅度（magnitude spectrum, 匹配 llama.cpp gemma4a use_magnitude=true）
     ///
     /// 处理流程：
     /// 1. 零填充（帧数据已由调用者加窗）
     /// 2. 转换到分割复数格式
     /// 3. 执行前向实数 FFT (vDSP_fft_zrip)
-    /// 4. 计算幅度平方 → 功率谱（不缩放）
+    /// 4. 计算幅度 |X| = sqrt(real² + imag²)
     ///
     /// @param frame 输入音频帧（已加窗，长度 ≤ self.n，自动零填充）
-    /// @param spectrum 输出功率谱 [n/2 + 1]
+    /// @param spectrum 输出幅度谱 [n/2 + 1]
     pub fn powerSpectrum(self: *AccelFFT, frame: []const f32, spectrum: []f32) void {
         const n = self.n;
         std.debug.assert(spectrum.len >= n / 2 + 1);
@@ -101,23 +100,27 @@ pub const AccelFFT = struct {
             .imagp = self.split_buf.ptr + n / 2,
         };
         for (0..n / 2) |i| {
-            split.realp[i] = buf[2 * i];      // even samples
-            split.imagp[i] = buf[2 * i + 1];  // odd samples
+            split.realp[i] = buf[2 * i]; // even samples
+            split.imagp[i] = buf[2 * i + 1]; // odd samples
         }
 
         // 3. 前向 FFT
         vdsp.vDSP_fft_zrip(self.setup, &split, 1, self.log2n, vdsp.kFFTDirection_Forward);
 
-        // 4. 计算功率谱（平方幅度）
-        //    vDSP_zvmags 输出 |real+j*imag|² 到 spectrum
+        // 4. 计算幅度谱 |X| = sqrt(real² + imag²)
+        //    匹配 llama.cpp gemma4a: use_magnitude=true
+        //    fft_out[j] = sqrtf(fft_out[2*j+0]^2 + fft_out[2*j+1]^2)
+        //    vDSP_zvmags 输出 |real+j*imag|²
         vdsp.vDSP_zvmags(&split, 1, spectrum.ptr, 1, n / 2);
 
         // 修正 DC 和 Nyquist 分量
         spectrum[0] = split.realp[0] * split.realp[0];
         spectrum[n / 2] = split.imagp[0] * split.imagp[0];
 
-        // 注意：不进行 sqrt 和除以 n，直接输出功率谱（能量）
-        // llama.cpp 使用功率谱进行梅尔滤波，无需额外缩放
+        // 对每个 bin 取平方根得到幅度
+        for (0..n / 2 + 1) |i| {
+            spectrum[i] = @sqrt(spectrum[i]);
+        }
     }
 };
 

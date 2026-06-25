@@ -108,7 +108,7 @@ pub fn loadWav(
     }
 
     log.info("Loaded WAV: {d} Hz, {d} ch, {d} bits, {d} samples ({d:.1}s)", .{
-        sample_rate, num_channels, bits_per_sample, num_samples,
+        sample_rate,                                                                 num_channels, bits_per_sample, num_samples,
         @as(f64, @floatFromInt(num_samples)) / @as(f64, @floatFromInt(sample_rate)),
     });
 

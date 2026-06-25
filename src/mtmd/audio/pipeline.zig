@@ -1,9 +1,9 @@
 //! 音频处理流水线编排器
 //!
 //! 串联各处理阶段，从 WAV 文件到 Mel 频谱特征。
-//! 使用 Arena 分配器管理临时内存，避免碎片化。
+//! 匹配 llama.cpp mtmd_audio_preprocessor_gemma4a 的精确逻辑。
 //!
-//! 参考: llama.cpp mtmd-audio.cpp
+//! 参考: llama.cpp mtmd-audio.cpp (mtmd_audio_preprocessor_gemma4a)
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -22,6 +22,15 @@ const helper = @import("helper");
 const log = std.log.scoped(.audio_pipeline);
 
 /// 从 PCM F32 音频样本计算 Mel 频谱（不经过文件加载）
+/// 匹配 llama.cpp mtmd_audio_preprocessor_gemma4a::preprocess() 的精确逻辑：
+///   - 无预加重 (preemph=0.0)
+///   - 无中心填充 (no_padding=true, 使用自定义 semicausal padding)
+///   - 使用幅度谱 |X| (use_magnitude=true)
+///   - 自然对数 (use_natural_log=true)
+///   - mel_floor=0.001
+///   - HTK mel scale, slaney_area_norm=false
+///   - Hann window zero-padded to FFT size
+///   - 30秒分块处理
 ///
 /// @param allocator 分配器（用于返回的 ProcessedAudio）
 /// @param audio_data PCM F32 音频样本
@@ -45,34 +54,14 @@ pub fn processPcmSamples(
     else
         audio_data;
 
-    // 预加重滤波器: y[n] = x[n] - pre_emphasis * x[n-1]
-    // 匹配 llama.cpp 的音频预处理逻辑
-    const samples = if (params.pre_emphasis > 0.0) blk: {
-        const emphasized = try tmp_alloc.alloc(f32, resampled.len);
-        emphasized[0] = resampled[0];
-        for (1..resampled.len) |i| {
-            emphasized[i] = resampled[i] - params.pre_emphasis * resampled[i - 1];
-        }
-        break :blk emphasized;
-    } else resampled;
+    // gemma4a 不使用预加重 (preemph=0.0)
+    const samples = resampled;
 
-    try helper.mtmdDebugSaveData(io, "zllama_audio_samples.json", "audio_samples",  samples);
+    helper.mtmdDebugSaveData(io, "zllama_audio_samples.json", "audio_samples", samples) catch |err| {
+        log.debug("Failed to save audio samples debug data: {}", .{err});
+    };
 
-    // 分帧 + 加窗
-    const framed = try framing.frameAudio(tmp_alloc, samples, .{
-        .frame_length = params.frame_length,
-        .hop_length = params.hop_length,
-        .n_fft = params.n_fft,
-    });
-
-    // FFT 功率谱
-    var fft_engine = try fft_mod.AccelFFT.init(tmp_alloc, params.n_fft);
-    defer fft_engine.deinit();
-
-    const n_freqs: u32 = params.n_fft / 2 + 1;
-    const spectrum = try tmp_alloc.alloc(f32, n_freqs);
-
-    // 预计算 Mel 滤波器组
+    // 预计算 Mel 滤波器组（HTK scale, slaney_area_norm=false）
     const filterbank = try mel.computeFilterbank(
         tmp_alloc,
         params.n_mel_bins,
@@ -82,29 +71,128 @@ pub fn processPcmSamples(
         params.mel_f_max,
     );
 
-    // 逐帧处理
-    const mel_out = try allocator.alloc(f32, @as(usize, params.n_mel_bins) * @as(usize, framed.n_frames));
+    // 预计算 Hann 窗口（零填充到 FFT 大小）
+    const hann_window = framing.computeHannWindow(params.frame_length);
 
-    for (0..framed.n_frames) |fi| {
-        const frame_start = fi * @as(usize, framed.frame_size);
+    // 初始化 FFT 引擎
+    var fft_engine = try fft_mod.AccelFFT.init(tmp_alloc, params.n_fft);
+    defer fft_engine.deinit();
 
-        fft_engine.powerSpectrum(framed.frames[frame_start .. frame_start + framed.frame_size], spectrum);
+    const n_freqs: u32 = params.n_fft / 2 + 1;
+    const frame_size: u32 = params.n_fft;
+    const hop: u32 = params.hop_length;
+    const pad_left: u32 = params.frame_length / 2;
 
-        const mel_frame = mel_out[fi * @as(usize, params.n_mel_bins) .. (fi + 1) * @as(usize, params.n_mel_bins)];
-        mel.applyFilterbank(spectrum, filterbank, params.n_mel_bins, n_freqs, mel_frame);
-        log_transform.applyLogTransformInPlace(mel_frame, params.log_offset);
+    // 匹配 llama.cpp gemma4a: 30秒分块处理
+    const chunk_samples: usize = 30 * params.sample_rate;
+
+    // 先计算总帧数
+    var total_frames: u32 = 0;
+
+    var offset: usize = 0;
+    while (offset < samples.len) {
+        const chunk_len = @min(chunk_samples, samples.len - offset);
+
+        // 匹配 llama.cpp gemma4a 的 semicausal padding 计算
+        const n_with_left: u32 = @as(u32, @intCast(chunk_len)) + pad_left;
+        const pt_frames: u32 = if (n_with_left >= params.frame_length + 1)
+            @as(u32, @intCast((n_with_left - (params.frame_length + 1)) / hop)) + 1
+        else
+            0;
+        const n_padded_needed: u32 = (pt_frames -| 1) * hop + frame_size;
+        const total_pad: u32 = @max(n_padded_needed -| @as(u32, @intCast(chunk_len)), pad_left);
+        const n_samples_padded: u32 = total_pad + @as(u32, @intCast(chunk_len));
+        const n_frames: u32 = if (n_samples_padded >= frame_size)
+            @as(u32, @intCast((n_samples_padded - frame_size) / hop)) + 1
+        else
+            0;
+
+        // 匹配 llama.cpp: 裁剪到 PyTorch 帧数
+        const actual_frames = @min(n_frames, pt_frames);
+        total_frames += actual_frames;
+
+        offset += chunk_samples;
     }
 
-    log.info("Audio pipeline: {d} frames x {d} mel bins, sr={d}Hz", .{
-        framed.n_frames, params.n_mel_bins, params.sample_rate,
+    // 分配 Mel 输出缓冲区 [n_mel_bins, n_frames] (mel-major 布局，匹配 llama.cpp)
+    // llama.cpp: out.data[(size_t)j * out.n_len + i] = sum;  (j=mel_bin, i=frame_idx)
+    const mel_out = try allocator.alloc(f32, @as(usize, params.n_mel_bins) * @as(usize, total_frames));
+    @memset(mel_out, 0.0);
+
+    // 逐块处理
+    var mel_frame_offset: u32 = 0;
+    offset = 0;
+
+    while (offset < samples.len) {
+        const chunk_len = @min(chunk_samples, samples.len - offset);
+        const chunk_ptr = samples[offset..][0..chunk_len];
+
+        // 匹配 llama.cpp gemma4a 的 semicausal padding
+        const n_with_left: u32 = @as(u32, @intCast(chunk_len)) + pad_left;
+        const pt_frames: u32 = if (n_with_left >= params.frame_length + 1)
+            @as(u32, @intCast((n_with_left - (params.frame_length + 1)) / hop)) + 1
+        else
+            0;
+        const n_padded_needed: u32 = (pt_frames -| 1) * hop + frame_size;
+        const total_pad: u32 = @max(n_padded_needed -| @as(u32, @intCast(chunk_len)), pad_left);
+        const n_samples_padded: u32 = total_pad + @as(u32, @intCast(chunk_len));
+        const n_frames: u32 = if (n_samples_padded >= frame_size)
+            @as(u32, @intCast((n_samples_padded - frame_size) / hop)) + 1
+        else
+            0;
+        const actual_frames = @min(n_frames, pt_frames);
+
+        // 构建填充缓冲区（匹配 llama.cpp: padded_samples = [pad_left zeros] + chunk_data + [right zeros]）
+        const padded = try tmp_alloc.alloc(f32, n_samples_padded);
+        @memset(padded, 0.0);
+        @memcpy(padded[pad_left..][0..chunk_len], chunk_ptr);
+
+        // 逐帧处理（匹配 llama.cpp log_mel_spectrogram_worker_thread）
+        const fft_in = try tmp_alloc.alloc(f32, frame_size);
+        const spectrum = try tmp_alloc.alloc(f32, n_freqs);
+
+        for (0..actual_frames) |fi| {
+            const start: usize = fi * @as(usize, hop);
+
+            // 应用 Hann 窗口（匹配 llama.cpp: valid_len = min(frame_size, max(0, n_samples - offset))）
+            const valid_len = @min(frame_size, if (n_samples_padded > start) n_samples_padded - start else 0);
+            @memset(fft_in, 0.0);
+            // 匹配 llama.cpp: for j < valid_len: fft_in[j] = hann[j] * samples[offset + j]
+            // hann[j] for j >= frame_length is 0 (zero-padded to FFT size)
+            for (0..valid_len) |j| {
+                fft_in[j] = hann_window[j] * padded[start + j];
+            }
+
+            // FFT → 幅度谱 |X| (use_magnitude=true)
+            fft_engine.powerSpectrum(fft_in[0..frame_size], spectrum);
+
+            // Mel 滤波 + 自然对数
+            // 匹配 llama.cpp mel-major 布局: out.data[mel_bin * n_len + frame_idx]
+            for (0..@as(usize, params.n_mel_bins)) |m| {
+                const mel_idx = m * @as(usize, total_frames) + @as(usize, mel_frame_offset) + fi;
+                mel_out[mel_idx] = @log(@max(
+                    mel.applyFilterbankSingle(spectrum, filterbank, @as(u32, @intCast(m)), n_freqs),
+                    params.log_offset,
+                ));
+            }
+        }
+
+        mel_frame_offset += actual_frames;
+        offset += chunk_samples;
+    }
+
+    log.info("Audio pipeline: {d} frames x {d} mel bins, sr={d}Hz (gemma4a exact match)", .{
+        total_frames, params.n_mel_bins, params.sample_rate,
     });
 
-    try helper.mtmdDebugSaveData(io, "zllama_log_audio_mel.json", "log_audio_mel", mel_out);
+    helper.mtmdDebugSaveData(io, "zllama_log_audio_mel.json", "log_audio_mel", mel_out) catch |err| {
+        log.debug("Failed to save mel debug data: {}", .{err});
+    };
 
     return .{
         .data = mel_out,
         .n_mel_bins = params.n_mel_bins,
-        .n_frames = framed.n_frames,
+        .n_frames = total_frames,
         .allocator = allocator,
     };
 }

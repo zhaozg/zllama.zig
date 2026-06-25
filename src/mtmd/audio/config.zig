@@ -3,7 +3,7 @@
 //! 所有音频处理阶段的配置参数集中管理。
 //! 参数可从 GGUF 元数据加载，也可使用默认值。
 //!
-//! 参考: llama.cpp mtmd-audio.cpp, gemma4a.cpp
+//! 参考: llama.cpp mtmd-audio.cpp (mtmd_audio_preprocessor_gemma4a)
 
 const std = @import("std");
 const gguf = @import("gguf");
@@ -11,7 +11,7 @@ const gguf = @import("gguf");
 const log = std.log.scoped(.audio_config);
 
 // ============================================================================
-// 默认音频参数常量
+// 默认音频参数常量 (Gemma4 E2B)
 // ============================================================================
 
 /// 默认音频采样率 (Gemma4 E2B)
@@ -26,12 +26,12 @@ pub const DEFAULT_N_FFT: u32 = 512;
 pub const DEFAULT_N_MEL_BINS: u32 = 128;
 /// Mel 最低频率
 pub const DEFAULT_MEL_F_MIN: f32 = 0.0;
-/// Mel 最高频率
+/// Mel 最高频率 (sample_rate/2)
 pub const DEFAULT_MEL_F_MAX: f32 = 8000.0;
-/// 预加重系数 (llama.cpp 通常使用 0.97)
-pub const DEFAULT_PRE_EMPHASIS: f32 = 0.97;
-/// 对数偏移（防止 log(0)，matches llama.cpp mel_floor=1e-3）
-pub const DEFAULT_LOG_OFFSET: f32 = 1e-3;
+/// 预加重系数 (gemma4a 不使用预加重，设为 0.0)
+pub const DEFAULT_PRE_EMPHASIS: f32 = 0.0;
+/// 对数偏移（防止 log(0)，matches llama.cpp gemma4a mel_floor=0.001）
+pub const DEFAULT_LOG_OFFSET: f32 = 0.001;
 
 // ============================================================================
 // 音频预处理参数
@@ -50,8 +50,12 @@ pub const AudioPreprocessParams = struct {
     log_offset: f32 = DEFAULT_LOG_OFFSET,
 
     /// 从音频编码器参数构建（部分参数从 GGUF 元数据加载）
+    /// 匹配 llama.cpp gemma4a: mel_f_max = sample_rate/2
     pub fn fromAudioEncoder(n_mel_bins: u32) AudioPreprocessParams {
-        return .{ .n_mel_bins = n_mel_bins };
+        return .{
+            .n_mel_bins = n_mel_bins,
+            .mel_f_max = @as(f32, @floatFromInt(DEFAULT_SAMPLE_RATE)) / 2.0,
+        };
     }
 
     /// 从 GGUF 元数据加载音频预处理参数

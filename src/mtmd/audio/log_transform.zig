@@ -1,9 +1,9 @@
 //! 对数变换
 //!
 //! 对 Mel 频谱进行自然对数压缩。
-//! 匹配 llama.cpp gemma4a 的 use_natural_log=true 行为。
+//! 匹配 llama.cpp gemma4a 的 use_natural_log=true, mel_floor=0.001 行为。
 //!
-//! 参考: llama.cpp mtmd-audio.cpp
+//! 参考: llama.cpp mtmd-audio.cpp (log_mel_spectrogram_worker_thread)
 
 const std = @import("std");
 const math = std.math;
@@ -16,7 +16,7 @@ const log = std.log.scoped(.audio_log);
 
 /// 对 Mel 频谱进行自然对数压缩
 /// mel_spectrum: [n_mel_bins] 输入 Mel 能量值
-/// log_offset: 防止 log(0) 的小常数（默认 0.001）
+/// log_offset: 防止 log(0) 的小常数（匹配 llama.cpp gemma4a mel_floor=0.001）
 /// 返回 [n_mel_bins] log-mel 值
 pub fn applyLogTransform(
     mel_spectrum: []const f32,
@@ -29,6 +29,7 @@ pub fn applyLogTransform(
 }
 
 /// 对 Mel 频谱进行自然对数压缩（原地操作）
+/// 匹配 llama.cpp: sum = max(sum, mel_floor); sum = log(sum);
 pub fn applyLogTransformInPlace(
     mel_spectrum: []f32,
     log_offset: f32,

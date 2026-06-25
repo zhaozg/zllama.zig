@@ -161,10 +161,12 @@ test "Mel filterbank: basic properties" {
         .log_offset = 0.001,
     };
 
-    var mel = try audio_mod.computeMelSpectrogram(testing.allocator, sine_samples, 16000, params);
+    // Use a no-op Io for testing (debug save will fail silently)
+    var mel = try audio_mod.computeMelSpectrogram(std.Io.failing, testing.allocator, sine_samples, 16000, params);
     defer mel.deinit();
 
     // With 320 samples + 192 pad = 512 padded, exactly 1 frame
+    // Mel output is mel-major: [n_mel_bins, n_frames]
     try testing.expectEqual(@as(u32, 1), mel.n_frames);
     try testing.expectEqual(@as(u32, 16), mel.n_mel_bins);
     try testing.expect(mel.data.len == 16);
