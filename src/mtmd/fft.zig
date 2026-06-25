@@ -75,13 +75,13 @@ pub const AccelFFT = struct {
         self.* = undefined;
     }
 
-    /// 计算实数帧的幅度谱（magnitude, 匹配 llama.cpp use_magnitude=true）
+    /// 计算实数帧的功率谱（power spectrum, 匹配 llama.cpp use_magnitude=false）
     ///
     /// 处理流程：
     /// 1. 零填充（帧数据已由调用者加窗）
     /// 2. 转换到分割复数格式
     /// 3. 执行前向实数 FFT (vDSP_fft_zrip)
-    /// 4. 计算幅度平方 → 功率谱
+    /// 4. 计算幅度平方 → 功率谱（不缩放）
     ///
     /// @param frame 输入音频帧（已加窗，长度 ≤ self.n，自动零填充）
     /// @param spectrum 输出功率谱 [n/2 + 1]
@@ -89,45 +89,35 @@ pub const AccelFFT = struct {
         const n = self.n;
         std.debug.assert(spectrum.len >= n / 2 + 1);
 
-        // 1. 零填充（帧数据已由调用者应用 Hann 窗口）
+        // 1. 零填充
         const buf = self.frame_buf;
         const copy_len = @min(frame.len, n);
         @memcpy(buf[0..copy_len], frame[0..copy_len]);
         @memset(buf[copy_len..n], 0);
 
-        // 2. 转换到分割复数格式（vDSP_fft_zrip 需要 even/odd 分割）
-        //    vDSP_fft_zrip expects: realp[i] = x[2*i], imagp[i] = x[2*i+1]
+        // 2. 转换到分割复数格式
         var split = vdsp.DSPSplitComplex{
             .realp = self.split_buf.ptr,
             .imagp = self.split_buf.ptr + n / 2,
         };
         for (0..n / 2) |i| {
-            split.realp[i] = buf[2 * i]; // even samples
-            split.imagp[i] = buf[2 * i + 1]; // odd samples
+            split.realp[i] = buf[2 * i];      // even samples
+            split.imagp[i] = buf[2 * i + 1];  // odd samples
         }
 
         // 3. 前向 FFT
         vdsp.vDSP_fft_zrip(self.setup, &split, 1, self.log2n, vdsp.kFFTDirection_Forward);
 
-        // 计算幅度平方（功率谱）
-        //    vDSP_zvmags: 直接输出 |real+j*imag|² 到 spectrum
+        // 4. 计算功率谱（平方幅度）
+        //    vDSP_zvmags 输出 |real+j*imag|² 到 spectrum
         vdsp.vDSP_zvmags(&split, 1, spectrum.ptr, 1, n / 2);
 
-        // FFT 的 DC 分量和 Nyquist 分量需要特殊处理：
-        // - DC 分量：realp[0]^2（imagp[0] 总是 0）
-        // - Nyquist 分量：realp[n/2-1]^2 / imagp[0]（存储在 split buffer 特殊位置）
+        // 修正 DC 和 Nyquist 分量
         spectrum[0] = split.realp[0] * split.realp[0];
         spectrum[n / 2] = split.imagp[0] * split.imagp[0];
 
-        // Convert power → magnitude (sqrt of power).
-        // vDSP_fft_zrip output is NOT internally scaled (unlike vDSP_fft_zip).
-        // To match numpy's np.abs(np.fft.rfft(x)) / n_fft:
-        //   magnitude = sqrt(power) / n_fft
-        // Reference: llama.cpp mtmd-audio.cpp log_mel_spectrogram_worker_thread
-        const inv_n: f32 = 1.0 / @as(f32, @floatFromInt(n));
-        for (spectrum[0 .. n / 2 + 1]) |*s| {
-            s.* = inv_n * @sqrt(@max(s.*, 0.0));
-        }
+        // 注意：不进行 sqrt 和除以 n，直接输出功率谱（能量）
+        // llama.cpp 使用功率谱进行梅尔滤波，无需额外缩放
     }
 };
 

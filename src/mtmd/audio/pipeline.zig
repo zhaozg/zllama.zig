@@ -17,101 +17,9 @@ const mel = @import("mel.zig");
 const log_transform = @import("log_transform.zig");
 const encoder = @import("encoder.zig");
 const postprocess = @import("postprocess.zig");
+const helper = @import("helper");
 
 const log = std.log.scoped(.audio_pipeline);
-
-// ============================================================================
-// 公开 API
-// ============================================================================
-
-/// 完整的音频处理流水线：从 WAV 文件到 Mel 频谱
-///
-/// 处理步骤（匹配 llama.cpp gemma4a 预处理器）：
-/// 1. 加载 WAV 文件
-/// 2. 重采样到 16kHz（如需要）
-/// 3. 半因果左填充 + 分帧 + Hann 窗口
-/// 4. FFT 功率谱
-/// 5. Mel 滤波器组（HTK 尺度, 128 bins, 0-8000 Hz）
-/// 6. 自然对数压缩
-///
-/// @param allocator 分配器（用于返回的 ProcessedAudio）
-/// @param io I/O 实例
-/// @param file_path WAV 文件路径
-/// @param params 预处理参数
-/// @returns ProcessedAudio（调用者负责 deinit）
-pub fn processWavFile(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    file_path: []const u8,
-    params: config_mod.AudioPreprocessParams,
-) !types.ProcessedAudio {
-    // 使用 Arena 管理临时内存
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const tmp_alloc = arena.allocator();
-
-    // 1. 加载 WAV 文件
-    const wav_result = try loader.loadWav(tmp_alloc, io, file_path);
-    if (wav_result.samples.len == 0) return error.EmptyAudio;
-
-    // 2. 重采样到目标采样率（如需要）
-    const samples = if (wav_result.info.sample_rate != params.sample_rate)
-        try loader.resample(tmp_alloc, wav_result.samples, wav_result.info.sample_rate, params.sample_rate)
-    else
-        wav_result.samples;
-
-    // 3. 分帧 + 加窗
-    const framed = try framing.frameAudio(tmp_alloc, samples, .{
-        .frame_length = params.frame_length,
-        .hop_length = params.hop_length,
-        .n_fft = params.n_fft,
-    });
-
-    // 4. FFT 功率谱
-    var fft_engine = try fft_mod.AccelFFT.init(tmp_alloc, params.n_fft);
-    defer fft_engine.deinit();
-
-    const n_freqs: u32 = params.n_fft / 2 + 1;
-    const spectrum = try tmp_alloc.alloc(f32, n_freqs);
-
-    // 5. 预计算 Mel 滤波器组
-    const filterbank = try mel.computeFilterbank(
-        tmp_alloc,
-        params.n_mel_bins,
-        params.n_fft,
-        params.sample_rate,
-        params.mel_f_min,
-        params.mel_f_max,
-    );
-
-    // 6. 逐帧处理：FFT -> Mel -> Log
-    const mel_out = try allocator.alloc(f32, @as(usize, params.n_mel_bins) * @as(usize, framed.n_frames));
-
-    for (0..framed.n_frames) |fi| {
-        const frame_start = fi * @as(usize, framed.frame_size);
-
-        // FFT 功率谱
-        fft_engine.powerSpectrum(framed.frames[frame_start .. frame_start + framed.frame_size], spectrum);
-
-        // Mel 滤波器组
-        const mel_frame = mel_out[fi * @as(usize, params.n_mel_bins) .. (fi + 1) * @as(usize, params.n_mel_bins)];
-        mel.applyFilterbank(spectrum, filterbank, params.n_mel_bins, n_freqs, mel_frame);
-
-        // 对数变换
-        log_transform.applyLogTransformInPlace(mel_frame, params.log_offset);
-    }
-
-    log.info("Audio pipeline: {d} frames x {d} mel bins, sr={d}Hz", .{
-        framed.n_frames, params.n_mel_bins, params.sample_rate,
-    });
-
-    return .{
-        .data = mel_out,
-        .n_mel_bins = params.n_mel_bins,
-        .n_frames = framed.n_frames,
-        .allocator = allocator,
-    };
-}
 
 /// 从 PCM F32 音频样本计算 Mel 频谱（不经过文件加载）
 ///
@@ -121,6 +29,7 @@ pub fn processWavFile(
 /// @param params 预处理参数
 /// @returns ProcessedAudio（调用者负责 deinit）
 pub fn processPcmSamples(
+    io: std.Io,
     allocator: std.mem.Allocator,
     audio_data: []const f32,
     sample_rate: u32,
@@ -131,10 +40,23 @@ pub fn processPcmSamples(
     const tmp_alloc = arena.allocator();
 
     // 重采样到目标采样率（如需要）
-    const samples = if (sample_rate != params.sample_rate)
+    const resampled = if (sample_rate != params.sample_rate)
         try loader.resample(tmp_alloc, audio_data, sample_rate, params.sample_rate)
     else
         audio_data;
+
+    // 预加重滤波器: y[n] = x[n] - pre_emphasis * x[n-1]
+    // 匹配 llama.cpp 的音频预处理逻辑
+    const samples = if (params.pre_emphasis > 0.0) blk: {
+        const emphasized = try tmp_alloc.alloc(f32, resampled.len);
+        emphasized[0] = resampled[0];
+        for (1..resampled.len) |i| {
+            emphasized[i] = resampled[i] - params.pre_emphasis * resampled[i - 1];
+        }
+        break :blk emphasized;
+    } else resampled;
+
+    try helper.mtmdDebugSaveData(io, "zllama_audio_samples.json", "audio_samples",  samples);
 
     // 分帧 + 加窗
     const framed = try framing.frameAudio(tmp_alloc, samples, .{
@@ -170,9 +92,14 @@ pub fn processPcmSamples(
 
         const mel_frame = mel_out[fi * @as(usize, params.n_mel_bins) .. (fi + 1) * @as(usize, params.n_mel_bins)];
         mel.applyFilterbank(spectrum, filterbank, params.n_mel_bins, n_freqs, mel_frame);
-
         log_transform.applyLogTransformInPlace(mel_frame, params.log_offset);
     }
+
+    log.info("Audio pipeline: {d} frames x {d} mel bins, sr={d}Hz", .{
+        framed.n_frames, params.n_mel_bins, params.sample_rate,
+    });
+
+    try helper.mtmdDebugSaveData(io, "zllama_log_audio_mel.json", "log_audio_mel", mel_out);
 
     return .{
         .data = mel_out,

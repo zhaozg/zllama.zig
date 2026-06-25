@@ -28,10 +28,10 @@ pub const DEFAULT_N_MEL_BINS: u32 = 128;
 pub const DEFAULT_MEL_F_MIN: f32 = 0.0;
 /// Mel 最高频率
 pub const DEFAULT_MEL_F_MAX: f32 = 8000.0;
-/// 预加重系数 (gemma4a disables pre-emphasis)
-pub const DEFAULT_PRE_EMPHASIS: f32 = 0.0;
-/// 对数偏移（防止 log(0)，matches gemma4a mel_floor=0.001）
-pub const DEFAULT_LOG_OFFSET: f32 = 0.001;
+/// 预加重系数 (llama.cpp 通常使用 0.97)
+pub const DEFAULT_PRE_EMPHASIS: f32 = 0.97;
+/// 对数偏移（防止 log(0)，matches llama.cpp mel_floor=1e-3）
+pub const DEFAULT_LOG_OFFSET: f32 = 1e-3;
 
 // ============================================================================
 // 音频预处理参数

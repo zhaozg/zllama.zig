@@ -448,6 +448,7 @@ pub fn build(b: *std.Build) void {
         helper_mod.addImport("preprocess", mm_preprocess_mod);
         helper_mod.addImport("stb_image", stb_image_mod);
         mm_manager_mod.addImport("helper", helper_mod);
+        mm_audio_mod.addImport("helper", helper_mod);
     }
     {
         const tokenize_mod = b.createModule(.{

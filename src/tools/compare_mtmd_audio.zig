@@ -190,7 +190,7 @@ pub const MtmdAudioComparator = struct {
         const preprocess_params = audio_mod.AudioPreprocessParams.fromAudioEncoder(
             if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else audio_mod.AUDIO_N_MEL_BINS,
         );
-        var mel = try audio_mod.computeMelSpectrogram(self.allocator, wav_samples, wav_info.sample_rate, preprocess_params);
+        var mel = try audio_mod.computeMelSpectrogram(io, self.allocator, wav_samples, wav_info.sample_rate, preprocess_params);
         defer mel.deinit();
         log.info("Mel spectrogram: {d} frames x {d} bins", .{ mel.n_frames, mel.n_mel_bins });
 

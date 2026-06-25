@@ -931,7 +931,7 @@ pub const InferenceEngine = struct {
         if (wav_result.samples.len == 0) return error.EmptyAudio;
 
         const preprocess_params = audio_mod.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else audio_mod.AUDIO_N_MEL_BINS);
-        var mel = try audio_mod.computeMelSpectrogram(self.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
+        var mel = try audio_mod.computeMelSpectrogram(io, self.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
         defer mel.deinit();
 
         self.ctx_graph.setNoAlloc(false);

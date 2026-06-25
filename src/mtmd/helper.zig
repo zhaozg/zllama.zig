@@ -302,3 +302,35 @@ fn loadAudioFromBuf(allocator: std.mem.Allocator, buf: []const u8) !BitmapWrappe
 
     return error.DataChunkNotFound;
 }
+
+/// 将浮点数组逐行写入文件，用于调试。
+/// 格式：
+/// [
+/// 数值1
+/// 数值2
+/// ...
+/// ]
+/// 注意：此格式不是合法 JSON，但与 llama.cpp 的调试输出保持一致。
+pub fn mtmdDebugSaveData(io: std.Io, fname: []const u8, title: []const u8, data: []const f32) !void {
+    log.info("Save {s} debug data to {s}", .{ title, fname });
+
+    const file = try std.Io.Dir.cwd().createFile(io, fname, .{});
+    defer file.close(io);
+
+    // 写入 JSON 格式数据
+    try file.writeStreamingAll(io, "[\n");
+
+    for (data[0 .. data.len - 1]) |val| {
+        // 使用 writeStreamingAll 逐行写入
+        var buf: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{d:.6},\n", .{val}) catch unreachable;
+        try file.writeStreamingAll(io, line);
+    }
+    {
+        var buf: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{d:.6}\n", .{data[data.len - 1]}) catch unreachable;
+        try file.writeStreamingAll(io, line);
+    }
+
+    try file.writeStreamingAll(io, "]");
+}

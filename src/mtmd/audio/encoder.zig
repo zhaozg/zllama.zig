@@ -180,6 +180,37 @@ pub const AudioEncoder = struct {
             };
         }
 
+        // 日志：子采样卷积权重
+        for (0..2) |i| {
+            if (sscp_conv_w[i]) |t| {
+                log.info("  conv1d.{d}.weight: shape=[{d},{d},{d}], name={s}", .{ i, t.ne()[0], t.ne()[1], t.ne()[2], t.getName() });
+            } else {
+                log.warn("  conv1d.{d}.weight: NOT FOUND", .{i});
+            }
+        }
+        // 日志：输入投影
+        if (sscp_inp_proj_w) |t| {
+            log.info("  input_projection: shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
+        } else {
+            log.warn("  input_projection: NOT FOUND (a.input_projection.weight)", .{});
+        }
+        // 日志：输出投影矩阵信息
+        if (audio_out_proj_w) |t| {
+            log.info("  audio_out_proj:  shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
+        } else {
+            log.warn("  audio_out_proj:  NOT FOUND (a.pre_encode.out.weight)", .{});
+        }
+        if (mm_soft_emb_norm_w) |t| {
+            log.info("  mm_soft_emb_norm: shape=[{d}], name={s}", .{ t.ne()[0], t.getName() });
+        } else {
+            log.warn("  mm_soft_emb_norm: NOT FOUND (mm.a.soft_emb_norm.weight)", .{});
+        }
+        if (mm_input_proj_w) |t| {
+            log.info("  mm_input_proj:   shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
+        } else {
+            log.warn("  mm_input_proj:   NOT FOUND (mm.a.input_projection.weight)", .{});
+        }
+
         log.info("Audio encoder loaded: {d} layers, subsampling convs ready", .{n_layer});
 
         return AudioEncoder{

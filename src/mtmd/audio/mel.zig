@@ -84,6 +84,18 @@ pub fn computeFilterbank(
                 row[k] = 0.0;
             }
         }
+
+        // 面积归一化：将每行除以该行的权重之和，使每个滤波器的面积为 1
+        var row_sum: f64 = 0.0;
+        for (row) |v| {
+            row_sum += @as(f64, @floatCast(v));
+        }
+        if (row_sum > 0.0) {
+            const inv_sum: f32 = @as(f32, @floatCast(1.0 / row_sum));
+            for (row) |*v| {
+                v.* *= inv_sum;
+            }
+        }
     }
 
     log.debug("Mel filterbank: {d} bins x {d} freqs, range {d:.0}-{d:.0} Hz", .{

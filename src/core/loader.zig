@@ -195,6 +195,12 @@ pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]con
         }
     }
 
+    log.info("MMProj file: {s}, size={d} bytes, tensors={d}, metadata_kv={d}", .{
+        mmproj_path,
+        gguf_data.len,
+        gguf_file.tensor_count,
+        gguf_file.metadata_keys.len,
+    });
     log.info("MMProj capabilities: audio={}, vision={}", .{ capabilities.has_audio, capabilities.has_vision });
 
     const mem_size = 2 * 1024 * 1024 * 1024;

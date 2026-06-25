@@ -19,8 +19,32 @@ pub fn getLogLevel() std.log.Level {
 }
 
 pub fn logFilter(comptime level: std.log.Level, comptime scope: @TypeOf(.EnumLiteral), comptime format: []const u8, args: anytype) void {
-    if (@intFromEnum(level) > @intFromEnum(runtime_log_level)) return;
+    // 检查 log_scope_levels 中是否有针对当前 scope 的特定级别设置
+    // 如果有，使用 scope 级别（编译期静态定义，覆盖运行时级别）；
+    // 否则使用 runtime_log_level（运行时动态控制）
+    const scope_level = comptime getScopeLevel(scope);
+    if (scope_level) |sl| {
+        if (@intFromEnum(level) > @intFromEnum(sl)) return;
+    } else {
+        if (@intFromEnum(level) > @intFromEnum(runtime_log_level)) return;
+    }
     std.log.defaultLog(level, scope, format, args);
+}
+
+/// 编译期获取 scope 在 log_scope_levels 中定义的级别
+/// 如果未找到，返回 null
+fn getScopeLevel(comptime scope: @TypeOf(.EnumLiteral)) ?std.log.Level {
+    if (@hasDecl(@import("root"), "std_options")) {
+        const opts = @import("root").std_options;
+        if (@hasField(@TypeOf(opts), "log_scope_levels")) {
+            inline for (opts.log_scope_levels) |sl| {
+                if (sl.scope == scope) {
+                    return sl.level;
+                }
+            }
+        }
+    }
+    return null;
 }
 
 // ============================================================================

@@ -47,6 +47,7 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
     .{ .scope = .prefill, .level = .debug },
     .{ .scope = .multimodal, .level = .debug },
     .{ .scope = .vision_encoder, .level = .info },
+    .{ .scope = .audio_pipeline, .level = .debug },
 } };
 
 const logger = std.log.scoped(.main);
