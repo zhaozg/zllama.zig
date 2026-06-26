@@ -252,8 +252,9 @@ pub const AudioEncoder = struct {
         const res_weight: f32 = 0.5;
 
         // 1. Create input tensor matching llama.cpp layout
-        //    llama.cpp: inp = build_inp_raw(1) with shape [n_mel, n_frames]
-        //    then: cur = transpose(inp) → [n_mel, n_frames] (for conv2d W=mel, H=frames)
+        //    llama.cpp: inp = build_inp_raw(1) with shape [n_mel, n_frames, 1, 1]
+        //    then: cur = transpose(inp) → [n_frames, n_mel, 1, 1]
+        //    Conv2D input shape: [N=1, IC=1, IH=n_mel, IW=n_frames]
         //    We create a 2D tensor [n_mel_bins, n_frames] with frame-major data
         //    (each row in contiguous memory = one frame's mel bins).
         var cur = try ctx.newTensor2d(ggml.Type.f32, @intCast(n_mel_bins), @intCast(n_frames));
@@ -326,7 +327,8 @@ pub const AudioEncoder = struct {
         pos_emb.setName("pos_emb");
         fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.n_embd), @intCast(P));
 
-        const kq_mask = try ctx.newTensor3d(ggml.Type.f32, @intCast(S), @intCast(C), @intCast(B));
+        // Create 4D mask [S, C, B, 1] so it can broadcast to [S, C, B, H] scores
+        const kq_mask = try ctx.newTensor4d(ggml.Type.f32, @intCast(S), @intCast(C), @intCast(B), 1);
         kq_mask.setName("kq_mask");
         fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos));
         ctx.setNoAlloc(true);
@@ -385,7 +387,8 @@ pub const AudioEncoder = struct {
                 // Q blocking: [D, H, N] -> pad to Np -> reshape [D, H, C, B]
                 Qcur = Qcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_seq)), 0); // [D, H, Np]
                 Qcur = Qcur.reshape4d(ctx, d_head_i, n_head_i, C, B); // [D, H, C, B]
-                Qcur = Qcur.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, C, H, B]
+                // llama.cpp: permute(0,3,1,2) -> [D, C, B, H]
+                Qcur = Qcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, C, B, H]
 
                 // K/V block context extraction via overlapping view
                 const pad_kv: i64 = S * B - n_pos_i;
@@ -395,39 +398,41 @@ pub const AudioEncoder = struct {
                 // Overlapping view: stride for B dim is C positions, not S
                 Kcur = Kcur.view4d(ctx, d_head_i, n_head_i, S, B, Kcur.nb()[1], Kcur.nb()[2], @as(usize, @intCast(C)) * Kcur.nb()[2], 0);
                 Kcur = Kcur.cont(ctx); // materialize overlapping windows
-                // permute(0,2,1,3): ne[0]=D, ne[2]=H, ne[1]=S, ne[3]=B → [D,S,H,B]
-                var Kblk = Kcur.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, S, H, B]
+                // llama.cpp: permute(0,3,1,2): ne[0]=D, ne[3]=H, ne[1]=S, ne[2]=B → [D,S,B,H]
+                var Kblk = Kcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, S, B, H]
 
                 Vcur = Vcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0);
                 Vcur = Vcur.roll(ctx, 0, 0, P, 0);
                 Vcur = Vcur.cont(ctx);
                 Vcur = Vcur.view4d(ctx, d_head_i, n_head_i, S, B, Vcur.nb()[1], Vcur.nb()[2], @as(usize, @intCast(C)) * Vcur.nb()[2], 0);
                 Vcur = Vcur.cont(ctx);
-                // permute(1,2,3,0): ne[1]=D, ne[2]=H, ne[3]=S, ne[0]=B → [B,D,H,S]
-                var Vblk = Vcur.permute(ctx, 1, 2, 3, 0).cont(ctx); // [B, D, H, S]
+                // llama.cpp: permute(1,3,0,2): ne[1]=D, ne[3]=H, ne[0]=S, ne[2]=B → [S,D,B,H]
+                var Vblk = Vcur.permute(ctx, 1, 3, 0, 2).cont(ctx); // [S, D, B, H]
 
-                // Content attention: Kblk=[D,S,H,B] @ Qcur=[D,C,H,B] → contracts on D → [S, C, H, B]
-                var scores = Kblk.mulMat(ctx, Qcur); // [S, C, H, B]
+                // Content attention: Kblk=[D,S,B,H] @ Qcur=[D,C,B,H] → contracts on D → [S, C, B, H]
+                var scores = Kblk.mulMat(ctx, Qcur); // [S, C, B, H]
 
                 // Relative position attention
                 if (layer.attn_k_rel_w) |k_rel| {
-                    // RPE: k_rel=[n_embd,n_embd] @ pos_emb=[D,R] → [n_embd,R] → reshape [D,H,R] → permute to [D,R,H]
+                    // RPE: k_rel=[n_embd,n_embd] @ pos_emb=[D,R] → [n_embd,R] → reshape [D,H,R]
                     var p_rpe = k_rel.mulMat(ctx, pos_emb);
                     p_rpe = p_rpe.reshape3d(ctx, d_head_i, n_head_i, R);
+                    // llama.cpp: permute(0,2,1,3) on [D,H,R] → [D,R,H]
                     p_rpe = p_rpe.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, R, H]
 
-                    // Q_flat @ RPE^T: Qcur=[D,C,H,B] → flatten to [D, C*B, H]
+                    // Q_flat @ RPE^T: Qcur=[D,C,B,H] → flatten to [D, C*B, H]
                     // p_rpe=[D,R,H] @ Q_flat=[D,C*B,H] → [R, C*B, H]
                     const Q_flat = Qcur.reshape3d(ctx, d_head_i, C * B, n_head_i);
                     var matrix_bd = p_rpe.mulMat(ctx, Q_flat); // [R, C*B, H]
+                    // Reshape to [R, C, B, H] (note: H is the last dim, matching llama.cpp)
                     matrix_bd = matrix_bd.reshape4d(ctx, R, C, B, n_head_i); // [R, C, B, H]
 
-                    // Blocked relative shift (appendix B of Transformer-XL): produce [S, C, H, B]
+                    // Blocked relative shift (appendix B of Transformer-XL): produce [S, C, B, H]
                     matrix_bd = matrix_bd.pad(ctx, S + 1 - R, 0, 0, 0); // [S+1, C, B, H]
                     matrix_bd = matrix_bd.reshape3d(ctx, (S + 1) * C, B, n_head_i);
                     matrix_bd = matrix_bd.view3d(ctx, C * S, B, n_head_i, matrix_bd.nb()[1], matrix_bd.nb()[2], 0);
                     matrix_bd = matrix_bd.cont(ctx); // [C*S, B, H]
-                    matrix_bd = matrix_bd.reshape4d(ctx, S, C, n_head_i, B); // [S, C, H, B] matches scores
+                    matrix_bd = matrix_bd.reshape4d(ctx, S, C, B, n_head_i); // [S, C, B, H] matches scores
 
                     scores = scores.add(ctx, matrix_bd);
                 }
@@ -437,18 +442,16 @@ pub const AudioEncoder = struct {
                 scores = scores.tanh(ctx);
                 scores = scores.scale(ctx, softcap);
 
-                // Blocked attention mask: [S, C, B] broadcasts to [S, C, H, B]
+                // Blocked attention mask: [S, C, B] broadcasts to [S, C, B, H]
                 scores = scores.add(ctx, kq_mask);
 
-                const attn = scores.softMax(ctx); // [S, C, H, B]
+                const attn = scores.softMax(ctx); // [S, C, B, H]
 
-                // attn @ V: attn=[S,C,H,B], Vblk=[B,D,H,S]
-                const Vt = Vblk.permute(ctx, 3, 2, 1, 0).cont(ctx); // [B,D,H,S] → [S,H,D,B]
-                var x = attn.mulMat(ctx, Vt); // [C, H, D, B]
-                x = x.permute(ctx, 1, 3, 0, 2).cont(ctx); // [C,H,D,B] → [D,C,B,H]
+                // llama.cpp: V.mulMat(attn): V=[S,D,B,H], attn=[S,C,B,H] → [D, C, B, H]
+                var x = Vblk.mulMat(ctx, attn); // [D, C, B, H]
 
-                // [D,C,B,H] -> [D,H,C,B] via permute(0,3,1,2) -> flatten -> trim
-                x = x.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, H, C, B]
+                // llama.cpp: output permute(0,2,3,1): [D,C,B,H] → [D,H,C,B]
+                x = x.permute(ctx, 0, 2, 3, 1).cont(ctx); // [D, H, C, B]
                 x = x.cont2d(ctx, d_head_i * n_head_i, C * B); // [D*H, C*B]
                 if (pad_seq > 0) {
                     x = x.view2d(ctx, d_head_i * n_head_i, n_pos_i, x.nb()[1], 0);

@@ -27,6 +27,7 @@
    - 所有 ggml C API 必须通过 `ggml.zig` 模块封装为类型安全的 Zig 函数，且保留 `c` 命名空间供高级用户直接调用。
    - 分配类操作（如 `ggml_new_tensor`）必须返回 `!*T` 错误联合，纯计算操作返回 `*T`。
    - 使用 `opaque {}` 类型包装不透明指针（`ggml_context`、`ggml_tensor` 等）。
+   - 说明文档: docs/GGML_BINDING.md
 
 3. **Zig 0.16.0 I/O 接口化约束**
    - **所有**阻塞 I/O 操作必须通过 Io 实例完成，函数签名应显式传递 Io 参数（类似 Allocator 模式）。
