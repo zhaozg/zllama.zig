@@ -117,9 +117,14 @@ pub const AccelFFT = struct {
         spectrum[0] = split.realp[0] * split.realp[0];
         spectrum[n / 2] = split.imagp[0] * split.imagp[0];
 
-        // 对每个 bin 取平方根得到幅度
+        // 对每个 bin 取平方根得到幅度，并除以 2 以匹配 llama.cpp
+        //
+        // Apple vDSP 的实数 FFT (vDSP_fft_zrip) 前向变换输出比标准 DFT 大 2 倍，
+        // 因此需要除以 2 以匹配 llama.cpp 的自定义 FFT 实现。
+        // 参考: deps/mtmd_details.md - log_mel_spectrogram 对齐
+        const inv_scale: f32 = 0.5; // 1/2, vDSP 前向 FFT 缩放因子
         for (0..n / 2 + 1) |i| {
-            spectrum[i] = @sqrt(spectrum[i]);
+            spectrum[i] = @sqrt(spectrum[i]) * inv_scale;
         }
     }
 };

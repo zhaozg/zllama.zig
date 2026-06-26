@@ -198,7 +198,7 @@ pub fn processPcmSamples(
         total_frames, params.n_mel_bins, params.sample_rate,
     });
 
-    helper.mtmdDebugSaveData(io, "zllama_log_audio_mel.json", "log_audio_mel", mel_out) catch |err| {
+    helper.mtmdDebugSaveData(io, "zllama_log_mel_spectrogram.json", "log_audio_mel", mel_out) catch |err| {
         log.debug("Failed to save mel debug data: {}", .{err});
     };
 
