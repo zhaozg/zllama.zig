@@ -4,4 +4,5 @@
 /deps/
 codedb.snapshot
 *.bin
+*.json
 mtmd-ref-logits
