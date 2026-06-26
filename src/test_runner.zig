@@ -40,4 +40,5 @@ comptime {
     _ = @import("tests/test_mtmd.zig");
     _ = @import("tests/test_audio.zig");
     _ = @import("tests/test_vision.zig");
+    _ = @import("tests/test_permute.zig");
 }

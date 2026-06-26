@@ -935,7 +935,7 @@ pub const InferenceEngine = struct {
         defer mel.deinit();
 
         mtmd.helper.mtmdDebugSaveData(io, "zllama_audio_mel.json", "audio_mel", mel.data) catch |err| {
-            logger.info("Save audio mel data fail: {}", .{ err });
+            logger.info("Save audio mel data fail: {}", .{err});
         };
 
         self.ctx_graph.setNoAlloc(false);
@@ -958,7 +958,7 @@ pub const InferenceEngine = struct {
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
 
         mtmd.helper.mtmdDebugSaveData(io, "zllama_audio_embeddings.json", "audio_embeddings", audio_embeddings.dataF32()) catch |err| {
-            logger.info("Save audio embeddings data fail: {}", .{ err });
+            logger.info("Save audio embeddings data fail: {}", .{err});
         };
 
         // —— 嵌入维度检查 ——
