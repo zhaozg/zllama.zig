@@ -25,16 +25,6 @@ pub const FramingParams = struct {
     n_fft: u32 = config_mod.DEFAULT_N_FFT,
 };
 
-/// 分帧结果
-pub const FramingResult = struct {
-    /// 帧数据缓冲区 [n_frames * n_fft]，每帧已加窗并零填充
-    frames: []f32,
-    /// 帧数
-    n_frames: u32,
-    /// 每帧大小（n_fft）
-    frame_size: u32,
-};
-
 /// 预计算 Hann 窗口（零填充到 FFT 大小）
 /// 匹配 llama.cpp gemma4a initialize():
 ///   cache.hann_window.assign(hparams.audio_n_fft, 0.0f);
@@ -83,68 +73,66 @@ pub fn computeFrameCount(
     return .{ .n_frames = n_frames, .total_pad = total_pad, .n_samples_padded = n_samples_padded };
 }
 
-/// 对音频数据进行分帧、加窗和零填充
+/// 逐帧处理回调接口
+/// 对每帧应用 Hann 窗口，通过回调逐帧处理，避免一次性分配所有帧数据。
 ///
 /// 处理步骤（匹配 llama.cpp gemma4a）：
 /// 1. 半因果左填充（pad_left = frame_length/2），右填充到匹配 PyTorch 帧数
 /// 2. 提取重叠帧
 /// 3. 应用 Hann 窗口（零填充到 FFT 大小）
+/// 4. 通过回调传递每帧数据
 ///
-/// 返回帧数据 [n_frames * n_fft]，每帧连续存储
-pub fn frameAudio(
+/// @param allocator 临时分配器
+/// @param audio_data PCM F32 音频样本
+/// @param params 分帧参数
+/// @param hann_window 预计算的 Hann 窗口（零填充到 FFT 大小）
+/// @param frame_callback 每帧回调：fn(frame_idx: u32, windowed_frame: []const f32, ctx: *ContextT) anyerror!void
+/// @param ctx 传递给回调的上下文指针
+pub fn frameAudioWithCallback(
     allocator: std.mem.Allocator,
     audio_data: []const f32,
     params: FramingParams,
-) !FramingResult {
+    hann_window: []const f32,
+    frame_callback: anytype,
+    ctx: anytype,
+) !u32 {
     if (audio_data.len == 0) return error.EmptyAudioData;
 
     const frame_count = computeFrameCount(audio_data.len, params);
     if (frame_count.n_frames == 0) return error.AudioTooShort;
 
     const frame_size: u32 = params.n_fft;
-    const total_samples = frame_count.n_frames * frame_size;
-
-    // 分配填充缓冲区（匹配 llama.cpp gemma4a 的 semicausal padding）
-    // padded = [pad_left zeros] + audio_data + [right_padding zeros]
+    const pad_left: u32 = params.frame_length / 2;
     const n_padded = audio_data.len + frame_count.total_pad;
+
+    // 构建填充缓冲区（匹配 llama.cpp gemma4a 的 semicausal padding）
+    // padded = [pad_left zeros] + audio_data + [right_padding zeros]
     var padded = try allocator.alloc(f32, n_padded);
     defer allocator.free(padded);
     @memset(padded, 0.0);
-    @memcpy(padded[frame_count.total_pad -| (frame_count.total_pad - frame_count.n_samples_padded + audio_data.len)..], audio_data);
-    // Simpler: just put audio at pad_left offset
-    @memset(padded[0..frame_count.total_pad], 0.0);
-    @memcpy(padded[frame_count.total_pad..], audio_data);
+    @memcpy(padded[pad_left..][0..audio_data.len], audio_data);
 
-    // 分配帧数据
-    const frames = try allocator.alloc(f32, total_samples);
-
-    // 预计算 Hann 窗口（零填充到 FFT 大小）
-    const hann_window = computeHannWindow(params.frame_length);
+    // 单帧工作缓冲区（复用避免重复分配）
+    var frame_buf = try allocator.alloc(f32, frame_size);
+    defer allocator.free(frame_buf);
 
     // 逐帧处理（匹配 llama.cpp log_mel_spectrogram_worker_thread）
     for (0..frame_count.n_frames) |fi| {
         const start: usize = fi * @as(usize, params.hop_length);
-        const frame_offset = fi * @as(usize, frame_size);
 
-        // 零填充整帧
-        @memset(frames[frame_offset .. frame_offset + frame_size], 0.0);
-
-        // 提取帧并应用 Hann 窗口
-        // 匹配 llama.cpp: valid_len = min(frame_size, max(0, n_samples - offset))
+        @memset(frame_buf, 0.0);
         const valid_len = @min(frame_size, if (n_padded > start) n_padded - start else 0);
         const copy_actual = @min(valid_len, params.frame_length);
         for (0..copy_actual) |j| {
-            frames[frame_offset + j] = hann_window[j] * padded[start + j];
+            frame_buf[j] = hann_window[j] * padded[start + j];
         }
+
+        try @call(.auto, frame_callback, .{ @as(u32, @intCast(fi)), frame_buf[0..frame_size], ctx });
     }
 
-    log.debug("Framing: {d} frames x {d} samples, pad={d}", .{
+    log.debug("Framing callback: {d} frames x {d} samples, pad={d}", .{
         frame_count.n_frames, frame_size, frame_count.total_pad,
     });
 
-    return .{
-        .frames = frames,
-        .n_frames = frame_count.n_frames,
-        .frame_size = frame_size,
-    };
+    return frame_count.n_frames;
 }

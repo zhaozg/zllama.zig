@@ -20,6 +20,7 @@ const ggml = @import("ggml");
 const gguf = @import("gguf");
 const weight_loader = @import("weight_loader");
 const config_mod = @import("config.zig");
+const framing = @import("framing.zig");
 
 const log = std.log.scoped(.audio_encoder);
 
@@ -543,14 +544,21 @@ pub const AudioEncoder = struct {
     /// 因此每 4 帧 mel 特征产生 1 个输出 token
     pub fn estimateOutputTokens(self: *const AudioEncoder, audio_length_sec: f32) u32 {
         const n_samples: u32 = @intFromFloat(@as(f32, @floatFromInt(self.params.sample_rate)) * audio_length_sec);
-        const pad_left: u32 = 160; // frame_length / 2
-        const hop: u32 = 160;
-        const n_with_left = n_samples + pad_left;
-        const n_frames: u32 = if (n_with_left >= 321) // frame_length + 1
-            (n_with_left - 321) / hop + 1
+        // 使用 framing.computeFrameCount 复用分帧计数逻辑
+        const fc = framing.computeFrameCount(n_samples, .{
+            .frame_length = config_mod.DEFAULT_FRAME_LENGTH,
+            .hop_length = config_mod.DEFAULT_HOP_LENGTH,
+            .n_fft = config_mod.DEFAULT_N_FFT,
+        });
+        // 匹配 llama.cpp: 裁剪到 PyTorch 帧数
+        const pad_left: u32 = config_mod.DEFAULT_FRAME_LENGTH / 2;
+        const n_with_left: u32 = n_samples + pad_left;
+        const pt_frames: u32 = if (n_with_left >= config_mod.DEFAULT_FRAME_LENGTH + 1)
+            @as(u32, @intCast((n_with_left - (config_mod.DEFAULT_FRAME_LENGTH + 1)) / config_mod.DEFAULT_HOP_LENGTH)) + 1
         else
             0;
-        return n_frames / 4;
+        const actual_frames = @min(fc.n_frames, pt_frames);
+        return actual_frames / 4;
     }
 
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {

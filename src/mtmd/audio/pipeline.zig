@@ -57,10 +57,6 @@ pub fn processPcmSamples(
     // gemma4a 不使用预加重 (preemph=0.0)
     const samples = resampled;
 
-    helper.mtmdDebugSaveData(io, "zllama_audio_samples.json", "audio_samples", samples) catch |err| {
-        log.debug("Failed to save audio samples debug data: {}", .{err});
-    };
-
     // 预计算 Mel 滤波器组（HTK scale, slaney_area_norm=false）
     const filterbank = try mel.computeFilterbank(
         tmp_alloc,
@@ -86,32 +82,42 @@ pub fn processPcmSamples(
     // 匹配 llama.cpp gemma4a: 30秒分块处理
     const chunk_samples: usize = 30 * params.sample_rate;
 
-    // 先计算总帧数
+    // 先计算总帧数（使用 framing.computeFrameCount 复用分帧计数逻辑）
     var total_frames: u32 = 0;
-
     var offset: usize = 0;
     while (offset < samples.len) {
         const chunk_len = @min(chunk_samples, samples.len - offset);
-
-        // 匹配 llama.cpp gemma4a 的 semicausal padding 计算
+        const fc = framing.computeFrameCount(chunk_len, .{
+            .frame_length = params.frame_length,
+            .hop_length = hop,
+            .n_fft = frame_size,
+        });
+        // 匹配 llama.cpp: 裁剪到 PyTorch 帧数
         const n_with_left: u32 = @as(u32, @intCast(chunk_len)) + pad_left;
         const pt_frames: u32 = if (n_with_left >= params.frame_length + 1)
             @as(u32, @intCast((n_with_left - (params.frame_length + 1)) / hop)) + 1
         else
             0;
-        const n_padded_needed: u32 = (pt_frames -| 1) * hop + frame_size;
-        const total_pad: u32 = @max(n_padded_needed -| @as(u32, @intCast(chunk_len)), pad_left);
-        const n_samples_padded: u32 = total_pad + @as(u32, @intCast(chunk_len));
-        const n_frames: u32 = if (n_samples_padded >= frame_size)
-            @as(u32, @intCast((n_samples_padded - frame_size) / hop)) + 1
-        else
-            0;
-
-        // 匹配 llama.cpp: 裁剪到 PyTorch 帧数
-        const actual_frames = @min(n_frames, pt_frames);
+        const actual_frames = @min(fc.n_frames, pt_frames);
         total_frames += actual_frames;
-
         offset += chunk_samples;
+    }
+
+    // 构建填充后的 SAMPLES（半因果填充：左填充 pad_left 个零，右填充到匹配 PyTorch 帧数）
+    // 匹配 llama.cpp gemma4a preprocess() 的 semicausal padding 逻辑
+    {
+        const fc_full = framing.computeFrameCount(samples.len, .{
+            .frame_length = params.frame_length,
+            .hop_length = hop,
+            .n_fft = frame_size,
+        });
+        const n_padded = samples.len + fc_full.total_pad;
+        var padded_samples = try tmp_alloc.alloc(f32, n_padded);
+        @memset(padded_samples, 0.0);
+        @memcpy(padded_samples[pad_left..][0..samples.len], samples);
+        helper.mtmdDebugSaveData(io, "zllama_audio_samples.json", "audio_samples_padded", padded_samples) catch |err| {
+            log.debug("Failed to save padded audio samples debug data: {}", .{err});
+        };
     }
 
     // 分配 Mel 输出缓冲区 [n_mel_bins, n_frames] (mel-major 布局，匹配 llama.cpp)
@@ -127,55 +133,62 @@ pub fn processPcmSamples(
         const chunk_len = @min(chunk_samples, samples.len - offset);
         const chunk_ptr = samples[offset..][0..chunk_len];
 
-        // 匹配 llama.cpp gemma4a 的 semicausal padding
-        const n_with_left: u32 = @as(u32, @intCast(chunk_len)) + pad_left;
-        const pt_frames: u32 = if (n_with_left >= params.frame_length + 1)
-            @as(u32, @intCast((n_with_left - (params.frame_length + 1)) / hop)) + 1
-        else
-            0;
-        const n_padded_needed: u32 = (pt_frames -| 1) * hop + frame_size;
-        const total_pad: u32 = @max(n_padded_needed -| @as(u32, @intCast(chunk_len)), pad_left);
-        const n_samples_padded: u32 = total_pad + @as(u32, @intCast(chunk_len));
-        const n_frames: u32 = if (n_samples_padded >= frame_size)
-            @as(u32, @intCast((n_samples_padded - frame_size) / hop)) + 1
-        else
-            0;
-        const actual_frames = @min(n_frames, pt_frames);
+        // 使用 framing.frameAudioWithCallback 复用分帧逻辑
+        // 对每帧：FFT → 幅度谱 → Mel 滤波 → 对数变换
+        //
+        // 注意：由于 Zig 回调无法捕获外部变量，我们使用一个包装结构体
+        // 来传递 pipeline 上下文给回调函数。
+        const Context = struct {
+            fft: *fft_mod.AccelFFT,
+            fb: []const f32,
+            mel_out_slice: []f32,
+            total_frames_val: u32,
+            mel_frame_offset_val: u32,
+            n_mel_bins: u32,
+            n_freqs: u32,
+            log_offset: f32,
+        };
 
-        // 构建填充缓冲区（匹配 llama.cpp: padded_samples = [pad_left zeros] + chunk_data + [right zeros]）
-        const padded = try tmp_alloc.alloc(f32, n_samples_padded);
-        @memset(padded, 0.0);
-        @memcpy(padded[pad_left..][0..chunk_len], chunk_ptr);
+        var ctx = Context{
+            .fft = &fft_engine,
+            .fb = filterbank,
+            .mel_out_slice = mel_out,
+            .total_frames_val = total_frames,
+            .mel_frame_offset_val = mel_frame_offset,
+            .n_mel_bins = params.n_mel_bins,
+            .n_freqs = n_freqs,
+            .log_offset = params.log_offset,
+        };
 
-        // 逐帧处理（匹配 llama.cpp log_mel_spectrogram_worker_thread）
-        const fft_in = try tmp_alloc.alloc(f32, frame_size);
-        const spectrum = try tmp_alloc.alloc(f32, n_freqs);
+        const actual_frames = try framing.frameAudioWithCallback(
+            tmp_alloc,
+            chunk_ptr,
+            .{
+                .frame_length = params.frame_length,
+                .hop_length = hop,
+                .n_fft = frame_size,
+            },
+            hann_window[0..frame_size],
+            struct {
+                fn callback(fi: u32, windowed_frame: []const f32, c: *Context) !void {
+                    // FFT → 幅度谱 |X| (use_magnitude=true)
+                    var spectrum: [257]f32 = undefined; // max n_freqs for n_fft=512
+                    const spec_slice = spectrum[0..c.n_freqs];
+                    c.fft.powerSpectrum(windowed_frame, spec_slice);
 
-        for (0..actual_frames) |fi| {
-            const start: usize = fi * @as(usize, hop);
-
-            // 应用 Hann 窗口（匹配 llama.cpp: valid_len = min(frame_size, max(0, n_samples - offset))）
-            const valid_len = @min(frame_size, if (n_samples_padded > start) n_samples_padded - start else 0);
-            @memset(fft_in, 0.0);
-            // 匹配 llama.cpp: for j < valid_len: fft_in[j] = hann[j] * samples[offset + j]
-            // hann[j] for j >= frame_length is 0 (zero-padded to FFT size)
-            for (0..valid_len) |j| {
-                fft_in[j] = hann_window[j] * padded[start + j];
-            }
-
-            // FFT → 幅度谱 |X| (use_magnitude=true)
-            fft_engine.powerSpectrum(fft_in[0..frame_size], spectrum);
-
-            // Mel 滤波 + 自然对数
-            // 匹配 llama.cpp mel-major 布局: out.data[mel_bin * n_len + frame_idx]
-            for (0..@as(usize, params.n_mel_bins)) |m| {
-                const mel_idx = m * @as(usize, total_frames) + @as(usize, mel_frame_offset) + fi;
-                mel_out[mel_idx] = @log(@max(
-                    mel.applyFilterbankSingle(spectrum, filterbank, @as(u32, @intCast(m)), n_freqs),
-                    params.log_offset,
-                ));
-            }
-        }
+                    // Mel 滤波 + 自然对数
+                    // 匹配 llama.cpp mel-major 布局: out.data[mel_bin * n_len + frame_idx]
+                    for (0..@as(usize, c.n_mel_bins)) |m| {
+                        const mel_idx = m * @as(usize, c.total_frames_val) + @as(usize, c.mel_frame_offset_val) + fi;
+                        c.mel_out_slice[mel_idx] = @log(@max(
+                            mel.applyFilterbankSingle(spec_slice, c.fb, @as(u32, @intCast(m)), c.n_freqs),
+                            c.log_offset,
+                        ));
+                    }
+                }
+            }.callback,
+            &ctx,
+        );
 
         mel_frame_offset += actual_frames;
         offset += chunk_samples;
