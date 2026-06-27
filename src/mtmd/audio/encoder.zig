@@ -18,6 +18,7 @@
 const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
+const c = @import("ggml").c;
 const weight_loader = @import("weight_loader");
 const config_mod = @import("config.zig");
 const framing = @import("framing.zig");
@@ -106,6 +107,12 @@ pub const AudioEncoder = struct {
     params: config_mod.AudioEncoderParams,
     weights: AudioEncoderWeights,
     ctx_weights: *ggml.Context,
+
+    /// Debug: intermediate tensor references for debug data saving
+    debug_conv2d_0_out: ?*ggml.Tensor = null,
+    debug_conv2d_1_out: ?*ggml.Tensor = null,
+    debug_flatten_out: ?*ggml.Tensor = null,
+    debug_input_proj_out: ?*ggml.Tensor = null,
 
     /// 从 GGUF 文件初始化音频编码器，加载所有权重到 ggml context
     pub fn init(
@@ -275,7 +282,7 @@ pub const AudioEncoder = struct {
     /// @param mel_data PCM F32 音频样本 [n_mel_bins, n_frames]
     /// @returns 音频嵌入 [n_output_embd, n_tokens]
     pub fn encode(
-        self: *const AudioEncoder,
+        self: *AudioEncoder,
         io: std.Io,
         ctx: *ggml.Context,
         cgraph: *ggml.CGraph,
@@ -330,8 +337,19 @@ pub const AudioEncoder = struct {
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
-            if (w.sscp_conv_w[i]) |conv_w| {
-                cur = cur.conv2d(ctx, conv_w, 2, 2, 1, 1, 1, 1);
+            if (w.sscp_conv_w[i]) |conv_w_raw| {
+                // conv1d weight from GGUF is 4D [KH, KW, IC, OC] (ne[0]=KH, ne[1]=KW, ne[2]=IC, ne[3]=OC)
+                // ggml_conv_2d expects 4D kernel [OC, IC, KH, KW] (ne[0]=KW, ne[1]=KH, ne[2]=IC, ne[3]=OC)
+                // CRITICAL: Even when KH==KW, the inner loop ordering differs:
+                //   GGUF: ne[0]=KH (kh varies fastest), ne[1]=KW
+                //   ggml_conv_2d: ne[0]=KW (kw varies fastest), ne[1]=KH
+                // These produce transposed 3x3 kernels! Must permute (1,0,2,3).
+                const ne = conv_w_raw.ne();
+                log.debug("conv1d.{d}.weight: ne=[{d},{d},{d},{d}], name={s}", .{ i, ne[0], ne[1], ne[2], ne[3], conv_w_raw.getName() });
+                log.info("conv1d.{d}.weight: ne=[{d},{d},{d},{d}], name={s}", .{ i, ne[0], ne[1], ne[2], ne[3], conv_w_raw.getName() });
+                const kernel = conv_w_raw.permute(ctx, 1, 0, 2, 3).cont(ctx);
+                cur = cur.conv2d(ctx, kernel, 2, 2, 1, 1, 1, 1);
+
                 if (w.sscp_conv_b[i]) |conv_b| {
                     cur = cur.add(ctx, conv_b);
                 }
@@ -343,6 +361,13 @@ pub const AudioEncoder = struct {
                     cur = cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
                 }
                 cur = cur.relu(ctx);
+
+                // === DEBUG: 保存 conv2d 层输出 ===
+                if (i == 0) {
+                    self.debug_conv2d_0_out = cur;
+                } else if (i == 1) {
+                    self.debug_conv2d_1_out = cur;
+                }
             }
         }
 
@@ -351,13 +376,19 @@ pub const AudioEncoder = struct {
         const flat_dim0 = cur.ne()[0] * cur.ne()[1];
         cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
 
-        // Input projection: map conv output dim → Conformer embedding dim
+        // === DEBUG: 保存 flatten 输出 ===
+        self.debug_flatten_out = cur;
+
+        // Input projection: map conv output dim -> Conformer embedding dim
         if (w.sscp_inp_proj_w) |proj_w| {
             cur = proj_w.mulMat(ctx, cur);
             if (w.sscp_inp_proj_b) |proj_b| {
                 cur = cur.add(ctx, proj_b);
             }
         }
+
+        // === DEBUG: 保存 input_proj 输出 ===
+        self.debug_input_proj_out = cur;
 
         // 输入投影
         const n_pos = cur.ne()[1];
@@ -632,6 +663,30 @@ pub const AudioEncoder = struct {
         return actual_frames / 4;
     }
 
+    /// 保存中间张量的调试数据（需在 graph.compute() 之后调用）
+    pub fn saveDebugData(self: *const AudioEncoder, io: std.Io) void {
+        if (self.debug_conv2d_0_out) |t| {
+            helper.mtmdDebugSaveData(io, "zllama_audio_conv2d_0_out.json", "conv2d_0_out", t.dataF32()) catch |err| {
+                log.debug("Failed to save conv2d_0_out debug data: {}", .{err});
+            };
+        }
+        if (self.debug_conv2d_1_out) |t| {
+            helper.mtmdDebugSaveData(io, "zllama_audio_conv2d_1_out.json", "conv2d_1_out", t.dataF32()) catch |err| {
+                log.debug("Failed to save conv2d_1_out debug data: {}", .{err});
+            };
+        }
+        if (self.debug_flatten_out) |t| {
+            helper.mtmdDebugSaveData(io, "zllama_audio_flatten_out.json", "flatten_out", t.dataF32()) catch |err| {
+                log.debug("Failed to save flatten_out debug data: {}", .{err});
+            };
+        }
+        if (self.debug_input_proj_out) |t| {
+            helper.mtmdDebugSaveData(io, "zllama_audio_input_proj_out.json", "input_proj_out", t.dataF32()) catch |err| {
+                log.debug("Failed to save input_proj_out debug data: {}", .{err});
+            };
+        }
+    }
+
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {
         allocator.free(self.weights.layers);
     }
@@ -751,12 +806,12 @@ fn fillChunkedAttentionMask(
 
     for (0..n_blocks) |b| {
         const bC: i64 = @intCast(b * C);
-        for (0..C) |c| {
-            const gq: i64 = @intCast(b * C + c); // global query position
+        for (0..C) |cc| {
+            const gq: i64 = @intCast(b * C + cc); // global query position
             for (0..S) |s| {
                 const s_i64: i64 = @intCast(s);
                 const gk: i64 = s_i64 + bC - @as(i64, @intCast(past)); // global key position
-                const idx = s + c * S + b * S * C;
+                const idx = s + cc * S + b * S * C;
                 // Condition matching C++: gq < n_pos && gk >= 0 && gk < n_pos && gk <= gq && (gq - gk) < past
                 if (gq < n_pos and gk >= 0 and gk < n_pos and gk <= gq and (gq - gk) < past) {
                     data[idx] = 0.0;

@@ -954,6 +954,10 @@ pub const InferenceEngine = struct {
         if (!a_galloc.allocGraph(audio_graph)) return error.GraphAllocFailed;
         try audio_graph.compute(self.n_threads);
 
+        // === DEBUG: 保存中间张量数据（conv2d_0_out, conv2d_1_out, flatten_out, input_proj_out）===
+        if (mm_mgr.audio_encoder) |enc| {
+            enc.saveDebugData(io);
+        }
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
 

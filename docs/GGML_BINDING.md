@@ -270,3 +270,62 @@ zig build test -Doptimize=ReleaseSafe
 3. **不同 permute 顺序导致不同计算结果**：虽然数学上等价，但 ggml 的 mul_mat
    对高维张量的 batch 广播处理依赖于数据布局（ne 维度顺序），
    不同的 permute 顺序导致不同的数据布局，进而产生不同的计算结果。
+
+### 5.5 ggml_conv_2d 核张量布局（GGUF vs ggml 核转置陷阱）
+
+`ggml_conv_2d` 期望的 4D 核张量布局为 `[OC, IC, KH, KW]`，其 ne 维度顺序为：
+- `ne[0] = KW`（宽度维度，最内层循环）
+- `ne[1] = KH`（高度维度）
+- `ne[2] = IC`（输入通道）
+- `ne[3] = OC`（输出通道）
+
+**关键事实**：`ggml_conv_2d` 的 ne[0] 是 **KW**（宽度先行），而非 KH。
+
+#### GGUF 文件中的核张量布局
+
+GGUF 中 Gemma Conformer 的卷积权重（如 `a.conv1d.0.weight`）存储的维度语义可能为：
+- `ne[0] = KH`（高度维度，最内层循环）
+- `ne[1] = KW`（宽度维度）
+- `ne[2] = IC`（输入通道）
+- `ne[3] = OC`（输出通道）
+
+#### 核转置问题
+
+即使 `KH == KW`（如 3×3 核），两种布局在 3×3 核矩阵内部的元素排列顺序不同：
+
+| 布局 | 3×3 核内遍历顺序 | 核矩阵（以 data[0..8] 填充） |
+|------|-----------------|--------------------------|
+| GGUF (ne[0]=KH) | `(kh=0,kw=0) → (1,0) → (2,0) → (0,1) → ...` | `[[d0,d3,d6],[d1,d4,d7],[d2,d5,d8]]` |
+| ggml (ne[0]=KW) | `(kw=0,kh=0) → (1,0) → (2,0) → (0,1) → ...` | `[[d0,d1,d2],[d3,d4,d5],[d6,d7,d8]]` |
+
+两种布局产生的 3×3 核矩阵是**互为转置**的关系。直接使用 GGUF 的核张量调用 `ggml_conv_2d`，等于对每个输入/输出通道的 3×3 核做了**隐式转置**，导致完全不同的卷积结果。
+
+#### 解决方案
+
+在 `conv2d` 调用前，使用 `permute(1, 0, 2, 3)` 交换 KH 和 KW 维度，将 GGUF 布局转换为 ggml 期望的布局：
+
+```zig
+// GGUF 核: ne[0]=KH, ne[1]=KW → ggml conv2d 期望: ne[0]=KW, ne[1]=KH
+const kernel = conv_w_raw.permute(ctx, 1, 0, 2, 3).cont(ctx);
+cur = cur.conv2d(ctx, kernel, 2, 2, 1, 1, 1, 1);
+```
+
+> **验证方法**：对比 `ggml_conv_2d` 的官方测试 `deps/ggml/tests/test-conv2d.cpp` 第 99 行：
+>
+> ```cpp
+> model.a = ggml_new_tensor_4d(model.ctx, GGML_TYPE_F16, KW, KH, IC, OC);
+> // ne[0]=KW, ne[1]=KH — 确认 ggml_conv_2d 的 ne[0] 是 KW！
+> ```
+
+#### 检测方法
+
+若卷积输出与参考实现严重偏离（NMSE > 1.0，余弦相似度 < 0.5），且：
+- 输入数据已验证一致
+- 权重数据已验证一致
+- 卷积 stride/padding/dilation 参数已验证一致
+
+则很可能是核转置问题。修复后卷积输出应与手工 NumPy 计算结果匹配。
+
+#### 深度可分离卷积
+
+对于深度可分离卷积（如 Conformer 的 `conv_dw`），核张量是 1D `[KH, 1, IC, 1]`，不存在 KH/KW 混淆问题，无需 permute。

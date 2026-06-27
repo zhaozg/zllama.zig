@@ -217,6 +217,10 @@ pub const MtmdAudioComparator = struct {
         }
         try audio_graph.compute(self.config.n_threads);
 
+        // === DEBUG: 保存中间张量数据 ===
+        if (mm_mgr.audio_encoder) |enc| {
+            enc.saveDebugData(io);
+        }
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
         log.info("Audio encoder output: [{d}, {d}]", .{ n_embd_val, n_audio_tokens });
