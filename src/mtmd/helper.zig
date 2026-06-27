@@ -311,17 +311,37 @@ fn loadAudioFromBuf(allocator: std.mem.Allocator, buf: []const u8) !BitmapWrappe
 /// ...
 /// ]
 /// 注意：此格式不是合法 JSON，但与 llama.cpp 的调试输出保持一致。
-pub fn mtmdDebugSaveData(io: std.Io, fname: []const u8, title: []const u8, data: []const f32) !void {
-    log.info("Save {s} debug data to {s}", .{ title, fname });
+/// @param io I/O 实例
+/// @param subdir 子目录（如 "debug_audio"），null 表示当前目录
+/// @param fname 文件名（不含路径）
+/// @param title 数据标题（用于日志）
+/// @param data 浮点数据
+pub fn mtmdDebugSaveData(io: std.Io, subdir: ?[]const u8, fname: []const u8, title: []const u8, data: []const f32) !void {
+    const cwd = std.Io.Dir.cwd();
 
-    const file = try std.Io.Dir.cwd().createFile(io, fname, .{});
-    defer file.close(io);
+    if (subdir) |sd| {
+        cwd.createDirPath(io, sd) catch {}; // 忽略目录已存在错误
+        const dir = try cwd.openDir(io, sd, .{});
+        defer dir.close(io);
 
-    // 写入 JSON 格式数据
+        log.info("Save {s} debug data to {s}/{s}", .{ title, sd, fname });
+
+        const file = try dir.createFile(io, fname, .{});
+        defer file.close(io);
+        try writeJsonArray(io, file, data);
+    } else {
+        log.info("Save {s} debug data to {s}", .{ title, fname });
+
+        const file = try cwd.createFile(io, fname, .{});
+        defer file.close(io);
+        try writeJsonArray(io, file, data);
+    }
+}
+
+fn writeJsonArray(io: std.Io, file: std.Io.File, data: []const f32) !void {
     try file.writeStreamingAll(io, "[\n");
 
     for (data[0 .. data.len - 1]) |val| {
-        // 使用 writeStreamingAll 逐行写入
         var buf: [64]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "{d:.6},\n", .{val}) catch unreachable;
         try file.writeStreamingAll(io, line);

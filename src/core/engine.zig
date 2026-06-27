@@ -934,7 +934,7 @@ pub const InferenceEngine = struct {
         var mel = try audio_mod.computeMelSpectrogram(io, self.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
         defer mel.deinit();
 
-        mtmd.helper.mtmdDebugSaveData(io, "zllama_audio_mel.json", "audio_mel", mel.data) catch |err| {
+        mtmd.helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_mel.json", "audio_mel", mel.data) catch |err| {
             logger.info("Save audio mel data fail: {}", .{err});
         };
 
@@ -961,7 +961,7 @@ pub const InferenceEngine = struct {
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
 
-        mtmd.helper.mtmdDebugSaveData(io, "zllama_audio_embeddings.json", "audio_embeddings", audio_embeddings.dataF32()) catch |err| {
+        mtmd.helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_embeddings.json", "audio_embeddings", audio_embeddings.dataF32()) catch |err| {
             logger.info("Save audio embeddings data fail: {}", .{err});
         };
 

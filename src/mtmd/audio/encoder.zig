@@ -109,6 +109,7 @@ pub const AudioEncoder = struct {
     ctx_weights: *ggml.Context,
 
     /// Debug: intermediate tensor references for debug data saving
+    debug_conv2d_0_raw: ?*ggml.Tensor = null,
     debug_conv2d_0_out: ?*ggml.Tensor = null,
     debug_conv2d_1_out: ?*ggml.Tensor = null,
     debug_flatten_out: ?*ggml.Tensor = null,
@@ -228,30 +229,38 @@ pub const AudioEncoder = struct {
             if (sscp_conv_w[i]) |t| {
                 const fname = try std.fmt.allocPrint(allocator, "zllama_audio_conv1d_{d}_weight.json", .{i});
                 defer allocator.free(fname);
-                helper.mtmdDebugSaveData(io, fname, "conv1d_weight", t.dataF32()) catch |err| {
+                helper.mtmdDebugSaveData(io, "debug_audio", fname, "conv1d_weight", t.dataF32()) catch |err| {
                     log.debug("Failed to save conv1d.{d}.weight debug data: {}", .{ i, err });
                 };
             }
             if (sscp_conv_b[i]) |t| {
                 const fname = try std.fmt.allocPrint(allocator, "zllama_audio_conv1d_{d}_bias.json", .{i});
                 defer allocator.free(fname);
-                helper.mtmdDebugSaveData(io, fname, "conv1d_bias", t.dataF32()) catch |err| {
+                helper.mtmdDebugSaveData(io, "debug_audio", fname, "conv1d_bias", t.dataF32()) catch |err| {
                     log.debug("Failed to save conv1d.{d}.bias debug data: {}", .{ i, err });
+                };
+            }
+            // Also save norm weight
+            if (sscp_norm_w[i]) |t| {
+                const fname = try std.fmt.allocPrint(allocator, "zllama_audio_conv1d_{d}_norm.json", .{i});
+                defer allocator.free(fname);
+                helper.mtmdDebugSaveData(io, "debug_audio", fname, "conv1d_norm", t.dataF32()) catch |err| {
+                    log.debug("Failed to save conv1d.{d}.norm debug data: {}", .{ i, err });
                 };
             }
         }
         if (sscp_inp_proj_w) |t| {
-            helper.mtmdDebugSaveData(io, "zllama_audio_input_proj_weight.json", "input_proj_weight", t.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_input_proj_weight.json", "input_proj_weight", t.dataF32()) catch |err| {
                 log.debug("Failed to save input_proj.weight debug data: {}", .{err});
             };
         }
         if (audio_out_proj_w) |t| {
-            helper.mtmdDebugSaveData(io, "zllama_audio_out_proj_weight.json", "audio_out_proj_weight", t.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_out_proj_weight.json", "audio_out_proj_weight", t.dataF32()) catch |err| {
                 log.debug("Failed to save audio_out_proj.weight debug data: {}", .{err});
             };
         }
         if (mm_input_proj_w) |t| {
-            helper.mtmdDebugSaveData(io, "zllama_audio_mm_input_proj_weight.json", "mm_input_proj_weight", t.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_mm_input_proj_weight.json", "mm_input_proj_weight", t.dataF32()) catch |err| {
                 log.debug("Failed to save mm_input_proj.weight debug data: {}", .{err});
             };
         }
@@ -296,9 +305,10 @@ pub const AudioEncoder = struct {
         const res_weight: f32 = 0.5;
 
         // === DEBUG: 保存 Mel 输入数据 ===
-        helper.mtmdDebugSaveData(io, "zllama_audio_encode_mel_input.json", "encode_mel_input", mel_data) catch |err| {
+        helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_encode_mel_input.json", "encode_mel_input", mel_data) catch |err| {
             log.debug("Failed to save encode mel input debug data: {}", .{err});
         };
+        log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
         log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
 
         // 1. Create input tensor matching llama.cpp layout
@@ -327,7 +337,7 @@ pub const AudioEncoder = struct {
         // === DEBUG: 保存 frame-major 转换后的输入 ===
         {
             const raw = cur.dataF32();
-            helper.mtmdDebugSaveData(io, "zllama_audio_encode_frame_major.json", "encode_frame_major", raw) catch |err| {
+            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_encode_frame_major.json", "encode_frame_major", raw) catch |err| {
                 log.debug("Failed to save frame-major input debug data: {}", .{err});
             };
         }
@@ -350,6 +360,11 @@ pub const AudioEncoder = struct {
                 const kernel = conv_w_raw.permute(ctx, 1, 0, 2, 3).cont(ctx);
                 cur = cur.conv2d(ctx, kernel, 2, 2, 1, 1, 1, 1);
 
+                // === DEBUG: save raw conv2d output (before bias/norm/relu) ===
+                if (i == 0) {
+                    self.debug_conv2d_0_raw = cur;
+                }
+
                 if (w.sscp_conv_b[i]) |conv_b| {
                     cur = cur.add(ctx, conv_b);
                 }
@@ -360,12 +375,17 @@ pub const AudioEncoder = struct {
                     cur = cur.mul(ctx, norm_w);
                     cur = cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
                 }
-                cur = cur.relu(ctx);
 
-                // === DEBUG: 保存 conv2d 层输出 ===
+                // === DEBUG: save after bias+norm but BEFORE relu (matches llama.cpp save point) ===
+                // llama reference has negative values → saved before ReLU
                 if (i == 0) {
                     self.debug_conv2d_0_out = cur;
-                } else if (i == 1) {
+                }
+
+                cur = cur.relu(ctx);
+
+                // === DEBUG: save after relu ===
+                if (i == 1) {
                     self.debug_conv2d_1_out = cur;
                 }
             }
@@ -413,7 +433,7 @@ pub const AudioEncoder = struct {
 
         // === DEBUG: 保存 pos_emb 数据 ===
         {
-            helper.mtmdDebugSaveData(io, "zllama_audio_pos_emb.json", "pos_emb", pos_emb.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_pos_emb.json", "pos_emb", pos_emb.dataF32()) catch |err| {
                 log.debug("Failed to save pos_emb debug data: {}", .{err});
             };
         }
@@ -425,7 +445,7 @@ pub const AudioEncoder = struct {
 
         // === DEBUG: 保存 kq_mask 数据 ===
         {
-            helper.mtmdDebugSaveData(io, "zllama_audio_kq_mask.json", "kq_mask", kq_mask.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_kq_mask.json", "kq_mask", kq_mask.dataF32()) catch |err| {
                 log.debug("Failed to save kq_mask debug data: {}", .{err});
             };
         }
@@ -664,24 +684,31 @@ pub const AudioEncoder = struct {
     }
 
     /// 保存中间张量的调试数据（需在 graph.compute() 之后调用）
+    /// 所有文件保存到 debug_audio/ 子目录
     pub fn saveDebugData(self: *const AudioEncoder, io: std.Io) void {
+        const subdir = "debug_audio";
+        if (self.debug_conv2d_0_raw) |t| {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_0_raw.json", "conv2d_0_raw", t.dataF32()) catch |err| {
+                log.debug("Failed to save conv2d_0_raw debug data: {}", .{err});
+            };
+        }
         if (self.debug_conv2d_0_out) |t| {
-            helper.mtmdDebugSaveData(io, "zllama_audio_conv2d_0_out.json", "conv2d_0_out", t.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_0_out.json", "conv2d_0_out", t.dataF32()) catch |err| {
                 log.debug("Failed to save conv2d_0_out debug data: {}", .{err});
             };
         }
         if (self.debug_conv2d_1_out) |t| {
-            helper.mtmdDebugSaveData(io, "zllama_audio_conv2d_1_out.json", "conv2d_1_out", t.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_1_out.json", "conv2d_1_out", t.dataF32()) catch |err| {
                 log.debug("Failed to save conv2d_1_out debug data: {}", .{err});
             };
         }
         if (self.debug_flatten_out) |t| {
-            helper.mtmdDebugSaveData(io, "zllama_audio_flatten_out.json", "flatten_out", t.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_flatten_out.json", "flatten_out", t.dataF32()) catch |err| {
                 log.debug("Failed to save flatten_out debug data: {}", .{err});
             };
         }
         if (self.debug_input_proj_out) |t| {
-            helper.mtmdDebugSaveData(io, "zllama_audio_input_proj_out.json", "input_proj_out", t.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_input_proj_out.json", "input_proj_out", t.dataF32()) catch |err| {
                 log.debug("Failed to save input_proj_out debug data: {}", .{err});
             };
         }
