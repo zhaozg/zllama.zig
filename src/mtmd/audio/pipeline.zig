@@ -115,7 +115,7 @@ pub fn processPcmSamples(
         var padded_samples = try tmp_alloc.alloc(f32, n_padded);
         @memset(padded_samples, 0.0);
         @memcpy(padded_samples[pad_left..][0..samples.len], samples);
-        helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_samples.json", "audio_samples_padded", padded_samples) catch |err| {
+        helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_samples_input.json", "audio_samples_input", padded_samples) catch |err| {
             log.debug("Failed to save padded audio samples debug data: {}", .{err});
         };
     }

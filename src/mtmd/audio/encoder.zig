@@ -246,16 +246,6 @@ pub const AudioEncoder = struct {
                 log.debug("Failed to save input_proj.weight debug data: {}", .{err});
             };
         }
-        if (audio_out_proj_w) |t| {
-            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_out_proj_weight.json", "audio_out_proj_weight", t.dataF32()) catch |err| {
-                log.debug("Failed to save audio_out_proj.weight debug data: {}", .{err});
-            };
-        }
-        if (mm_input_proj_w) |t| {
-            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_mm_input_proj_weight.json", "mm_input_proj_weight", t.dataF32()) catch |err| {
-                log.debug("Failed to save mm_input_proj.weight debug data: {}", .{err});
-            };
-        }
 
         return AudioEncoder{
             .params = params,
@@ -299,10 +289,6 @@ pub const AudioEncoder = struct {
         const norm_eps: f32 = 1e-6;
         const res_weight: f32 = 0.5;
 
-        // === DEBUG: 保存 Mel 输入数据 ===
-        helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_encode_mel_input.json", "encode_mel_input", mel_data) catch |err| {
-            log.debug("Failed to save encode mel input debug data: {}", .{err});
-        };
         log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
         log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
 
@@ -312,7 +298,7 @@ pub const AudioEncoder = struct {
         //    We create directly: [n_mel, n_frames] 2D with frame-major data = match after transpose.
         //    ne[0]=n_mel (freq varies fastest), ne[1]=n_frames (time).
         var cur = try ctx.newTensor2d(ggml.Type.f32, @intCast(n_mel_bins), @intCast(n_frames));
-        cur.setName("audio_mel_input");
+        cur.setName("debug_audio_encoder_input");
 
         {
             const raw = cur.dataBytes();
@@ -328,14 +314,6 @@ pub const AudioEncoder = struct {
             }
         }
 
-        // === DEBUG: 保存 frame-major 转换后的输入 ===
-        {
-            const raw = cur.dataF32();
-            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_encode_frame_major.json", "encode_frame_major", raw) catch |err| {
-                log.debug("Failed to save frame-major input debug data: {}", .{err});
-            };
-        }
-
         // Reshape to 4D for conv2d: [n_mel_bins, n_frames, 1, 1] (matches llama.cpp after transpose)
         cur = cur.reshape4d(ctx, @intCast(n_mel_bins), @intCast(n_frames), 1, 1);
 
@@ -344,15 +322,14 @@ pub const AudioEncoder = struct {
             if (w.sscp_conv_w[i]) |conv_w_raw| {
                 // conv1d weight from GGUF is 4D [KH, KW, IC, OC] (ne[0]=KH, ne[1]=KW, ne[2]=IC, ne[3]=OC)
                 // ggml_conv_2d expects 4D kernel [OC, IC, KH, KW] (ne[0]=KW, ne[1]=KH, ne[2]=IC, ne[3]=OC)
-                // CRITICAL: Even when KH==KW, the inner loop ordering differs:
-                //   GGUF: ne[0]=KH (kh varies fastest), ne[1]=KW
-                //   ggml_conv_2d: ne[0]=KW (kw varies fastest), ne[1]=KH
-                // These produce transposed 3x3 kernels! Must permute (1,0,2,3).
+                // When KH==KW (both 3), the data layout matches ggml_conv_2d's expectation
+                // because ne[0]=KH=3=KW and ne[1]=KW=3=KH, so no permute needed.
+                // llama.cpp passes model.sscp_conv_w[i] directly without permute.
                 const ne = conv_w_raw.ne();
                 log.debug("conv1d.{d}.weight: ne=[{d},{d},{d},{d}], name={s}", .{ i, ne[0], ne[1], ne[2], ne[3], conv_w_raw.getName() });
                 log.info("conv1d.{d}.weight: ne=[{d},{d},{d},{d}], name={s}", .{ i, ne[0], ne[1], ne[2], ne[3], conv_w_raw.getName() });
-                const kernel = conv_w_raw.permute(ctx, 1, 0, 2, 3).cont(ctx);
-                cur = cur.conv2d(ctx, kernel, 2, 2, 1, 1, 1, 1);
+                // Use kernel directly without permute, matching llama.cpp behavior
+                cur = cur.conv2d(ctx, conv_w_raw, 2, 2, 1, 1, 1, 1);
 
                 // === DEBUG: save raw conv2d output (before bias/norm/relu) ===
                 if (i == 0) {
@@ -680,11 +657,6 @@ pub const AudioEncoder = struct {
     // 所有文件保存到 debug_audio/ 子目录
     pub fn saveDebugData(self: *const AudioEncoder, io: std.Io) void {
         const subdir = "debug_audio";
-        if (self.debug_conv2d_0_raw) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_0_raw.json", "conv2d_0_raw", t.dataF32()) catch |err| {
-                log.debug("Failed to save conv2d_0_raw debug data: {}", .{err});
-            };
-        }
         if (self.debug_conv2d_0_output) |t| {
             helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_0_output.json", "conv2d_0_output", t.dataF32()) catch |err| {
                 log.debug("Failed to save conv2d_0_output debug data: {}", .{err});
@@ -695,13 +667,14 @@ pub const AudioEncoder = struct {
                 log.debug("Failed to save conv2d_1_output debug data: {}", .{err});
             };
         }
-        if (self.debug_flatten_output) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_flatten_output.json", "flatten_output", t.dataF32()) catch |err| {
-                log.debug("Failed to save flatten_output debug data: {}", .{err});
-            };
-        }
         if (self.debug_input_proj_output) |t| {
             helper.mtmdDebugSaveData(io, subdir, "zllama_audio_input_proj_output.json", "input_proj_output", t.dataF32()) catch |err| {
+                log.debug("Failed to save input_proj_output debug data: {}", .{err});
+            };
+        }
+
+        if (self.debug_flatten_output) | t | {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_flatten_output.json", "flatten_output", t.dataF32()) catch |err| {
                 log.debug("Failed to save input_proj_output debug data: {}", .{err});
             };
         }
