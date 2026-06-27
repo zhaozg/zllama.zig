@@ -301,7 +301,10 @@ pub const AudioEncoder = struct {
     ) !*ggml.Tensor {
         const w = self.weights;
         const p = self.params;
-        const norm_eps = p.norm_eps;
+        // llama.cpp hardcodes 1e-6 for gemma4a (see clip.cpp PROJECTOR_TYPE_GEMMA4A case)
+        // due to a mistake in the original conversion code, rms_norm_eps is set to a wrong value
+        // since all gemma4a models use 1e-6, we just hardcode it here
+        const norm_eps: f32 = 1e-6;
         const res_weight: f32 = 0.5;
 
         // === DEBUG: 保存 Mel 输入数据 ===
@@ -312,11 +315,10 @@ pub const AudioEncoder = struct {
         log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
 
         // 1. Create input tensor matching llama.cpp layout
-        //    llama.cpp: inp = build_inp_raw(1) with shape [n_mel, n_frames, 1, 1]
-        //    then: cur = transpose(inp) → [n_frames, n_mel, 1, 1]
-        //    Conv2D input shape: [N=1, IC=1, IH=n_mel, IW=n_frames]
-        //    We create a 2D tensor [n_mel_bins, n_frames] with frame-major data
-        //    (each row in contiguous memory = one frame's mel bins).
+        //    llama.cpp: inp = build_inp_raw(1) with shape [n_frames, n_mel, 1, 1] (bin-major)
+        //    then: cur = transpose(inp) → [n_mel, n_frames, 1, 1] (frame-major in memory)
+        //    We create directly: [n_mel, n_frames] 2D with frame-major data = match after transpose.
+        //    ne[0]=n_mel (freq varies fastest), ne[1]=n_frames (time).
         var cur = try ctx.newTensor2d(ggml.Type.f32, @intCast(n_mel_bins), @intCast(n_frames));
         cur.setName("audio_mel_input");
 
@@ -326,7 +328,7 @@ pub const AudioEncoder = struct {
             const n_mel: usize = @intCast(n_mel_bins);
             const n_fr: usize = @intCast(n_frames);
             // mel_data is bin-major: src[m * n_fr + fi]
-            // dst expects frame-major: dst[m + fi * n_mel]
+            // dst is frame-major: dst[m + fi * n_mel] (ne[0]=n_mel varies fastest)
             for (0..n_fr) |fi| {
                 for (0..n_mel) |m| {
                     dst[m + fi * n_mel] = mel_data[m * n_fr + fi];
@@ -342,7 +344,7 @@ pub const AudioEncoder = struct {
             };
         }
 
-        // Reshape to 4D for conv2d: [n_mel_bins, n_frames, 1, 1]
+        // Reshape to 4D for conv2d: [n_mel_bins, n_frames, 1, 1] (matches llama.cpp after transpose)
         cur = cur.reshape4d(ctx, @intCast(n_mel_bins), @intCast(n_frames), 1, 1);
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
@@ -376,15 +378,14 @@ pub const AudioEncoder = struct {
                     cur = cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
                 }
 
-                // === DEBUG: save after bias+norm but BEFORE relu (matches llama.cpp save point) ===
-                // llama reference has negative values → saved before ReLU
+                cur = cur.relu(ctx);
+
+                // === DEBUG: save after relu (matches llama.cpp ggml_set_name("conv2d_0_out") after relu) ===
                 if (i == 0) {
                     self.debug_conv2d_0_out = cur;
                 }
 
-                cur = cur.relu(ctx);
-
-                // === DEBUG: save after relu ===
+                // === DEBUG: save conv2d_1 after relu ===
                 if (i == 1) {
                     self.debug_conv2d_1_out = cur;
                 }
