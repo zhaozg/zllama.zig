@@ -954,7 +954,7 @@ pub const InferenceEngine = struct {
         if (!a_galloc.allocGraph(audio_graph)) return error.GraphAllocFailed;
         try audio_graph.compute(self.n_threads);
 
-        // === DEBUG: 保存中间张量数据（conv2d_0_out, conv2d_1_out, flatten_out, input_proj_out）===
+        // === DEBUG: 保存中间张量数据（conv2d_0_output, conv2d_1_output, flatten_output, input_proj_output）===
         if (mm_mgr.audio_encoder) |enc| {
             enc.saveDebugData(io);
         }

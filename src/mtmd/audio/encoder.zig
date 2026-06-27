@@ -108,14 +108,14 @@ pub const AudioEncoder = struct {
     weights: AudioEncoderWeights,
     ctx_weights: *ggml.Context,
 
-    /// Debug: intermediate tensor references for debug data saving
+    // Debug: intermediate tensor references for debug data saving
     debug_conv2d_0_raw: ?*ggml.Tensor = null,
-    debug_conv2d_0_out: ?*ggml.Tensor = null,
-    debug_conv2d_1_out: ?*ggml.Tensor = null,
-    debug_flatten_out: ?*ggml.Tensor = null,
-    debug_input_proj_out: ?*ggml.Tensor = null,
+    debug_conv2d_0_output: ?*ggml.Tensor = null,
+    debug_conv2d_1_output: ?*ggml.Tensor = null,
+    debug_flatten_output: ?*ggml.Tensor = null,
+    debug_input_proj_output: ?*ggml.Tensor = null,
 
-    /// 从 GGUF 文件初始化音频编码器，加载所有权重到 ggml context
+    // 从 GGUF 文件初始化音频编码器，加载所有权重到 ggml context
     pub fn init(
         io: std.Io,
         gguf_file: *const gguf.GGUFFile,
@@ -240,14 +240,6 @@ pub const AudioEncoder = struct {
                     log.debug("Failed to save conv1d.{d}.bias debug data: {}", .{ i, err });
                 };
             }
-            // Also save norm weight
-            if (sscp_norm_w[i]) |t| {
-                const fname = try std.fmt.allocPrint(allocator, "zllama_audio_conv1d_{d}_norm.json", .{i});
-                defer allocator.free(fname);
-                helper.mtmdDebugSaveData(io, "debug_audio", fname, "conv1d_norm", t.dataF32()) catch |err| {
-                    log.debug("Failed to save conv1d.{d}.norm debug data: {}", .{ i, err });
-                };
-            }
         }
         if (sscp_inp_proj_w) |t| {
             helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_input_proj_weight.json", "input_proj_weight", t.dataF32()) catch |err| {
@@ -284,12 +276,12 @@ pub const AudioEncoder = struct {
         };
     }
 
-    /// 编码音频数据，返回嵌入 tokens
-    /// @param io I/O 实例
-    /// @param ctx ggml 计算上下文
-    /// @param graph 计算图
-    /// @param mel_data PCM F32 音频样本 [n_mel_bins, n_frames]
-    /// @returns 音频嵌入 [n_output_embd, n_tokens]
+    // 编码音频数据，返回嵌入 tokens
+    // @param io I/O 实例
+    // @param ctx ggml 计算上下文
+    // @param graph 计算图
+    // @param mel_data PCM F32 音频样本 [n_mel_bins, n_frames]
+    // @returns 音频嵌入 [n_output_embd, n_tokens]
     pub fn encode(
         self: *AudioEncoder,
         io: std.Io,
@@ -382,12 +374,12 @@ pub const AudioEncoder = struct {
 
                 // === DEBUG: save after relu (matches llama.cpp ggml_set_name("conv2d_0_out") after relu) ===
                 if (i == 0) {
-                    self.debug_conv2d_0_out = cur;
+                    self.debug_conv2d_0_output = cur;
                 }
 
                 // === DEBUG: save conv2d_1 after relu ===
                 if (i == 1) {
-                    self.debug_conv2d_1_out = cur;
+                    self.debug_conv2d_1_output = cur;
                 }
             }
         }
@@ -398,7 +390,7 @@ pub const AudioEncoder = struct {
         cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
 
         // === DEBUG: 保存 flatten 输出 ===
-        self.debug_flatten_out = cur;
+        self.debug_flatten_output = cur;
 
         // Input projection: map conv output dim -> Conformer embedding dim
         if (w.sscp_inp_proj_w) |proj_w| {
@@ -409,7 +401,7 @@ pub const AudioEncoder = struct {
         }
 
         // === DEBUG: 保存 input_proj 输出 ===
-        self.debug_input_proj_out = cur;
+        self.debug_input_proj_output = cur;
 
         // 输入投影
         const n_pos = cur.ne()[1];
@@ -446,7 +438,7 @@ pub const AudioEncoder = struct {
 
         // === DEBUG: 保存 kq_mask 数据 ===
         {
-            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_kq_mask.json", "kq_mask", kq_mask.dataF32()) catch |err| {
+            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_attn_mask.json", "kq_mask", kq_mask.dataF32()) catch |err| {
                 log.debug("Failed to save kq_mask debug data: {}", .{err});
             };
         }
@@ -657,14 +649,14 @@ pub const AudioEncoder = struct {
         return cur;
     }
 
-    /// 返回音频编码器是否可用（权重已加载）
+    // 返回音频编码器是否可用（权重已加载）
     pub fn isAvailable(self: *const AudioEncoder) bool {
         return self.weights.sscp_conv_w[0] != null;
     }
 
-    /// 估算编码后的 token 数量
-    /// Gemma 4 E2B 的 Conformer 使用 2 层步长为 2 的子采样，
-    /// 因此每 4 帧 mel 特征产生 1 个输出 token
+    // 估算编码后的 token 数量
+    // Gemma 4 E2B 的 Conformer 使用 2 层步长为 2 的子采样，
+    // 因此每 4 帧 mel 特征产生 1 个输出 token
     pub fn estimateOutputTokens(self: *const AudioEncoder, audio_length_sec: f32) u32 {
         const n_samples: u32 = @intFromFloat(@as(f32, @floatFromInt(self.params.sample_rate)) * audio_length_sec);
         // 使用 framing.computeFrameCount 复用分帧计数逻辑
@@ -684,8 +676,8 @@ pub const AudioEncoder = struct {
         return actual_frames / 4;
     }
 
-    /// 保存中间张量的调试数据（需在 graph.compute() 之后调用）
-    /// 所有文件保存到 debug_audio/ 子目录
+    // 保存中间张量的调试数据（需在 graph.compute() 之后调用）
+    // 所有文件保存到 debug_audio/ 子目录
     pub fn saveDebugData(self: *const AudioEncoder, io: std.Io) void {
         const subdir = "debug_audio";
         if (self.debug_conv2d_0_raw) |t| {
@@ -693,24 +685,24 @@ pub const AudioEncoder = struct {
                 log.debug("Failed to save conv2d_0_raw debug data: {}", .{err});
             };
         }
-        if (self.debug_conv2d_0_out) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_0_out.json", "conv2d_0_out", t.dataF32()) catch |err| {
-                log.debug("Failed to save conv2d_0_out debug data: {}", .{err});
+        if (self.debug_conv2d_0_output) |t| {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_0_output.json", "conv2d_0_output", t.dataF32()) catch |err| {
+                log.debug("Failed to save conv2d_0_output debug data: {}", .{err});
             };
         }
-        if (self.debug_conv2d_1_out) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_1_out.json", "conv2d_1_out", t.dataF32()) catch |err| {
-                log.debug("Failed to save conv2d_1_out debug data: {}", .{err});
+        if (self.debug_conv2d_1_output) |t| {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_1_output.json", "conv2d_1_output", t.dataF32()) catch |err| {
+                log.debug("Failed to save conv2d_1_output debug data: {}", .{err});
             };
         }
-        if (self.debug_flatten_out) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_flatten_out.json", "flatten_out", t.dataF32()) catch |err| {
-                log.debug("Failed to save flatten_out debug data: {}", .{err});
+        if (self.debug_flatten_output) |t| {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_flatten_output.json", "flatten_output", t.dataF32()) catch |err| {
+                log.debug("Failed to save flatten_output debug data: {}", .{err});
             };
         }
-        if (self.debug_input_proj_out) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_input_proj_out.json", "input_proj_out", t.dataF32()) catch |err| {
-                log.debug("Failed to save input_proj_out debug data: {}", .{err});
+        if (self.debug_input_proj_output) |t| {
+            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_input_proj_output.json", "input_proj_output", t.dataF32()) catch |err| {
+                log.debug("Failed to save input_proj_output debug data: {}", .{err});
             };
         }
     }
@@ -728,7 +720,7 @@ fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: [
     return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
 }
 
-/// 加载单个 Conformer 层
+// 加载单个 Conformer 层
 fn loadConformerLayer(
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
@@ -786,20 +778,20 @@ fn findLayerWeight(
     return weight_loader.loadLayerWeight(ctx, gguf_file, prefix, name);
 }
 
-/// RMS 归一化
+// RMS 归一化
 fn rmsNorm(ctx: *ggml.Context, x: *ggml.Tensor, weight: *ggml.Tensor, eps: f32) *ggml.Tensor {
     return x.rmsNorm(ctx, eps).mul(ctx, weight);
 }
 
-/// SiLU FFN: down(up(x) * silu(gate(x)))
+// SiLU FFN: down(up(x) * silu(gate(x)))
 fn ffnSilu(ctx: *ggml.Context, x: *ggml.Tensor, up_w: *ggml.Tensor, down_w: *ggml.Tensor) *ggml.Tensor {
     const h = up_w.mulMat(ctx, x);
     return down_w.mulMat(ctx, h.silu(ctx));
 }
 
-/// Fill a 2D tensor [n_embd, n_pos] with sinusoidal position encodings.
-/// Used for Relative Position Encoding (RPE) in Conformer attention.
-/// Matches llama.cpp clip.cpp: positions are in DESCENDING order (max_past, max_past-1, ..., 0).
+// Fill a 2D tensor [n_embd, n_pos] with sinusoidal position encodings.
+// Used for Relative Position Encoding (RPE) in Conformer attention.
+// Matches llama.cpp clip.cpp: positions are in DESCENDING order (max_past, max_past-1, ..., 0).
 fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_past: usize) void {
     const data = tensor.dataF32();
     const num_timescales = n_embd / 2;
@@ -817,8 +809,8 @@ fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_p
     }
 }
 
-/// Fill a 3D attention mask tensor [S, C, B] for chunked self-attention.
-/// Matches llama.cpp clip.cpp lines 4244-4263.
+// Fill a 3D attention mask tensor [S, C, B] for chunked self-attention.
+// Matches llama.cpp clip.cpp lines 4244-4263.
 fn fillChunkedAttentionMask(
     tensor: *ggml.Tensor,
     n_ctx: usize,
