@@ -242,6 +242,7 @@ pub const MultiModalManager = struct {
     /// @param gguf_file 包含多模态编码器权重的 GGUF 文件（通常为 mmproj 文件）
     /// @param ctx ggml 权重上下文
     pub fn init(
+        io: std.Io,
         allocator: std.mem.Allocator,
         gguf_file: *const gguf.GGUFFile,
         ctx: *ggml.Context,
@@ -251,7 +252,7 @@ pub const MultiModalManager = struct {
         var vision_enc: ?vision.VisionEncoder = null;
 
         if (caps.has_audio) {
-            audio_enc = try audio.AudioEncoder.init(gguf_file, ctx, allocator);
+            audio_enc = try audio.AudioEncoder.init(io, gguf_file, ctx, allocator);
             log.info("Audio encoder initialized", .{});
         }
 
@@ -281,6 +282,7 @@ pub const MultiModalManager = struct {
     /// 编码单个多模态输入，返回嵌入 tokens
     pub fn encodeMedia(
         self: *MultiModalManager,
+        io: std.Io,
         ctx: *ggml.Context,
         graph: *ggml.CGraph,
         input: MediaInput,
@@ -297,7 +299,7 @@ pub const MultiModalManager = struct {
             .audio => {
                 if (self.audio_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.AudioEncoderNotAvailable;
-                    return enc.encode(ctx, graph, input.mel_data.?, input.mel_bins, input.mel_frames);
+                    return enc.encode(io, ctx, graph, input.mel_data.?, input.mel_bins, input.mel_frames);
                 }
                 return error.AudioEncoderNotAvailable;
             },

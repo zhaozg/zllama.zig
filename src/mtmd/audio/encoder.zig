@@ -21,6 +21,7 @@ const gguf = @import("gguf");
 const weight_loader = @import("weight_loader");
 const config_mod = @import("config.zig");
 const framing = @import("framing.zig");
+const helper = @import("helper");
 
 const log = std.log.scoped(.audio_encoder);
 
@@ -108,6 +109,7 @@ pub const AudioEncoder = struct {
 
     /// 从 GGUF 文件初始化音频编码器，加载所有权重到 ggml context
     pub fn init(
+        io: std.Io,
         gguf_file: *const gguf.GGUFFile,
         ctx: *ggml.Context,
         allocator: std.mem.Allocator,
@@ -214,6 +216,39 @@ pub const AudioEncoder = struct {
 
         log.info("Audio encoder loaded: {d} layers, subsampling convs ready", .{n_layer});
 
+        // === DEBUG: 保存子采样卷积权重数据 ===
+        for (0..2) |i| {
+            if (sscp_conv_w[i]) |t| {
+                const fname = try std.fmt.allocPrint(allocator, "zllama_audio_conv1d_{d}_weight.json", .{i});
+                defer allocator.free(fname);
+                helper.mtmdDebugSaveData(io, fname, "conv1d_weight", t.dataF32()) catch |err| {
+                    log.debug("Failed to save conv1d.{d}.weight debug data: {}", .{ i, err });
+                };
+            }
+            if (sscp_conv_b[i]) |t| {
+                const fname = try std.fmt.allocPrint(allocator, "zllama_audio_conv1d_{d}_bias.json", .{i});
+                defer allocator.free(fname);
+                helper.mtmdDebugSaveData(io, fname, "conv1d_bias", t.dataF32()) catch |err| {
+                    log.debug("Failed to save conv1d.{d}.bias debug data: {}", .{ i, err });
+                };
+            }
+        }
+        if (sscp_inp_proj_w) |t| {
+            helper.mtmdDebugSaveData(io, "zllama_audio_input_proj_weight.json", "input_proj_weight", t.dataF32()) catch |err| {
+                log.debug("Failed to save input_proj.weight debug data: {}", .{err});
+            };
+        }
+        if (audio_out_proj_w) |t| {
+            helper.mtmdDebugSaveData(io, "zllama_audio_out_proj_weight.json", "audio_out_proj_weight", t.dataF32()) catch |err| {
+                log.debug("Failed to save audio_out_proj.weight debug data: {}", .{err});
+            };
+        }
+        if (mm_input_proj_w) |t| {
+            helper.mtmdDebugSaveData(io, "zllama_audio_mm_input_proj_weight.json", "mm_input_proj_weight", t.dataF32()) catch |err| {
+                log.debug("Failed to save mm_input_proj.weight debug data: {}", .{err});
+            };
+        }
+
         return AudioEncoder{
             .params = params,
             .weights = .{
@@ -234,12 +269,14 @@ pub const AudioEncoder = struct {
     }
 
     /// 编码音频数据，返回嵌入 tokens
+    /// @param io I/O 实例
     /// @param ctx ggml 计算上下文
     /// @param graph 计算图
     /// @param mel_data PCM F32 音频样本 [n_mel_bins, n_frames]
     /// @returns 音频嵌入 [n_output_embd, n_tokens]
     pub fn encode(
         self: *const AudioEncoder,
+        io: std.Io,
         ctx: *ggml.Context,
         cgraph: *ggml.CGraph,
         mel_data: []const f32,
@@ -250,6 +287,12 @@ pub const AudioEncoder = struct {
         const p = self.params;
         const norm_eps = p.norm_eps;
         const res_weight: f32 = 0.5;
+
+        // === DEBUG: 保存 Mel 输入数据 ===
+        helper.mtmdDebugSaveData(io, "zllama_audio_encode_mel_input.json", "encode_mel_input", mel_data) catch |err| {
+            log.debug("Failed to save encode mel input debug data: {}", .{err});
+        };
+        log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
 
         // 1. Create input tensor matching llama.cpp layout
         //    llama.cpp: inp = build_inp_raw(1) with shape [n_mel, n_frames, 1, 1]
@@ -272,6 +315,14 @@ pub const AudioEncoder = struct {
                     dst[m + fi * n_mel] = mel_data[m * n_fr + fi];
                 }
             }
+        }
+
+        // === DEBUG: 保存 frame-major 转换后的输入 ===
+        {
+            const raw = cur.dataF32();
+            helper.mtmdDebugSaveData(io, "zllama_audio_encode_frame_major.json", "encode_frame_major", raw) catch |err| {
+                log.debug("Failed to save frame-major input debug data: {}", .{err});
+            };
         }
 
         // Reshape to 4D for conv2d: [n_mel_bins, n_frames, 1, 1]
@@ -320,6 +371,8 @@ pub const AudioEncoder = struct {
         const Np: i64 = B * C; // padded sequence length
         const pad_seq: i64 = Np - n_pos;
 
+        log.info("encode: n_pos={d}, C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad_seq={d}", .{ n_pos, C, P, S, R, B, Np, pad_seq });
+
         // Create input tensors for RPE and mask (filled with data, matching C++ set_input)
         // Ensure allocations are enabled before creating tensors that we'll write into
         ctx.setNoAlloc(false);
@@ -327,10 +380,25 @@ pub const AudioEncoder = struct {
         pos_emb.setName("pos_emb");
         fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.n_embd), @intCast(P));
 
+        // === DEBUG: 保存 pos_emb 数据 ===
+        {
+            helper.mtmdDebugSaveData(io, "zllama_audio_pos_emb.json", "pos_emb", pos_emb.dataF32()) catch |err| {
+                log.debug("Failed to save pos_emb debug data: {}", .{err});
+            };
+        }
+
         // Create 4D mask [S, C, B, 1] so it can broadcast to [S, C, B, H] scores
         const kq_mask = try ctx.newTensor4d(ggml.Type.f32, @intCast(S), @intCast(C), @intCast(B), 1);
         kq_mask.setName("kq_mask");
         fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos));
+
+        // === DEBUG: 保存 kq_mask 数据 ===
+        {
+            helper.mtmdDebugSaveData(io, "zllama_audio_kq_mask.json", "kq_mask", kq_mask.dataF32()) catch |err| {
+                log.debug("Failed to save kq_mask debug data: {}", .{err});
+            };
+        }
+
         ctx.setNoAlloc(true);
 
         // 3. Conformer Blocks

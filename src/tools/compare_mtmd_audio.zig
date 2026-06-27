@@ -166,7 +166,7 @@ pub const MtmdAudioComparator = struct {
         const mm_ctx = try ggml.Context.initNoAlloc(2 * 1024 * 1024 * 1024);
         defer mm_ctx.deinit();
 
-        var mm_mgr = try mm.MultiModalManager.init(self.allocator, &mmproj_gguf, mm_ctx, capabilities);
+        var mm_mgr = try mm.MultiModalManager.init(io, self.allocator, &mmproj_gguf, mm_ctx, capabilities);
         defer mm_mgr.deinit();
 
         log.info("Audio encoder loaded: {s} ({d} Hz)", .{ capabilities.audio_encoder_type, capabilities.audio_sample_rate });
@@ -200,7 +200,7 @@ pub const MtmdAudioComparator = struct {
 
         graph_ctx.setNoAlloc(false);
         var audio_graph = try ggml.CGraph.initReserved(graph_ctx, 32768);
-        const audio_embeddings = try mm_mgr.encodeMedia(graph_ctx, audio_graph, .{
+        const audio_embeddings = try mm_mgr.encodeMedia(io, graph_ctx, audio_graph, .{
             .media_type = .audio,
             .mel_data = mel.data,
             .mel_bins = mel.n_mel_bins,

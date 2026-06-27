@@ -855,7 +855,7 @@ pub const InferenceEngine = struct {
 
         self.ctx_graph.setNoAlloc(false);
         var vision_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
-        const vision_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, vision_graph, .{
+        const vision_embeddings = try mm_mgr.encodeMedia(io, self.ctx_graph, vision_graph, .{
             .media_type = .image,
             .image_data = img.data,
             .image_width = img.width,
@@ -940,7 +940,7 @@ pub const InferenceEngine = struct {
 
         self.ctx_graph.setNoAlloc(false);
         var audio_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
-        const audio_embeddings = try mm_mgr.encodeMedia(self.ctx_graph, audio_graph, .{
+        const audio_embeddings = try mm_mgr.encodeMedia(io, self.ctx_graph, audio_graph, .{
             .media_type = .audio,
             .mel_data = mel.data,
             .mel_bins = mel.n_mel_bins,

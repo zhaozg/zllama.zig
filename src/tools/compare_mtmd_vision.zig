@@ -163,7 +163,7 @@ pub const MtmdVisionComparator = struct {
         const mm_ctx = try ggml.Context.initNoAlloc(2 * 1024 * 1024 * 1024);
         defer mm_ctx.deinit();
 
-        var mm_mgr = try mm.MultiModalManager.init(self.allocator, &mmproj_gguf, mm_ctx, capabilities);
+        var mm_mgr = try mm.MultiModalManager.init(io, self.allocator, &mmproj_gguf, mm_ctx, capabilities);
         defer mm_mgr.deinit();
 
         log.info("Vision encoder loaded: {s}", .{capabilities.vision_encoder_type});
@@ -185,7 +185,7 @@ pub const MtmdVisionComparator = struct {
 
         graph_ctx.setNoAlloc(false);
         var vision_graph = try ggml.CGraph.initReserved(graph_ctx, 32768);
-        const vision_embeddings = try mm_mgr.encodeMedia(graph_ctx, vision_graph, .{
+        const vision_embeddings = try mm_mgr.encodeMedia(io, graph_ctx, vision_graph, .{
             .media_type = .image,
             .image_data = img.data,
             .image_width = img.width,

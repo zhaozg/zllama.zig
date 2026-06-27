@@ -207,7 +207,7 @@ pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]con
     const ctx = try ggml.Context.initNoAlloc(mem_size);
     errdefer ctx.deinit();
 
-    const mgr = try mm.MultiModalManager.init(allocator, &gguf_file, ctx, capabilities.*);
+    const mgr = try mm.MultiModalManager.init(io, allocator, &gguf_file, ctx, capabilities.*);
     return mgr;
 }
 
