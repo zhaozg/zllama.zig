@@ -234,95 +234,55 @@ pub const AudioEncoder = struct {
         // ====================================================================
         // 加载 Clamp 信息（对应 C++ clip.cpp 中 clamp_info_map 的填充逻辑）
         // ====================================================================
-        // C++ 实现遍历所有 tensors_to_load，对每个 .weight 张量，
+        // C++ 实现 (clip.cpp:2597-2611): 遍历所有 tensors_to_load，对每个 .weight 张量，
         // 查找对应的 .input_max, .input_min, .output_max, .output_min 标量张量。
         // 这些标量是 1 元素 f32 张量，存储在 GGUF 中。
-        // 参考: deps/llama.cpp/tools/mtmd/clip.cpp 第 2170-2185 行
+        // 使用 get_scalar 读取，默认值 FLT_MAX / -FLT_MAX。
+        // 参考: deps/llama.cpp/tools/mtmd/clip.cpp 第 2597-2611 行
         var clamp_map = std.StringHashMap(ClampInfo).init(allocator);
         {
-            // 收集所有可能被 clamp 的权重名称
-            var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| {
-                return err;
-            };
-            defer weight_names.deinit(allocator);
+            // 遍历 GGUF 中所有张量，查找 .weight 结尾且存在对应 clamp 标量的张量
+            for (gguf_file.tensors.items) |*tensor_info| {
+                const name = tensor_info.name;
+                if (!std.mem.endsWith(u8, name, ".weight")) continue;
 
-            // 添加所有 .weight 张量的名称
-            if (sscp_inp_proj_w) |t| try weight_names.append(allocator, t.getName());
-            if (audio_out_proj_w) |t| try weight_names.append(allocator, t.getName());
-            if (mm_input_proj_w) |t| try weight_names.append(allocator, t.getName());
-            for (layers) |*layer| {
-                if (layer.q_w) |t| try weight_names.append(allocator, t.getName());
-                if (layer.k_w) |t| try weight_names.append(allocator, t.getName());
-                if (layer.v_w) |t| try weight_names.append(allocator, t.getName());
-                if (layer.o_w) |t| try weight_names.append(allocator, t.getName());
-                if (layer.conv_pw1_w) |t| try weight_names.append(allocator, t.getName());
-                if (layer.conv_pw2_w) |t| try weight_names.append(allocator, t.getName());
-            }
+                // 跳过非音频相关的张量（只处理 a. 和 mm.a. 前缀的）
+                if (!std.mem.startsWith(u8, name, "a.") and !std.mem.startsWith(u8, name, "mm.a.")) continue;
 
-            // 对每个权重名称，查找对应的 clamp 标量
-            // C++ 实现 (clip.cpp:2170-2185): 对每个 .weight 张量，
-            // 使用 string_replace_all 将 ".weight" 替换为 ".input_max" 等后缀，
-            // 然后通过 get_scalar 从 GGUF 文件读取标量值。
-            // 注意：是替换而非追加，所以 "a.input_projection.weight" -> "a.input_projection.input_max"
-            for (weight_names.items) |w_name| {
-                // 跳过非 .weight 结尾的名称（虽然理论上不会发生）
-                if (!std.mem.endsWith(u8, w_name, ".weight")) continue;
-
-                // 使用 allocator 分配缓冲区进行字符串替换
                 // 将 ".weight" 替换为 ".input_max" / ".input_min" / ".output_max" / ".output_min"
+                const weight_suffix = ".weight";
+                const prefix_len = name.len - weight_suffix.len;
                 const clamp_suffixes = [_][]const u8{ ".input_max", ".input_min", ".output_max", ".output_min" };
                 var clamp_names: [4][]const u8 = undefined;
 
                 for (&clamp_names, clamp_suffixes) |*out_name, suffix| {
-                    // 计算替换后的长度：原长度 - ".weight"长度 + suffix长度
-                    const weight_suffix = ".weight";
-                    const new_len = w_name.len - weight_suffix.len + suffix.len;
+                    const new_len = prefix_len + suffix.len;
                     const buf = try allocator.alloc(u8, new_len);
                     errdefer allocator.free(buf);
-
-                    // 复制 .weight 之前的部分
-                    const prefix_end = w_name.len - weight_suffix.len;
-                    @memcpy(buf[0..prefix_end], w_name[0..prefix_end]);
-                    // 追加 suffix
-                    @memcpy(buf[prefix_end..][0..suffix.len], suffix);
+                    @memcpy(buf[0..prefix_len], name[0..prefix_len]);
+                    @memcpy(buf[prefix_len..][0..suffix.len], suffix);
                     out_name.* = buf;
                 }
                 defer {
                     for (clamp_names) |n| allocator.free(n);
                 }
 
-                // 尝试从 GGUF 中读取这些标量张量
-                // 它们是 1 元素 f32 张量
-                const inp_max_tensor = gguf_file.findTensor(clamp_names[0]);
-                const inp_min_tensor = gguf_file.findTensor(clamp_names[1]);
-                const out_max_tensor = gguf_file.findTensor(clamp_names[2]);
-                const out_min_tensor = gguf_file.findTensor(clamp_names[3]);
+                // 使用默认值读取标量（匹配 C++ get_scalar 的默认值行为）
+                const inp_max_val = readScalarOrDefault(gguf_file, clamp_names[0], std.math.floatMax(f32));
+                const inp_min_val = readScalarOrDefault(gguf_file, clamp_names[1], -std.math.floatMax(f32));
+                const out_max_val = readScalarOrDefault(gguf_file, clamp_names[2], std.math.floatMax(f32));
+                const out_min_val = readScalarOrDefault(gguf_file, clamp_names[3], -std.math.floatMax(f32));
 
-                if (inp_max_tensor != null and inp_min_tensor != null and
-                    out_max_tensor != null and out_min_tensor != null)
-                {
-                    // 读取标量值（1 元素 f32 张量）
-                    const inp_max_data = gguf_file.getTensorData(inp_max_tensor.?);
-                    const inp_min_data = gguf_file.getTensorData(inp_min_tensor.?);
-                    const out_max_data = gguf_file.getTensorData(out_max_tensor.?);
-                    const out_min_data = gguf_file.getTensorData(out_min_tensor.?);
+                try clamp_map.put(name, ClampInfo{
+                    .inp_min = inp_min_val,
+                    .inp_max = inp_max_val,
+                    .out_min = out_min_val,
+                    .out_max = out_max_val,
+                });
 
-                    const inp_max_val = @as(*const f32, @ptrCast(@alignCast(inp_max_data.ptr))).*;
-                    const inp_min_val = @as(*const f32, @ptrCast(@alignCast(inp_min_data.ptr))).*;
-                    const out_max_val = @as(*const f32, @ptrCast(@alignCast(out_max_data.ptr))).*;
-                    const out_min_val = @as(*const f32, @ptrCast(@alignCast(out_min_data.ptr))).*;
-
-                    try clamp_map.put(w_name, ClampInfo{
-                        .inp_min = inp_min_val,
-                        .inp_max = inp_max_val,
-                        .out_min = out_min_val,
-                        .out_max = out_max_val,
-                    });
-
-                    log.debug("  clamp info for '{s}': inp=[{}, {}], out=[{}, {}]", .{
-                        w_name, inp_min_val, inp_max_val, out_min_val, out_max_val,
-                    });
-                }
+                log.debug("  clamp info for '{s}': inp=[{}, {}], out=[{}, {}]", .{
+                    name, inp_min_val, inp_max_val, out_min_val, out_max_val,
+                });
             }
         }
 
@@ -704,7 +664,7 @@ pub const AudioEncoder = struct {
                 residual;
         }
 
-        log.debug("After conformer blocks: cur shape [{}, {}]", . { cur.ne()[0], cur.ne()[1] });
+        log.debug("After conformer blocks: cur shape [{}, {}]", .{ cur.ne()[0], cur.ne()[1] });
 
         // 4. 输出投影（使用 buildMM 应用 clamp）
         if (w.audio_out_proj_w) |out_w| {
@@ -724,7 +684,7 @@ pub const AudioEncoder = struct {
             cur = buildMM(ctx, proj_w, cur, &w.clamp_map);
         }
 
-        log.debug("Final output shape: [{}, {}]", . { cur.ne()[0], cur.ne()[1] });
+        log.debug("Final output shape: [{}, {}]", .{ cur.ne()[0], cur.ne()[1] });
 
         cgraph.buildForwardExpand(cur);
         return cur;
@@ -878,6 +838,15 @@ fn findLayerWeight(
     name: []const u8,
 ) !*ggml.Tensor {
     return weight_loader.loadLayerWeight(ctx, gguf_file, prefix, name);
+}
+
+/// 从 GGUF 文件中读取标量 f32 值，如果张量不存在则返回默认值
+/// 对应 C++ clip.cpp 中的 get_scalar 函数
+fn readScalarOrDefault(gguf_file: *const gguf.GGUFFile, name: []const u8, default_val: f32) f32 {
+    const tensor_info = gguf_file.findTensor(name) orelse return default_val;
+    const data = gguf_file.getTensorData(tensor_info);
+    if (data.len < 4) return default_val;
+    return @as(*const f32, @ptrCast(@alignCast(data.ptr))).*;
 }
 
 // RMS 归一化
