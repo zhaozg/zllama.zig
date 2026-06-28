@@ -467,10 +467,7 @@ pub const AudioEncoder = struct {
 
         const flat_dim0 = cur.ne()[0] * cur.ne()[1];
         cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
-        log.debug("flatten: ne=[{}, {}, {}, {}], nb=[{}, {}, {}, {}]", .{
-            cur.ne()[0], cur.ne()[1], cur.ne()[2], cur.ne()[3],
-            cur.nb()[0], cur.nb()[1], cur.nb()[2], cur.nb()[3]
-        });
+        log.debug("flatten: ne=[{}, {}, {}, {}], nb=[{}, {}, {}, {}]", .{ cur.ne()[0], cur.ne()[1], cur.ne()[2], cur.ne()[3], cur.nb()[0], cur.nb()[1], cur.nb()[2], cur.nb()[3] });
 
         // === DEBUG: set name + setOutput for flatten output ===
         cur.setName("debug_audio_flatten_output");
@@ -534,15 +531,15 @@ pub const AudioEncoder = struct {
 
         // 3. Conformer Blocks
         for (w.layers, 0..) |*layer, il| {
-            _ = il;
+            // _ = il; // il is now used by buildNorm and buildFFN
             var residual = cur;
 
             // FFN 1 (half-step)
             if (layer.ff_norm_w != null and layer.ff_up_w != null and layer.ff_down_w != null) {
-                cur = rmsNorm(ctx, residual, layer.ff_norm_w.?, norm_eps);
-                cur = ffnSilu(ctx, cur, layer.ff_up_w.?, layer.ff_down_w.?);
+                cur = buildNorm(ctx, residual, layer.ff_norm_w, null, .rms, norm_eps, @as(i32, @intCast(il)));
+                cur = buildFFN(ctx, cur, layer.ff_up_w, null, null, null, layer.ff_down_w, null, .silu, @as(i32, @intCast(il)), &w.clamp_map);
                 if (layer.ff_post_norm_w) |post_norm| {
-                    cur = rmsNorm(ctx, cur, post_norm, norm_eps);
+                    cur = buildNorm(ctx, cur, post_norm, null, .rms, norm_eps, @as(i32, @intCast(il)));
                 }
                 residual = residual.add(ctx, cur.scale(ctx, res_weight));
             }
@@ -552,10 +549,9 @@ pub const AudioEncoder = struct {
                 const q_scale: f32 = (1.0 / @sqrt(@as(f32, @floatFromInt(p.d_head)))) / @log(2.0);
                 const k_scale: f32 = @log2(1.0 + @exp(1.0));
                 const softcap: f32 = 50.0;
-
                 const attn_norm = if (layer.attn_pre_norm_w) |w2| w2 else layer.ln_1_w;
                 const attn_in = if (attn_norm) |norm_w|
-                    rmsNorm(ctx, residual, norm_w, norm_eps)
+                    buildNorm(ctx, residual, norm_w, null, .rms, norm_eps, @as(i32, @intCast(il)))
                 else
                     residual;
 
@@ -590,23 +586,13 @@ pub const AudioEncoder = struct {
                 Qcur = Qcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, C, B, H]
 
                 // K/V block context extraction via overlapping view
-                const pad_kv: i64 = S * B - n_pos_i;
-                Kcur = Kcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0); // [D, H, S*B]
-                Kcur = Kcur.roll(ctx, 0, 0, P, 0); // left-pad by P
-                Kcur = Kcur.cont(ctx); // materialize roll
-                // Overlapping view: stride for B dim is C positions, not S
-                Kcur = Kcur.view4d(ctx, d_head_i, n_head_i, S, B, Kcur.nb()[1], Kcur.nb()[2], @as(usize, @intCast(C)) * Kcur.nb()[2], 0);
-                Kcur = Kcur.cont(ctx); // materialize overlapping windows
+                var Kblk = extractBlocks(ctx, Kcur, d_head_i, n_head_i, S, B, C, P, n_pos_i);
                 // llama.cpp: permute(0,3,1,2): ne[0]=D, ne[3]=H, ne[1]=S, ne[2]=B → [D,S,B,H]
-                var Kblk = Kcur.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, S, B, H]
+                Kblk = Kblk.permute(ctx, 0, 3, 1, 2).cont(ctx); // [D, S, B, H]
 
-                Vcur = Vcur.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0);
-                Vcur = Vcur.roll(ctx, 0, 0, P, 0);
-                Vcur = Vcur.cont(ctx);
-                Vcur = Vcur.view4d(ctx, d_head_i, n_head_i, S, B, Vcur.nb()[1], Vcur.nb()[2], @as(usize, @intCast(C)) * Vcur.nb()[2], 0);
-                Vcur = Vcur.cont(ctx);
+                var Vblk = extractBlocks(ctx, Vcur, d_head_i, n_head_i, S, B, C, P, n_pos_i);
                 // llama.cpp: permute(1,3,0,2): ne[1]=D, ne[3]=H, ne[0]=S, ne[2]=B → [S,D,B,H]
-                var Vblk = Vcur.permute(ctx, 1, 3, 0, 2).cont(ctx); // [S, D, B, H]
+                Vblk = Vblk.permute(ctx, 1, 3, 0, 2).cont(ctx); // [S, D, B, H]
 
                 // Content attention: Kblk=[D,S,B,H] @ Qcur=[D,C,B,H] → contracts on D → [S, C, B, H]
                 var scores = Kblk.mulMat(ctx, Qcur); // [S, C, B, H]
@@ -663,7 +649,7 @@ pub const AudioEncoder = struct {
                     x = x.add(ctx, ob);
                 }
                 if (layer.attn_post_norm_w) |post_norm| {
-                    x = rmsNorm(ctx, x, post_norm, norm_eps);
+                    x = buildNorm(ctx, x, post_norm, null, .rms, norm_eps, @as(i32, @intCast(il)));
                 }
                 residual = residual.add(ctx, x);
             }
@@ -672,7 +658,7 @@ pub const AudioEncoder = struct {
             if (layer.norm_conv_w != null and layer.conv_pw1_w != null and
                 layer.conv_dw_w != null and layer.conv_pw2_w != null)
             {
-                cur = rmsNorm(ctx, residual, layer.norm_conv_w.?, norm_eps);
+                cur = buildNorm(ctx, residual, layer.norm_conv_w, null, .rms, norm_eps, @as(i32, @intCast(il)));
                 // 卷积 pointwise 投影 1（使用 buildMM 应用 clamp）
                 var x_conv = buildMM(ctx, layer.conv_pw1_w.?, cur, &w.clamp_map);
 
@@ -703,20 +689,22 @@ pub const AudioEncoder = struct {
 
             // FFN 2 (half-step)
             if (layer.ff_norm_1_w != null and layer.ff_up_1_w != null and layer.ff_down_1_w != null) {
-                cur = rmsNorm(ctx, residual, layer.ff_norm_1_w.?, norm_eps);
-                cur = ffnSilu(ctx, cur, layer.ff_up_1_w.?, layer.ff_down_1_w.?);
+                cur = buildNorm(ctx, residual, layer.ff_norm_1_w, null, .rms, norm_eps, @as(i32, @intCast(il)));
+                cur = buildFFN(ctx, cur, layer.ff_up_1_w, null, null, null, layer.ff_down_1_w, null, .silu, @as(i32, @intCast(il)), &w.clamp_map);
                 if (layer.ff_post_norm_1_w) |post_norm| {
-                    cur = rmsNorm(ctx, cur, post_norm, norm_eps);
+                    cur = buildNorm(ctx, cur, post_norm, null, .rms, norm_eps, @as(i32, @intCast(il)));
                 }
                 residual = residual.add(ctx, cur.scale(ctx, res_weight));
             }
 
             // Layer output norm
             cur = if (layer.ln_2_w) |ln2|
-                rmsNorm(ctx, residual, ln2, norm_eps)
+                buildNorm(ctx, residual, ln2, null, .rms, norm_eps, @as(i32, @intCast(il)))
             else
                 residual;
         }
+
+        log.debug("After conformer blocks: cur shape [{}, {}]", . { cur.ne()[0], cur.ne()[1] });
 
         // 4. 输出投影（使用 buildMM 应用 clamp）
         if (w.audio_out_proj_w) |out_w| {
@@ -735,6 +723,8 @@ pub const AudioEncoder = struct {
         if (w.mm_input_proj_w) |proj_w| {
             cur = buildMM(ctx, proj_w, cur, &w.clamp_map);
         }
+
+        log.debug("Final output shape: [{}, {}]", . { cur.ne()[0], cur.ne()[1] });
 
         cgraph.buildForwardExpand(cur);
         return cur;
@@ -891,14 +881,154 @@ fn findLayerWeight(
 }
 
 // RMS 归一化
-fn rmsNorm(ctx: *ggml.Context, x: *ggml.Tensor, weight: *ggml.Tensor, eps: f32) *ggml.Tensor {
-    return x.rmsNorm(ctx, eps).mul(ctx, weight);
+/// 归一化类型（对应 C++ clip-model.h 中的 norm_type）
+pub const NormType = enum {
+    normal,
+    rms,
+};
+
+/// FFN 激活类型（对应 C++ clip-model.h 中的 ffn_op_type）
+pub const FFNOpType = enum {
+    gelu,
+    gelu_erf,
+    silu,
+    gelu_quick,
+    relu_sqr,
+};
+
+/// 通用归一化函数（对应 C++ clip_graph::build_norm）
+/// 支持 RMSNorm 和 LayerNorm，可选 weight 和 bias
+fn buildNorm(
+    ctx: *ggml.Context,
+    cur: *ggml.Tensor,
+    mw: ?*ggml.Tensor,
+    mb: ?*ggml.Tensor,
+    norm_type: NormType,
+    norm_eps: f32,
+    il: i32,
+) *ggml.Tensor {
+    _ = il;
+    var result = switch (norm_type) {
+        .rms => cur.rmsNorm(ctx, norm_eps),
+        .normal => cur.norm(ctx, norm_eps),
+    };
+
+    if (mw) |w| {
+        result = result.mul(ctx, w);
+    }
+
+    if (mb) |b| {
+        result = result.add(ctx, b);
+    }
+
+    return result;
 }
 
-// SiLU FFN: down(up(x) * silu(gate(x)))
-fn ffnSilu(ctx: *ggml.Context, x: *ggml.Tensor, up_w: *ggml.Tensor, down_w: *ggml.Tensor) *ggml.Tensor {
-    const h = up_w.mulMat(ctx, x);
-    return down_w.mulMat(ctx, h.silu(ctx));
+/// 通用 FFN 函数（对应 C++ clip_graph::build_ffn）
+/// 支持 SiLU、GELU 等激活类型，可选 gate、up_bias、gate_bias、down_bias
+fn buildFFN(
+    ctx: *ggml.Context,
+    cur: *ggml.Tensor,
+    up: ?*ggml.Tensor,
+    up_b: ?*ggml.Tensor,
+    gate: ?*ggml.Tensor,
+    gate_b: ?*ggml.Tensor,
+    down: ?*ggml.Tensor,
+    down_b: ?*ggml.Tensor,
+    type_op: FFNOpType,
+    il: i32,
+    clamp_map: *const std.StringHashMap(ClampInfo),
+) *ggml.Tensor {
+    _ = il;
+    // tmp = up ? build_mm(up, cur) : cur
+    var tmp = if (up) |up_w| buildMM(ctx, up_w, cur, clamp_map) else cur;
+
+    if (up_b) |ub| {
+        tmp = tmp.add(ctx, ub);
+    }
+
+    var result: *ggml.Tensor = undefined;
+    if (gate) |gate_w| {
+        result = buildMM(ctx, gate_w, cur, clamp_map);
+        if (gate_b) |gb| {
+            result = result.add(ctx, gb);
+        }
+    } else {
+        result = tmp;
+    }
+
+    switch (type_op) {
+        .silu => {
+            if (gate != null) {
+                // SwiGLU: silu(gate(x)) * up(x)
+                result = result.silu(ctx).mul(ctx, tmp);
+            } else {
+                result = result.silu(ctx);
+            }
+        },
+        .gelu => {
+            if (gate != null) {
+                // GEGLU: gelu(gate(x)) * up(x)
+                result = result.gelu(ctx).mul(ctx, tmp);
+            } else {
+                result = result.gelu(ctx);
+            }
+        },
+        .gelu_erf => {
+            if (gate != null) {
+                // GEGLU: gelu_erf(gate(x)) * up(x)
+                result = result.gelu(ctx).mul(ctx, tmp);
+            } else {
+                result = result.gelu(ctx);
+            }
+        },
+        .gelu_quick => {
+            if (gate != null) {
+                result = result.gelu(ctx).mul(ctx, tmp);
+            } else {
+                result = result.gelu(ctx);
+            }
+        },
+        .relu_sqr => {
+            result = result.relu(ctx).mul(ctx, result);
+        },
+    }
+
+    if (down) |down_w| {
+        result = buildMM(ctx, down_w, result, clamp_map);
+    }
+
+    if (down_b) |db| {
+        result = result.add(ctx, db);
+    }
+
+    return result;
+}
+
+/// K/V block context extraction via overlapping view（对应 C++ gemma4a.cpp 中的 extract_blocks lambda）
+/// 将 [D, H, N] 张量通过 pad + roll + overlapping view 转换为 [D, H, S, B]
+fn extractBlocks(
+    ctx: *ggml.Context,
+    t: *ggml.Tensor,
+    d_head: i64,
+    n_head: i64,
+    S: i64,
+    B: i64,
+    C: i64,
+    P: i64,
+    n_pos: i64,
+) *ggml.Tensor {
+    const pad_kv: i64 = S * B - n_pos;
+    // [D, H, N] -> pad to S*B -> roll right by P -> cont (materialize)
+    var result = t.pad(ctx, 0, 0, @as(i32, @intCast(pad_kv)), 0); // [D, H, S*B]
+    result = result.roll(ctx, 0, 0, @as(i32, @intCast(P)), 0); // left-pad by P
+    result = result.cont(ctx); // materialize roll (removes view offset)
+    // Overlapping view: stride for B dim is C positions, not S
+    // ne = [D, H, S, B], data_size = D*H*S*B*sizeof = source_nbytes (exact fit)
+    // nb1=D*sizeof, nb2=D*H*sizeof, nb3=C*D*H*sizeof (overlap: C < S)
+    result = result.view4d(ctx, d_head, n_head, S, B, result.nb()[1], result.nb()[2], @as(usize, @intCast(C)) * result.nb()[2], 0);
+    result = result.cont(ctx); // materialize overlapping windows
+    return result;
 }
 
 // ============================================================================
