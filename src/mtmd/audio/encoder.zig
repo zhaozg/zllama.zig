@@ -431,7 +431,7 @@ pub const AudioEncoder = struct {
 
             // Chunked local self-attention with RPE
             if (layer.q_w != null and layer.k_w != null and layer.v_w != null and layer.o_w != null) {
-                const q_scale: f32 = (1.0 / @sqrt(@as(f32, @floatFromInt(p.d_head)))) / @log2(2.0);
+                const q_scale: f32 = (1.0 / @sqrt(@as(f32, @floatFromInt(p.d_head)))) / @log(2.0);
                 const k_scale: f32 = @log2(1.0 + @exp(1.0));
                 const softcap: f32 = 50.0;
 
