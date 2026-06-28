@@ -4,14 +4,40 @@
 
 目标是对齐 `llama_audio_encoder_input` 数据。
 
-我们对关键实现 `./src/mtmd/audio/encoder.zig` 与
-`./deps/llama.cpp/tools/mtmd/models/gemma4a.cpp` 进行代码的仔细比较。
+请对对关键实现 `./src/mtmd/audio/encoder.zig` 与 `./deps/llama.cpp/tools/mtmd/models/gemma4a.cpp` 进行代码的仔细比较。
 
 ## 测试条件说明
 
 - 模型相同（Gemma 4 E2B）
 - mmproj 相同
 - 输入音频相同（hello.wav）
+
+## 文件生成顺序
+
+| 序号  | 文件名                               |  说明                                                                   |
+| :---: | :---                                 |  :---                                                                   |
+| 1     | `llama_audio_samples_input.json`     |  **原始音频样本**（输入数据）                                           |
+| 2     | `llama_audio_mel.json`               |  **梅尔频谱特征**（从样本计算得出）                                     |
+| 3     | `llama_audio_encoder_input.json`     |  **转置后的梅尔频谱**（`transpose` + `cont`，送入 Conv2d 前的形状）     |
+| 4     | `llama_audio_conv1d_0_weight.json`   |  **Conv2d 第0层权重**（`a.conv1d.0.weight`，用于第1个卷积）             |
+| 5     | `llama_audio_conv2d_0_output.json`   |  **Conv2d 第0层输出**（经过 Conv2d + Bias + LayerNorm + ReLU）          |
+| 6     | `llama_audio_conv1d_1_weight.json`   |  **Conv2d 第1层权重**（`a.conv1d.1.weight`，用于第2个卷积）             |
+| 7     | `llama_audio_conv2d_1_output.json`   |  **Conv2d 第1层输出**（经过 Conv2d + Bias + LayerNorm + ReLU）          |
+| 8     | `llama_audio_flatten_output.json`    |  **展平后的特征**（`permute` + `reshape_2d`）                           |
+| 9     | `llama_audio_input_proj_weight.json` |  **输入投影权重**（`a.input_projection.weight`，映射到 Conformer 维度） |
+| 10    | `llama_audio_input_proj_output.json` |  **输入投影输出**（Conformer 编码器的输入）                             |
+| 11    | `llama_audio_pos_emb.json`           |  **相对位置编码**（RPE，在 Conformer 注意力中使用）                     |
+| 12    | `llama_audio_attn_mask.json`         |  **分块注意力掩码**（在 Conformer 注意力中使用）                        |
+| 13    | `llama_audio_embeddings.json`        |  **最终音频嵌入**（Conformer 编码器 + 输出投影）                        |
+
+---
+
+### 说明
+- **权重文件**（`conv1d_*_weight`, `input_proj_weight`）虽然在 `init` 阶段加载，但在数据流中它们作为**对应计算层的输入参数**，因此放在对应层输出之前。
+- **`pos_emb` 和 `attn_mask`** 是在 `input_proj_output` 之后、Conformer 循环之前创建的辅助输入，因此放在 `input_proj_output` 之后。
+- **最终嵌入**是所有 Conformer 层和输出投影后的结果，放在最后。
+
+这个顺序与 `encoder.zig` 中 `encode()` 函数的执行步骤完全一致。
 
 中间数据:
 
@@ -25,6 +51,8 @@
 
 我们期望如下数据相同，希望得到相同的结果。
 
+`llama_audio_encoder_input.json` 与 `llama_audio_encoder_input.json` 文件大小完全不同.
+`llama_audio_conv2d_0_output.json` 与 `zllama_audio_conv2d_0_output.json` 文件大小不同，余弦相似度: 0.9035093784 ❌.
 `llama_audio_embeddings.json` 与 `zllama_audio_embeddings.json` 大小不同，余弦相似度仅 0.16 ❌。
 
 ## 关键发现
@@ -135,14 +163,6 @@ const q_scale: f32 = (1.0 / @sqrt(@as(f32, @floatFromInt(p.d_head)))) / @log(2.0
 |-------|:----------:|:----:|
 | 最终音频嵌入 | 0.16 | ❌ 显著差异 |
 
-#### ⚠️ 不可靠的 llama.cpp 中间数据
-llama.cpp 在 gemma4a.cpp 中对中间张量调用了 `ggml_set_input()`，导致 Gallocr 分配器不为这些张量分配内存，因此以下数据是**未初始化的内存垃圾值**：
-- `llama_audio_encoder_input.json`
-- `llama_audio_conv2d_0_output.json`
-- `llama_audio_flatten_output.json`
-- `llama_audio_input_proj_output.json`
-
-只有最终输出 `llama_audio_embeddings.json`（没有 `ggml_set_input`）是可靠的。
 
 ---
 

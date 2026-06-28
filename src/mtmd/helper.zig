@@ -354,3 +354,65 @@ fn writeJsonArray(io: std.Io, file: std.Io.File, data: []const f32) !void {
 
     try file.writeStreamingAll(io, "]");
 }
+
+/// 从计算图中查找指定名称的 F32 张量，将其数据保存为 JSON 数组文件。
+///
+/// 注意：此函数通过 `ggml_graph_get_tensor` 查找张量，然后通过 `dataF32()` 直接
+/// 读取 CPU 内存中的数据。如果张量在 GPU 后端上，`dataF32()` 可能返回空指针，
+/// 此时会回退到 `ggml_backend_tensor_get`。
+///
+/// C++ 参考 (clip.cpp):
+/// ```cpp
+/// auto save_tensor = [&](const char * name, const char * fname) {
+///     ggml_tensor * t = ggml_graph_get_tensor(gf, name);
+///     if (t && t->type == GGML_TYPE_F32) {
+///         std::vector<float> data(ggml_nelements(t));
+///         ggml_backend_tensor_get(t, data.data(), 0, ggml_nbytes(t));
+///         mtmd_debug_save_data(fname, name, data.data(), data.size());
+///     }
+/// };
+/// ```
+pub fn mtmdDebugSaveTensor(io: std.Io, subdir: ?[]const u8, fname: []const u8, title: []const u8, cgraph: *ggml.CGraph) !void {
+    const c = @import("ggml").c;
+
+    // 通过名称从计算图中查找张量
+    // 构造 null-terminated 字符串（ggml_graph_get_tensor 需要 C 字符串）
+    var title_buf: [256]u8 = undefined;
+    if (title.len >= title_buf.len) {
+        log.warn("mtmdDebugSaveTensor: tensor name too long ({d} >= {d})", .{ title.len, title_buf.len });
+        return;
+    }
+    @memcpy(title_buf[0..title.len], title);
+    title_buf[title.len] = 0;
+    const t = c.ggml_graph_get_tensor(@ptrCast(cgraph), &title_buf);
+    if (t == null) {
+        log.warn("mtmdDebugSaveTensor: tensor '{s}' not found in graph", .{title});
+        return;
+    }
+
+    // 仅处理 F32 类型的张量
+    if (t.*.type != c.GGML_TYPE_F32) {
+        log.warn("mtmdDebugSaveTensor: tensor '{s}' is not F32 (type={})", .{ title, t.*.type });
+        return;
+    }
+
+    const n_elems = @as(usize, @intCast(c.ggml_nelements(t)));
+
+    // 使用 dataF32() 直接读取 CPU 内存中的数据。
+    // 注意：如果张量在 GPU 后端上，data 指针可能为 null。
+    // 此时回退到 ggml_backend_tensor_get（需要 backend buffer）。
+    const tensor_data = t.*.data;
+    if (tensor_data != null) {
+        const data = @as([*]f32, @ptrCast(@alignCast(tensor_data)))[0..n_elems];
+        try mtmdDebugSaveData(io, subdir, fname, title, data);
+    } else {
+        // 回退：通过 backend API 读取
+        const n_bytes = @as(usize, @intCast(c.ggml_nbytes(t)));
+        const allocator = std.heap.page_allocator;
+        const data = try allocator.alloc(f32, n_elems);
+        defer allocator.free(data);
+
+        c.ggml_backend_tensor_get(t, @ptrCast(data.ptr), 0, n_bytes);
+        try mtmdDebugSaveData(io, subdir, fname, title, data);
+    }
+}

@@ -962,9 +962,15 @@ pub const InferenceEngine = struct {
         try audio_graph.compute(self.n_threads);
 
         // === DEBUG: 保存中间张量数据（conv2d_0_output, conv2d_1_output, flatten_output, input_proj_output）===
+        mtmd.helper.mtmdDebugSaveTensor(io, "debug_audio",
+        "zllama_audio_encoder_input.json", "debug_audio_encoder_input",
+        audio_graph) catch |err| {
+            logger.info("Save audio debug_audio_encoder_input data fail: {}", .{err});
+        };
         if (mm_mgr.audio_encoder) |enc| {
             enc.saveDebugData(io);
         }
+
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
 

@@ -305,9 +305,9 @@ pub const AudioEncoder = struct {
         // Transpose + cont to get frame-major layout [n_mel, n_frames, 1, 1]
         // This matches llama.cpp: cur = ggml_cont(ctx0, ggml_transpose(ctx0, inp))
         var cur = ggml.transpose(ctx, inp_raw);
-        cur.setName("debug_audio_encoder_input_transposed");
         cur = ggml.cont(ctx, cur);
         cur.setName("debug_audio_encoder_input");
+        ggml.setInput(cur);
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
