@@ -27,7 +27,12 @@ pub fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, n
         };
         ctx.setNoAlloc(true);
 
-        tensor.setName(@ptrCast(name));
+        // 确保名称以 null 结尾，因为 ggml_set_name 需要 [:0]const u8
+        var name_buf: [256]u8 = undefined;
+        if (name.len >= name_buf.len) return error.NameTooLong;
+        @memcpy(name_buf[0..name.len], name);
+        name_buf[name.len] = 0;
+        tensor.setName(name_buf[0..name.len :0]);
 
         const tensor_data = gguf_file.getTensorData(info);
         const tensor_bytes = tensor.dataBytes();

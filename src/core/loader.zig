@@ -128,7 +128,12 @@ pub const Loader = struct {
             tensor_info.?.type,
             ne,
         );
-        tensor.setName(name);
+        // 确保名称以 null 结尾
+        var name_buf: [256]u8 = undefined;
+        if (name.len >= name_buf.len) return error.NameTooLong;
+        @memcpy(name_buf[0..name.len], name);
+        name_buf[name.len] = 0;
+        tensor.setName(name_buf[0..name.len :0]);
 
         // 从 GGUF 数据复制权重
         const src_data = tensor_info.?.data;

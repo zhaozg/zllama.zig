@@ -260,49 +260,48 @@ pub const AudioEncoder = struct {
             }
 
             // 对每个权重名称，查找对应的 clamp 标量
+            // C++ 实现 (clip.cpp:2170-2185): 对每个 .weight 张量，
+            // 使用 string_replace_all 将 ".weight" 替换为 ".input_max" 等后缀，
+            // 然后通过 get_scalar 从 GGUF 文件读取标量值。
+            // 注意：是替换而非追加，所以 "a.input_projection.weight" -> "a.input_projection.input_max"
             for (weight_names.items) |w_name| {
                 // 跳过非 .weight 结尾的名称（虽然理论上不会发生）
                 if (!std.mem.endsWith(u8, w_name, ".weight")) continue;
 
-                // 构造 clamp 标量名称：将 .weight 替换为 .input_max 等
-                // 例如: "a.input_projection.weight" -> "a.input_projection.weight.input_max"
-                var inp_max_name: [256]u8 = undefined;
-                var inp_min_name: [256]u8 = undefined;
-                var out_max_name: [256]u8 = undefined;
-                var out_min_name: [256]u8 = undefined;
+                // 使用 allocator 分配缓冲区进行字符串替换
+                // 将 ".weight" 替换为 ".input_max" / ".input_min" / ".output_max" / ".output_min"
+                const clamp_suffixes = [_][]const u8{ ".input_max", ".input_min", ".output_max", ".output_min" };
+                var clamp_names: [4][]const u8 = undefined;
 
-                @memcpy(inp_max_name[0..w_name.len], w_name);
-                @memcpy(inp_min_name[0..w_name.len], w_name);
-                @memcpy(out_max_name[0..w_name.len], w_name);
-                @memcpy(out_min_name[0..w_name.len], w_name);
+                for (&clamp_names, clamp_suffixes) |*out_name, suffix| {
+                    // 计算替换后的长度：原长度 - ".weight"长度 + suffix长度
+                    const weight_suffix = ".weight";
+                    const new_len = w_name.len - weight_suffix.len + suffix.len;
+                    const buf = try allocator.alloc(u8, new_len);
+                    errdefer allocator.free(buf);
 
-                const suffix = ".input_max";
-                @memcpy(inp_max_name[w_name.len..][0..suffix.len], suffix);
-                const inp_max_full = inp_max_name[0 .. w_name.len + suffix.len];
-
-                const suffix2 = ".input_min";
-                @memcpy(inp_min_name[w_name.len..][0..suffix2.len], suffix2);
-                const inp_min_full = inp_min_name[0 .. w_name.len + suffix2.len];
-
-                const suffix3 = ".output_max";
-                @memcpy(out_max_name[w_name.len..][0..suffix3.len], suffix3);
-                const out_max_full = out_max_name[0 .. w_name.len + suffix3.len];
-
-                const suffix4 = ".output_min";
-                @memcpy(out_min_name[w_name.len..][0..suffix4.len], suffix4);
-                const out_min_full = out_min_name[0 .. w_name.len + suffix4.len];
+                    // 复制 .weight 之前的部分
+                    const prefix_end = w_name.len - weight_suffix.len;
+                    @memcpy(buf[0..prefix_end], w_name[0..prefix_end]);
+                    // 追加 suffix
+                    @memcpy(buf[prefix_end..][0..suffix.len], suffix);
+                    out_name.* = buf;
+                }
+                defer {
+                    for (clamp_names) |n| allocator.free(n);
+                }
 
                 // 尝试从 GGUF 中读取这些标量张量
                 // 它们是 1 元素 f32 张量
-                const inp_max_tensor = gguf_file.findTensor(inp_max_full);
-                const inp_min_tensor = gguf_file.findTensor(inp_min_full);
-                const out_max_tensor = gguf_file.findTensor(out_max_full);
-                const out_min_tensor = gguf_file.findTensor(out_min_full);
+                const inp_max_tensor = gguf_file.findTensor(clamp_names[0]);
+                const inp_min_tensor = gguf_file.findTensor(clamp_names[1]);
+                const out_max_tensor = gguf_file.findTensor(clamp_names[2]);
+                const out_min_tensor = gguf_file.findTensor(clamp_names[3]);
 
                 if (inp_max_tensor != null and inp_min_tensor != null and
                     out_max_tensor != null and out_min_tensor != null)
                 {
-                    // 读取标量值
+                    // 读取标量值（1 元素 f32 张量）
                     const inp_max_data = gguf_file.getTensorData(inp_max_tensor.?);
                     const inp_min_data = gguf_file.getTensorData(inp_min_tensor.?);
                     const out_max_data = gguf_file.getTensorData(out_max_tensor.?);
@@ -313,21 +312,15 @@ pub const AudioEncoder = struct {
                     const out_max_val = @as(*const f32, @ptrCast(@alignCast(out_max_data.ptr))).*;
                     const out_min_val = @as(*const f32, @ptrCast(@alignCast(out_min_data.ptr))).*;
 
-                    // 使用默认值（匹配 C++ get_scalar 的默认值）
-                    const inp_max = if (inp_max_tensor != null) inp_max_val else std.math.floatMax(f32);
-                    const inp_min = if (inp_min_tensor != null) inp_min_val else -std.math.floatMax(f32);
-                    const out_max = if (out_max_tensor != null) out_max_val else std.math.floatMax(f32);
-                    const out_min = if (out_min_tensor != null) out_min_val else -std.math.floatMax(f32);
-
                     try clamp_map.put(w_name, ClampInfo{
-                        .inp_min = inp_min,
-                        .inp_max = inp_max,
-                        .out_min = out_min,
-                        .out_max = out_max,
+                        .inp_min = inp_min_val,
+                        .inp_max = inp_max_val,
+                        .out_min = out_min_val,
+                        .out_max = out_max_val,
                     });
 
                     log.debug("  clamp info for '{s}': inp=[{}, {}], out=[{}, {}]", .{
-                        w_name, inp_min, inp_max, out_min, out_max,
+                        w_name, inp_min_val, inp_max_val, out_min_val, out_max_val,
                     });
                 }
             }
@@ -431,7 +424,6 @@ pub const AudioEncoder = struct {
                 // llama.cpp passes model.sscp_conv_w[i] directly without permute.
                 const ne = conv_w_raw.ne();
                 log.debug("conv1d.{d}.weight: ne=[{d},{d},{d},{d}], name={s}", .{ i, ne[0], ne[1], ne[2], ne[3], conv_w_raw.getName() });
-                log.info("conv1d.{d}.weight: ne=[{d},{d},{d},{d}], name={s}", .{ i, ne[0], ne[1], ne[2], ne[3], conv_w_raw.getName() });
                 // Use kernel directly without permute, matching llama.cpp behavior
                 cur = cur.conv2d(ctx, conv_w_raw, 2, 2, 1, 1, 1, 1);
 
@@ -468,8 +460,17 @@ pub const AudioEncoder = struct {
         // Flatten [freq, time, ch, 1] -> [ch*freq, time]
         // Matches llama.cpp: ggml_permute(ctx0, cur, 1, 2, 0, 3)
         cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
+
+        // === DEBUG: set name + setOutput for flatten output ===
+        cur.setName("llama_audio_after_cont");
+        ggml.setOutput(cur);
+
         const flat_dim0 = cur.ne()[0] * cur.ne()[1];
         cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
+        log.debug("flatten: ne=[{}, {}, {}, {}], nb=[{}, {}, {}, {}]", .{
+            cur.ne()[0], cur.ne()[1], cur.ne()[2], cur.ne()[3],
+            cur.nb()[0], cur.nb()[1], cur.nb()[2], cur.nb()[3]
+        });
 
         // === DEBUG: set name + setOutput for flatten output ===
         cur.setName("debug_audio_flatten_output");
@@ -806,6 +807,9 @@ pub const AudioEncoder = struct {
         helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_conv2d_1_output.json", "debug_audio_conv2d_1_output", cgraph) catch |err| {
             log.debug("Failed to save conv2d_1_output debug data: {}", .{err});
         };
+        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_after_cont.json", "llama_audio_after_cont", cgraph) catch |err| {
+            log.debug("Failed to save llama_audio_after_cont debug data: {}", .{err});
+        };
         helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_flatten_output.json", "debug_audio_flatten_output", cgraph) catch |err| {
             log.debug("Failed to save flatten_output debug data: {}", .{err});
         };
@@ -912,7 +916,7 @@ fn buildMM(
 ) *ggml.Tensor {
     const name = w.getName();
     if (clamp_map.get(name)) |ci| {
-        log.debug("buildMM: applying clamp for '{s}': inp=[{}, {}], out=[{}, {}]", .{
+        log.debug("ggml_clamp('{s}'): inp=[{}, {}], out=[{}, {}]", .{
             name, ci.inp_min, ci.inp_max, ci.out_min, ci.out_max,
         });
         // 对输入 clamp
