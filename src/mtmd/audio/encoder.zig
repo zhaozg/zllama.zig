@@ -234,24 +234,53 @@ pub const AudioEncoder = struct {
         // ====================================================================
         // 加载 Clamp 信息（对应 C++ clip.cpp 中 clamp_info_map 的填充逻辑）
         // ====================================================================
-        // C++ 实现 (clip.cpp:2597-2611): 遍历所有 tensors_to_load，对每个 .weight 张量，
-        // 查找对应的 .input_max, .input_min, .output_max, .output_min 标量张量。
-        // 这些标量是 1 元素 f32 张量，存储在 GGUF 中。
-        // 使用 get_scalar 读取，默认值 FLT_MAX / -FLT_MAX。
+        // C++ 实现 (clip.cpp:2597-2611): 遍历所有 tensors_to_load（即通过 get_tensor
+        // 成功加载的张量），对每个 .weight 张量，查找对应的 .input_max, .input_min,
+        // .output_max, .output_min 标量张量。使用 get_scalar 读取，默认值 FLT_MAX / -FLT_MAX。
         // 参考: deps/llama.cpp/tools/mtmd/clip.cpp 第 2597-2611 行
         var clamp_map = std.StringHashMap(ClampInfo).init(allocator);
         {
-            // 遍历 GGUF 中所有张量，查找 .weight 结尾且存在对应 clamp 标量的张量
-            for (gguf_file.tensors.items) |*tensor_info| {
-                const name = tensor_info.name;
-                if (!std.mem.endsWith(u8, name, ".weight")) continue;
+            // 收集所有已加载的 .weight 张量名称（对应 C++ 的 tensors_to_load）
+            var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| {
+                return err;
+            };
+            defer weight_names.deinit(allocator);
 
-                // 跳过非音频相关的张量（只处理 a. 和 mm.a. 前缀的）
-                if (!std.mem.startsWith(u8, name, "a.") and !std.mem.startsWith(u8, name, "mm.a.")) continue;
+            // 子采样卷积权重
+            for (sscp_conv_w) |t| {
+                if (t) |wt| try weight_names.append(allocator, wt.getName());
+            }
+            // 输入投影
+            if (sscp_inp_proj_w) |t| try weight_names.append(allocator, t.getName());
+            if (audio_out_proj_w) |t| try weight_names.append(allocator, t.getName());
+            if (mm_input_proj_w) |t| try weight_names.append(allocator, t.getName());
 
-                // 将 ".weight" 替换为 ".input_max" / ".input_min" / ".output_max" / ".output_min"
+            // 所有层的权重
+            for (layers) |*layer| {
+                // Attention
+                if (layer.q_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.k_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.v_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.o_w) |t| try weight_names.append(allocator, t.getName());
+                // FFN 1
+                if (layer.ff_up_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.ff_down_w) |t| try weight_names.append(allocator, t.getName());
+                // Convolution
+                if (layer.conv_pw1_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.conv_dw_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.conv_pw2_w) |t| try weight_names.append(allocator, t.getName());
+                // FFN 2
+                if (layer.ff_up_1_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.ff_down_1_w) |t| try weight_names.append(allocator, t.getName());
+            }
+
+            // 对每个权重名称，查找对应的 clamp 标量
+            // C++ 实现: 使用 string_replace_all 将 ".weight" 替换为 ".input_max" 等后缀
+            for (weight_names.items) |w_name| {
+                if (!std.mem.endsWith(u8, w_name, ".weight")) continue;
+
                 const weight_suffix = ".weight";
-                const prefix_len = name.len - weight_suffix.len;
+                const prefix_len = w_name.len - weight_suffix.len;
                 const clamp_suffixes = [_][]const u8{ ".input_max", ".input_min", ".output_max", ".output_min" };
                 var clamp_names: [4][]const u8 = undefined;
 
@@ -259,7 +288,7 @@ pub const AudioEncoder = struct {
                     const new_len = prefix_len + suffix.len;
                     const buf = try allocator.alloc(u8, new_len);
                     errdefer allocator.free(buf);
-                    @memcpy(buf[0..prefix_len], name[0..prefix_len]);
+                    @memcpy(buf[0..prefix_len], w_name[0..prefix_len]);
                     @memcpy(buf[prefix_len..][0..suffix.len], suffix);
                     out_name.* = buf;
                 }
@@ -273,15 +302,11 @@ pub const AudioEncoder = struct {
                 const out_max_val = readScalarOrDefault(gguf_file, clamp_names[2], std.math.floatMax(f32));
                 const out_min_val = readScalarOrDefault(gguf_file, clamp_names[3], -std.math.floatMax(f32));
 
-                try clamp_map.put(name, ClampInfo{
+                try clamp_map.put(w_name, ClampInfo{
                     .inp_min = inp_min_val,
                     .inp_max = inp_max_val,
                     .out_min = out_min_val,
                     .out_max = out_max_val,
-                });
-
-                log.debug("  clamp info for '{s}': inp=[{}, {}], out=[{}, {}]", .{
-                    name, inp_min_val, inp_max_val, out_min_val, out_max_val,
                 });
             }
         }
@@ -422,7 +447,7 @@ pub const AudioEncoder = struct {
         cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
 
         // === DEBUG: set name + setOutput for flatten output ===
-        cur.setName("llama_audio_after_cont");
+        cur.setName("debug_audio_after_cont");
         ggml.setOutput(cur);
 
         const flat_dim0 = cur.ne()[0] * cur.ne()[1];
@@ -665,6 +690,8 @@ pub const AudioEncoder = struct {
         }
 
         log.debug("After conformer blocks: cur shape [{}, {}]", .{ cur.ne()[0], cur.ne()[1] });
+        cur.setName("debug_audio_conformer_blocks_output");
+        ggml.setOutput(cur);
 
         // 4. 输出投影（使用 buildMM 应用 clamp）
         if (w.audio_out_proj_w) |out_w| {
@@ -685,6 +712,9 @@ pub const AudioEncoder = struct {
         }
 
         log.debug("Final output shape: [{}, {}]", .{ cur.ne()[0], cur.ne()[1] });
+
+        cur.setName("debug_audio_multimodal_embedder_output");
+        ggml.setOutput(cur);
 
         cgraph.buildForwardExpand(cur);
         return cur;
@@ -757,12 +787,19 @@ pub const AudioEncoder = struct {
         helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_conv2d_1_output.json", "debug_audio_conv2d_1_output", cgraph) catch |err| {
             log.debug("Failed to save conv2d_1_output debug data: {}", .{err});
         };
-        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_after_cont.json", "llama_audio_after_cont", cgraph) catch |err| {
-            log.debug("Failed to save llama_audio_after_cont debug data: {}", .{err});
+        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_after_cont.json", "debug_audio_after_cont", cgraph) catch |err| {
+            log.debug("Failed to save audio_after_cont debug data: {}", .{err});
         };
         helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_flatten_output.json", "debug_audio_flatten_output", cgraph) catch |err| {
             log.debug("Failed to save flatten_output debug data: {}", .{err});
         };
+        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_conformer_blocks_output.json", "debug_audio_conformer_blocks_output", cgraph) catch |err| {
+            log.debug("Failed to save conformer_blocks_output debug data: {}", .{err});
+        };
+        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_multimodal_embedder_output.json", "debug_audio_multimodal_embedder_output", cgraph) catch |err| {
+            log.debug("Failed to save flatten_output debug data: {}", .{err});
+        };
+
         helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_input_proj_output.json", "debug_audio_input_proj_output", cgraph) catch |err| {
             log.debug("Failed to save input_proj_output debug data: {}", .{err});
         };

@@ -57,22 +57,19 @@
 
 ---
 
-> **最新对齐状态更新（基于 2026-06-28 最新比较数据）**
-> 通过将 llama.cpp 中中间张量的 `ggml_set_input` 改为 `ggml_set_output`，我们获得了可靠的数据。最新比较结果如下：
+## 最新对齐状态（2026-06-28 最终确认）
 
 | 数据项 | 余弦相似度 | 状态 |
 |-------|-----------|:----:|
-| `encoder_input` | 1.0 | ✅ 完全一致 |
-| `conv2d_0_output` | 1.0 | ✅ **完全一致**（微小浮点误差） |
-| `conv2d_1_output` | 1.0 | ✅ 完全一致 |
-| `after_cont`（permute+cont 后） | 1.0 | ✅ **完全一致**（新增） |
-| `flatten_output` | 1.0 | ✅ **完全一致**（已修复） |
-| `input_proj_output` | -0.002 | ❌ **显著差异**（几乎正交） |
-| `embeddings` | 0.778 | ❌ **显著差异**（受 input_proj 影响） |
+| `encoder_input` | 1.0 | ✅ |
+| `conv2d_0_output` | 1.0 | ✅ |
+| `conv2d_1_output` | 1.0 | ✅ |
+| `after_cont`（permute+cont 后） | 1.0 | ✅ |
+| `flatten_output` | 1.0 | ✅ |
+| `input_proj_output` | **-0.002** | ❌ **几乎正交** |
+| `embeddings` | 0.777 | ❌ **显著差异**（源于 input_proj） |
 
---- 更新 ↑ 新增 after_cont 行，更新 flatten_output 和 input_proj_output 数值 ---
-
-- 唯一未对齐的环节是 **`Input Projection`**，即 `sscp_inp_proj_w` 与 `flatten_output` 的矩阵乘法（`mulMat`）结果完全不同，尽管权重本身一致（`input_proj_weight` 相似度 1.0）。
+**所有前置步骤（输入、Mel、卷积、Flatten）均已完美对齐，唯一差异锁定在 Input Projection 的矩阵乘法。** 权重本身也一致（相似度 1.0），输入数据也一致，因此问题必定出在 `ggml_mul_mat` 的调用或实现上。
 
 ---
 
@@ -89,11 +86,11 @@
 | 步骤 | C++ (`gemma4v.cpp`) | Zig (`encoder.zig`) | 一致性 |
 |------|---------------------|----------------------|--------|
 | 1. 输入转置 | `ggml_transpose` + `ggml_cont` | `ggml.transpose` + `ggml.cont` | ✅ |
-| 2. 两层 Conv2D (stride=2, padding=1) + 后处理 | `ggml_conv_2d` + bias + LayerNorm + ReLU | `cur.conv2d` + add + norm + ReLU | ✅（Conv2d 第1层输出已验证一致） |
-| 3. Flatten + Input Projection | `permute` + `reshape_2d` + `mul_mat` | 相同 | ⚠️ Flatten 已对齐，Input Projection 未对齐 |
-| 4. 12 层 Conformer | FFN → 分块注意力 → 卷积模块 → FFN → Norm | 完全相同的块序列 | ⚠️ 因 Input Projection 错误，后续均受影响 |
-| 5. 输出投影 + RMSNorm | `mul_mat` + `rms_norm` + `mul` | 相同 | ⚠️ 受 Input Projection 影响 |
-
+| 2. 两层 Conv2D (stride=2, padding=1) + 后处理 | `ggml_conv_2d` + bias + LayerNorm + ReLU | `cur.conv2d` + add + norm + ReLU | ✅ |
+| 3. Flatten + Input Projection | `permute` + `reshape_2d` + `mul_mat` | 相同 | ✅ |
+| 4. **Input Projection（mul_mat）** | | |  ❌ **唯一差异点** |
+| 5. 12 层 Conformer | FFN → 分块注意力 → 卷积模块 → FFN → Norm | 完全相同的块序列 | ⚠️ 因 Input Projection 错误，后续均受影响 |
+| 6. 输出投影 + RMSNorm | `mul_mat` + `rms_norm` + `mul` | 相同 | ⚠️ 受 Input Projection 影响 |
 
 ---
 
@@ -165,16 +162,42 @@ const q_scale: f32 = (1.0 / @sqrt(@as(f32, @floatFromInt(p.d_head)))) / @log(2.0
 
 ---
 
-### 四、维度推导一致性
+### 四、当前唯一未对齐环节：Input Projection 的 `mulMat`
 
-| 中间变量 | C++ 预期形状 | Zig 实际形状（据代码） | 匹配？ |
-|---------|-------------|----------------------|--------|
-| 输入 (转置后) | `[n_mel, n_frames, 1, 1]` | 由 `inp_raw` 转置得到 | ✅ |
-| Conv2D_0 输出 | `[64, T/2, 128, 1]` | 由 `ggml_conv_2d` 自动计算 | ✅（Conv2d 第1层输出已验证） |
-| Conv2D_1 输出 | `[32, T/4, 32, 1]` | 同上 | ✅（余弦相似度=1.0） |
-| Flatten 后 | `[1024, T/4]` | `reshape2d(flat_dim0, ne[2])`，其中 `flat_dim0 = 32*32=1024`，`ne[2]` 为 `T/4` | ✅（数值已对齐） |
-| Input Projection | `[n_embd, T/4]` | `proj_w` 形状 `[n_embd, 1024]`，乘后得 `[n_embd, T/4]` | ⚠️ 形状匹配，但数值错误（矩阵乘法问题） |
+#### 现象
+- 输入 `flatten_output`：形状 `[1024, 20]`，数值与 C++ 完全一致（余弦相似度 1.0）。
+- 权重 `input_proj_weight`：形状 `[1024, 1024]`，数值完全一致。
+- 输出 `input_proj_output`：形状 `[1024, 20]`，但与 C++ 几乎正交（余弦 -0.002），平均绝对差 3.5，最大差 114。
 
+#### 根因推测
+
+1. **`mulMat` 参数顺序错误**：Zig 调用可能为 `ggml_mul_mat(ctx, x, w)` 而非 `ggml_mul_mat(ctx, w, x)`，导致计算 `x * w` 而非 `w * x`。虽然形状可能仍为 `[1024,20]`，但数值完全不同。
+2. **`ggml_mul_mat` 底层实现差异**：Zig 使用的 ggml 库与 C++ 版本对 `mul_mat` 的实现可能不同（如矩阵乘法的内存布局、SIMD 路径等），但鉴于其他 `mulMat`（如 Q/K/V）也未对齐，但最可能仍是参数顺序问题。
+
+#### 紧急排查步骤
+
+##### 1. 检查 `src/ggml/tensor.zig` 中 `mulMat` 的绑定
+```zig
+pub fn mulMat(self: *Tensor, ctx: *Context, other: *Tensor) *Tensor {
+    return ggml_mul_mat(ctx, self, other);
+}
+```
+确认其调用的是 `ggml_mul_mat(ctx, self, other)`。若实际为 `ggml_mul_mat(ctx, other, self)`，则立即修正。
+
+##### 2. 临时绕过 `mulMat` 方法
+在 `encoder.zig` 中，将 Input Projection 的调用改为直接调用 C API：
+```zig
+// 原：cur = proj_w.mulMat(ctx, cur);
+// 改为：
+cur = ggml_mul_mat(ctx, proj_w, cur);
+```
+重新编译运行，观察 `input_proj_output` 是否变为正确。
+
+#### 3. 打印调用前的张量信息
+在 `mulMat` 调用前，打印 `proj_w` 和 `cur` 的 `ne`/`nb`，与 C++ 端 `ggml_mul_mat` 调用前的日志对比，确保元数据完全一致（已知一致，但可再确认）。
+
+#### 4. 检查 `ggml_mul_mat` 的返回值
+确保返回值类型正确，且未被后续操作意外修改。
 
 ---
 
@@ -188,21 +211,13 @@ const q_scale: f32 = (1.0 / @sqrt(@as(f32, @floatFromInt(p.d_head)))) / @log(2.0
 | Conv1d 第0层权重 | 1.0 | ✅ |
 | Conv1d 第1层权重 | 1.0 | ✅ |
 | Conv2d 第1层输出 | 1.0 | ✅ |
-| Conv2d 第0层输出 | 1.0 | ✅（最新确认） |
+| Conv2d 第0层输出 | 1.0 | ✅ |
 | 输入投影权重 | 1.0 | ✅ |
 | 位置编码 | 1.0 | ✅ |
 | 注意力掩码 | 1.0 | ✅ |
-| `after_cont` | 1.0 | ✅（新增） |
-| Flatten 输出 | 1.0 | ✅（已修复） |
-| clamp 逻辑 | — | ✅（已实现并打印） |
-
---- 更新 ↑ 将 Flatten 和 after_cont 加入已验证列表，移除待排查 ---
-
-#### ❌ 待排查的差异
-| 数据项 | 余弦相似度 | 状态 |
-|-------|:----------:|:----:|
-| Input Projection 输出 | -0.002 | ❌ **显著差异**（几乎正交） |
-| 最终音频嵌入 | 0.778 | ❌ **显著差异**（受 Input Projection 影响） |
+| `after_cont` | 1.0 | ✅ |
+| Flatten 输出 | 1.0 | ✅ |
+| clamp 逻辑 | — | ✅ |
 
 
 ---
@@ -292,78 +307,6 @@ const q_scale: f32 = (1.0 / @sqrt(@as(f32, @floatFromInt(p.d_head)))) / @log(2.0
 当前唯一未对齐的环节是 **`Input Projection` 的矩阵乘法（`mulMat`）**，其输出几乎正交（余弦相似度 -0.002），而输入数据（`flatten_output`）和权重（`input_proj_weight`）均正确。因此，请立即检查 `mulMat` 的 Zig 绑定实现，确认参数顺序和底层计算与 C++ 完全一致。
 
 一旦 `input_proj_output` 对齐，后续 Conformer 层和最终嵌入将自动匹配（因为其余部分已验证），届时音频编码将完全对齐。
-
----
-
-## 附录 B：ggml_cont 操作与 ggml_set_input 的交互分析
-
-### 问题描述
-
-在 `encoder.zig` 中，`ggml_set_input` 被调用在 `ggml_cont` 的结果上：
-
-```zig
-var cur = ggml.transpose(ctx, inp_raw);
-cur = ggml.cont(ctx, cur);
-cur.setName("debug_audio_encoder_input");
-ggml.setInput(cur);
-```
-
-`ggml_set_input` 设置 `GGML_TENSOR_FLAG_INPUT` 标志。这个标志在 ggml-alloc 中有特殊处理：
-
-```c
-// ggml-alloc.c 第744行
-if (node->flags & GGML_TENSOR_FLAG_INPUT) {
-    ggml_gallocr_allocate_node(galloc, graph->nodes[i], get_node_buffer_id(node_buffer_ids, i));
-}
-```
-
-这告诉分配器为这个节点分配内存。但 `cont` 结果是一个**操作输出**，不是真正的输入。设置 INPUT 标志可能会让分配器认为数据已经由外部提供，从而跳过计算。
-
-### 分析
-
-经过对 ggml-alloc 源码的详细分析：
-
-1. **分配阶段**：分配器为 `cont` 结果分配内存（因为 INPUT 标志）
-2. **计算阶段**：`cont` 操作读取源张量（transpose 结果）并写入目标张量（cont 结果）
-3. **读取阶段**：`mtmdDebugSaveTensor` 读取 `cont` 结果的 `data` 指针
-
-分配器在分配阶段之后，计算阶段之前，会设置 `node->data` 指针。计算阶段会写入这个指针指向的内存。读取阶段会读取这个内存。
-
-**结论**：`ggml_set_input` 在 `cont` 结果上不会导致数据错误。它只是确保分配器为这个张量分配内存，并且不会在计算后被释放。
-
-### 与 llama.cpp 的一致性
-
-在 llama.cpp 中，`ggml_set_input` 也被调用在 `cont` 结果上：
-
-```cpp
-auto * cur = ggml_cont(ctx0, ggml_transpose(ctx0, inp));
-ggml_set_name(cur, "debug_audio_encoder_input");
-ggml_set_input(cur);
-```
-
-所以两者的行为完全一致。✅
-
-### 潜在问题
-
-虽然 `ggml_set_input` 的行为一致，但有一个潜在问题：
-
-在 llama.cpp 中，`ggml_backend_sched_graph_compute` 使用调度器，它会：
-1. 为每个操作分配后端
-2. 在操作之间同步数据
-
-在 zllama.zig 中，`ggml_backend_graph_compute` 使用单后端（CPU），它不会在操作之间同步数据。
-
-对于 CPU 上的 `cont` 操作，两者应该产生相同的结果。但如果 `cont` 操作被调度到 GPU 上（在 llama.cpp 中），而数据在 CPU 上，则需要进行数据传输。
-
-但在我们的场景中，所有数据都在 CPU 上，所以不应该有差异。
-
-### 建议
-
-1. **在 `cont` 之后立即保存数据**：在 `ggml_set_input` 之前，直接从 `cont` 结果的 `data` 指针读取数据并保存。这样可以排除图计算过程中的干扰。
-
-2. **使用 `ggml_graph_dump_dot` 可视化图结构**：比较 llama.cpp 和 zllama.zig 的图结构，确保节点顺序和依赖关系一致。
-
-3. **检查 `ggml_backend_cpu_graph_compute` 的实现**：确保它正确处理 `GGML_OP_CONT` 操作。
 
 ---
 
