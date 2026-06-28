@@ -361,10 +361,7 @@ pub const AudioEncoder = struct {
         }
 
         // Flatten [freq, time, ch, 1] -> [ch*freq, time]
-        // ```cpp (form llama.cpp gemma4a.cpp)
-        // cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 2, 0, 3));
-        // cur = ggml_reshape_2d(ctx0, cur, cur->ne[0] * cur->ne[1], cur->ne[2]);
-        // ```
+        // Matches llama.cpp: ggml_permute(ctx0, cur, 1, 2, 0, 3)
         cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
         const flat_dim0 = cur.ne()[0] * cur.ne()[1];
         cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);

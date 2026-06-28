@@ -27,6 +27,11 @@
    - 所有 ggml C API 必须通过 `ggml.zig` 模块封装为类型安全的 Zig 函数，且保留 `c` 命名空间供高级用户直接调用。
    - 分配类操作（如 `ggml_new_tensor`）必须返回 `!*T` 错误联合，纯计算操作返回 `*T`。
    - 使用 `opaque {}` 类型包装不透明指针（`ggml_context`、`ggml_tensor` 等）。
+   - **⚠️ ggml_permute 语义陷阱**：`ggml_permute(ctx, t, a0, a1, a2, a3)` 的参数是"**新轴→原轴**"映射（而非直觉的"原轴→新轴"）。
+     例：`permute(1,2,0,3)` 在 `[A,B,C,D]` 上得到 `[C,A,B,D]`（新轴0=原轴1=C，新轴1=原轴2=A，新轴2=原轴0=B）。
+     **必须**直接复制 llama.cpp 参考实现中的 permute 参数，严禁自行推导。详见 `deps/ggml.md` 和 `docs/GGML_BINDING.md`。
+   - **⚠️ ggml_mul_mat 维度收缩**：`mul_mat(A, B)` 在 ne[0] 维度收缩，结果 ne[0]=A.ne[1]、ne[1]=B.ne[1]。高维 batch 广播依赖 ne[2]/ne[3]。
+   - **⚠️ permute 后必须 cont**：`ggml_permute` 只改元数据不移动数据，后续 reshape/view 操作前必须调用 `.cont(ctx)` 物化布局。
    - 说明文档: docs/GGML_BINDING.md
 
 3. **Zig 0.16.0 I/O 接口化约束**

@@ -317,3 +317,69 @@ model.a = ggml_new_tensor_4d(model.ctx, GGML_TYPE_F16, KW, KH, IC, OC);
 #### 深度可分离卷积
 
 对于深度可分离卷积（如 Conformer 的 `conv_dw`），核张量是 1D `[KH, 1, IC, 1]`，不存在 KH/KW 混淆问题，无需 permute。
+
+### 5.6 Flatten 操作：permute + reshape2d 模式
+
+音频编码器中的 Flatten 是将 4D Conv2D 输出展平为 2D 以送入全连接层的标准模式。
+
+**llama.cpp 参考**（`deps/llama.cpp/tools/mtmd/models/gemma4a.cpp:55-56`）：
+
+```cpp
+// Flatten [freq, time, ch, 1] -> [ch*freq, time]
+cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 2, 0, 3));
+cur = ggml_reshape_2d(ctx0, cur, cur->ne[0] * cur->ne[1], cur->ne[2]);
+```
+
+**Zig 实现**（`src/mtmd/audio/encoder.zig`）：
+
+```zig
+// Flatten [freq, time, ch, 1] -> [ch*freq, time]
+// Matches llama.cpp: ggml_permute(ctx0, cur, 1, 2, 0, 3)
+cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
+const flat_dim0 = cur.ne()[0] * cur.ne()[1];  // = ch * freq
+cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);  // = [ch*freq, time]
+```
+
+**维度流**：`[freq, time, ch, 1]` → permute(1,2,0,3) → `[time, ch, freq, 1]` → reshape2d → `[ch*freq, time]`
+
+> **警告**：不要自行"推导"permute 参数。这个 permute 顺序由权重文件的布局决定（`input_projection.weight` 的形状必须与 flatten 输出匹配），直接复制 llama.cpp 的参数即可。
+
+### 5.7 开发黄金法则：始终匹配 llama.cpp
+
+当编写涉及 ggml 维度操作的代码时，遵循以下流程：
+
+1. **找到 llama.cpp 参考**：在 `deps/llama.cpp/tools/mtmd/models/` 或 `deps/llama.cpp/src/` 中找到对应代码。
+2. **逐字复制 permute 参数**：ggml_permute 的参数语义特殊（"新轴→原轴"而非"原轴→新轴"），自行推导极易出错。
+3. **添加交叉引用注释**：在 Zig 代码中以 `// Matches llama.cpp:` 标注参考源文件和行号。
+4. **编写测试验证**：在 `src/tests/test_permute.zig` 中添加对应测试，用 ggml 计算图运行验证。
+5. **运行回归测试**：`zig build test -Doptimize=ReleaseSafe --summary all` 确保所有 155+ 测试通过。
+
+常见需要匹配的操作：
+
+| 操作 | 参考文件 | 关键点 |
+|------|---------|--------|
+| 标准注意力 Q/K/V permute | `llama-graph.cpp:2083-2085` | `permute(0,2,1,3)` |
+| 音频 Flatten | `gemma4a.cpp:55` | `permute(1,2,0,3)` |
+| 音频 LayerNorm | `gemma4a.cpp:42-44` | `permute(1,2,0,3)` / `permute(2,0,1,3)` |
+| 音频 Q blocking | `gemma4a.cpp` | `permute(0,3,1,2)` |
+| 音频 K blocking | `gemma4a.cpp` | `permute(0,3,1,2)` |
+| 音频 V blocking | `gemma4a.cpp` | `permute(1,3,0,2)` |
+| 注意力结果恢复 | `gemma4a.cpp` | `permute(0,2,3,1)` |
+
+### 5.8 调试技巧
+
+当怀疑 permute 顺序有问题时：
+
+```zig
+// 1. 打印 permute 前后的形状
+const before = cur.ne();
+std.log.debug("before permute: [{d},{d},{d},{d}]", .{ before[0], before[1], before[2], before[3] });
+cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
+const after = cur.ne();
+std.log.debug("after permute: [{d},{d},{d},{d}]", .{ after[0], after[1], after[2], after[3] });
+
+// 2. 与 llama.cpp 参考对比形状（在 llama.cpp 中添加 printf 打印相同位置）
+
+// 3. 使用 test_permute.zig 编写独立测试
+```
+
