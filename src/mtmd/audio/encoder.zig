@@ -292,30 +292,50 @@ pub const AudioEncoder = struct {
         log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
         log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
 
-        // 1. Create input tensor matching llama.cpp layout
-        //    llama.cpp: inp = build_inp_raw(1) with shape [n_frames, n_mel, 1, 1] (bin-major)
-        //    then: cur = transpose(inp) → [n_mel, n_frames, 1, 1] (frame-major in memory)
-        //    We create directly: [n_mel, n_frames] 2D with frame-major data = match after transpose.
-        //    ne[0]=n_mel (freq varies fastest), ne[1]=n_frames (time).
-        var cur = try ctx.newTensor2d(ggml.Type.f32, @intCast(n_mel_bins), @intCast(n_frames));
-        cur.setName("debug_audio_encoder_input");
+        // 1. Create input tensor matching llama.cpp layout exactly
+        //    llama.cpp: inp = build_inp_raw(1) with shape [n_frames, n_mel, 1, 1] (mel-major)
+        //      ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, img.nx(), img.ny(), channels, n_batch)
+        //      where img.nx() = n_frames, img.ny() = n_mel
+        //      → ne[0]=n_frames, ne[1]=n_mel, ne[2]=1, ne[3]=1
+        //    then: cur = ggml_cont(ctx0, ggml_transpose(ctx0, inp))
+        //      → [n_mel, n_frames, 1, 1] (frame-major in memory)
+        //
+        //    mel_data layout (from pipeline): mel-major, data[mel_bin * n_frames + frame]
+        //    When copied into tensor [n_frames, n_mel] (ne[0]=n_frames varies fastest):
+        //      tensor[frame + n_frames * mel_bin] = data[mel_bin * n_frames + frame]
+        //      This is exactly mel-major layout, so data can be copied directly.
+        //    After transpose + cont: tensor becomes [n_mel, n_frames] with frame-major layout.
+        var inp_raw = try ctx.newTensor4d(ggml.Type.f32,
+            @intCast(n_frames),  // ne[0] = n_frames (varies fastest)
+            @intCast(n_mel_bins), // ne[1] = n_mel
+            1,                    // ne[2] = channels
+            1);                   // ne[3] = n_batch
+        inp_raw.setName("inp_raw");
 
+        // Copy mel data directly (mel-major layout matches ne[0]=n_frames)
         {
-            const raw = cur.dataBytes();
+            const raw = inp_raw.dataBytes();
             const dst = @as([*]f32, @ptrCast(@alignCast(raw.ptr)));
             const n_mel: usize = @intCast(n_mel_bins);
             const n_fr: usize = @intCast(n_frames);
-            // mel_data is bin-major: src[m * n_fr + fi]
-            // dst is frame-major: dst[m + fi * n_mel] (ne[0]=n_mel varies fastest)
-            for (0..n_fr) |fi| {
-                for (0..n_mel) |m| {
-                    dst[m + fi * n_mel] = mel_data[m * n_fr + fi];
-                }
-            }
+            // mel_data is mel-major: data[mel_bin * n_frames + frame]
+            // tensor[frame + n_frames * mel_bin] = data[mel_bin * n_frames + frame]
+            // Direct copy, no transpose needed
+            @memcpy(dst[0..mel_data.len], mel_data);
+            _ = n_mel;
+            _ = n_fr;
         }
 
-        // Reshape to 4D for conv2d: [n_mel_bins, n_frames, 1, 1] (matches llama.cpp after transpose)
-        cur = cur.reshape4d(ctx, @intCast(n_mel_bins), @intCast(n_frames), 1, 1);
+        // Transpose + cont to get frame-major layout [n_mel, n_frames, 1, 1]
+        // This matches llama.cpp: cur = ggml_cont(ctx0, ggml_transpose(ctx0, inp))
+        var cur = ggml.transpose(ctx, inp_raw);
+        cur.setName("debug_audio_encoder_input_transposed");
+        cur = ggml.cont(ctx, cur);
+        cur.setName("debug_audio_encoder_input");
+
+        try helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_encoder_input.json",
+            "debug_audio_encoder_input",
+            cur.dataF32());
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
