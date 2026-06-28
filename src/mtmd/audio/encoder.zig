@@ -341,24 +341,37 @@ pub const AudioEncoder = struct {
 
                 cur = cur.relu(ctx);
 
-                // === DEBUG: save after relu (matches llama.cpp ggml_set_name("conv2d_0_out") after relu) ===
+                // === DEBUG: set name + setOutput to preserve intermediate tensor for debug ===
+                // 使用 setOutput 而非 setInput，因为这是中间计算结果（输出），
+                // 需要在 graph compute 后通过 ggml_graph_get_tensor 读取。
+                // setInput 用于用户提供数据的输入张量，setOutput 用于需要保留的计算结果。
                 if (i == 0) {
+                    cur.setName("debug_audio_conv2d_0_output");
+                    ggml.setOutput(cur);
                     self.debug_conv2d_0_output = cur;
                 }
 
-                // === DEBUG: save conv2d_1 after relu ===
+                // === DEBUG: set name + setOutput for conv2d_1 ===
                 if (i == 1) {
+                    cur.setName("debug_audio_conv2d_1_output");
+                    ggml.setOutput(cur);
                     self.debug_conv2d_1_output = cur;
                 }
             }
         }
 
-        // Flatten: [freq, time, channels, 1] -> [channels*freq, time]
+        // Flatten [freq, time, ch, 1] -> [ch*freq, time]
+        // ```cpp (form llama.cpp gemma4a.cpp)
+        // cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 2, 0, 3));
+        // cur = ggml_reshape_2d(ctx0, cur, cur->ne[0] * cur->ne[1], cur->ne[2]);
+        // ```
         cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
         const flat_dim0 = cur.ne()[0] * cur.ne()[1];
         cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
 
-        // === DEBUG: 保存 flatten 输出 ===
+        // === DEBUG: set name + setOutput for flatten output ===
+        cur.setName("debug_audio_flatten_output");
+        ggml.setOutput(cur);
         self.debug_flatten_output = cur;
 
         // Input projection: map conv output dim -> Conformer embedding dim
@@ -369,7 +382,10 @@ pub const AudioEncoder = struct {
             }
         }
 
-        // === DEBUG: 保存 input_proj 输出 ===
+        // === DEBUG: set name + setOutput for input_proj output ===
+        // 使用 setOutput 保留中间结果，以便 graph compute 后通过 ggml_graph_get_tensor 读取
+        cur.setName("debug_audio_input_proj_output");
+        ggml.setOutput(cur);
         self.debug_input_proj_output = cur;
 
         // 输入投影
@@ -390,7 +406,7 @@ pub const AudioEncoder = struct {
         // Ensure allocations are enabled before creating tensors that we'll write into
         ctx.setNoAlloc(false);
         const pos_emb = try ctx.newTensor2d(ggml.Type.f32, p.n_embd, @intCast(R));
-        pos_emb.setName("pos_emb");
+        pos_emb.setName("debug_audio_pos_emb");
         fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.n_embd), @intCast(P));
 
         // === DEBUG: 保存 pos_emb 数据 ===
@@ -402,7 +418,7 @@ pub const AudioEncoder = struct {
 
         // Create 4D mask [S, C, B, 1] so it can broadcast to [S, C, B, H] scores
         const kq_mask = try ctx.newTensor4d(ggml.Type.f32, @intCast(S), @intCast(C), @intCast(B), 1);
-        kq_mask.setName("kq_mask");
+        kq_mask.setName("debug_audio_attn_mask");
         fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos));
 
         // === DEBUG: 保存 kq_mask 数据 ===
@@ -673,30 +689,24 @@ pub const AudioEncoder = struct {
     }
 
     // 保存中间张量的调试数据（需在 graph.compute() 之后调用）
+    // 使用 mtmdDebugSaveTensor 通过图查找张量，匹配 llama.cpp 的 ggml_graph_get_tensor + ggml_backend_tensor_get 方式
     // 所有文件保存到 debug_audio/ 子目录
-    pub fn saveDebugData(self: *const AudioEncoder, io: std.Io) void {
+    pub fn saveDebugData(_: *const AudioEncoder, io: std.Io, cgraph: *ggml.CGraph) void {
         const subdir = "debug_audio";
-        if (self.debug_conv2d_0_output) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_0_output.json", "conv2d_0_output", t.dataF32()) catch |err| {
-                log.debug("Failed to save conv2d_0_output debug data: {}", .{err});
-            };
-        }
-        if (self.debug_conv2d_1_output) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_conv2d_1_output.json", "conv2d_1_output", t.dataF32()) catch |err| {
-                log.debug("Failed to save conv2d_1_output debug data: {}", .{err});
-            };
-        }
-        if (self.debug_input_proj_output) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_input_proj_output.json", "input_proj_output", t.dataF32()) catch |err| {
-                log.debug("Failed to save input_proj_output debug data: {}", .{err});
-            };
-        }
-
-        if (self.debug_flatten_output) |t| {
-            helper.mtmdDebugSaveData(io, subdir, "zllama_audio_flatten_output.json", "flatten_output", t.dataF32()) catch |err| {
-                log.debug("Failed to save input_proj_output debug data: {}", .{err});
-            };
-        }
+        // 按 llama.cpp 的顺序保存：encoder_input, conv2d_0, conv2d_1, flatten, input_proj, attn_mask, pos_emb
+        // encoder_input 由 engine.zig 中的 mtmdDebugSaveTensor 保存
+        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_conv2d_0_output.json", "debug_audio_conv2d_0_output", cgraph) catch |err| {
+            log.debug("Failed to save conv2d_0_output debug data: {}", .{err});
+        };
+        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_conv2d_1_output.json", "debug_audio_conv2d_1_output", cgraph) catch |err| {
+            log.debug("Failed to save conv2d_1_output debug data: {}", .{err});
+        };
+        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_flatten_output.json", "debug_audio_flatten_output", cgraph) catch |err| {
+            log.debug("Failed to save flatten_output debug data: {}", .{err});
+        };
+        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_input_proj_output.json", "debug_audio_input_proj_output", cgraph) catch |err| {
+            log.debug("Failed to save input_proj_output debug data: {}", .{err});
+        };
     }
 
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {
