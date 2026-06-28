@@ -113,6 +113,11 @@ pub const Tensor = opaque {
     pub fn sigmoid(self: *Tensor, ctx: *anyopaque) *Tensor {
         return wrap(c.ggml_sigmoid(@ptrCast(ctx), @ptrCast(@alignCast(self))));
     }
+    /// 对张量每个元素进行裁剪（clamp），将值限制在 [min, max] 范围内
+    /// 对应 C++ 的 ggml_clamp
+    pub fn clamp(self: *Tensor, ctx: *anyopaque, min: f32, max: f32) *Tensor {
+        return wrap(cmod.ggml_clamp(@ptrCast(ctx), @ptrCast(@alignCast(self)), min, max));
+    }
     pub fn permute(self: *Tensor, ctx: *anyopaque, axis0: i32, axis1: i32, axis2: i32, axis3: i32) *Tensor {
         return wrap(c.ggml_permute(@ptrCast(ctx), @ptrCast(@alignCast(self)), axis0, axis1, axis2, axis3));
     }

@@ -105,6 +105,12 @@ pub fn relu(ctx: *Context, a: *Tensor) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_relu(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
 }
 
+/// 对张量每个元素进行裁剪（clamp），将值限制在 [min, max] 范围内
+/// 对应 C++ 的 ggml_clamp
+pub fn clamp(ctx: *Context, a: *Tensor, min: f32, max: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(cmod.ggml_clamp(@ptrCast(ctx), @ptrCast(@alignCast(a)), min, max)));
+}
+
 // ============================================================================
 // 张量操作
 // ============================================================================

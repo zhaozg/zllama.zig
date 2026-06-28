@@ -27,6 +27,18 @@ const helper = @import("helper");
 const log = std.log.scoped(.audio_encoder);
 
 // ============================================================================
+// Clamp 信息（对应 C++ clip-model.h 中的 clamp_info）
+// ============================================================================
+
+/// 矩阵乘法的 clamp 参数，对应 C++ clip-model.h 中的 clamp_info
+pub const ClampInfo = struct {
+    inp_min: f32,
+    inp_max: f32,
+    out_min: f32,
+    out_max: f32,
+};
+
+// ============================================================================
 // Conformer 层权重
 // ============================================================================
 
@@ -97,6 +109,10 @@ pub const AudioEncoderWeights = struct {
     // 多模态嵌入投影 (mm.a.*)
     mm_soft_emb_norm_w: ?*ggml.Tensor = null,
     mm_input_proj_w: ?*ggml.Tensor = null,
+
+    // Clamp 信息映射：权重名称 -> ClampInfo
+    // 对应 C++ clip-model.h 中的 clamp_info_map
+    clamp_map: std.StringHashMap(ClampInfo),
 };
 
 // ============================================================================
@@ -107,13 +123,6 @@ pub const AudioEncoder = struct {
     params: config_mod.AudioEncoderParams,
     weights: AudioEncoderWeights,
     ctx_weights: *ggml.Context,
-
-    // Debug: intermediate tensor references for debug data saving
-    debug_conv2d_0_raw: ?*ggml.Tensor = null,
-    debug_conv2d_0_output: ?*ggml.Tensor = null,
-    debug_conv2d_1_output: ?*ggml.Tensor = null,
-    debug_flatten_output: ?*ggml.Tensor = null,
-    debug_input_proj_output: ?*ggml.Tensor = null,
 
     // 从 GGUF 文件初始化音频编码器，加载所有权重到 ggml context
     pub fn init(
@@ -222,7 +231,109 @@ pub const AudioEncoder = struct {
             log.warn("  mm_input_proj:   NOT FOUND (mm.a.input_projection.weight)", .{});
         }
 
-        log.info("Audio encoder loaded: {d} layers, subsampling convs ready", .{n_layer});
+        // ====================================================================
+        // 加载 Clamp 信息（对应 C++ clip.cpp 中 clamp_info_map 的填充逻辑）
+        // ====================================================================
+        // C++ 实现遍历所有 tensors_to_load，对每个 .weight 张量，
+        // 查找对应的 .input_max, .input_min, .output_max, .output_min 标量张量。
+        // 这些标量是 1 元素 f32 张量，存储在 GGUF 中。
+        // 参考: deps/llama.cpp/tools/mtmd/clip.cpp 第 2170-2185 行
+        var clamp_map = std.StringHashMap(ClampInfo).init(allocator);
+        {
+            // 收集所有可能被 clamp 的权重名称
+            var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| {
+                return err;
+            };
+            defer weight_names.deinit(allocator);
+
+            // 添加所有 .weight 张量的名称
+            if (sscp_inp_proj_w) |t| try weight_names.append(allocator, t.getName());
+            if (audio_out_proj_w) |t| try weight_names.append(allocator, t.getName());
+            if (mm_input_proj_w) |t| try weight_names.append(allocator, t.getName());
+            for (layers) |*layer| {
+                if (layer.q_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.k_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.v_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.o_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.conv_pw1_w) |t| try weight_names.append(allocator, t.getName());
+                if (layer.conv_pw2_w) |t| try weight_names.append(allocator, t.getName());
+            }
+
+            // 对每个权重名称，查找对应的 clamp 标量
+            for (weight_names.items) |w_name| {
+                // 跳过非 .weight 结尾的名称（虽然理论上不会发生）
+                if (!std.mem.endsWith(u8, w_name, ".weight")) continue;
+
+                // 构造 clamp 标量名称：将 .weight 替换为 .input_max 等
+                // 例如: "a.input_projection.weight" -> "a.input_projection.weight.input_max"
+                var inp_max_name: [256]u8 = undefined;
+                var inp_min_name: [256]u8 = undefined;
+                var out_max_name: [256]u8 = undefined;
+                var out_min_name: [256]u8 = undefined;
+
+                @memcpy(inp_max_name[0..w_name.len], w_name);
+                @memcpy(inp_min_name[0..w_name.len], w_name);
+                @memcpy(out_max_name[0..w_name.len], w_name);
+                @memcpy(out_min_name[0..w_name.len], w_name);
+
+                const suffix = ".input_max";
+                @memcpy(inp_max_name[w_name.len..][0..suffix.len], suffix);
+                const inp_max_full = inp_max_name[0 .. w_name.len + suffix.len];
+
+                const suffix2 = ".input_min";
+                @memcpy(inp_min_name[w_name.len..][0..suffix2.len], suffix2);
+                const inp_min_full = inp_min_name[0 .. w_name.len + suffix2.len];
+
+                const suffix3 = ".output_max";
+                @memcpy(out_max_name[w_name.len..][0..suffix3.len], suffix3);
+                const out_max_full = out_max_name[0 .. w_name.len + suffix3.len];
+
+                const suffix4 = ".output_min";
+                @memcpy(out_min_name[w_name.len..][0..suffix4.len], suffix4);
+                const out_min_full = out_min_name[0 .. w_name.len + suffix4.len];
+
+                // 尝试从 GGUF 中读取这些标量张量
+                // 它们是 1 元素 f32 张量
+                const inp_max_tensor = gguf_file.findTensor(inp_max_full);
+                const inp_min_tensor = gguf_file.findTensor(inp_min_full);
+                const out_max_tensor = gguf_file.findTensor(out_max_full);
+                const out_min_tensor = gguf_file.findTensor(out_min_full);
+
+                if (inp_max_tensor != null and inp_min_tensor != null and
+                    out_max_tensor != null and out_min_tensor != null)
+                {
+                    // 读取标量值
+                    const inp_max_data = gguf_file.getTensorData(inp_max_tensor.?);
+                    const inp_min_data = gguf_file.getTensorData(inp_min_tensor.?);
+                    const out_max_data = gguf_file.getTensorData(out_max_tensor.?);
+                    const out_min_data = gguf_file.getTensorData(out_min_tensor.?);
+
+                    const inp_max_val = @as(*const f32, @ptrCast(@alignCast(inp_max_data.ptr))).*;
+                    const inp_min_val = @as(*const f32, @ptrCast(@alignCast(inp_min_data.ptr))).*;
+                    const out_max_val = @as(*const f32, @ptrCast(@alignCast(out_max_data.ptr))).*;
+                    const out_min_val = @as(*const f32, @ptrCast(@alignCast(out_min_data.ptr))).*;
+
+                    // 使用默认值（匹配 C++ get_scalar 的默认值）
+                    const inp_max = if (inp_max_tensor != null) inp_max_val else std.math.floatMax(f32);
+                    const inp_min = if (inp_min_tensor != null) inp_min_val else -std.math.floatMax(f32);
+                    const out_max = if (out_max_tensor != null) out_max_val else std.math.floatMax(f32);
+                    const out_min = if (out_min_tensor != null) out_min_val else -std.math.floatMax(f32);
+
+                    try clamp_map.put(w_name, ClampInfo{
+                        .inp_min = inp_min,
+                        .inp_max = inp_max,
+                        .out_min = out_min,
+                        .out_max = out_max,
+                    });
+
+                    log.debug("  clamp info for '{s}': inp=[{}, {}], out=[{}, {}]", .{
+                        w_name, inp_min, inp_max, out_min, out_max,
+                    });
+                }
+            }
+        }
+
+        log.info("Audio encoder loaded: {d} layers, subsampling convs ready, {d} clamp entries", .{ n_layer, clamp_map.count() });
 
         // === DEBUG: 保存子采样卷积权重数据 ===
         for (0..2) |i| {
@@ -261,6 +372,7 @@ pub const AudioEncoder = struct {
                 .audio_out_proj_b = audio_out_proj_b,
                 .mm_soft_emb_norm_w = mm_soft_emb_norm_w,
                 .mm_input_proj_w = mm_input_proj_w,
+                .clamp_map = clamp_map,
             },
             .ctx_weights = ctx,
         };
@@ -323,11 +435,6 @@ pub const AudioEncoder = struct {
                 // Use kernel directly without permute, matching llama.cpp behavior
                 cur = cur.conv2d(ctx, conv_w_raw, 2, 2, 1, 1, 1, 1);
 
-                // === DEBUG: save raw conv2d output (before bias/norm/relu) ===
-                if (i == 0) {
-                    self.debug_conv2d_0_raw = cur;
-                }
-
                 if (w.sscp_conv_b[i]) |conv_b| {
                     cur = cur.add(ctx, conv_b);
                 }
@@ -348,14 +455,12 @@ pub const AudioEncoder = struct {
                 if (i == 0) {
                     cur.setName("debug_audio_conv2d_0_output");
                     ggml.setOutput(cur);
-                    self.debug_conv2d_0_output = cur;
                 }
 
                 // === DEBUG: set name + setOutput for conv2d_1 ===
                 if (i == 1) {
                     cur.setName("debug_audio_conv2d_1_output");
                     ggml.setOutput(cur);
-                    self.debug_conv2d_1_output = cur;
                 }
             }
         }
@@ -369,11 +474,11 @@ pub const AudioEncoder = struct {
         // === DEBUG: set name + setOutput for flatten output ===
         cur.setName("debug_audio_flatten_output");
         ggml.setOutput(cur);
-        self.debug_flatten_output = cur;
 
         // Input projection: map conv output dim -> Conformer embedding dim
+        // 使用 buildMM 替代直接 mulMat，以应用 clamp 逻辑
         if (w.sscp_inp_proj_w) |proj_w| {
-            cur = proj_w.mulMat(ctx, cur);
+            cur = buildMM(ctx, proj_w, cur, &w.clamp_map);
             if (w.sscp_inp_proj_b) |proj_b| {
                 cur = cur.add(ctx, proj_b);
             }
@@ -383,7 +488,6 @@ pub const AudioEncoder = struct {
         // 使用 setOutput 保留中间结果，以便 graph compute 后通过 ggml_graph_get_tensor 读取
         cur.setName("debug_audio_input_proj_output");
         ggml.setOutput(cur);
-        self.debug_input_proj_output = cur;
 
         // 输入投影
         const n_pos = cur.ne()[1];
@@ -454,10 +558,10 @@ pub const AudioEncoder = struct {
                 else
                     residual;
 
-                // Q, K, V 投影
-                var Qcur = layer.q_w.?.mulMat(ctx, attn_in);
-                var Kcur = layer.k_w.?.mulMat(ctx, attn_in);
-                var Vcur = layer.v_w.?.mulMat(ctx, attn_in);
+                // Q, K, V 投影（使用 buildMM 应用 clamp）
+                var Qcur = buildMM(ctx, layer.q_w.?, attn_in, &w.clamp_map);
+                var Kcur = buildMM(ctx, layer.k_w.?, attn_in, &w.clamp_map);
+                var Vcur = buildMM(ctx, layer.v_w.?, attn_in, &w.clamp_map);
 
                 const d_head_i: i64 = @intCast(p.d_head);
                 const n_head_i: i64 = @intCast(p.n_head);
@@ -552,7 +656,8 @@ pub const AudioEncoder = struct {
                     x = x.cont(ctx);
                 }
 
-                x = layer.o_w.?.mulMat(ctx, x);
+                // 注意力输出投影（使用 buildMM 应用 clamp）
+                x = buildMM(ctx, layer.o_w.?, x, &w.clamp_map);
                 if (layer.o_b) |ob| {
                     x = x.add(ctx, ob);
                 }
@@ -567,7 +672,8 @@ pub const AudioEncoder = struct {
                 layer.conv_dw_w != null and layer.conv_pw2_w != null)
             {
                 cur = rmsNorm(ctx, residual, layer.norm_conv_w.?, norm_eps);
-                var x_conv = layer.conv_pw1_w.?.mulMat(ctx, cur);
+                // 卷积 pointwise 投影 1（使用 buildMM 应用 clamp）
+                var x_conv = buildMM(ctx, layer.conv_pw1_w.?, cur, &w.clamp_map);
 
                 // GLU gate (sigmoid)
                 const d_gate = @divExact(x_conv.ne()[0], 2);
@@ -589,7 +695,8 @@ pub const AudioEncoder = struct {
                     x_conv = x_conv.mul(ctx, cn_w);
                 }
                 x_conv = x_conv.silu(ctx);
-                x_conv = layer.conv_pw2_w.?.mulMat(ctx, x_conv);
+                // 卷积 pointwise 投影 2（使用 buildMM 应用 clamp）
+                x_conv = buildMM(ctx, layer.conv_pw2_w.?, x_conv, &w.clamp_map);
                 residual = residual.add(ctx, x_conv);
             }
 
@@ -610,9 +717,9 @@ pub const AudioEncoder = struct {
                 residual;
         }
 
-        // 4. 输出投影
+        // 4. 输出投影（使用 buildMM 应用 clamp）
         if (w.audio_out_proj_w) |out_w| {
-            cur = out_w.mulMat(ctx, cur);
+            cur = buildMM(ctx, out_w, cur, &w.clamp_map);
             if (w.audio_out_proj_b) |out_b| {
                 cur = cur.add(ctx, out_b);
             }
@@ -623,8 +730,9 @@ pub const AudioEncoder = struct {
         if (w.mm_soft_emb_norm_w) |sn_w| {
             cur = cur.mul(ctx, sn_w);
         }
+        // 多模态嵌入投影（使用 buildMM 应用 clamp）
         if (w.mm_input_proj_w) |proj_w| {
-            cur = proj_w.mulMat(ctx, cur);
+            cur = buildMM(ctx, proj_w, cur, &w.clamp_map);
         }
 
         cgraph.buildForwardExpand(cur);
@@ -707,6 +815,7 @@ pub const AudioEncoder = struct {
     }
 
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {
+        self.weights.clamp_map.deinit();
         allocator.free(self.weights.layers);
     }
 };
@@ -786,6 +895,36 @@ fn rmsNorm(ctx: *ggml.Context, x: *ggml.Tensor, weight: *ggml.Tensor, eps: f32) 
 fn ffnSilu(ctx: *ggml.Context, x: *ggml.Tensor, up_w: *ggml.Tensor, down_w: *ggml.Tensor) *ggml.Tensor {
     const h = up_w.mulMat(ctx, x);
     return down_w.mulMat(ctx, h.silu(ctx));
+}
+
+// ============================================================================
+// buildMM - 带 clamp 的矩阵乘法（对应 C++ clip_graph_gemma4a::build_mm）
+// ============================================================================
+
+/// 执行带 clamp 的矩阵乘法。
+/// 如果权重名称在 clamp_map 中，则对输入和输出分别应用 clamp。
+/// 对应 C++ gemma4a.cpp 中的 clip_graph_gemma4a::build_mm。
+fn buildMM(
+    ctx: *ggml.Context,
+    w: *ggml.Tensor,
+    x: *ggml.Tensor,
+    clamp_map: *const std.StringHashMap(ClampInfo),
+) *ggml.Tensor {
+    const name = w.getName();
+    if (clamp_map.get(name)) |ci| {
+        log.debug("buildMM: applying clamp for '{s}': inp=[{}, {}], out=[{}, {}]", .{
+            name, ci.inp_min, ci.inp_max, ci.out_min, ci.out_max,
+        });
+        // 对输入 clamp
+        const clamped = x.clamp(ctx, ci.inp_min, ci.inp_max);
+        // 矩阵乘法
+        var out = w.mulMat(ctx, clamped);
+        // 对输出 clamp
+        out = out.clamp(ctx, ci.out_min, ci.out_max);
+        return out;
+    } else {
+        return w.mulMat(ctx, x);
+    }
 }
 
 // Fill a 2D tensor [n_embd, n_pos] with sinusoidal position encodings.
