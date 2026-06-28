@@ -266,20 +266,18 @@ pub const AudioEncoder = struct {
         };
     }
 
-    // 编码音频数据，返回嵌入 tokens
-    // @param io I/O 实例
-    // @param ctx ggml 计算上下文
-    // @param graph 计算图
-    // @param mel_data PCM F32 音频样本 [n_mel_bins, n_frames]
-    // @returns 音频嵌入 [n_output_embd, n_tokens]
+    /// 编码音频数据，返回嵌入 tokens
+    /// @param io I/O 实例
+    /// @param ctx ggml 计算上下文
+    /// @param graph 计算图
+    /// @param mel_tensor Mel 频谱张量 [n_frames, n_mel_bins]（由 melToTensor 创建）
+    /// @returns 音频嵌入 [n_output_embd, n_tokens]
     pub fn encode(
         self: *AudioEncoder,
         io: std.Io,
         ctx: *ggml.Context,
         cgraph: *ggml.CGraph,
-        mel_data: []const f32,
-        n_mel_bins: u32,
-        n_frames: u32,
+        mel_tensor: *ggml.Tensor,
     ) !*ggml.Tensor {
         const w = self.weights;
         const p = self.params;
@@ -289,42 +287,20 @@ pub const AudioEncoder = struct {
         const norm_eps: f32 = 1e-6;
         const res_weight: f32 = 0.5;
 
-        log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
-        log.info("encode: n_mel_bins={d}, n_frames={d}, mel_data.len={d}", .{ n_mel_bins, n_frames, mel_data.len });
+        const n_frames: u32 = @intCast(mel_tensor.ne()[0]);
+        const n_mel_bins: u32 = @intCast(mel_tensor.ne()[1]);
 
-        // 1. Create input tensor matching llama.cpp layout exactly
-        //    llama.cpp: inp = build_inp_raw(1) with shape [n_frames, n_mel, 1, 1] (mel-major)
-        //      ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, img.nx(), img.ny(), channels, n_batch)
-        //      where img.nx() = n_frames, img.ny() = n_mel
-        //      → ne[0]=n_frames, ne[1]=n_mel, ne[2]=1, ne[3]=1
-        //    then: cur = ggml_cont(ctx0, ggml_transpose(ctx0, inp))
-        //      → [n_mel, n_frames, 1, 1] (frame-major in memory)
-        //
-        //    mel_data layout (from pipeline): mel-major, data[mel_bin * n_frames + frame]
-        //    When copied into tensor [n_frames, n_mel] (ne[0]=n_frames varies fastest):
-        //      tensor[frame + n_frames * mel_bin] = data[mel_bin * n_frames + frame]
-        //      This is exactly mel-major layout, so data can be copied directly.
-        //    After transpose + cont: tensor becomes [n_mel, n_frames] with frame-major layout.
-        var inp_raw = try ctx.newTensor4d(ggml.Type.f32,
-            @intCast(n_frames),  // ne[0] = n_frames (varies fastest)
+        log.info("encode: n_mel_bins={d}, n_frames={d}, mel_tensor.shape=[{d},{d}]", .{ n_mel_bins, n_frames, mel_tensor.ne()[0], mel_tensor.ne()[1] });
+
+        // 1. Use the mel tensor from melToTensor() as inp_raw.
+        //    melToTensor() creates [n_frames, n_mel_bins] (mel-major layout).
+        //    llama.cpp: inp = build_inp_raw(1) with shape [n_frames, n_mel, 1, 1]
+        //    We reshape the 2D tensor to 4D [n_frames, n_mel_bins, 1, 1].
+        var inp_raw = mel_tensor.reshape4d(ctx, @intCast(n_frames), // ne[0] = n_frames (varies fastest)
             @intCast(n_mel_bins), // ne[1] = n_mel
-            1,                    // ne[2] = channels
-            1);                   // ne[3] = n_batch
+            1, // ne[2] = channels
+            1); // ne[3] = n_batch
         inp_raw.setName("inp_raw");
-
-        // Copy mel data directly (mel-major layout matches ne[0]=n_frames)
-        {
-            const raw = inp_raw.dataBytes();
-            const dst = @as([*]f32, @ptrCast(@alignCast(raw.ptr)));
-            const n_mel: usize = @intCast(n_mel_bins);
-            const n_fr: usize = @intCast(n_frames);
-            // mel_data is mel-major: data[mel_bin * n_frames + frame]
-            // tensor[frame + n_frames * mel_bin] = data[mel_bin * n_frames + frame]
-            // Direct copy, no transpose needed
-            @memcpy(dst[0..mel_data.len], mel_data);
-            _ = n_mel;
-            _ = n_fr;
-        }
 
         // Transpose + cont to get frame-major layout [n_mel, n_frames, 1, 1]
         // This matches llama.cpp: cur = ggml_cont(ctx0, ggml_transpose(ctx0, inp))
@@ -332,10 +308,6 @@ pub const AudioEncoder = struct {
         cur.setName("debug_audio_encoder_input_transposed");
         cur = ggml.cont(ctx, cur);
         cur.setName("debug_audio_encoder_input");
-
-        try helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_encoder_input.json",
-            "debug_audio_encoder_input",
-            cur.dataF32());
 
         // 2. 子采样 Conv2D (2层，每层 stride=2, padding=1)
         for (0..2) |i| {
@@ -646,6 +618,33 @@ pub const AudioEncoder = struct {
         return cur;
     }
 
+    /// 编码音频数据（回退接口：接收原始 []const f32 数据）
+    /// 在内部创建 ggml 张量并调用 encode()。
+    /// 此方法保留向后兼容性，新代码应优先使用 encode() 接收 mel_tensor。
+    pub fn encodeRaw(
+        self: *AudioEncoder,
+        io: std.Io,
+        ctx: *ggml.Context,
+        cgraph: *ggml.CGraph,
+        mel_data: []const f32,
+        n_mel_bins: u32,
+        n_frames: u32,
+    ) !*ggml.Tensor {
+        // 创建临时张量并拷贝数据（匹配 melToTensor 的布局 [n_frames, n_mel_bins]）
+        var inp_raw = try ctx.newTensor2d(
+            ggml.Type.f32,
+            @intCast(n_frames),
+            @intCast(n_mel_bins),
+        );
+        inp_raw.setName("inp_raw_fallback");
+        {
+            const raw = inp_raw.dataBytes();
+            const dst = @as([*]f32, @ptrCast(@alignCast(raw.ptr)));
+            @memcpy(dst[0..mel_data.len], mel_data);
+        }
+        return self.encode(io, ctx, cgraph, inp_raw);
+    }
+
     // 返回音频编码器是否可用（权重已加载）
     pub fn isAvailable(self: *const AudioEncoder) bool {
         return self.weights.sscp_conv_w[0] != null;
@@ -693,7 +692,7 @@ pub const AudioEncoder = struct {
             };
         }
 
-        if (self.debug_flatten_output) | t | {
+        if (self.debug_flatten_output) |t| {
             helper.mtmdDebugSaveData(io, subdir, "zllama_audio_flatten_output.json", "flatten_output", t.dataF32()) catch |err| {
                 log.debug("Failed to save input_proj_output debug data: {}", .{err});
             };

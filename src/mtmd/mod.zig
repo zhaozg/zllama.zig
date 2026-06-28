@@ -187,10 +187,12 @@ pub const MediaInput = struct {
     image_data: ?[]const u8 = null,
     image_width: u32 = 0,
     image_height: u32 = 0,
-    /// 音频数据：Mel 频谱 F32 [n_mel_bins, n_frames]
+    /// 音频数据：Mel 频谱 F32 [n_mel_bins, n_frames]（原始数据，用于 melToTensor）
     mel_data: ?[]const f32 = null,
     mel_bins: u32 = 0,
     mel_frames: u32 = 0,
+    /// 音频 Mel 张量 [n_frames, n_mel_bins]（由 melToTensor 创建，优先于 mel_data）
+    mel_tensor: ?*ggml.Tensor = null,
     audio_length_sec: f32 = 0,
 };
 
@@ -299,7 +301,15 @@ pub const MultiModalManager = struct {
             .audio => {
                 if (self.audio_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.AudioEncoderNotAvailable;
-                    return enc.encode(io, ctx, graph, input.mel_data.?, input.mel_bins, input.mel_frames);
+                    // 优先使用 mel_tensor（由 melToTensor 创建），否则使用 mel_data 回退
+                    if (input.mel_tensor) |mt| {
+                        return enc.encode(io, ctx, graph, mt);
+                    } else if (input.mel_data) |md| {
+                        // 回退：在 encode 内部创建张量
+                        return enc.encodeRaw(io, ctx, graph, md, input.mel_bins, input.mel_frames);
+                    } else {
+                        return error.NoAudioData;
+                    }
                 }
                 return error.AudioEncoderNotAvailable;
             },

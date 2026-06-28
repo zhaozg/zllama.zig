@@ -90,7 +90,7 @@ pub const Tensor = opaque {
         return wrap(c.ggml_rms_norm(@ptrCast(ctx), @ptrCast(@alignCast(self)), eps));
     }
     pub fn norm(self: *Tensor, ctx: *anyopaque, eps: f32) *Tensor {
-        return wrap(c.ggml_rms_norm(@ptrCast(ctx), @ptrCast(@alignCast(self)), eps));
+        return wrap(c.ggml_norm(@ptrCast(ctx), @ptrCast(@alignCast(self)), eps));
     }
     pub fn scale(self: *Tensor, ctx: *anyopaque, s: f32) *Tensor {
         return wrap(c.ggml_scale(@ptrCast(ctx), @ptrCast(@alignCast(self)), s));
