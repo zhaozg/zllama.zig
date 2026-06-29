@@ -23,20 +23,17 @@ const weight_loader = @import("weight_loader");
 const config_mod = @import("config.zig");
 const framing = @import("framing.zig");
 const helper = @import("helper");
+const graph = @import("graph");
 
 const log = std.log.scoped(.audio_encoder);
 
 // ============================================================================
-// Clamp 信息（对应 C++ clip-model.h 中的 clamp_info）
+// Clamp 信息（使用 graph/types.zig 中的 ClampInfo）
 // ============================================================================
 
 /// 矩阵乘法的 clamp 参数，对应 C++ clip-model.h 中的 clamp_info
-pub const ClampInfo = struct {
-    inp_min: f32,
-    inp_max: f32,
-    out_min: f32,
-    out_max: f32,
-};
+/// 新代码应直接使用 graph.ClampInfo
+pub const ClampInfo = graph.ClampInfo;
 
 // ============================================================================
 // Conformer 层权重
@@ -521,10 +518,10 @@ pub const AudioEncoder = struct {
 
             // FFN 1 (half-step)
             if (layer.ff_norm_w != null and layer.ff_up_w != null and layer.ff_down_w != null) {
-                cur = buildNorm(ctx, residual, layer.ff_norm_w, null, .rms, norm_eps, @as(i32, @intCast(il)));
-                cur = buildFFN(ctx, cur, layer.ff_up_w, null, null, null, layer.ff_down_w, null, .silu, @as(i32, @intCast(il)), &w.clamp_map);
+                cur = try buildNorm(ctx, residual, layer.ff_norm_w, null, .rms, norm_eps, @as(i32, @intCast(il)));
+                cur = try buildFFN(ctx, cur, layer.ff_up_w, null, null, null, layer.ff_down_w, null, .silu, @as(i32, @intCast(il)), &w.clamp_map);
                 if (layer.ff_post_norm_w) |post_norm| {
-                    cur = buildNorm(ctx, cur, post_norm, null, .rms, norm_eps, @as(i32, @intCast(il)));
+                    cur = try buildNorm(ctx, cur, post_norm, null, .rms, norm_eps, @as(i32, @intCast(il)));
                 }
                 residual = residual.add(ctx, cur.scale(ctx, res_weight));
             }
@@ -536,14 +533,14 @@ pub const AudioEncoder = struct {
                 const softcap: f32 = 50.0;
                 const attn_norm = if (layer.attn_pre_norm_w) |w2| w2 else layer.ln_1_w;
                 const attn_in = if (attn_norm) |norm_w|
-                    buildNorm(ctx, residual, norm_w, null, .rms, norm_eps, @as(i32, @intCast(il)))
+                    try buildNorm(ctx, residual, norm_w, null, .rms, norm_eps, @as(i32, @intCast(il)))
                 else
                     residual;
 
                 // Q, K, V 投影（使用 buildMM 应用 clamp）
-                var Qcur = buildMM(ctx, layer.q_w.?, attn_in, &w.clamp_map);
-                var Kcur = buildMM(ctx, layer.k_w.?, attn_in, &w.clamp_map);
-                var Vcur = buildMM(ctx, layer.v_w.?, attn_in, &w.clamp_map);
+                var Qcur = try buildMM(ctx, layer.q_w.?, attn_in, &w.clamp_map);
+                var Kcur = try buildMM(ctx, layer.k_w.?, attn_in, &w.clamp_map);
+                var Vcur = try buildMM(ctx, layer.v_w.?, attn_in, &w.clamp_map);
 
                 const d_head_i: i64 = @intCast(p.d_head);
                 const n_head_i: i64 = @intCast(p.n_head);
@@ -630,12 +627,12 @@ pub const AudioEncoder = struct {
                 }
 
                 // 注意力输出投影（使用 buildMM 应用 clamp）
-                x = buildMM(ctx, layer.o_w.?, x, &w.clamp_map);
+                x = try buildMM(ctx, layer.o_w.?, x, &w.clamp_map);
                 if (layer.o_b) |ob| {
                     x = x.add(ctx, ob);
                 }
                 if (layer.attn_post_norm_w) |post_norm| {
-                    x = buildNorm(ctx, x, post_norm, null, .rms, norm_eps, @as(i32, @intCast(il)));
+                    x = try buildNorm(ctx, x, post_norm, null, .rms, norm_eps, @as(i32, @intCast(il)));
                 }
                 residual = residual.add(ctx, x);
             }
@@ -644,9 +641,9 @@ pub const AudioEncoder = struct {
             if (layer.norm_conv_w != null and layer.conv_pw1_w != null and
                 layer.conv_dw_w != null and layer.conv_pw2_w != null)
             {
-                cur = buildNorm(ctx, residual, layer.norm_conv_w, null, .rms, norm_eps, @as(i32, @intCast(il)));
+                cur = try buildNorm(ctx, residual, layer.norm_conv_w, null, .rms, norm_eps, @as(i32, @intCast(il)));
                 // 卷积 pointwise 投影 1（使用 buildMM 应用 clamp）
-                var x_conv = buildMM(ctx, layer.conv_pw1_w.?, cur, &w.clamp_map);
+                var x_conv = try buildMM(ctx, layer.conv_pw1_w.?, cur, &w.clamp_map);
 
                 // GLU gate (sigmoid)
                 const d_gate = @divExact(x_conv.ne()[0], 2);
@@ -669,23 +666,23 @@ pub const AudioEncoder = struct {
                 }
                 x_conv = x_conv.silu(ctx);
                 // 卷积 pointwise 投影 2（使用 buildMM 应用 clamp）
-                x_conv = buildMM(ctx, layer.conv_pw2_w.?, x_conv, &w.clamp_map);
+                x_conv = try buildMM(ctx, layer.conv_pw2_w.?, x_conv, &w.clamp_map);
                 residual = residual.add(ctx, x_conv);
             }
 
             // FFN 2 (half-step)
             if (layer.ff_norm_1_w != null and layer.ff_up_1_w != null and layer.ff_down_1_w != null) {
-                cur = buildNorm(ctx, residual, layer.ff_norm_1_w, null, .rms, norm_eps, @as(i32, @intCast(il)));
-                cur = buildFFN(ctx, cur, layer.ff_up_1_w, null, null, null, layer.ff_down_1_w, null, .silu, @as(i32, @intCast(il)), &w.clamp_map);
+                cur = try buildNorm(ctx, residual, layer.ff_norm_1_w, null, .rms, norm_eps, @as(i32, @intCast(il)));
+                cur = try buildFFN(ctx, cur, layer.ff_up_1_w, null, null, null, layer.ff_down_1_w, null, .silu, @as(i32, @intCast(il)), &w.clamp_map);
                 if (layer.ff_post_norm_1_w) |post_norm| {
-                    cur = buildNorm(ctx, cur, post_norm, null, .rms, norm_eps, @as(i32, @intCast(il)));
+                    cur = try buildNorm(ctx, cur, post_norm, null, .rms, norm_eps, @as(i32, @intCast(il)));
                 }
                 residual = residual.add(ctx, cur.scale(ctx, res_weight));
             }
 
             // Layer output norm
             cur = if (layer.ln_2_w) |ln2|
-                buildNorm(ctx, residual, ln2, null, .rms, norm_eps, @as(i32, @intCast(il)))
+                try buildNorm(ctx, residual, ln2, null, .rms, norm_eps, @as(i32, @intCast(il)))
             else
                 residual;
         }
@@ -696,7 +693,7 @@ pub const AudioEncoder = struct {
 
         // 4. 输出投影（使用 buildMM 应用 clamp）
         if (w.audio_out_proj_w) |out_w| {
-            cur = buildMM(ctx, out_w, cur, &w.clamp_map);
+            cur = try buildMM(ctx, out_w, cur, &w.clamp_map);
             if (w.audio_out_proj_b) |out_b| {
                 cur = cur.add(ctx, out_b);
             }
@@ -709,7 +706,7 @@ pub const AudioEncoder = struct {
         }
         // 多模态嵌入投影（使用 buildMM 应用 clamp）
         if (w.mm_input_proj_w) |proj_w| {
-            cur = buildMM(ctx, proj_w, cur, &w.clamp_map);
+            cur = try buildMM(ctx, proj_w, cur, &w.clamp_map);
         }
 
         log.debug("Final output shape: [{}, {}]", .{ cur.ne()[0], cur.ne()[1] });
@@ -889,52 +886,49 @@ fn readScalarOrDefault(gguf_file: *const gguf.GGUFFile, name: []const u8, defaul
 
 // RMS 归一化
 /// 归一化类型（对应 C++ clip-model.h 中的 norm_type）
-/// 归一化类型（兼容 graph/types.zig）
-/// 新代码应使用 graph/types.zig 中的 NormType
-pub const NormType = enum {
-    normal,
-    rms,
-};
+/// 归一化类型（使用 graph/types.zig 中的 NormType）
+/// 新代码应直接使用 graph.NormType
+pub const NormType = graph.NormType;
 
-/// FFN 激活类型（对应 C++ clip-model.h 中的 ffn_op_type）
-pub const FFNOpType = enum {
-    gelu,
-    gelu_erf,
-    silu,
-    gelu_quick,
-    relu_sqr,
-};
+/// FFN 激活类型（使用 graph/types.zig 中的 FFNOpType）
+/// 新代码应直接使用 graph.FFNOpType
+pub const FFNOpType = graph.FFNOpType;
 
-/// 通用归一化函数（对应 C++ clip_graph::build_norm）
+/// 归一化函数（使用 graph.buildNorm 实现）
 /// 支持 RMSNorm 和 LayerNorm，可选 weight 和 bias
+/// 对应 C++ clip_graph::build_norm
 pub fn buildNorm(
     ctx: *ggml.Context,
     cur: *ggml.Tensor,
     mw: ?*ggml.Tensor,
     mb: ?*ggml.Tensor,
-    norm_type: NormType,
+    norm_type: enum { normal, rms },
     norm_eps: f32,
     il: i32,
-) *ggml.Tensor {
+) !*ggml.Tensor {
     _ = il;
+    // 映射本地枚举到 graph 枚举
+    const gnorm_type: graph.NormType = switch (norm_type) {
+        .rms => .rms_norm,
+        .normal => .layer_norm,
+    };
+    if (mw) |w| {
+        return graph.buildNorm(ctx, cur, w, mb, gnorm_type, norm_eps, "audio_norm");
+    }
+    // 没有权重时，只做归一化
     var result = switch (norm_type) {
         .rms => cur.rmsNorm(ctx, norm_eps),
         .normal => cur.norm(ctx, norm_eps),
     };
-
-    if (mw) |w| {
-        result = result.mul(ctx, w);
-    }
-
     if (mb) |b| {
         result = result.add(ctx, b);
     }
-
     return result;
 }
 
-/// 通用 FFN 函数（对应 C++ clip_graph::build_ffn）
+/// 通用 FFN 函数（使用 graph.buildFFN 实现）
 /// 支持 SiLU、GELU 等激活类型，可选 gate、up_bias、gate_bias、down_bias
+/// 对应 C++ clip_graph::build_ffn
 pub fn buildFFN(
     ctx: *ggml.Context,
     cur: *ggml.Tensor,
@@ -944,76 +938,53 @@ pub fn buildFFN(
     gate_b: ?*ggml.Tensor,
     down: ?*ggml.Tensor,
     down_b: ?*ggml.Tensor,
-    type_op: FFNOpType,
+    type_op: enum { gelu, gelu_erf, silu, gelu_quick, relu_sqr },
     il: i32,
-    clamp_map: *const std.StringHashMap(ClampInfo),
-) *ggml.Tensor {
+    clamp_map: *const std.StringHashMap(graph.ClampInfo),
+) !*ggml.Tensor {
     _ = il;
-    // tmp = up ? build_mm(up, cur) : cur
-    var tmp = if (up) |up_w| buildMM(ctx, up_w, cur, clamp_map) else cur;
-
-    if (up_b) |ub| {
-        tmp = tmp.add(ctx, ub);
-    }
-
-    var result: *ggml.Tensor = undefined;
-    if (gate) |gate_w| {
-        result = buildMM(ctx, gate_w, cur, clamp_map);
-        if (gate_b) |gb| {
-            result = result.add(ctx, gb);
+    _ = clamp_map;
+    // 映射本地枚举到 graph 枚举
+    const gtype_op: graph.FFNOpType = switch (type_op) {
+        .silu => .silu,
+        .gelu => .gelu,
+        .gelu_erf => .gelu_erf,
+        .gelu_quick => .gelu_quick,
+        .relu_sqr => .relu_sqr,
+    };
+    // 如果 up 或 down 为 null，退回到简单实现
+    if (up == null or down == null) {
+        // 简单实现：只做激活
+        var result = cur;
+        if (up) |up_w| {
+            result = up_w.mulMat(ctx, result);
+            if (up_b) |ub| {
+                result = result.add(ctx, ub);
+            }
         }
-    } else {
-        result = tmp;
-    }
-
-    switch (type_op) {
-        .silu => {
-            if (gate != null) {
-                // SwiGLU: silu(gate(x)) * up(x)
-                result = result.silu(ctx).mul(ctx, tmp);
-            } else {
-                result = result.silu(ctx);
+        result = switch (type_op) {
+            .silu => result.silu(ctx),
+            .gelu => result.gelu(ctx),
+            .gelu_erf => result.geluErf(ctx),
+            .gelu_quick => result.geluQuick(ctx),
+            .relu_sqr => result.relu(ctx).sqr(ctx),
+        };
+        if (gate) |gate_w| {
+            var g = gate_w.mulMat(ctx, cur);
+            if (gate_b) |gb| {
+                g = g.add(ctx, gb);
             }
-        },
-        .gelu => {
-            if (gate != null) {
-                // GEGLU: gelu(gate(x)) * up(x)
-                result = result.gelu(ctx).mul(ctx, tmp);
-            } else {
-                result = result.gelu(ctx);
+            result = result.mul(ctx, g);
+        }
+        if (down) |down_w| {
+            result = down_w.mulMat(ctx, result);
+            if (down_b) |db| {
+                result = result.add(ctx, db);
             }
-        },
-        .gelu_erf => {
-            if (gate != null) {
-                // GEGLU: gelu_erf(gate(x)) * up(x)
-                result = result.geluErf(ctx).mul(ctx, tmp);
-            } else {
-                result = result.geluErf(ctx);
-            }
-        },
-        .gelu_quick => {
-            if (gate != null) {
-                // GEGLU: gelu_quick(gate(x)) * up(x)
-                result = result.geluQuick(ctx).mul(ctx, tmp);
-            } else {
-                result = result.geluQuick(ctx);
-            }
-        },
-        .relu_sqr => {
-            result = result.relu(ctx);
-            result = result.sqr(ctx);
-        },
+        }
+        return result;
     }
-
-    if (down) |down_w| {
-        result = buildMM(ctx, down_w, result, clamp_map);
-    }
-
-    if (down_b) |db| {
-        result = result.add(ctx, db);
-    }
-
-    return result;
+    return graph.buildFFN(ctx, cur, up.?, up_b, gate, gate_b, down.?, down_b, gtype_op, "audio_ffn");
 }
 
 /// K/V block context extraction via overlapping view（对应 C++ gemma4a.cpp 中的 extract_blocks lambda）
@@ -1043,33 +1014,22 @@ fn extractBlocks(
 }
 
 // ============================================================================
-// buildMM - 带 clamp 的矩阵乘法（对应 C++ clip_graph_gemma4a::build_mm）
+// buildMM - 带 clamp 的矩阵乘法（使用 graph.buildMM + clamp_map 查找）
 // ============================================================================
 
 /// 执行带 clamp 的矩阵乘法。
 /// 如果权重名称在 clamp_map 中，则对输入和输出分别应用 clamp。
 /// 对应 C++ gemma4a.cpp 中的 clip_graph_gemma4a::build_mm。
+/// 使用 graph.buildMM 实现，避免重复代码。
 pub fn buildMM(
     ctx: *ggml.Context,
     w: *ggml.Tensor,
     x: *ggml.Tensor,
-    clamp_map: *const std.StringHashMap(ClampInfo),
-) *ggml.Tensor {
+    clamp_map: *const std.StringHashMap(graph.ClampInfo),
+) !*ggml.Tensor {
     const name = w.getName();
-    if (clamp_map.get(name)) |ci| {
-        log.debug("ggml_clamp('{s}'): inp=[{}, {}], out=[{}, {}]", .{
-            name, ci.inp_min, ci.inp_max, ci.out_min, ci.out_max,
-        });
-        // 对输入 clamp
-        const clamped = x.clamp(ctx, ci.inp_min, ci.inp_max);
-        // 矩阵乘法
-        var out = w.mulMat(ctx, clamped);
-        // 对输出 clamp
-        out = out.clamp(ctx, ci.out_min, ci.out_max);
-        return out;
-    } else {
-        return w.mulMat(ctx, x);
-    }
+    const clamp_info = clamp_map.get(name);
+    return graph.buildMM(ctx, w, x, if (clamp_info) |ci| &ci else null);
 }
 
 // Fill a 2D tensor [n_embd, n_pos] with sinusoidal position encodings.

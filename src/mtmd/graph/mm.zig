@@ -35,15 +35,25 @@ pub fn buildMM(
     x: *ggml.Tensor,
     clamp_info: ?*const ClampInfo,
 ) !*ggml.Tensor {
-    var result = w.mulMat(ctx, x);
-
+    // 如果提供了 clamp_info，先对输入 clamp，再做矩阵乘法，最后对输出 clamp
+    // 对应 C++ gemma4a.cpp 中 clip_graph_gemma4a::build_mm 的行为
     if (clamp_info) |ci| {
-        // Gemma4ClippableLinear: clamp input and output
-        result = result.clamp(ctx, ci.inp_min, ci.inp_max);
-        result.setName("mm_clamped");
+        log.debug("buildMM clamp: inp=[{}, {}], out=[{}, {}]", .{
+            ci.inp_min, ci.inp_max, ci.out_min, ci.out_max,
+        });
+        // 对输入 clamp
+        const clamped = x.clamp(ctx, ci.inp_min, ci.inp_max);
+        clamped.setName("mm_clamped_inp");
+        // 矩阵乘法
+        var result = w.mulMat(ctx, clamped);
+        result.setName("mm_mulmat");
+        // 对输出 clamp
+        result = result.clamp(ctx, ci.out_min, ci.out_max);
+        result.setName("mm_clamped_out");
+        return result;
     }
 
-    return result;
+    return w.mulMat(ctx, x);
 }
 
 /// 构建 Gemma3 风格的多模态投影器

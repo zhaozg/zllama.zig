@@ -369,6 +369,15 @@ pub fn build(b: *std.Build) void {
     });
     fft_mod.linkFramework("Accelerate", .{});
 
+    // mtmd graph 模块（需在 audio/vision 模块之前定义）
+    const mm_graph_mod = b.createModule(.{
+        .root_source_file = b.path("src/mtmd/graph/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mm_graph_mod.addImport("ggml", ggml_mod);
+
     const mm_audio_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/audio/mod.zig"),
         .target = target,
@@ -379,6 +388,7 @@ pub fn build(b: *std.Build) void {
     mm_audio_mod.addImport("gguf", gguf_mod);
     mm_audio_mod.addImport("weight_loader", weight_loader_mod);
     mm_audio_mod.addImport("fft", fft_mod);
+    mm_audio_mod.addImport("graph", mm_graph_mod);
 
 
     const mm_vision_mod = b.createModule(.{
@@ -390,6 +400,7 @@ pub fn build(b: *std.Build) void {
     mm_vision_mod.addImport("ggml", ggml_mod);
     mm_vision_mod.addImport("gguf", gguf_mod);
     mm_vision_mod.addImport("weight_loader", weight_loader_mod);
+    mm_vision_mod.addImport("graph", mm_graph_mod);
 
     const utils_mod = b.createModule(.{
         .root_source_file = b.path("src/utils.zig"),
@@ -401,15 +412,6 @@ pub fn build(b: *std.Build) void {
     utils_mod.addImport("gguf", gguf_mod);
     utils_mod.addImport("tokenizer", tokenizer_mod);
 
-
-    // mtmd graph 模块
-    const mm_graph_mod = b.createModule(.{
-        .root_source_file = b.path("src/mtmd/graph/mod.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    mm_graph_mod.addImport("ggml", ggml_mod);
 
     const mm_manager_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/mod.zig"),

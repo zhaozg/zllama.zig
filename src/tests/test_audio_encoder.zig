@@ -92,7 +92,7 @@ test "buildNorm: RMS norm without weight/bias" {
     const eps: f32 = 1e-6;
 
     // Call buildNorm with RMS norm, no weight/bias
-    const result = audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
 
     // Set output and compute
     ggml.setOutput(result);
@@ -126,7 +126,7 @@ test "buildNorm: RMS norm with weight" {
 
     const eps: f32 = 1e-6;
 
-    const result = audio_encoder.buildNorm(ctx, input, weight, null, .rms, eps, 0);
+    const result = try audio_encoder.buildNorm(ctx, input, weight, null, .rms, eps, 0);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -171,7 +171,7 @@ test "buildNorm: RMS norm with weight and bias" {
 
     const eps: f32 = 1e-6;
 
-    const result = audio_encoder.buildNorm(ctx, input, weight, bias, .rms, eps, 0);
+    const result = try audio_encoder.buildNorm(ctx, input, weight, bias, .rms, eps, 0);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -209,7 +209,7 @@ test "buildNorm: Layer norm without weight/bias" {
 
     const eps: f32 = 1e-6;
 
-    const result = audio_encoder.buildNorm(ctx, input, null, null, .normal, eps, 0);
+    const result = try audio_encoder.buildNorm(ctx, input, null, null, .normal, eps, 0);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -248,7 +248,7 @@ test "buildNorm: RMS norm with zero input" {
 
     const eps: f32 = 1e-6;
 
-    const result = audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -274,7 +274,7 @@ test "buildNorm: RMS norm with single element" {
 
     const eps: f32 = 1e-6;
 
-    const result = audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -300,7 +300,7 @@ test "buildNorm: RMS norm with large epsilon" {
 
     const eps: f32 = 1.0; // Large epsilon
 
-    const result = audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -330,7 +330,7 @@ test "buildNorm: 3D tensor RMS norm" {
 
     const eps: f32 = 1e-6;
 
-    const result = audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -383,7 +383,7 @@ test "buildFFN: SiLU without gate (simple FFN)" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -430,7 +430,7 @@ test "buildFFN: SwiGLU (with gate)" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, null, gate_w, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, gate_w, null, down_w, null, .silu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -471,7 +471,7 @@ test "buildFFN: GELU without gate" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .gelu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .gelu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -509,7 +509,7 @@ test "buildFFN: with up bias" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, up_b, null, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, up_b, null, null, down_w, null, .silu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -547,7 +547,7 @@ test "buildFFN: with down bias" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, down_b, .silu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, down_b, .silu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -588,7 +588,7 @@ test "buildFFN: GEGLU with gate bias" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, null, gate_w, gate_b, down_w, null, .gelu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, gate_w, gate_b, down_w, null, .gelu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -623,7 +623,7 @@ test "buildFFN: relu_sqr activation" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .relu_sqr, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .relu_sqr, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -658,7 +658,7 @@ test "buildFFN: zero input" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -703,7 +703,7 @@ test "buildFFN: SwiGLU with clamp on weights" {
     try clamp_map.put("test_gate.weight", .{ .inp_min = -0.5, .inp_max = 0.5, .out_min = -1.0, .out_max = 1.0 });
     try clamp_map.put("test_down.weight", .{ .inp_min = -0.5, .inp_max = 0.5, .out_min = -1.0, .out_max = 1.0 });
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, null, gate_w, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, gate_w, null, down_w, null, .silu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -731,7 +731,7 @@ test "buildFFN: no up weight (passthrough)" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, null, null, null, null, null, null, .silu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, null, null, null, null, null, null, .silu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -773,7 +773,7 @@ test "buildMM: basic matrix multiply without clamp" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -820,7 +820,7 @@ test "buildMM: with input clamp" {
         .out_max = std.math.floatMax(f32),
     });
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -872,7 +872,7 @@ test "buildMM: with output clamp" {
         .out_max = 0.5, // Clamp output to [-0.5, 0.5]
     });
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -913,7 +913,7 @@ test "buildMM: with both input and output clamp" {
         .out_max = 1.0,
     });
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -949,7 +949,7 @@ test "buildMM: without clamp (weight not in map)" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -984,7 +984,7 @@ test "buildMM: 1D input (vector)" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1027,7 +1027,7 @@ test "buildMM: 3D weight tensor" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1062,7 +1062,7 @@ test "buildMM: large matrix multiply" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1107,7 +1107,7 @@ test "buildMM: with clamp on weight not in map (no-op)" {
         .out_max = 1.0,
     });
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1142,7 +1142,7 @@ test "buildMM: zero weight matrix" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1182,7 +1182,7 @@ test "buildMM: identity-like matrix" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1212,7 +1212,7 @@ test "buildNorm: empty clamp_map does not affect buildNorm" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, 1.0, 1.0);
 
-    const result = audio_encoder.buildNorm(ctx, input, null, null, .rms, 1e-6, 0);
+    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, 1e-6, 0);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1246,7 +1246,7 @@ test "buildFFN: empty clamp_map" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, 0, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1279,7 +1279,7 @@ test "buildMM: empty clamp_map" {
     var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
     defer clamp_map.deinit();
 
-    const result = audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);

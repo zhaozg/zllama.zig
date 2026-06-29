@@ -39,23 +39,20 @@ pub fn buildNorm(
     switch (norm_type) {
         .layer_norm => {
             result = result.norm(ctx, norm_eps);
-            result.setName(name);
         },
         .rms_norm => {
             result = result.rmsNorm(ctx, norm_eps);
-            result.setName(name);
         },
     }
 
     // 广播乘法: mw [n_embd] × result [n_embd, n_patches]
     result = result.mul(ctx, reshapeForBroadcast(ctx, mw));
-    result.setName(name);
 
     if (mb) |b| {
         result = result.add(ctx, b);
-        result.setName(name);
     }
 
+    _ = name; // 保留参数以保持 API 兼容性
     return result;
 }
 

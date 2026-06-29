@@ -131,15 +131,14 @@ pub const GraphBuilder = struct {
 | 现有文件 | 调整方式 |
 |---|---|
 | `src/mtmd/vision/types.zig` | ✅ 已改为兼容层，重新导出 graph/types.zig 的类型 |
-| `src/mtmd/vision/encoder.zig` | ⏳ 保留独立实现（含 ViT 块、patch embedding、pooling 等） |
-| `src/mtmd/audio/encoder.zig` | ⏳ 保留独立实现（含 buildNorm/buildFFN/buildMM 等） |
+| `src/mtmd/vision/encoder.zig` | ✅ 已重构，applyViTBlocks 使用 graph.buildNorm/buildFFN/buildAttn |
+| `src/mtmd/audio/encoder.zig` | ✅ 已重构，buildNorm/buildFFN/buildMM 使用 graph 模块实现 |
 | `src/mtmd/vision/config.zig` | 保留，作为超参数加载模块 |
 | `src/mtmd/vision/loader.zig` | 保留，作为权重加载模块 |
 | `src/mtmd/vision/preprocess.zig` | 保留，作为预处理模块 |
 | `src/mtmd/vision/postprocess.zig` | 保留，作为后处理模块 |
 | `src/mtmd/vision/pipeline.zig` | 保留独立实现 |
-| `src/mtmd/audio/encoder.zig` | 保留独立实现（含 buildNorm/buildFFN/buildMM） |
-| `build.zig` | ✅ 已添加 graph 模块注册 |
+| `build.zig` | ✅ 已添加 graph 模块注册（在 audio/vision 模块之前） |
 | `src/mtmd/mod.zig` | ✅ 已添加 graph 模块导入 |
 
 ## 7. 调试支持
@@ -220,7 +219,5 @@ src/mtmd/
 
 | 任务 | 优先级 | 说明 |
 |---|---|---|
-| 重构 vision/encoder.zig | 中 | 使用新的 graph/ 模块（当前保留独立实现，含 ViT 块、patch embedding、pooling） |
-| 重构 audio/encoder.zig | 中 | 使用新的 graph/ 模块（当前保留独立实现，含 buildNorm/buildFFN/buildMM） |
 | 集成测试 | 中 | 与 llama.cpp 参考实现对比 |
 | 调试保存功能 | 低 | 中间张量数据保存 |

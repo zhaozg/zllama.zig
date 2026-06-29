@@ -1,6 +1,7 @@
 //! 视觉编码器
 //!
 //! 提供 Vision Transformer (ViT) 编码器实现，支持 Gemma4V 和 Gemma4UV 两种变体。
+//! 使用 src/mtmd/graph/ 模块的通用构建块（buildNorm, buildFFN, buildAttn 等）。
 //! 参考: llama.cpp tools/mtmd/models/gemma4v.cpp, gemma4uv.cpp
 
 const std = @import("std");
@@ -11,6 +12,7 @@ const types = @import("types.zig");
 const loader = @import("loader.zig");
 const preprocess = @import("preprocess.zig");
 const postprocess = @import("postprocess.zig");
+const graph = @import("graph");
 
 const VisionEncoderParams = config.VisionEncoderParams;
 const EncoderType = config.EncoderType;
@@ -148,7 +150,7 @@ pub const VisionEncoder = struct {
         // 4. ViT blocks (only for gemma4v)
         var cur = inp;
         if (self.encoder_type == .gemma4v) {
-            cur = self.applyViTBlocks(ctx, cur, effective_n_embd, effective_n_head, d_head, n_patches, n_patches_x, n_patches_y);
+            cur = try self.applyViTBlocks(ctx, cur, effective_n_embd, effective_n_head, d_head, n_patches, n_patches_x, n_patches_y);
         }
 
         // 5. Pooling (gemma4v only)
@@ -358,24 +360,13 @@ pub const VisionEncoder = struct {
         n_patches: i64,
         n_patches_x: i64,
         n_patches_y: i64,
-    ) *ggml.Tensor {
+    ) !*ggml.Tensor {
         const w = self.weights;
         const p = self.params;
         _ = n_patches_y;
-        // Create position index tensors for 2D RoPE (matches llama.cpp gemma4v.cpp)
-        ctx.setNoAlloc(false);
-        const pos_x_t = ctx.newTensor1d(ggml.Type.i32, n_patches) catch unreachable;
-        pos_x_t.setName("vit_pos_x");
-        const pos_y_t = ctx.newTensor1d(ggml.Type.i32, n_patches) catch unreachable;
-        pos_y_t.setName("vit_pos_y");
-        {
-            const px = pos_x_t.dataI32();
-            const py = pos_y_t.dataI32();
-            for (0..@as(usize, @intCast(n_patches))) |i| {
-                px[i] = @mod(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
-                py[i] = @divTrunc(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
-            }
-        }
+
+        // 使用 graph 模块创建 2D RoPE 位置索引
+        const vit_indices = try graph.createPositionIndices(ctx, n_patches, n_patches_x);
 
         const n_batch: i64 = 1;
         const d_head_half: i64 = @divExact(d_head, 2);
@@ -383,24 +374,18 @@ pub const VisionEncoder = struct {
 
         // Flatten to [n_embd, n_pos * B] for ViT layers
         var inpL = inp.reshape2d(ctx, effective_n_embd, n_patches * n_batch);
-        ctx.setNoAlloc(true);
 
         for (w.layers) |*layer| {
             var cur = inpL;
 
-            // --- Pre-attention RMSNorm ---
+            // --- Pre-attention RMSNorm (使用 graph.buildNorm) ---
             var attn_in = cur;
             if (layer.ln_1_w) |ln1_w| {
-                attn_in = attn_in.rmsNorm(ctx, p.norm_eps);
-                attn_in = attn_in.mul(ctx, postprocess.reshapeForBroadcast(ctx, ln1_w));
-                if (layer.ln_1_b) |ln1_b| {
-                    attn_in = attn_in.add(ctx, ln1_b);
-                }
+                attn_in = try graph.buildNorm(ctx, attn_in, ln1_w, layer.ln_1_b, .rms_norm, p.norm_eps, "vit_attn_norm");
             }
 
             // --- Self-attention with 2D RoPE ---
             {
-                // DEBUG: print weight shapes
                 var Qcur = layer.q_w.?.mulMat(ctx, attn_in);
                 var Kcur = layer.k_w.?.mulMat(ctx, attn_in);
                 var Vcur = layer.v_w.?.mulMat(ctx, attn_in);
@@ -413,14 +398,14 @@ pub const VisionEncoder = struct {
                 {
                     const first_q = Qcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Qcur.nb()[1], Qcur.nb()[2], Qcur.nb()[3], 0);
                     const first_k = Kcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Kcur.nb()[1], Kcur.nb()[2], Kcur.nb()[3], 0);
-                    const rope_first_q = first_q.ropeExt(ctx, pos_x_t, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    const rope_first_k = first_k.ropeExt(ctx, pos_x_t, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+                    const rope_first_q = first_q.ropeExt(ctx, vit_indices.pos_x, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+                    const rope_first_k = first_k.ropeExt(ctx, vit_indices.pos_x, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
 
                     const offset: usize = @intCast(d_head_half * @sizeOf(f32));
                     const second_q = Qcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Qcur.nb()[1], Qcur.nb()[2], Qcur.nb()[3], offset);
                     const second_k = Kcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Kcur.nb()[1], Kcur.nb()[2], Kcur.nb()[3], offset);
-                    const rope_second_q = second_q.ropeExt(ctx, pos_y_t, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    const rope_second_k = second_k.ropeExt(ctx, pos_y_t, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+                    const rope_second_q = second_q.ropeExt(ctx, vit_indices.pos_y, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+                    const rope_second_k = second_k.ropeExt(ctx, vit_indices.pos_y, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
 
                     Qcur = rope_first_q.concat(ctx, rope_second_q, 0);
                     Kcur = rope_first_k.concat(ctx, rope_second_k, 0);
@@ -431,63 +416,53 @@ pub const VisionEncoder = struct {
                     Vcur = Vcur.rmsNorm(ctx, p.norm_eps);
                 }
 
-                // Per-head attention (n_head is small for ViT, ~16)
-                var head_outputs: [64]*ggml.Tensor = undefined;
-                for (0..@as(usize, @intCast(effective_n_head))) |h| {
-                    const h_off: usize = h * @as(usize, @intCast(d_head)) * @sizeOf(f32);
-                    const Qh = Qcur.view2d(ctx, d_head, n_patches, Qcur.nb()[2], h_off);
+                // 使用 graph.buildAttn 进行注意力计算
+                const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
+                const attn_out = try graph.buildAttn(
+                    ctx,
+                    layer.o_w orelse return error.MissingOutputWeight,
+                    layer.o_b,
+                    Qcur,
+                    Kcur,
+                    Vcur,
+                    null,
+                    kq_scale,
+                    effective_n_head,
+                    "vit_attn",
+                    layer.attn_sinks,
+                );
 
-                    const Kh = Kcur.view2d(ctx, d_head, n_patches, Kcur.nb()[2], h_off);
-                    const Vh = Vcur.view2d(ctx, d_head, n_patches, Vcur.nb()[2], h_off);
-
-                    // ggml_mul_mat(A, B) = A^T @ B. Pass Qh, Kh directly for Q^T @ K
-                    var scores = Qh.mulMat(ctx, Kh); // [n_patches, d_head]^T @ [d_head, n_patches] → [n_patches, n_patches]
-                    scores = scores.scale(ctx, 1.0 / @sqrt(@as(f32, @floatFromInt(d_head))));
-                    scores = scores.softMax(ctx);
-
-                    // For scores @ V: mul_mat(V^T, scores^T) = V @ scores^T = (scores @ V^T)^T
-                    // We want [d_head, n_patches] per head for concat along dim 0
-                    const Vt = Vh.permute(ctx, 1, 0, 2, 3).cont(ctx);
-                    const scores_t = scores.permute(ctx, 1, 0, 2, 3).cont(ctx);
-                    const out_h = Vt.mulMat(ctx, scores_t); // [d_head, n_patches]
-                    head_outputs[h] = out_h;
-                }
-
-                var x = head_outputs[0];
-                for (1..@as(usize, @intCast(effective_n_head))) |h| {
-                    x = x.concat(ctx, head_outputs[h], 0);
-                }
-
-                x = layer.o_w.?.mulMat(ctx, x);
-                if (layer.o_b) |ob| {
-                    x = x.add(ctx, ob);
-                }
-                cur = cur.add(ctx, x);
+                cur = cur.add(ctx, attn_out);
             }
 
             inpL = cur;
 
-            // --- FFN ---
+            // --- FFN (使用 graph.buildFFN) ---
             {
                 var ffn_in = cur;
                 if (layer.ln_2_w) |ln2_w| {
-                    ffn_in = ffn_in.rmsNorm(ctx, p.norm_eps);
-                    ffn_in = ffn_in.mul(ctx, postprocess.reshapeForBroadcast(ctx, ln2_w));
-                    if (layer.ln_2_b) |ln2_b| {
-                        ffn_in = ffn_in.add(ctx, ln2_b);
-                    }
+                    ffn_in = try graph.buildNorm(ctx, ffn_in, ln2_w, layer.ln_2_b, .rms_norm, p.norm_eps, "vit_ffn_norm");
                 }
 
-                const h = layer.ff_up_w.?.mulMat(ctx, ffn_in);
-                const activated = switch (p.ffn_op) {
-                    .silu => h.silu(ctx),
-                    .gelu => h.gelu(ctx),
+                const ffn_op: graph.FFNOpType = switch (p.ffn_op) {
+                    .silu => .silu,
+                    .gelu => .gelu,
                 };
-                const ffn_out = layer.ff_down_w.?.mulMat(ctx, activated);
-                cur = cur.add(ctx, ffn_out);
-            }
+                const ffn_out = try graph.buildFFN(
+                    ctx,
+                    ffn_in,
+                    layer.ff_up_w orelse return error.MissingFFNUpWeight,
+                    layer.ff_up_b,
+                    layer.ff_gate_w,
+                    layer.ff_gate_b,
+                    layer.ff_down_w orelse return error.MissingFFNDownWeight,
+                    layer.ff_down_b,
+                    ffn_op,
+                    "vit_ffn",
+                );
 
-            inpL = cur;
+                inpL = cur.add(ctx, ffn_out);
+            }
         }
 
         return inpL;

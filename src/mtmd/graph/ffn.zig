@@ -49,11 +49,9 @@ pub fn buildFFN(
 ) !*ggml.Tensor {
     // Up projection: [n_ff, n_embd] @ [n_embd, n_patches] → [n_ff, n_patches]
     var up_result = up.mulMat(ctx, cur);
-    up_result.setName(name);
 
     if (up_b) |b| {
         up_result = up_result.add(ctx, b);
-        up_result.setName(name);
     }
 
     // Gate projection (optional, for GLU variants)
@@ -73,29 +71,24 @@ pub fn buildFFN(
             .gelu_quick => up_result.geluQuick(ctx),
             .relu_sqr => {
                 const relu = up_result.relu(ctx);
-                relu.setName(name);
                 break :blk relu.mul(ctx, relu);
             },
         };
     };
 
-    activated.setName(name);
-
     // Gate (element-wise multiply with gate projection)
     if (gate_result) |g| {
         activated = activated.mul(ctx, g);
-        activated.setName(name);
     }
 
     // Down projection: [n_embd, n_ff] @ [n_ff, n_patches] → [n_embd, n_patches]
     var result = down.mulMat(ctx, activated);
-    result.setName(name);
 
     if (down_b) |b| {
         result = result.add(ctx, b);
-        result.setName(name);
     }
 
+    _ = name; // 保留参数以保持 API 兼容性
     return result;
 }
 
