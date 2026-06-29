@@ -43,7 +43,7 @@ pub fn buildAttn(
     const n_patches = q_cur.ne()[2];
     const n_batch = q_cur.ne()[3];
     _ = n_batch;
-
+    _ = name;
 
     // 形状断言
     std.debug.assert(q_cur.ne()[1] == n_head);
@@ -68,11 +68,8 @@ pub fn buildAttn(
     // 1. 将 Q, K, V 重塑为 [d_head, n_patches, n_head * n_batch]
     //    通过 permute(2, 0, 1, 3) + cont + reshape
     const q_flat = q_cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
-    q_flat.setName(name);
     const k_flat = k_cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
-    k_flat.setName(name);
     const v_flat = v_cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
-    v_flat.setName(name);
 
     // 现在形状: [n_patches, d_head, n_head * n_batch]
     // 对每个 head*batch 计算注意力
@@ -84,9 +81,7 @@ pub fn buildAttn(
 
     // 将 Q 转置为 [d_head, n_patches] 用于 mul_mat
     const q_t = q_flat.permute(ctx, 1, 0, 2, 3).cont(ctx);
-    q_t.setName(name);
     const k_t = k_flat.permute(ctx, 1, 0, 2, 3).cont(ctx);
-    k_t.setName(name);
 
     // scores = Q^T @ K = [n_patches, d_head]^T @ [n_patches, d_head] → [d_head, d_head]? 不对
     // ggml_mul_mat(A, B) = A^T @ B
@@ -96,21 +91,17 @@ pub fn buildAttn(
     // 正确!
 
     var scores = q_t.mulMat(ctx, k_t);
-    scores.setName(name);
 
     // 3. Scale
     scores = scores.scale(ctx, kq_scale);
-    scores.setName(name);
 
     // 4. Mask (optional)
     if (kq_mask) |mask| {
         scores = scores.add(ctx, mask);
-        scores.setName(name);
     }
 
     // 5. Softmax
     scores = scores.softMax(ctx);
-    scores.setName(name);
 
     // 6. scores @ V
     // V: [d_head, n_patches] (per head*batch)
@@ -125,7 +116,6 @@ pub fn buildAttn(
     // 标准做法: scores @ V
     // V 是 [d_head, n_patches], 需要转置为 [n_patches, d_head]
     const v_t = v_flat.permute(ctx, 1, 0, 2, 3).cont(ctx);
-    v_t.setName(name);
 
     // scores @ V: [n_patches, n_patches] @ [n_patches, d_head] = [n_patches, d_head]
     // mul_mat(V_t, scores) = V_t^T @ scores = [n_patches, d_head] @ [n_patches, n_patches] = [n_patches, d_head]? 不对
@@ -161,25 +151,20 @@ pub fn buildAttn(
     // 然后转置回 [n_patches, d_head]
 
     var attn_out = v_t.mulMat(ctx, scores);
-    attn_out.setName(name);
 
     // attn_out: [d_head, n_patches] (per head*batch)
     // 转置回 [n_patches, d_head]
     attn_out = attn_out.permute(ctx, 1, 0, 2, 3).cont(ctx);
-    attn_out.setName(name);
 
     // 7. 重塑回 [d_head * n_head, n_patches] = [n_embd, n_patches]
     const n_embd = d_head * n_head;
     attn_out = attn_out.reshape2d(ctx, n_embd, n_patches);
-    attn_out.setName(name);
 
     // 8. 输出投影
     var result = wo.mulMat(ctx, attn_out);
-    result.setName(name);
 
     if (wo_b) |b| {
         result = result.add(ctx, b);
-        result.setName(name);
     }
 
     // 9. Attention sinks (optional)

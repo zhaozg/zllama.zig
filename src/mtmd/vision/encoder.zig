@@ -429,7 +429,7 @@ pub const VisionEncoder = struct {
                     kq_scale,
                     effective_n_head,
                     "vit_attn",
-                    layer.attn_sinks,
+                    null, // attn_sinks not supported in ViTLayerWeights
                 );
 
                 cur = cur.add(ctx, attn_out);
@@ -452,11 +452,11 @@ pub const VisionEncoder = struct {
                     ctx,
                     ffn_in,
                     layer.ff_up_w orelse return error.MissingFFNUpWeight,
-                    layer.ff_up_b,
-                    layer.ff_gate_w,
-                    layer.ff_gate_b,
+                    null, // ff_up_b not in ViTLayerWeights
+                    null, // ff_gate_w not in ViTLayerWeights
+                    null, // ff_gate_b not in ViTLayerWeights
                     layer.ff_down_w orelse return error.MissingFFNDownWeight,
-                    layer.ff_down_b,
+                    null, // ff_down_b not in ViTLayerWeights
                     ffn_op,
                     "vit_ffn",
                 );

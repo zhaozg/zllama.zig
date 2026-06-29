@@ -458,7 +458,7 @@ pub const AudioEncoder = struct {
         // Input projection: map conv output dim -> Conformer embedding dim
         // 使用 buildMM 替代直接 mulMat，以应用 clamp 逻辑
         if (w.sscp_inp_proj_w) |proj_w| {
-            cur = buildMM(ctx, proj_w, cur, &w.clamp_map);
+            cur = try buildMM(ctx, proj_w, cur, &w.clamp_map);
             if (w.sscp_inp_proj_b) |proj_b| {
                 cur = cur.add(ctx, proj_b);
             }
