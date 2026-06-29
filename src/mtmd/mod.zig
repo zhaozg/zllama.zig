@@ -14,6 +14,8 @@ const model = @import("model");
 const audio = @import("audio");
 const vision = @import("vision");
 const tokenizer = @import("tokenizer");
+const graph = @import("graph");
+
 
 const log = std.log.scoped(.mtmd);
 
@@ -21,6 +23,8 @@ pub const audio_mod = audio;
 pub const vision_mod = vision;
 pub const helper = @import("helper");
 pub const tokenize = @import("tokenize");
+pub const graph_mod = graph;
+
 // ============================================================================
 // 基础类型定义
 // ============================================================================
@@ -286,7 +290,8 @@ pub const MultiModalManager = struct {
         self: *MultiModalManager,
         io: std.Io,
         ctx: *ggml.Context,
-        graph: *ggml.CGraph,
+        cgraph: *ggml.CGraph,
+
         input: MediaInput,
     ) !*ggml.Tensor {
         return switch (input.media_type) {
@@ -294,7 +299,8 @@ pub const MultiModalManager = struct {
             .image => {
                 if (self.vision_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.VisionEncoderNotAvailable;
-                    return enc.encode(ctx, graph, input.image_data.?, input.image_width, input.image_height);
+                    return enc.encode(ctx, cgraph, input.image_data.?, input.image_width, input.image_height);
+
                 }
                 return error.VisionEncoderNotAvailable;
             },
@@ -303,10 +309,12 @@ pub const MultiModalManager = struct {
                     if (!enc.isAvailable()) return error.AudioEncoderNotAvailable;
                     // 优先使用 mel_tensor（由 melToTensor 创建），否则使用 mel_data 回退
                     if (input.mel_tensor) |mt| {
-                        return enc.encode(io, ctx, graph, mt);
+                        return enc.encode(io, ctx, cgraph, mt);
+
                     } else if (input.mel_data) |md| {
                         // 回退：在 encode 内部创建张量
-                        return enc.encodeRaw(io, ctx, graph, md, input.mel_bins, input.mel_frames);
+                        return enc.encodeRaw(io, ctx, cgraph, md, input.mel_bins, input.mel_frames);
+
                     } else {
                         return error.NoAudioData;
                     }

@@ -401,6 +401,16 @@ pub fn build(b: *std.Build) void {
     utils_mod.addImport("gguf", gguf_mod);
     utils_mod.addImport("tokenizer", tokenizer_mod);
 
+
+    // mtmd graph 模块
+    const mm_graph_mod = b.createModule(.{
+        .root_source_file = b.path("src/mtmd/graph/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mm_graph_mod.addImport("ggml", ggml_mod);
+
     const mm_manager_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/mod.zig"),
         .target = target,
@@ -413,6 +423,8 @@ pub fn build(b: *std.Build) void {
     mm_manager_mod.addImport("audio", mm_audio_mod);
     mm_manager_mod.addImport("vision", mm_vision_mod);
     mm_manager_mod.addImport("tokenizer", tokenizer_mod);
+
+    mm_manager_mod.addImport("graph", mm_graph_mod);
 
     const mm_preprocess_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/preprocess.zig"),
