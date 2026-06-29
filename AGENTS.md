@@ -25,6 +25,7 @@
 2. **ggml 集成策略**
    - **静态编译 ggml 源码**（推荐），避免预编译库的 ABI 不一致。
    - 所有 ggml C API 必须通过 `ggml.zig` 模块封装为类型安全的 Zig 函数，且保留 `c` 命名空间供高级用户直接调用。
+   - 发现未进行zig绑定的在llama.cpp中使用ggml函数, 立即在ggml.zig中绑定，并增加测试用例。
    - 分配类操作（如 `ggml_new_tensor`）必须返回 `!*T` 错误联合，纯计算操作返回 `*T`。
    - 使用 `opaque {}` 类型包装不透明指针（`ggml_context`、`ggml_tensor` 等）。
    - **⚠️ ggml_permute 语义陷阱**：`ggml_permute(ctx, t, a0, a1, a2, a3)` 的参数是"**新轴→原轴**"映射（而非直觉的"原轴→新轴"）。

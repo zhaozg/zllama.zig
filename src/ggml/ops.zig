@@ -97,6 +97,18 @@ pub fn gelu(ctx: *Context, a: *Tensor) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_gelu(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
 }
 
+pub fn geluErf(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_gelu_erf(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn geluQuick(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_gelu_quick(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn sqr(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_sqr(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
 pub fn tanh(ctx: *Context, a: *Tensor) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_tanh(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
 }

@@ -110,6 +110,15 @@ pub const Tensor = opaque {
     pub fn gelu(self: *Tensor, ctx: *anyopaque) *Tensor {
         return wrap(c.ggml_gelu(@ptrCast(ctx), @ptrCast(@alignCast(self))));
     }
+    pub fn geluErf(self: *Tensor, ctx: *anyopaque) *Tensor {
+        return wrap(c.ggml_gelu_erf(@ptrCast(ctx), @ptrCast(@alignCast(self))));
+    }
+    pub fn geluQuick(self: *Tensor, ctx: *anyopaque) *Tensor {
+        return wrap(c.ggml_gelu_quick(@ptrCast(ctx), @ptrCast(@alignCast(self))));
+    }
+    pub fn sqr(self: *Tensor, ctx: *anyopaque) *Tensor {
+        return wrap(c.ggml_sqr(@ptrCast(ctx), @ptrCast(@alignCast(self))));
+    }
     pub fn sigmoid(self: *Tensor, ctx: *anyopaque) *Tensor {
         return wrap(c.ggml_sigmoid(@ptrCast(ctx), @ptrCast(@alignCast(self))));
     }

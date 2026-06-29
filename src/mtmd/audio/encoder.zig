@@ -983,20 +983,22 @@ pub fn buildFFN(
         .gelu_erf => {
             if (gate != null) {
                 // GEGLU: gelu_erf(gate(x)) * up(x)
-                result = result.gelu(ctx).mul(ctx, tmp);
+                result = result.geluErf(ctx).mul(ctx, tmp);
             } else {
-                result = result.gelu(ctx);
+                result = result.geluErf(ctx);
             }
         },
         .gelu_quick => {
             if (gate != null) {
-                result = result.gelu(ctx).mul(ctx, tmp);
+                // GEGLU: gelu_quick(gate(x)) * up(x)
+                result = result.geluQuick(ctx).mul(ctx, tmp);
             } else {
-                result = result.gelu(ctx);
+                result = result.geluQuick(ctx);
             }
         },
         .relu_sqr => {
-            result = result.relu(ctx).mul(ctx, result);
+            result = result.relu(ctx);
+            result = result.sqr(ctx);
         },
     }
 
