@@ -24,7 +24,6 @@
 const std = @import("std");
 
 pub const config = @import("config.zig");
-pub const types = @import("types.zig");
 pub const loader = @import("loader.zig");
 pub const preprocess = @import("preprocess.zig");
 pub const postprocess = @import("postprocess.zig");
@@ -35,8 +34,6 @@ pub const pipeline = @import("pipeline.zig");
 pub const VisionEncoderParams = config.VisionEncoderParams;
 pub const EncoderType = config.EncoderType;
 pub const FfnOp = config.FfnOp;
-pub const ViTLayerWeights = types.ViTLayerWeights;
-pub const VisionEncoderWeights = types.VisionEncoderWeights;
 pub const VisionEncoder = encoder.VisionEncoder;
 pub const VisionPipeline = pipeline.VisionPipeline;
 pub const NormalizeMode = preprocess.NormalizeMode;

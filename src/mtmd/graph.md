@@ -124,13 +124,15 @@ pub const GraphBuilder = struct {
 4. **第四阶段**：实现投影器构建（mm.zig、stack.zig）✅
 5. **第五阶段**：实现模型特定构建器（models/gemma4v.zig, gemma4a.zig）✅
 6. **第六阶段**：build.zig 集成 + mtmd/mod.zig 集成 ✅
+7. **第七阶段**：旧代码兼容层（vision/types.zig 重定向到 graph/types.zig）✅
 
 ### 6.2 现有文件调整
 
 | 现有文件 | 调整方式 |
 |---|---|
-| `src/mtmd/vision/encoder.zig` | 保留独立实现，可逐步迁移到 graph/ 模块 |
-| `src/mtmd/vision/types.zig` | 保留独立实现，与 graph/types.zig 共存 |
+| `src/mtmd/vision/types.zig` | ✅ 已改为兼容层，重新导出 graph/types.zig 的类型 |
+| `src/mtmd/vision/encoder.zig` | ⏳ 保留独立实现（含 ViT 块、patch embedding、pooling 等） |
+| `src/mtmd/audio/encoder.zig` | ⏳ 保留独立实现（含 buildNorm/buildFFN/buildMM 等） |
 | `src/mtmd/vision/config.zig` | 保留，作为超参数加载模块 |
 | `src/mtmd/vision/loader.zig` | 保留，作为权重加载模块 |
 | `src/mtmd/vision/preprocess.zig` | 保留，作为预处理模块 |
@@ -212,13 +214,13 @@ src/mtmd/
 | Attention sinks | `src/mtmd/graph/attn.zig` | ✅ 完成 |
 | build.zig 集成 | `build.zig` | ✅ 完成（graph 模块注册） |
 | mtmd/mod.zig 集成 | `src/mtmd/mod.zig` | ✅ 完成（graph 模块导入） |
+| vision/types.zig 兼容层 | `src/mtmd/vision/types.zig` | ✅ 完成（重定向到 graph/types.zig） |
 
 ### 10.2 待完成
 
 | 任务 | 优先级 | 说明 |
 |---|---|---|
-| 重构 vision/encoder.zig | 中 | 使用新的 graph/ 模块（当前保留独立实现） |
-| 重构 audio/encoder.zig | 中 | 使用新的 graph/ 模块（当前保留独立实现） |
-| 重构 vision/types.zig | 低 | 合并到 graph/types.zig |
+| 重构 vision/encoder.zig | 中 | 使用新的 graph/ 模块（当前保留独立实现，含 ViT 块、patch embedding、pooling） |
+| 重构 audio/encoder.zig | 中 | 使用新的 graph/ 模块（当前保留独立实现，含 buildNorm/buildFFN/buildMM） |
 | 集成测试 | 中 | 与 llama.cpp 参考实现对比 |
 | 调试保存功能 | 低 | 中间张量数据保存 |

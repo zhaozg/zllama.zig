@@ -889,6 +889,8 @@ fn readScalarOrDefault(gguf_file: *const gguf.GGUFFile, name: []const u8, defaul
 
 // RMS 归一化
 /// 归一化类型（对应 C++ clip-model.h 中的 norm_type）
+/// 归一化类型（兼容 graph/types.zig）
+/// 新代码应使用 graph/types.zig 中的 NormType
 pub const NormType = enum {
     normal,
     rms,

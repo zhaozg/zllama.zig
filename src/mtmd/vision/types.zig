@@ -1,11 +1,11 @@
-//! 视觉编码器类型定义
+//! 视觉编码器类型定义（兼容层）
 //!
-//! 定义 ViT 层权重和视觉编码器权重的数据结构。
-//! 参考: llama.cpp tools/mtmd/models/gemma4v.cpp, gemma4uv.cpp
+//! 此文件为兼容层，提供与 graph/types.zig 兼容的类型定义。
+//! 新代码应直接使用 @import("graph") 模块。
+//!
+//! 参考: src/mtmd/graph/types.zig
 
 const ggml = @import("ggml");
-const config = @import("config.zig");
-const VisionEncoderParams = config.VisionEncoderParams;
 
 /// ViT 单层权重
 pub const ViTLayerWeights = struct {
@@ -52,3 +52,7 @@ pub const VisionEncoderWeights = struct {
     mm_input_proj_w: ?*ggml.Tensor = null,
     mm_soft_emb_norm_w: ?*ggml.Tensor = null,
 };
+
+// Need VisionEncoderParams for the struct
+const config = @import("config.zig");
+const VisionEncoderParams = config.VisionEncoderParams;
