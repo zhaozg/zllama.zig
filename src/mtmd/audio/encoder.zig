@@ -904,7 +904,7 @@ pub const FFNOpType = enum {
 
 /// 通用归一化函数（对应 C++ clip_graph::build_norm）
 /// 支持 RMSNorm 和 LayerNorm，可选 weight 和 bias
-fn buildNorm(
+pub fn buildNorm(
     ctx: *ggml.Context,
     cur: *ggml.Tensor,
     mw: ?*ggml.Tensor,
@@ -932,7 +932,7 @@ fn buildNorm(
 
 /// 通用 FFN 函数（对应 C++ clip_graph::build_ffn）
 /// 支持 SiLU、GELU 等激活类型，可选 gate、up_bias、gate_bias、down_bias
-fn buildFFN(
+pub fn buildFFN(
     ctx: *ggml.Context,
     cur: *ggml.Tensor,
     up: ?*ggml.Tensor,
@@ -1044,7 +1044,7 @@ fn extractBlocks(
 /// 执行带 clamp 的矩阵乘法。
 /// 如果权重名称在 clamp_map 中，则对输入和输出分别应用 clamp。
 /// 对应 C++ gemma4a.cpp 中的 clip_graph_gemma4a::build_mm。
-fn buildMM(
+pub fn buildMM(
     ctx: *ggml.Context,
     w: *ggml.Tensor,
     x: *ggml.Tensor,
