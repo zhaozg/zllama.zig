@@ -612,8 +612,9 @@ pub const AudioEncoder = struct {
                 scores = scores.tanh(ctx);
                 scores = scores.scale(ctx, softcap);
 
-                // Blocked attention mask: [S, C, B] broadcasts to [S, C, B, H]
-                scores = scores.add(ctx, kq_mask);
+                // Blocked attention mask: [S, C, B, 1] -> repeat to [S, C, B, H] to match scores
+                const kq_mask_4d = ggml.repeat(ctx, kq_mask, scores);
+                scores = scores.add(ctx, kq_mask_4d);
 
                 const attn = scores.softMax(ctx); // [S, C, B, H]
 
