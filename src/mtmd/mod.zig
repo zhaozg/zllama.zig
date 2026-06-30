@@ -266,8 +266,12 @@ pub const MultiModalManager = struct {
         }
 
         if (caps.has_vision) {
-            vision_enc = try vision.VisionEncoder.init(gguf_file, ctx, allocator);
-            log.info("Vision encoder initialized", .{});
+            const backend = vision.getBackend(caps.vision_encoder_type) orelse {
+                log.err("Unknown vision encoder type: '{s}'", .{caps.vision_encoder_type});
+                return error.UnknownVisionEncoder;
+            };
+            vision_enc = try vision.VisionEncoder.init(gguf_file, ctx, allocator, backend);
+            log.info("Vision encoder initialized: backend={s}", .{backend.name});
         }
 
         return MultiModalManager{

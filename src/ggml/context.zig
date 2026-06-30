@@ -49,6 +49,11 @@ pub const Context = opaque {
         c.ggml_reset(@ptrCast(self));
     }
 
+    /// 获取 no_alloc 模式
+    pub fn getNoAlloc(self: *Context) bool {
+        return c.ggml_get_no_alloc(@ptrCast(self));
+    }
+
     /// 设置 no_alloc 模式
     pub fn setNoAlloc(self: *Context, no_alloc: bool) void {
         c.ggml_set_no_alloc(@ptrCast(self), no_alloc);

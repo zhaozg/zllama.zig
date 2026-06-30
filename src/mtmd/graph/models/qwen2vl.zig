@@ -7,7 +7,8 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
-const graph = @import("..");
+const gguf = @import("gguf");
+const graph = @import("../mod.zig");
 
 const GraphBuilder = graph.GraphBuilder;
 const NormType = graph.NormType;
@@ -20,17 +21,185 @@ const ImageF32 = graph.ImageF32;
 
 const log = std.log.scoped(.qwen2vl_graph);
 
-// 构建 Qwen2VL 完整计算图
-//
-// 处理流程:
-//   1. Temporal merge: 两个 Conv2D 相加 (patch_embeddings_0 + patch_embeddings_1)
-//   2. Spatial merge: permute + reshape 合并空间维度
-//   3. Pre-LN (可选)
-//   4. ViT blocks (LayerNorm + 自注意力 + M-RoPE + FFN)
-//   5. Post-LN (可选)
-//   6. 多模态投影 (FFN)
-//
-// 参考: llama.cpp qwen2vl.cpp build()
+// ============================================================================
+// 视觉编码器后端注册
+// ============================================================================
+
+/// Qwen2VL 视觉编码器后端实例
+pub const backend = graph.VisionEncoderBackend{
+    .name = "qwen2vl",
+    .loadParams = loadParams,
+    .loadWeights = loadWeights,
+    .buildGraph = buildGraphFromWeights,
+    .estimateOutputTokens = estimateOutputTokens,
+};
+
+/// 从 GGUF 元数据读取视觉编码器超参数
+pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
+    _ = gguf_file;
+    _ = params;
+    // Qwen2VL 参数已由 encoder.zig 从 clip.vision.* 前缀加载
+}
+
+/// 从 GGUF 加载 Qwen2VL 视觉编码器所有权重到 VisionEncoderWeights
+pub fn loadWeights(
+    allocator: std.mem.Allocator,
+    gguf_file: *const gguf.GGUFFile,
+    ctx: *ggml.Context,
+    w: *VisionEncoderWeights,
+) !void {
+    // Patch embedding (v.patch_embd.*)
+    w.patch_embeddings_0 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;
+    w.patch_embeddings_1 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd_1.weight") catch null;
+    w.patch_bias = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.bias") catch null;
+
+    // 位置编码
+    w.position_embeddings = findTensorInGGUF(ctx, gguf_file, "v.position_embd.weight") catch null;
+
+    // Pre/Post LN
+    w.pre_ln_w = findTensorInGGUF(ctx, gguf_file, "v.pre_ln.weight") catch null;
+    w.pre_ln_b = findTensorInGGUF(ctx, gguf_file, "v.pre_ln.bias") catch null;
+    w.post_ln_w = findTensorInGGUF(ctx, gguf_file, "v.post_ln.weight") catch null;
+    w.post_ln_b = findTensorInGGUF(ctx, gguf_file, "v.post_ln.bias") catch null;
+
+    // 多模态投影
+    w.mm_0_w = findTensorInGGUF(ctx, gguf_file, "mm.0.weight") catch null;
+    w.mm_0_b = findTensorInGGUF(ctx, gguf_file, "mm.0.bias") catch null;
+    w.mm_1_w = findTensorInGGUF(ctx, gguf_file, "mm.1.weight") catch null;
+    w.mm_1_b = findTensorInGGUF(ctx, gguf_file, "mm.1.bias") catch null;
+
+    // 检测实际层数
+    var actual_n_layer: u32 = 0;
+    for (0..64) |il| {
+        var buf: [32]u8 = undefined;
+        const test_name = try std.fmt.bufPrint(&buf, "v.blk.{d}.attn_q.weight", .{il});
+        if (gguf_file.findTensor(test_name) == null) break;
+        actual_n_layer = @intCast(il + 1);
+    }
+
+    const n_layer: usize = @intCast(actual_n_layer);
+    w.layers = try allocator.alloc(ViTLayerWeights, n_layer);
+
+    for (0..n_layer) |il| {
+        const prefix = try std.fmt.allocPrint(allocator, "v.blk.{d}", .{il});
+        defer allocator.free(prefix);
+        w.layers[il] = loadViTLayer(ctx, gguf_file, prefix) catch |err| {
+            log.err("Failed to load ViT layer {d}: {}", .{ il, err });
+            return err;
+        };
+    }
+
+    log.info("Qwen2VL weights loaded: {d} ViT layers", .{n_layer});
+}
+
+/// 从 VisionEncoderWeights 构建计算图的包装函数
+fn buildGraphFromWeights(
+    ctx: *ggml.Context,
+    gf: *ggml.CGraph,
+    w: *const VisionEncoderWeights,
+    p: *const graph.VisionHParams,
+    image_tensor: *ggml.Tensor,
+) !*ggml.CGraph {
+    const img = ImageF32{
+        .buf = image_tensor.dataF32(),
+        .nx = p.image_size,
+        .ny = p.image_size,
+    };
+
+    var hparams = VisionHParams{
+        .image_size = p.image_size,
+        .patch_size = p.patch_size,
+        .n_embd = p.n_embd,
+        .n_head = p.n_head,
+        .n_layer = p.n_layer,
+        .n_ff = p.n_ff,
+        .projection_dim = p.projection_dim,
+        .n_merge = p.n_merge,
+        .eps = p.eps,
+        .rope_theta = p.rope_theta,
+        .n_wa_pattern = p.n_wa_pattern,
+        .wa_layer_indexes = p.wa_layer_indexes,
+        .wa_pattern_mode = p.wa_pattern_mode,
+    };
+
+    var builder = GraphBuilder{
+        .weights = w,
+        .hparams = &hparams,
+        .proj_type = .qwen2vl,
+        .img = &img,
+        .ctx0 = ctx,
+        .gf = gf,
+    };
+
+    return buildGraph(&builder);
+}
+
+/// 估算输出 token 数量
+pub fn estimateOutputTokens(img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32 {
+    const patches_x = (img_width + patch_size - 1) / patch_size;
+    const patches_y = (img_height + patch_size - 1) / patch_size;
+    const n_patches = patches_x * patches_y;
+    const merge = if (n_merge > 0) n_merge else 1;
+    return n_patches / (merge * merge);
+}
+
+// ============================================================================
+// 权重加载辅助函数
+// ============================================================================
+
+fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
+    const weight_loader = @import("weight_loader");
+    return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
+}
+
+fn loadViTLayer(
+    ctx: *ggml.Context,
+    gguf_file: *const gguf.GGUFFile,
+    prefix: []const u8,
+) !ViTLayerWeights {
+    const weight_loader = @import("weight_loader");
+    var layer = ViTLayerWeights{};
+
+    // Attention
+    layer.ln_1_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln1.weight") catch null;
+    layer.ln_1_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln1.bias") catch null;
+    layer.q_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight") catch null;
+    layer.q_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q.bias") catch null;
+    layer.k_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch null;
+    layer.k_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_k.bias") catch null;
+    layer.v_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight") catch null;
+    layer.v_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_v.bias") catch null;
+    layer.o_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_out.weight") catch null;
+    layer.o_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_out.bias") catch null;
+
+    // FFN
+    layer.ln_2_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln2.weight") catch null;
+    layer.ln_2_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln2.bias") catch null;
+    layer.ff_up_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight") catch null;
+    layer.ff_up_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.bias") catch null;
+    layer.ff_gate_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight") catch null;
+    layer.ff_gate_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.bias") catch null;
+    layer.ff_down_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch null;
+    layer.ff_down_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.bias") catch null;
+
+    return layer;
+}
+
+// ============================================================================
+// 原始 buildGraph 函数（保留向后兼容）
+// ============================================================================
+
+/// 构建 Qwen2VL 完整计算图
+///
+/// 处理流程:
+///   1. Temporal merge: 两个 Conv2D 相加 (patch_embeddings_0 + patch_embeddings_1)
+///   2. Spatial merge: permute + reshape 合并空间维度
+///   3. Pre-LN (可选)
+///   4. ViT blocks (LayerNorm + 自注意力 + M-RoPE + FFN)
+///   5. Post-LN (可选)
+///   6. 多模态投影 (FFN)
+///
+/// 参考: llama.cpp qwen2vl.cpp build()
 pub fn buildGraph(
     builder: *GraphBuilder,
 ) !*ggml.CGraph {
@@ -41,7 +210,7 @@ pub fn buildGraph(
 
     const n_embd: i64 = @intCast(p.n_embd);
     const n_head: i64 = @intCast(p.n_head);
-    const d_head = n_embd / n_head;
+    const d_head = @divExact(n_embd, n_head);
     const img_width: u32 = p.image_size;
     const img_height: u32 = p.image_size;
     const patch_size: i32 = @intCast(p.patch_size);
@@ -56,7 +225,7 @@ pub fn buildGraph(
     const norm_t: NormType = if (p.ffn_op == .gelu_erf) .rms_norm else .layer_norm;
 
     // M-RoPE sections: 4 equal parts
-    const mrope_sections = [_]i32{ @intCast(d_head / 4), @intCast(d_head / 4), @intCast(d_head / 4), @intCast(d_head / 4) };
+    const mrope_sections = [_]i32{ @intCast(@divExact(d_head, @as(i64, 4))), @intCast(@divExact(d_head, @as(i64, 4))), @intCast(@divExact(d_head, @as(i64, 4))), @intCast(@divExact(d_head, @as(i64, 4))) };
 
     const use_window_attn = p.n_wa_pattern > 0;
     const n_wa_pattern: i64 = @intCast(p.n_wa_pattern);
@@ -109,11 +278,11 @@ pub fn buildGraph(
     inp.setName("spatial_permuted");
 
     // Reshape to [n_embd * 2, n_patches_x / 2, n_patches_y, batch_size]
-    inp = inp.cont4d(ctx, n_embd * 2, n_patches_x / 2, n_patches_y, n_batch);
+    inp = inp.cont4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
     inp.setName("spatial_reshaped_1");
 
     // Reshape to [n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2)]
-    inp = inp.reshape4d(ctx, n_embd * 2, n_patches_x / 2, 2, n_batch * (n_patches_y / 2));
+    inp = inp.reshape4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), 2, n_batch * @divExact(n_patches_y, @as(i64, 2)));
     inp.setName("spatial_reshaped_2");
 
     // permute(0, 2, 1, 3)
@@ -121,7 +290,7 @@ pub fn buildGraph(
     inp.setName("spatial_permuted_2");
 
     // cont to [n_embd, n_patches_x * n_patches_y, batch_size]
-    inp = inp.cont3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
+    inp = ggml.cont(ctx, inp).reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
     inp.setName("spatial_merged");
 
     var inpL = inp;
@@ -136,7 +305,7 @@ pub fn buildGraph(
     var inv_window_idx: ?*ggml.Tensor = null;
     if (use_window_attn) {
         // inv_window_idx for reordering
-        inv_window_idx = try ctx.newTensor1d(ggml.Type.i32, n_patches / 4);
+        inv_window_idx = try ctx.newTensor1d(ggml.Type.i32, @divExact(n_patches, @as(i64, 4)));
         inv_window_idx.?.setName("inv_window_idx");
 
         // window mask
@@ -144,11 +313,11 @@ pub fn buildGraph(
         window_mask.?.setName("window_mask");
 
         // Reorder patches using inv_window_idx
-        inpL = inpL.reshape2d(ctx, n_embd * 4, n_patches * n_batch / 4);
+        inpL = inpL.reshape2d(ctx, n_embd * 4, @divExact(n_patches * n_batch, @as(i64, 4)));
         inpL.setName("window_reorder_flat");
         inpL = inpL.getRows(ctx, inv_window_idx.?);
         inpL.setName("window_reorder");
-        inpL = inpL.cont3d(ctx, n_embd, n_patches, n_batch);
+        inpL = ggml.cont(ctx, inpL).reshape3d(ctx, n_embd, n_patches, n_batch);
         inpL.setName("window_reordered");
     }
 
@@ -200,9 +369,9 @@ pub fn buildGraph(
             Vcur.setName("blk");
 
             // M-RoPE
-            Qcur = Qcur.ropeMulti(ctx, positions, null, @intCast(d_head / 2), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
+            Qcur = ggml.ropeMulti(ctx, Qcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
             Qcur.setName("blk");
-            Kcur = Kcur.ropeMulti(ctx, positions, null, @intCast(d_head / 2), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
+            Kcur = ggml.ropeMulti(ctx, Kcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
             Kcur.setName("blk");
 
             // Attention
@@ -262,7 +431,7 @@ pub fn buildGraph(
 
     // 9. Multimodal projection
     var embeddings = inpL;
-    embeddings = embeddings.cont3d(ctx, n_embd * 4, n_patches / 4, n_batch);
+    embeddings = ggml.cont(ctx, embeddings).reshape3d(ctx, n_embd * 4, @divExact(n_patches, @as(i64, 4)), n_batch);
     embeddings.setName("mm_reshape");
 
     // FFN projection: mm_0 (GELU) -> mm_1
@@ -282,14 +451,14 @@ pub fn buildGraph(
 
     // Window attention reorder back (if applicable)
     if (use_window_attn) {
-        var window_idx = try ctx.newTensor1d(ggml.Type.i32, n_patches / 4);
+        var window_idx = try ctx.newTensor1d(ggml.Type.i32, @divExact(n_patches, @as(i64, 4)));
         window_idx.setName("window_idx");
 
-        embeddings = embeddings.reshape2d(ctx, p.projection_dim, n_patches / 4);
+        embeddings = embeddings.reshape2d(ctx, p.projection_dim, @divExact(n_patches, @as(i64, 4)));
         embeddings.setName("window_reorder_back_flat");
         embeddings = embeddings.getRows(ctx, window_idx);
         embeddings.setName("window_reorder_back");
-        embeddings = embeddings.cont3d(ctx, @intCast(p.projection_dim), n_patches / 4, n_batch);
+        embeddings = ggml.cont(ctx, embeddings).reshape3d(ctx, @intCast(p.projection_dim), @divExact(n_patches, @as(i64, 4)), n_batch);
         embeddings.setName("window_reordered_back");
     }
 

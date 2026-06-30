@@ -250,10 +250,12 @@ pub fn resizePositionEmbeddings(
     var cur = pos_embd.reshape4d(ctx, n_embd, 1, src_size, 1);
     cur.setName("pos_embd_4d");
 
-    // Use ggml_upscale to interpolate along dim 2 (src_size -> target_size)
+    // Use repeat to interpolate along dim 2 (src_size -> target_size)
     const scale_factor: i32 = @intCast(@divTrunc(target_size, src_size));
     if (scale_factor > 1) {
-        cur = cur.upscale(ctx, scale_factor);
+        // Create a target tensor with the desired shape and repeat
+        const repeated = try ctx.newTensor4d(ggml.Type.f32, n_embd, 1, target_size, 1);
+        cur = ggml.repeat(ctx, cur, repeated);
         cur.setName("pos_embd_upscaled");
     }
 

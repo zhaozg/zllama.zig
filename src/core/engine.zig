@@ -855,6 +855,7 @@ pub const InferenceEngine = struct {
         if (img.width == 0 or img.height == 0) return error.EmptyImage;
 
         self.ctx_graph.setNoAlloc(false);
+        logger.info("ctx_graph no_alloc after setNoAlloc(false): {}", .{self.ctx_graph.getNoAlloc()});
         var vision_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
         const vision_embeddings = try mm_mgr.encodeMedia(io, self.ctx_graph, vision_graph, .{
             .media_type = .image,

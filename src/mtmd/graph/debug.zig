@@ -30,7 +30,7 @@ pub const DebugTensorRegistry = struct {
     /// 是否启用调试
     enabled: bool = false,
     /// 注册的张量列表
-    entries: std.ArrayListUnmanaged(DebugTensorEntry) = .{},
+    entries: std.ArrayListUnmanaged(DebugTensorEntry) = .{ .items = &.{}, .capacity = 0 },
 
     /// 初始化调试注册表
     pub fn init() DebugTensorRegistry {

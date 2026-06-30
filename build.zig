@@ -369,6 +369,15 @@ pub fn build(b: *std.Build) void {
     });
     fft_mod.linkFramework("Accelerate", .{});
 
+    // mtmd debug 模块
+    const debug_mod = b.createModule(.{
+        .root_source_file = b.path("src/debug.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    debug_mod.addImport("ggml", ggml_mod);
+
     // mtmd graph 模块（需在 audio/vision 模块之前定义）
     const mm_graph_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/graph/mod.zig"),
@@ -379,14 +388,7 @@ pub fn build(b: *std.Build) void {
     mm_graph_mod.addImport("ggml", ggml_mod);
     mm_graph_mod.addImport("gguf", gguf_mod);
     mm_graph_mod.addImport("weight_loader", weight_loader_mod);
-
-    const debug_mod = b.createModule(.{
-        .root_source_file = b.path("src/debug.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    debug_mod.addImport("ggml", ggml_mod);
+    mm_graph_mod.addImport("debug", debug_mod);
 
     const mm_audio_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/audio/mod.zig"),

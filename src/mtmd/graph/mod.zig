@@ -57,6 +57,16 @@ pub const PadStyle = types.PadStyle;
 pub const DebugTensorEntry = debug.DebugTensorEntry;
 pub const DebugTensorRegistry = debug.DebugTensorRegistry;
 
+/// 视觉编码器后端接口
+/// 每个视觉模型实现此接口，提供模型特定的操作
+pub const VisionEncoderBackend = struct {
+    name: []const u8,
+    loadParams: *const fn (gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
+    loadWeights: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
+    buildGraph: *const fn (ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, image_tensor: *ggml.Tensor) anyerror!*ggml.CGraph,
+    estimateOutputTokens: *const fn (img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32,
+};
+
 /// 音频编码器后端接口
 /// 每个音频模型实现此接口，提供模型特定的操作
 pub const AudioEncoderBackend = struct {

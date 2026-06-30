@@ -1,8 +1,15 @@
-//! 视觉编码器
+//! 视觉编码器框架
 //!
-//! 提供 Vision Transformer (ViT) 编码器实现，支持 Gemma4V 和 Gemma4UV 两种变体。
-//! 使用 src/mtmd/graph/ 模块的通用构建块（buildNorm, buildFFN, buildAttn 等）。
-//! 参考: llama.cpp tools/mtmd/models/gemma4v.cpp, gemma4uv.cpp
+//! 提供视觉编码器的通用框架，包括：
+//! - VisionEncoder 结构体（生命周期管理、编码接口）
+//! - 模型无关的权重容器（使用 graph.VisionEncoderWeights）
+//!
+//! 模型特定的实现（权重加载、图构建、token 估算）下沉到
+//! src/mtmd/graph/models/ 中，通过 VisionEncoderBackend 分发。
+//!
+//! 设计原则：
+//! - encoder.zig 只包含框架、流程、架构代码
+//! - 具体模型的张量名称、图结构、参数硬编码都在 graph/models/ 中
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -17,17 +24,24 @@ const graph = @import("graph");
 const VisionEncoderParams = config.VisionEncoderParams;
 const EncoderType = config.EncoderType;
 const VisionEncoderWeights = types.VisionEncoderWeights;
-const ViTLayerWeights = types.ViTLayerWeights;
 const NormalizeMode = preprocess.NormalizeMode;
 
 const log = std.log.scoped(.vision_encoder);
 
-/// 视觉编码器
+/// 视觉编码器后端接口（重新导出自 graph 模块）
+pub const VisionEncoderBackend = graph.VisionEncoderBackend;
+
+// ============================================================================
+// 视觉编码器
+// ============================================================================
+
+/// 通用视觉编码器
+/// 通过 backend 字段分发到具体模型实现
 pub const VisionEncoder = struct {
     params: VisionEncoderParams,
     weights: VisionEncoderWeights,
-    encoder_type: EncoderType,
     ctx_weights: *ggml.Context,
+    backend: *const VisionEncoderBackend,
 
     /// 图像归一化参数（来自 GGUF clip.vision.image_mean / image_std）
     image_mean: [3]f32 = .{ 0.0, 0.0, 0.0 },
@@ -41,6 +55,7 @@ pub const VisionEncoder = struct {
         gguf_file: *const gguf.GGUFFile,
         ctx: *ggml.Context,
         allocator: std.mem.Allocator,
+        backend: *const VisionEncoderBackend,
     ) !VisionEncoder {
         var params = VisionEncoderParams{};
 
@@ -59,10 +74,11 @@ pub const VisionEncoder = struct {
 
         if (gguf_file.getU32("clip.vision.feed_forward_length")) |v| params.n_ff = v else if (gguf_file.getU32("gemma4.vision.feed_forward_length")) |v| params.n_ff = v;
 
-        // projection_dim 是输出投影维度（匹配 LLM n_embd），不是 n_merge
+        // projection_dim 是输出投影维度（匹配 LLM n_embd）
         if (gguf_file.getU32("clip.vision.projection_dim")) |v| params.n_output_embd = v else if (gguf_file.getU32("gemma4.vision.projection_dim")) |v| params.n_output_embd = v;
 
-        if (gguf_file.getF32("clip.vision.attention.layer_norm_epsilon")) |v| params.norm_eps = v else if (gguf_file.getF32("gemma4.vision.rope_theta")) |v| params.rope_theta = v;
+        if (gguf_file.getF32("clip.vision.attention.layer_norm_epsilon")) |v| params.norm_eps = v;
+        if (gguf_file.getF32("clip.vision.rope_theta")) |v| params.rope_theta = v;
 
         // 读取图像归一化参数
         var image_mean: [3]f32 = .{ 0.0, 0.0, 0.0 };
@@ -74,34 +90,49 @@ pub const VisionEncoder = struct {
             for (std_val, 0..) |v, i| image_std[i] = v;
         }
 
-        // 检测编码器类型
-        const enc_type: EncoderType = if (gguf_file.findTensor("v.patch_norm.1.weight") != null or
-            gguf_file.findTensor("patch_norm_1.weight") != null)
-            .gemma4uv
-        else
-            .gemma4v;
+        // 让 backend 加载模型特定参数
+        // 构建 VisionHParams 用于 backend 调用
+        var hparams = graph.VisionHParams{
+            .image_size = params.image_size,
+            .patch_size = params.patch_size,
+            .n_embd = params.n_embd,
+            .n_head = params.n_head,
+            .n_layer = params.n_layer,
+            .n_ff = params.n_ff,
+            .projection_dim = params.n_output_embd,
+            .n_merge = params.n_merge,
+            .eps = params.norm_eps,
+            .rope_theta = params.rope_theta,
+        };
+        backend.loadParams(gguf_file, &hparams);
 
-        log.info("Loading vision encoder: type={s}, size={d}, patch={d}, embd={d}, heads={d}, layers={d}, output_embd={d}", .{
-            @tagName(enc_type),   params.image_size, params.patch_size,
-            params.n_embd,        params.n_head,     params.n_layer,
+        log.info("Loading vision encoder: backend={s}, size={d}, patch={d}, embd={d}, heads={d}, layers={d}, output_embd={d}", .{
+            backend.name, params.image_size, params.patch_size,
+            params.n_embd, params.n_head, params.n_layer,
             params.n_output_embd,
         });
         log.info("  image_mean=[{d:.4},{d:.4},{d:.4}] image_std=[{d:.4},{d:.4},{d:.4}]", .{
             image_mean[0], image_mean[1], image_mean[2],
-            image_std[0],  image_std[1],  image_std[2],
+            image_std[0], image_std[1], image_std[2],
         });
 
         // 加载所有权重
-        const weights = try loader.loadWeights(ctx, gguf_file, params, enc_type, allocator);
+        var weights = VisionEncoderWeights{};
+        try backend.loadWeights(allocator, gguf_file, ctx, &weights);
 
         return VisionEncoder{
             .params = params,
             .weights = weights,
-            .encoder_type = enc_type,
             .ctx_weights = ctx,
+            .backend = backend,
             .image_mean = image_mean,
             .image_std = image_std,
         };
+    }
+
+    /// 返回视觉编码器是否可用（权重已加载）
+    pub fn isAvailable(self: *const VisionEncoder) bool {
+        return self.weights.patch_embeddings_0 != null;
     }
 
     /// 编码 RGB 图像数据，返回视觉嵌入 tokens
@@ -120,15 +151,7 @@ pub const VisionEncoder = struct {
         img_width: u32,
         img_height: u32,
     ) !*ggml.Tensor {
-        const w = self.weights;
         const p = self.params;
-
-        var effective_n_embd: i64 = @intCast(p.n_embd);
-        const effective_n_head: i64 = @intCast(p.n_head);
-        var d_head: i64 = @divExact(effective_n_embd, effective_n_head);
-        var n_patches_x: i64 = 0;
-        var n_patches_y: i64 = 0;
-        var n_patches: i64 = 0;
 
         // Validate input size
         const expected_len: usize = @as(usize, @intCast(img_width)) * @as(usize, @intCast(img_height)) * 3;
@@ -141,45 +164,39 @@ pub const VisionEncoder = struct {
         var inp = try preprocess.normalizeToTensor(ctx, image_data, img_width, img_height, self.image_mean, self.image_std, .standard);
         inp.setName("vision_input");
 
-        // 2. Patch embedding
-        inp = self.patchEmbed(ctx, inp, img_width, img_height, &effective_n_embd, &d_head, &n_patches_x, &n_patches_y, &n_patches);
+        // 2. 构建 VisionHParams 用于 backend 调用
+        var hparams = graph.VisionHParams{
+            .image_size = p.image_size,
+            .patch_size = p.patch_size,
+            .n_embd = p.n_embd,
+            .n_head = p.n_head,
+            .n_layer = p.n_layer,
+            .n_ff = p.n_ff,
+            .projection_dim = p.n_output_embd,
+            .n_merge = p.n_merge,
+            .eps = p.norm_eps,
+            .rope_theta = p.rope_theta,
+        };
 
-        // 3. 位置编码
-        inp = self.addPositionEmbeddings(ctx, inp, n_patches, n_patches_x, n_patches_y, effective_n_embd);
+        // 3. 通过 backend 构建完整计算图
+        _ = try self.backend.buildGraph(ctx, cgraph, &self.weights, &hparams, inp);
 
-        // 4. ViT blocks (only for gemma4v)
-        var cur = inp;
-        if (self.encoder_type == .gemma4v) {
-            cur = try self.applyViTBlocks(ctx, cur, effective_n_embd, effective_n_head, d_head, n_patches, n_patches_x, n_patches_y);
-        }
-
-        // 5. Pooling (gemma4v only)
-        if (self.encoder_type == .gemma4v) {
-            cur = self.applyPooling(ctx, cur, effective_n_embd, n_patches_x, n_patches_y);
-        }
-
-        // 6. 标准化
-        cur = postprocess.standardize(ctx, cur, w.std_bias, w.std_scale);
-
-        // 7. 投影到 LLM 嵌入空间
-        cur = postprocess.projectToLLM(ctx, cur, p.norm_eps, w.mm_soft_emb_norm_w, w.mm_input_proj_w);
-
-        cgraph.buildForwardExpand(cur);
-        return cur;
-    }
-
-    /// 返回视觉编码器是否可用（权重已加载）
-    pub fn isAvailable(self: *const VisionEncoder) bool {
-        return self.weights.patch_embeddings_0 != null;
+        // 4. 从图中获取输出张量
+        const ggml_c = @import("ggml").c;
+        var name_buf: [64]u8 = undefined;
+        const out_name = "mm_output";
+        @memcpy(name_buf[0..out_name.len], out_name);
+        name_buf[out_name.len] = 0;
+        const result = ggml_c.ggml_graph_get_tensor(@ptrCast(cgraph), &name_buf) orelse {
+            log.err("Failed to find output tensor '{s}' in graph", .{out_name});
+            return error.TensorNotFound;
+        };
+        return @as(*ggml.Tensor, @ptrCast(result));
     }
 
     /// 估算给定分辨率图像的 token 数量
     pub fn estimateOutputTokens(self: *const VisionEncoder, img_width: u32, img_height: u32) u32 {
-        const patches_x = (img_width + self.params.patch_size - 1) / self.params.patch_size;
-        const patches_y = (img_height + self.params.patch_size - 1) / self.params.patch_size;
-        const n_patches = patches_x * patches_y;
-        const n_merge = if (self.params.n_merge > 0) self.params.n_merge else 1;
-        return n_patches / (n_merge * n_merge);
+        return self.backend.estimateOutputTokens(img_width, img_height, self.params.patch_size, self.params.n_merge);
     }
 
     /// 计算视觉 token 预算下的最佳图像分辨率
@@ -193,305 +210,5 @@ pub const VisionEncoder = struct {
 
     pub fn deinit(self: *VisionEncoder, allocator: std.mem.Allocator) void {
         allocator.free(self.weights.layers);
-    }
-
-    // ============================================================================
-    // 内部方法
-    // ============================================================================
-
-    /// Patch embedding 阶段
-    fn patchEmbed(
-        self: *const VisionEncoder,
-        ctx: *ggml.Context,
-        inp: *ggml.Tensor,
-        img_width: u32,
-        img_height: u32,
-        effective_n_embd: *i64,
-        d_head: *i64,
-        n_patches_x: *i64,
-        n_patches_y: *i64,
-        n_patches: *i64,
-    ) *ggml.Tensor {
-        const w = self.weights;
-        var cur = inp;
-
-        switch (self.encoder_type) {
-            .gemma4v => {
-                // Scale: patches * 2 - 1
-                // Matches llama.cpp gemma4v.cpp: ggml_scale_bias(ctx0, inp_raw, 2.0f, -1.0f)
-                cur = ggml.scale(ctx, cur, 2.0);
-                {
-                    const bias = ctx.newTensor1d(ggml.Type.f32, 1) catch unreachable;
-                    bias.dataF32()[0] = -1.0;
-                    bias.setName("vision_bias");
-                    cur = cur.add(ctx, bias);
-                }
-
-                // Conv2D patch embedding
-                if (w.patch_embeddings_0) |pe| {
-                    const kw: i32 = @intCast(pe.ne()[0]);
-                    const kh: i32 = @intCast(pe.ne()[1]);
-                    effective_n_embd.* = pe.ne()[3];
-                    d_head.* = @divExact(effective_n_embd.*, @as(i64, @intCast(self.params.n_head)));
-                    n_patches_x.* = @divTrunc(@as(i64, @intCast(img_width)), kw);
-                    n_patches_y.* = @divTrunc(@as(i64, @intCast(img_height)), kh);
-                    n_patches.* = n_patches_x.* * n_patches_y.*;
-
-                    cur = cur.conv2d(ctx, pe, kw, kh, 0, 0, 1, 1);
-                    // Reshape to [n_embd, n_patches]
-                    cur = cur.reshape3d(ctx, n_patches.*, effective_n_embd.*, 1);
-                    cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
-                    cur.setName("inp_patches");
-                }
-            },
-            .gemma4uv => {
-                // Gemma4UV: im2col + patch norms + projection
-                if (w.patch_norm_1_w) |pn1_w| {
-                    if (w.patch_embeddings_0) |pe| {
-                        const kw: i32 = @intCast(pe.ne()[0]);
-                        const kh: i32 = @intCast(pe.ne()[1]);
-                        const ic: i32 = @intCast(pe.ne()[2]);
-                        n_patches_x.* = @divTrunc(@as(i64, @intCast(img_width)), kw);
-                        n_patches_y.* = @divTrunc(@as(i64, @intCast(img_height)), kh);
-                        n_patches.* = n_patches_x.* * n_patches_y.*;
-
-                        const im2col_kernel = ctx.newTensor4d(ggml.Type.f32, kw, kh, ic, 1) catch unreachable;
-                        cur = cur.im2col(ctx, im2col_kernel, kw, kh, 0, 0, 1, 1, true, ggml.Type.f32);
-                    }
-
-                    // Flatten to [patch_size*patch_size*C, n_patches]
-                    cur = cur.reshape2d(ctx, cur.ne()[0], n_patches.*);
-
-                    // Patch norm 1
-                    cur = cur.norm(ctx, 1e-5);
-                    cur = cur.mul(ctx, pn1_w);
-                    if (w.patch_norm_1_b) |pn1_b| {
-                        cur = cur.add(ctx, pn1_b);
-                    }
-                }
-
-                // Project to embedding dimension
-                if (w.patch_embeddings_0) |pe| {
-                    cur = cur.mulMat(ctx, pe);
-                }
-                if (w.patch_bias) |pb| {
-                    cur = cur.add(ctx, pb);
-                }
-
-                // Patch norm 2
-                if (w.patch_norm_2_w) |pn2_w| {
-                    cur = cur.norm(ctx, 1e-5);
-                    cur = cur.mul(ctx, pn2_w);
-                    if (w.patch_norm_2_b) |pn2_b| {
-                        cur = cur.add(ctx, pn2_b);
-                    }
-                }
-            },
-        }
-
-        return cur;
-    }
-
-    /// 添加位置编码
-    fn addPositionEmbeddings(
-        self: *const VisionEncoder,
-        ctx: *ggml.Context,
-        inp: *ggml.Tensor,
-        n_patches: i64,
-        n_patches_x: i64,
-        n_patches_y: i64,
-        effective_n_embd: i64,
-    ) *ggml.Tensor {
-        _ = n_patches_y;
-        const w = self.weights;
-        var cur = inp;
-
-        if (w.position_embeddings) |pos_embd| {
-            const pos_size = pos_embd.ne()[1];
-            const row_size = ggml.Type.rowSize(pos_embd.dataType(), effective_n_embd);
-
-            // Position embeddings stored as [n_embd, 2*pos_size]: first half=X, second half=Y
-            const tbl_x = pos_embd.view2d(ctx, effective_n_embd, pos_size, row_size, 0);
-            const tbl_y = pos_embd.view2d(ctx, effective_n_embd, pos_size, row_size, @as(usize, @intCast(pos_size)) * row_size);
-
-            // Create and fill position index tensors
-            ctx.setNoAlloc(false);
-            var pos_x = ctx.newTensor1d(ggml.Type.i32, n_patches) catch unreachable;
-            pos_x.setName("pos_x");
-            var pos_y = ctx.newTensor1d(ggml.Type.i32, n_patches) catch unreachable;
-            pos_y.setName("pos_y");
-            {
-                const px = pos_x.dataI32();
-                const py = pos_y.dataI32();
-                for (0..@as(usize, @intCast(n_patches))) |i| {
-                    px[i] = @mod(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
-                    py[i] = @divTrunc(@as(i32, @intCast(i)), @as(i32, @intCast(n_patches_x)));
-                }
-            }
-            ctx.setNoAlloc(true);
-
-            // getRows produces [n_embd, n_patches]; matches inp format
-            const emb_x = tbl_x.getRows(ctx, pos_x);
-            const emb_y = tbl_y.getRows(ctx, pos_y);
-            cur = cur.add(ctx, emb_x);
-            cur = cur.add(ctx, emb_y);
-
-            // Pos norm (Gemma4UV only)
-            if (self.encoder_type == .gemma4uv) {
-                if (w.patch_norm_3_w) |pn3_w| {
-                    cur = cur.norm(ctx, 1e-5);
-                    cur = cur.mul(ctx, pn3_w);
-                    if (w.patch_norm_3_b) |pn3_b| {
-                        cur = cur.add(ctx, pn3_b);
-                    }
-                }
-            }
-        }
-
-        return cur;
-    }
-    fn applyViTBlocks(
-        self: *const VisionEncoder,
-        ctx: *ggml.Context,
-        inp: *ggml.Tensor,
-        effective_n_embd: i64,
-        effective_n_head: i64,
-        d_head: i64,
-        n_patches: i64,
-        n_patches_x: i64,
-        n_patches_y: i64,
-    ) !*ggml.Tensor {
-        const w = self.weights;
-        const p = self.params;
-        _ = n_patches_y;
-
-        // 使用 graph 模块创建 2D RoPE 位置索引
-        const vit_indices = try graph.createPositionIndices(ctx, n_patches, n_patches_x);
-
-        const n_batch: i64 = 1;
-        const d_head_half: i64 = @divExact(d_head, 2);
-        const rope_theta: f32 = p.rope_theta;
-
-        // Flatten to [n_embd, n_pos * B] for ViT layers
-        var inpL = inp.reshape2d(ctx, effective_n_embd, n_patches * n_batch);
-
-        for (w.layers) |*layer| {
-            var cur = inpL;
-
-            // --- Pre-attention RMSNorm (使用 graph.buildNorm) ---
-            var attn_in = cur;
-            if (layer.ln_1_w) |ln1_w| {
-                attn_in = try graph.buildNorm(ctx, attn_in, ln1_w, layer.ln_1_b, .rms_norm, p.norm_eps, "vit_attn_norm");
-            }
-
-            // --- Self-attention with 2D RoPE ---
-            {
-                var Qcur = layer.q_w.?.mulMat(ctx, attn_in);
-                var Kcur = layer.k_w.?.mulMat(ctx, attn_in);
-                var Vcur = layer.v_w.?.mulMat(ctx, attn_in);
-
-                Qcur = Qcur.reshape4d(ctx, d_head, effective_n_head, n_patches, n_batch);
-                Kcur = Kcur.reshape4d(ctx, d_head, effective_n_head, n_patches, n_batch);
-                Vcur = Vcur.reshape4d(ctx, d_head, effective_n_head, n_patches, n_batch);
-
-                // 2D RoPE: first half uses pos_x, second half uses pos_y
-                {
-                    const first_q = Qcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Qcur.nb()[1], Qcur.nb()[2], Qcur.nb()[3], 0);
-                    const first_k = Kcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Kcur.nb()[1], Kcur.nb()[2], Kcur.nb()[3], 0);
-                    const rope_first_q = first_q.ropeExt(ctx, vit_indices.pos_x, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    const rope_first_k = first_k.ropeExt(ctx, vit_indices.pos_x, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-
-                    const offset: usize = @intCast(d_head_half * @sizeOf(f32));
-                    const second_q = Qcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Qcur.nb()[1], Qcur.nb()[2], Qcur.nb()[3], offset);
-                    const second_k = Kcur.view4d(ctx, d_head_half, effective_n_head, n_patches, n_batch, Kcur.nb()[1], Kcur.nb()[2], Kcur.nb()[3], offset);
-                    const rope_second_q = second_q.ropeExt(ctx, vit_indices.pos_y, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                    const rope_second_k = second_k.ropeExt(ctx, vit_indices.pos_y, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-
-                    Qcur = rope_first_q.concat(ctx, rope_second_q, 0);
-                    Kcur = rope_first_k.concat(ctx, rope_second_k, 0);
-                }
-
-                // Vcur RMSNorm (gemma4v-specific, matches llama.cpp)
-                if (self.encoder_type == .gemma4v) {
-                    Vcur = Vcur.rmsNorm(ctx, p.norm_eps);
-                }
-
-                // 使用 graph.buildAttn 进行注意力计算
-                const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
-                const attn_out = try graph.buildAttn(
-                    ctx,
-                    layer.o_w orelse return error.MissingOutputWeight,
-                    layer.o_b,
-                    Qcur,
-                    Kcur,
-                    Vcur,
-                    null,
-                    kq_scale,
-                    effective_n_head,
-                    "vit_attn",
-                    null, // attn_sinks not supported in ViTLayerWeights
-                );
-
-                cur = cur.add(ctx, attn_out);
-            }
-
-            inpL = cur;
-
-            // --- FFN (使用 graph.buildFFN) ---
-            {
-                var ffn_in = cur;
-                if (layer.ln_2_w) |ln2_w| {
-                    ffn_in = try graph.buildNorm(ctx, ffn_in, ln2_w, layer.ln_2_b, .rms_norm, p.norm_eps, "vit_ffn_norm");
-                }
-
-                const ffn_op: graph.FFNOpType = switch (p.ffn_op) {
-                    .silu => .silu,
-                    .gelu => .gelu,
-                };
-                const ffn_out = try graph.buildFFN(
-                    ctx,
-                    ffn_in,
-                    layer.ff_up_w orelse return error.MissingFFNUpWeight,
-                    null, // ff_up_b not in ViTLayerWeights
-                    null, // ff_gate_w not in ViTLayerWeights
-                    null, // ff_gate_b not in ViTLayerWeights
-                    layer.ff_down_w orelse return error.MissingFFNDownWeight,
-                    null, // ff_down_b not in ViTLayerWeights
-                    ffn_op,
-                    "vit_ffn",
-                );
-
-                inpL = cur.add(ctx, ffn_out);
-            }
-        }
-
-        return inpL;
-    }
-
-    /// 应用 Pooling（平均池化下采样）
-    fn applyPooling(
-        self: *const VisionEncoder,
-        ctx: *ggml.Context,
-        cur: *ggml.Tensor,
-        effective_n_embd: i64,
-        n_patches_x: i64,
-        n_patches_y: i64,
-    ) *ggml.Tensor {
-        const p = self.params;
-        const kernel_size: i64 = @intCast(p.n_merge);
-
-        var result = cur;
-        // [n_embd, n_patches] -> [n_patches_x, n_patches_y, n_embd, 1]
-        result = result.permute(ctx, 1, 0, 2, 3).cont(ctx);
-        result = result.cont4d(ctx, n_patches_x, n_patches_y, effective_n_embd, 1);
-        result = result.pool2d(ctx, 1, @as(i32, @intCast(kernel_size)), @as(i32, @intCast(kernel_size)), @as(i32, @intCast(kernel_size)), @as(i32, @intCast(kernel_size)), 0, 0);
-
-        const out_x = @divTrunc(n_patches_x, kernel_size);
-        const out_y = @divTrunc(n_patches_y, kernel_size);
-        result = result.reshape3d(ctx, out_x * out_y, effective_n_embd, 1);
-        result = result.permute(ctx, 1, 0, 2, 3).cont(ctx);
-        result = result.scale(ctx, @sqrt(@as(f32, @floatFromInt(effective_n_embd))));
-
-        return result;
     }
 };

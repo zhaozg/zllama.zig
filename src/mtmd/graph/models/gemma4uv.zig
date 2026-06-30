@@ -7,8 +7,9 @@
 //! 参考: deps/llama.cpp/tools/mtmd/models/gemma4uv.cpp
 
 const std = @import("std");
+const graph = @import("../mod.zig");
+const gguf = @import("gguf");
 const ggml = @import("ggml");
-const graph = @import("..");
 
 const GraphBuilder = graph.GraphBuilder;
 const NormType = graph.NormType;
@@ -21,17 +22,130 @@ const ImageF32 = graph.ImageF32;
 
 const log = std.log.scoped(.gemma4uv_graph);
 
-// 构建 Gemma4UV 完整计算图
-//
-// 处理流程:
-//   1. im2col + patch norm 1 (LayerNorm)
-//   2. 投影到 embedding 维度 (patch_embeddings_0)
-//   3. patch norm 2 (LayerNorm)
-//   4. 2D 位置编码 (X/Y 分别编码)
-//   5. patch norm 3 (LayerNorm)
-//   6. RMSNorm + 投影到 LLM 嵌入空间
-//
-// 参考: llama.cpp gemma4uv.cpp build()
+// ============================================================================
+// 视觉编码器后端注册
+// ============================================================================
+
+/// Gemma4UV 视觉编码器后端实例
+pub const backend = graph.VisionEncoderBackend{
+    .name = "gemma4uv",
+    .loadParams = loadParams,
+    .loadWeights = loadWeights,
+    .buildGraph = buildGraphFromWeights,
+    .estimateOutputTokens = estimateOutputTokens,
+};
+
+/// 从 GGUF 元数据读取视觉编码器超参数
+pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
+    _ = gguf_file;
+    _ = params;
+    // Gemma4UV 参数已由 encoder.zig 从 clip.vision.* 前缀加载
+}
+
+/// 从 GGUF 加载 Gemma4UV 视觉编码器所有权重到 VisionEncoderWeights
+pub fn loadWeights(
+    allocator: std.mem.Allocator,
+    gguf_file: *const gguf.GGUFFile,
+    ctx: *ggml.Context,
+    w: *VisionEncoderWeights,
+) !void {
+    // Patch embedding
+    w.patch_embeddings_0 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;
+    w.patch_bias = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.bias") catch null;
+
+    // Patch 归一化
+    w.patch_norm_1_w = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.1.weight") catch null;
+    w.patch_norm_1_b = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.1.bias") catch null;
+    w.patch_norm_2_w = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.2.weight") catch null;
+    w.patch_norm_2_b = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.2.bias") catch null;
+    w.patch_norm_3_w = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.3.weight") catch null;
+    w.patch_norm_3_b = findTensorInGGUF(ctx, gguf_file, "v.patch_norm.3.bias") catch null;
+
+    // 位置编码
+    w.position_embeddings = findTensorInGGUF(ctx, gguf_file, "v.position_embd.weight") catch null;
+
+    // 多模态投影
+    w.mm_input_proj_w = findTensorInGGUF(ctx, gguf_file, "mm.input_projection.weight") catch null;
+    w.mm_soft_emb_norm_w = findTensorInGGUF(ctx, gguf_file, "mm.soft_emb_norm.weight") catch null;
+
+    // Gemma4UV 没有 ViT layers
+    w.layers = try allocator.alloc(ViTLayerWeights, 0);
+
+    log.info("Gemma4UV weights loaded (no ViT layers)", .{});
+}
+
+/// 从 VisionEncoderWeights 构建计算图的包装函数
+fn buildGraphFromWeights(
+    ctx: *ggml.Context,
+    gf: *ggml.CGraph,
+    w: *const VisionEncoderWeights,
+    p: *const graph.VisionHParams,
+    image_tensor: *ggml.Tensor,
+) !*ggml.CGraph {
+    const img = ImageF32{
+        .buf = image_tensor.dataF32(),
+        .nx = p.image_size,
+        .ny = p.image_size,
+    };
+
+    var hparams = VisionHParams{
+        .image_size = p.image_size,
+        .patch_size = p.patch_size,
+        .n_embd = p.n_embd,
+        .n_head = p.n_head,
+        .n_layer = p.n_layer,
+        .n_ff = p.n_ff,
+        .projection_dim = p.projection_dim,
+        .n_merge = p.n_merge,
+        .eps = p.eps,
+        .rope_theta = p.rope_theta,
+    };
+
+    var builder = GraphBuilder{
+        .weights = w,
+        .hparams = &hparams,
+        .proj_type = .gemma4uv,
+        .img = &img,
+        .ctx0 = ctx,
+        .gf = gf,
+    };
+
+    return buildGraph(&builder);
+}
+
+/// 估算输出 token 数量
+pub fn estimateOutputTokens(img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32 {
+    const patches_x = (img_width + patch_size - 1) / patch_size;
+    const patches_y = (img_height + patch_size - 1) / patch_size;
+    const n_patches = patches_x * patches_y;
+    const merge = if (n_merge > 0) n_merge else 1;
+    return n_patches / (merge * merge);
+}
+
+// ============================================================================
+// 权重加载辅助函数
+// ============================================================================
+
+fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
+    const weight_loader = @import("weight_loader");
+    return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
+}
+
+// ============================================================================
+// 原始 buildGraph 函数（保留向后兼容）
+// ============================================================================
+
+/// 构建 Gemma4UV 完整计算图
+///
+/// 处理流程:
+///   1. im2col + patch norm 1 (LayerNorm)
+///   2. 投影到 embedding 维度 (patch_embeddings_0)
+///   3. patch norm 2 (LayerNorm)
+///   4. 2D 位置编码 (X/Y 分别编码)
+///   5. patch norm 3 (LayerNorm)
+///   6. RMSNorm + 投影到 LLM 嵌入空间
+///
+/// 参考: llama.cpp gemma4uv.cpp build()
 pub fn buildGraph(
     builder: *GraphBuilder,
 ) !*ggml.CGraph {

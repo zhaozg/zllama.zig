@@ -113,9 +113,9 @@ pub fn buildAttn(
     // mul_mat(V^T, scores^T) = V @ scores^T = (scores @ V^T)^T
     // 所以: mul_mat(scores, V_t^T) = scores^T @ V_t = [n_patches, n_patches] @ [d_head, n_patches] = [n_patches, d_head]? 不对
     //
-    // 标准做法: scores @ V
-    // V 是 [d_head, n_patches], 需要转置为 [n_patches, d_head]
-    const v_t = v_flat.permute(ctx, 1, 0, 2, 3).cont(ctx);
+    // V is already in [n_patches, d_head, ...] shape from v_flat
+    // Use v_flat directly for scores @ V computation
+    const v_for_attn = v_flat;
 
     // scores @ V: [n_patches, n_patches] @ [n_patches, d_head] = [n_patches, d_head]
     // mul_mat(V_t, scores) = V_t^T @ scores = [n_patches, d_head] @ [n_patches, n_patches] = [n_patches, d_head]? 不对
@@ -150,7 +150,7 @@ pub fn buildAttn(
     // mul_mat(V_t, scores) = V_t^T @ scores = [d_head, n_patches] @ [n_patches, n_patches] = [d_head, n_patches]
     // 然后转置回 [n_patches, d_head]
 
-    var attn_out = v_t.mulMat(ctx, scores);
+    var attn_out = scores.mulMat(ctx, v_for_attn);
 
     // attn_out: [d_head, n_patches] (per head*batch)
     // 转置回 [n_patches, d_head]

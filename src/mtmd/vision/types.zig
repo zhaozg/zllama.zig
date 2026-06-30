@@ -6,53 +6,53 @@
 //! 参考: src/mtmd/graph/types.zig
 
 const ggml = @import("ggml");
+const graph = @import("graph");
+
+// ============================================================================
+// 重新导出 graph 模块的核心类型
+// ============================================================================
 
 /// ViT 单层权重
-pub const ViTLayerWeights = struct {
-    ln_1_w: ?*ggml.Tensor = null,
-    ln_1_b: ?*ggml.Tensor = null,
-    q_w: ?*ggml.Tensor = null,
-    k_w: ?*ggml.Tensor = null,
-    v_w: ?*ggml.Tensor = null,
-    o_w: ?*ggml.Tensor = null,
-    o_b: ?*ggml.Tensor = null,
-    ln_2_w: ?*ggml.Tensor = null,
-    ln_2_b: ?*ggml.Tensor = null,
-    ff_up_w: ?*ggml.Tensor = null,
-    ff_down_w: ?*ggml.Tensor = null,
-};
+pub const ViTLayerWeights = graph.ViTLayerWeights;
 
 /// 视觉编码器所有权重
-pub const VisionEncoderWeights = struct {
-    params: VisionEncoderParams,
+pub const VisionEncoderWeights = graph.VisionEncoderWeights;
 
-    /// Patch embedding
-    patch_embeddings_0: ?*ggml.Tensor = null,
-    patch_bias: ?*ggml.Tensor = null,
+/// 图像 F32 数据
+pub const ImageF32 = graph.ImageF32;
 
-    /// Patch 归一化（Gemma4UV 特有）
-    patch_norm_1_w: ?*ggml.Tensor = null,
-    patch_norm_1_b: ?*ggml.Tensor = null,
-    patch_norm_2_w: ?*ggml.Tensor = null,
-    patch_norm_2_b: ?*ggml.Tensor = null,
-    patch_norm_3_w: ?*ggml.Tensor = null,
-    patch_norm_3_b: ?*ggml.Tensor = null,
+/// 图像 U8 数据
+pub const ImageU8 = graph.ImageU8;
 
-    /// 位置编码
-    position_embeddings: ?*ggml.Tensor = null,
+/// 图像 F32 批次
+pub const ImageF32Batch = graph.ImageF32Batch;
 
-    /// ViT 层
-    layers: []ViTLayerWeights = &.{},
+/// 构建选项
+pub const BuildVitOpts = graph.BuildVitOpts;
 
-    /// 标准化
-    std_bias: ?*ggml.Tensor = null,
-    std_scale: ?*ggml.Tensor = null,
+/// 投影器类型
+pub const ProjectorType = graph.ProjectorType;
 
-    /// 多模态嵌入投影
-    mm_input_proj_w: ?*ggml.Tensor = null,
-    mm_soft_emb_norm_w: ?*ggml.Tensor = null,
-};
+/// 归一化类型
+pub const NormType = graph.NormType;
 
-// Need VisionEncoderParams for the struct
-const config = @import("config.zig");
-const VisionEncoderParams = config.VisionEncoderParams;
+/// FFN 激活函数类型
+pub const FFNOpType = graph.FFNOpType;
+
+/// Patch merge 类型
+pub const PatchMergeType = graph.PatchMergeType;
+
+/// 缩放算法
+pub const ResizeAlgo = graph.ResizeAlgo;
+
+/// 填充样式
+pub const PadStyle = graph.PadStyle;
+
+/// Flash attention 类型
+pub const FlashAttnType = graph.FlashAttnType;
+
+/// 模态类型
+pub const Modality = graph.Modality;
+
+/// 裁剪信息
+pub const ClampInfo = graph.ClampInfo;

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
+const gguf = @import("gguf");
 const graph = @import("../mod.zig");
 
 const GraphBuilder = graph.GraphBuilder;
@@ -17,6 +18,161 @@ const ViTLayerWeights = graph.ViTLayerWeights;
 const ImageF32 = graph.ImageF32;
 
 const log = std.log.scoped(.gemma4v_graph);
+
+// ============================================================================
+// 视觉编码器后端注册
+// ============================================================================
+
+/// Gemma4V 视觉编码器后端实例
+pub const backend = graph.VisionEncoderBackend{
+    .name = "gemma4v",
+    .loadParams = loadParams,
+    .loadWeights = loadWeights,
+    .buildGraph = buildGraphFromWeights,
+    .estimateOutputTokens = estimateOutputTokens,
+};
+
+/// 从 GGUF 元数据读取视觉编码器超参数
+pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
+    _ = gguf_file;
+    _ = params;
+    // Gemma4V 参数已由 encoder.zig 从 clip.vision.* 前缀加载
+    // 此处可添加模型特定参数覆盖
+}
+
+/// 从 GGUF 加载 Gemma4V 视觉编码器所有权重到 VisionEncoderWeights
+pub fn loadWeights(
+    allocator: std.mem.Allocator,
+    gguf_file: *const gguf.GGUFFile,
+    ctx: *ggml.Context,
+    w: *VisionEncoderWeights,
+) !void {
+    // Patch embedding (v.patch_embd.*)
+    w.patch_embeddings_0 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;
+    w.patch_bias = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.bias") catch null;
+
+    // 位置编码 (v.position_embd.weight)
+    w.position_embeddings = findTensorInGGUF(ctx, gguf_file, "v.position_embd.weight") catch null;
+
+    // 标准化 (v.std_bias, v.std_scale)
+    w.std_bias = findTensorInGGUF(ctx, gguf_file, "v.std_bias") catch null;
+    w.std_scale = findTensorInGGUF(ctx, gguf_file, "v.std_scale") catch null;
+
+    // 多模态投影 (mm.*)
+    w.mm_input_proj_w = findTensorInGGUF(ctx, gguf_file, "mm.input_projection.weight") catch null;
+    w.mm_soft_emb_norm_w = findTensorInGGUF(ctx, gguf_file, "mm.soft_emb_norm.weight") catch null;
+
+    // 检测实际层数
+    var actual_n_layer: u32 = 0;
+    for (0..64) |il| {
+        var buf: [32]u8 = undefined;
+        const test_name = try std.fmt.bufPrint(&buf, "v.blk.{d}.attn_q.weight", .{il});
+        if (gguf_file.findTensor(test_name) == null) break;
+        actual_n_layer = @intCast(il + 1);
+    }
+
+    const n_layer: usize = @intCast(actual_n_layer);
+    w.layers = try allocator.alloc(ViTLayerWeights, n_layer);
+
+    for (0..n_layer) |il| {
+        const prefix = try std.fmt.allocPrint(allocator, "v.blk.{d}", .{il});
+        defer allocator.free(prefix);
+        w.layers[il] = loadViTLayer(ctx, gguf_file, prefix) catch |err| {
+            log.err("Failed to load ViT layer {d}: {}", .{ il, err });
+            return err;
+        };
+    }
+
+    log.info("Gemma4V weights loaded: {d} ViT layers", .{n_layer});
+}
+
+/// 从 VisionEncoderWeights 构建计算图的包装函数
+fn buildGraphFromWeights(
+    ctx: *ggml.Context,
+    gf: *ggml.CGraph,
+    w: *const VisionEncoderWeights,
+    p: *const graph.VisionHParams,
+    image_tensor: *ggml.Tensor,
+) !*ggml.CGraph {
+    // 构建 ImageF32 用于 GraphBuilder
+    const img = ImageF32{
+        .buf = image_tensor.dataF32(),
+        .nx = p.image_size,
+        .ny = p.image_size,
+    };
+
+    var hparams = VisionHParams{
+        .image_size = p.image_size,
+        .patch_size = p.patch_size,
+        .n_embd = p.n_embd,
+        .n_head = p.n_head,
+        .n_layer = p.n_layer,
+        .n_ff = p.n_ff,
+        .projection_dim = p.projection_dim,
+        .n_merge = p.n_merge,
+        .eps = p.eps,
+        .rope_theta = p.rope_theta,
+    };
+
+    var builder = GraphBuilder{
+        .weights = w,
+        .hparams = &hparams,
+        .proj_type = .gemma4v,
+        .img = &img,
+        .ctx0 = ctx,
+        .gf = gf,
+    };
+
+    return buildGraph(&builder);
+}
+
+/// 估算输出 token 数量
+pub fn estimateOutputTokens(img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32 {
+    const patches_x = (img_width + patch_size - 1) / patch_size;
+    const patches_y = (img_height + patch_size - 1) / patch_size;
+    const n_patches = patches_x * patches_y;
+    const merge = if (n_merge > 0) n_merge else 1;
+    return n_patches / (merge * merge);
+}
+
+// ============================================================================
+// 权重加载辅助函数
+// ============================================================================
+
+fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
+    const weight_loader = @import("weight_loader");
+    return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
+}
+
+fn loadViTLayer(
+    ctx: *ggml.Context,
+    gguf_file: *const gguf.GGUFFile,
+    prefix: []const u8,
+) !ViTLayerWeights {
+    const weight_loader = @import("weight_loader");
+    var layer = ViTLayerWeights{};
+
+    // Attention
+    layer.ln_1_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln1.weight") catch null;
+    layer.ln_1_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln1.bias") catch null;
+    layer.q_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_q.weight") catch null;
+    layer.k_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_k.weight") catch null;
+    layer.v_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_v.weight") catch null;
+    layer.o_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_out.weight") catch null;
+    layer.o_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_out.bias") catch null;
+
+    // FFN
+    layer.ln_2_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln2.weight") catch null;
+    layer.ln_2_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln2.bias") catch null;
+    layer.ff_up_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight") catch null;
+    layer.ff_down_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch null;
+
+    return layer;
+}
+
+// ============================================================================
+// 原始 buildGraph 函数（保留向后兼容）
+// ============================================================================
 
 /// 构建 Gemma4V 完整计算图
 ///
@@ -40,7 +196,7 @@ pub fn buildGraph(
 
     const n_embd: i64 = @intCast(p.n_embd);
     const n_head: i64 = @intCast(p.n_head);
-    const d_head = n_embd / n_head;
+    const d_head = @divExact(n_embd, n_head);
     const img_width: u32 = p.image_size;
     const img_height: u32 = p.image_size;
     const patch_size: i32 = @intCast(p.patch_size);
@@ -69,7 +225,7 @@ pub fn buildGraph(
             for (0..W) |x| {
                 const src_idx = (y * W + x) * 3;
                 const dst_base = y * W + x;
-                dst[dst_base] = src[src_idx];       // R
+                dst[dst_base] = src[src_idx];           // R
                 dst[dst_base + H * W] = src[src_idx + 1]; // G
                 dst[dst_base + 2 * H * W] = src[src_idx + 2]; // B
             }
@@ -133,11 +289,11 @@ pub fn buildGraph(
 
     // 创建 2D RoPE 位置索引
     const vit_indices = try graph.createPositionIndices(ctx, n_patches, n_patches_x);
-    const d_head_half = d_head / 2;
+    const d_head_half = @divExact(d_head, @as(i64, 2));
 
     for (w.layers, 0..) |*layer, il| {
-        const layer_name = try std.fmt.allocPrint(std.heap.page_allocator, "blk.{d}", .{il});
-        defer std.heap.page_allocator.free(layer_name);
+        var layer_buf: [32]u8 = undefined;
+        const layer_name = try std.fmt.bufPrintZ(&layer_buf, "blk.{d}", .{il});
 
         var residual = inpL;
 
@@ -266,8 +422,8 @@ pub fn buildGraph(
         );
         pooled.setName("pool_avg");
 
-        const out_x = n_patches_x / kernel_size;
-        const out_y = n_patches_y / kernel_size;
+        const out_x = @divExact(n_patches_x, kernel_size);
+        const out_y = @divExact(n_patches_y, kernel_size);
         pooled = pooled.reshape3d(ctx, out_x * out_y, n_embd, 1);
         pooled.setName("pool_reshaped");
         pooled = pooled.permute(ctx, 1, 0, 2, 3).cont(ctx);
