@@ -338,7 +338,19 @@ pub fn mtmdDebugSaveData(io: std.Io, subdir: ?[]const u8, fname: []const u8, tit
     }
 }
 
-fn writeJsonArray(io: std.Io, file: std.Io.File, data: []const f32) !void {
+/// 将浮点数组以 JSON 数组格式写入文件。
+/// 格式：
+/// [
+/// 1.234567,
+/// 2.345678,
+/// ...
+/// 9.876543
+/// ]
+/// 每个值保留 6 位小数。
+/// @param io I/O 实例
+/// @param file 已打开的文件
+/// @param data 浮点数据
+pub fn writeJsonArray(io: std.Io, file: std.Io.File, data: []const f32) !void {
     try file.writeStreamingAll(io, "[\n");
 
     for (data[0 .. data.len - 1]) |val| {

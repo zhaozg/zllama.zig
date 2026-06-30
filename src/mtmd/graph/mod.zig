@@ -13,6 +13,7 @@ pub const vit = @import("vit.zig");
 pub const attn = @import("attn.zig");
 pub const ffn = @import("ffn.zig");
 pub const norm = @import("norm.zig");
+pub const debug = @import("debug.zig");
 
 // 模型特定构建器
 pub const model_graphs = struct {
@@ -51,6 +52,10 @@ pub const ClampInfo = types.ClampInfo;
 pub const Modality = types.Modality;
 pub const ResizeAlgo = types.ResizeAlgo;
 pub const PadStyle = types.PadStyle;
+
+// 重新导出调试类型
+pub const DebugTensorEntry = debug.DebugTensorEntry;
+pub const DebugTensorRegistry = debug.DebugTensorRegistry;
 
 /// 音频编码器后端接口
 /// 每个音频模型实现此接口，提供模型特定的操作

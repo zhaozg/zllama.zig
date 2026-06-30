@@ -108,6 +108,16 @@ pub const CGraph = opaque {
             false, // force_grads = false
         )));
     }
+
+    /// 通过名称在图中查找张量
+    /// 返回 null 如果未找到
+    pub fn getTensor(self: *CGraph, name: [:0]const u8) ?*Tensor {
+        const t = c.ggml_graph_get_tensor(@ptrCast(self), name.ptr);
+        if (t) |ptr| {
+            return @as(*Tensor, @ptrCast(ptr));
+        }
+        return null;
+    }
 };
 
 // ============================================================================

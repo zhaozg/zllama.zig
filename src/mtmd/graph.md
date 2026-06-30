@@ -28,6 +28,7 @@ src/mtmd/graph/
 ├── merge.zig            # Patch merge / pixel shuffle 构建
 ├── stack.zig            # Frame stacking 构建（音频）
 ├── mm.zig               # 多模态投影器构建（build_mm）
+├── debug.zig            # 调试支持（DebugTensorRegistry）
 └── types.zig            # 共享类型定义（norm_type, ffn_op_type 等）
 ```
 
@@ -84,6 +85,7 @@ pub const GraphBuilder = struct {
     gf: *ggml.CGraph,
     n_batch: u32 = 1,
     flash_attn_type: FlashAttnType = .disabled,
+    debug_registry: DebugTensorRegistry = .{},
 
     pub fn build(self: *GraphBuilder) !*ggml.CGraph;
     pub fn buildMM(self: *const GraphBuilder, w: *ggml.Tensor, x: *ggml.Tensor) !*ggml.Tensor;
@@ -99,6 +101,9 @@ pub const GraphBuilder = struct {
     pub fn buildGemma3Projector(...) !*ggml.Tensor;
     pub fn buildStandardizeAndProject(...) !*ggml.Tensor;
     pub fn createPositionIndices(...) !struct { pos_x, pos_y };
+    pub fn debugRegisterTensor(...) !void;
+    pub fn debugSaveAll(...) !void;
+    pub fn debugSaveTensorByName(...) !void;
 };
 ```
 
@@ -165,6 +170,44 @@ pub const AudioEncoderBackend = struct {
 - 张量形状断言
 - 调试命名（`setName()`）
 - 中间张量数据保存（`mtmdDebugSaveTensor()`）
+- 实现:
+  1. ✅ `src/mtmd/graph/debug.zig` — `DebugTensorRegistry` 模块，管理调试张量注册表
+     - `register()`: 注册张量，设置调试名称，标记 input/output
+     - `saveAll()`: 将所有注册张量保存为 JSON 数组文件
+     - `saveTensor()`: 保存单个张量数据
+     - `saveTensorByName()`: 通过名称在图中查找张量并保存
+  2. ✅ `src/ggml/graph.zig` — `CGraph.getTensor()`: 通过名称在图中查找张量
+  3. ✅ `src/mtmd/graph/builder.zig` — `GraphBuilder` 集成调试接口
+     - `debugRegisterTensor()`: 注册张量调试
+     - `debugSaveAll()`: 保存所有调试张量
+     - `debugSaveTensorByName()`: 按名称保存单个张量
+  4. ✅ `src/mtmd/graph/mod.zig` — 导出 `debug` 模块和 `DebugTensorRegistry`
+
+### 7.1 使用示例
+
+```zig
+// 在模型构建器中注册调试张量
+const allocator = ...;
+try builder.debugRegisterTensor(allocator, cur, "debug_audio_encoder_input", false);
+
+// 构建完成后保存所有调试数据
+try builder.debugSaveAll(allocator, "/tmp/debug", "llama_audio");
+
+// 或按名称保存单个张量
+try builder.debugSaveTensorByName(allocator, "debug_audio_encoder_input", "/tmp/debug", "encoder_input.json");
+```
+
+### 7.2 文件格式
+
+保存的 JSON 数组文件格式（与 llama.cpp `mtmd_debug_save_data` 兼容）:
+```json
+[
+1.234567,
+2.345678,
+...
+9.876543
+]
+```
 
 ## 8. 测试策略
 
@@ -191,6 +234,7 @@ src/mtmd/
 │   ├── merge.zig               # Patch merge 构建
 │   ├── stack.zig               # Frame stacking 构建
 │   ├── mm.zig                  # 投影器构建
+│   ├── debug.zig               # 调试支持
 │   └── models/                 # 模型特定实现
 │       ├── gemma4v.zig         # Gemma4V 视觉编码器
 │       ├── gemma4a.zig         # Gemma4A 音频编码器
@@ -223,6 +267,7 @@ src/mtmd/
 | 投影器 | `src/mtmd/graph/mm.zig` | ✅ 完成（含测试） |
 | 通用 ViT | `src/mtmd/graph/vit.zig` | ✅ 完成（含测试） |
 | 模块根 | `src/mtmd/graph/mod.zig` | ✅ 完成 |
+| 调试支持 | `src/mtmd/graph/debug.zig` | ✅ 完成（含测试） |
 | Gemma4V 模型 | `src/mtmd/graph/models/gemma4v.zig` | ✅ 完成 |
 | Gemma4A 模型 | `src/mtmd/graph/models/gemma4a.zig` | ✅ 完成 |
 | Gemma4UV 模型 | `src/mtmd/graph/models/gemma4uv.zig` | ✅ 完成 |
@@ -236,10 +281,10 @@ src/mtmd/
 | AudioEncoderBackend 接口 | `src/mtmd/graph/mod.zig` | ✅ 完成（定义在 graph/mod.zig，由 audio/encoder.zig 重新导出） |
 | Gemma4A backend 注册 | `src/mtmd/graph/models/gemma4a.zig` | ✅ 完成（导出 `backend` 常量） |
 | AudioEncoder 使用 AudioEncoderParams | `src/mtmd/audio/encoder.zig` | ✅ 完成（内部使用 AudioEncoderParams，调用 backend 时构建 VisionHParams） |
+| CGraph.getTensor 绑定 | `src/ggml/graph.zig` | ✅ 完成（ggml_graph_get_tensor 绑定） |
 
 ### 10.2 待完成
 
 | 任务 | 优先级 | 说明 |
 |---|---|---|
 | 集成测试 | 中 | 与 llama.cpp 参考实现对比 |
-| 调试保存功能 | 低 | 中间张量数据保存 |

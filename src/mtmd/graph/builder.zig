@@ -6,6 +6,7 @@
 const std = @import("std");
 const ggml = @import("ggml");
 const types = @import("types.zig");
+const debug_mod = @import("debug.zig");
 const vit_builder = @import("vit.zig");
 const attn_builder = @import("attn.zig");
 const ffn_builder = @import("ffn.zig");
@@ -50,16 +51,34 @@ pub const GraphBuilder = struct {
     n_batch: u32 = 1,
     /// Flash attention 类型
     flash_attn_type: FlashAttnType = .disabled,
+    /// 调试张量注册表
+    debug_registry: debug_mod.DebugTensorRegistry = .{},
 
     /// 派生常量
-    pub fn patchSize(self: *const GraphBuilder) u32 { return self.hparams.patch_size; }
-    pub fn nEmbd(self: *const GraphBuilder) u32 { return self.hparams.n_embd; }
-    pub fn nHead(self: *const GraphBuilder) u32 { return self.hparams.n_head; }
-    pub fn nHeadKV(self: *const GraphBuilder) u32 { return if (self.hparams.n_head_kv > 0) self.hparams.n_head_kv else self.hparams.n_head; }
-    pub fn dHead(self: *const GraphBuilder) u32 { return self.hparams.n_embd / self.hparams.n_head; }
-    pub fn nLayer(self: *const GraphBuilder) u32 { return self.hparams.n_layer; }
-    pub fn nMMProjEmbd(self: *const GraphBuilder) u32 { return self.hparams.projection_dim; }
-    pub fn eps(self: *const GraphBuilder) f32 { return self.hparams.eps; }
+    pub fn patchSize(self: *const GraphBuilder) u32 {
+        return self.hparams.patch_size;
+    }
+    pub fn nEmbd(self: *const GraphBuilder) u32 {
+        return self.hparams.n_embd;
+    }
+    pub fn nHead(self: *const GraphBuilder) u32 {
+        return self.hparams.n_head;
+    }
+    pub fn nHeadKV(self: *const GraphBuilder) u32 {
+        return if (self.hparams.n_head_kv > 0) self.hparams.n_head_kv else self.hparams.n_head;
+    }
+    pub fn dHead(self: *const GraphBuilder) u32 {
+        return self.hparams.n_embd / self.hparams.n_head;
+    }
+    pub fn nLayer(self: *const GraphBuilder) u32 {
+        return self.hparams.n_layer;
+    }
+    pub fn nMMProjEmbd(self: *const GraphBuilder) u32 {
+        return self.hparams.projection_dim;
+    }
+    pub fn eps(self: *const GraphBuilder) f32 {
+        return self.hparams.eps;
+    }
 
     /// 构建完整的计算图
     /// 返回计算图指针
@@ -113,7 +132,6 @@ pub const GraphBuilder = struct {
     pub fn buildInp(self: *GraphBuilder) !*ggml.Tensor {
         const w = self.weights;
         const p = self.hparams;
-
 
         return patch_builder.buildInp(
             self.ctx0,
@@ -241,15 +259,66 @@ pub const GraphBuilder = struct {
         return rope_builder.createPositionIndices(self.ctx0, n_patches, n_patches_x);
     }
 
-    /// 调试: 保存张量数据
-    pub fn debugSaveTensor(
+    /// 注册一个张量用于调试
+    ///
+    /// 参数:
+    ///   - allocator: 分配器
+    ///   - tensor: 要调试的张量
+    ///   - debug_name: 调试名称（会通过 setName 设置到张量）
+    ///   - is_input: true 表示输入张量，false 表示输出张量
+    ///
+    /// 此函数会:
+    ///   1. 设置张量的调试名称 (setName)
+    ///   2. 如果是输入张量，调用 setInput；否则调用 setOutput
+    ///   3. 将条目添加到调试注册表
+    pub fn debugRegisterTensor(
         self: *GraphBuilder,
-        name: []const u8,
-        subdir: ?[]const u8,
-    ) void {
-        _ = self;
-        _ = name;
-        _ = subdir;
-        // TODO: implement debug save
+        allocator: std.mem.Allocator,
+        tensor: *ggml.Tensor,
+        debug_name: []const u8,
+        is_input: bool,
+    ) !void {
+        try self.debug_registry.register(allocator, tensor, debug_name, is_input);
+    }
+
+    /// 保存所有调试张量数据到文件
+    ///
+    /// 参数:
+    ///   - allocator: 分配器
+    ///   - storage_path: 存储目录路径
+    ///   - file_prefix: 文件名前缀
+    ///
+    /// 每个张量保存为一个 JSON 数组文件:
+    ///   {storage_path}/{file_prefix}_{debug_name}.json
+    pub fn debugSaveAll(
+        self: *GraphBuilder,
+        allocator: std.mem.Allocator,
+        storage_path: []const u8,
+        file_prefix: []const u8,
+    ) !void {
+        try self.debug_registry.saveAll(allocator, storage_path, file_prefix);
+    }
+
+    /// 保存单个调试张量数据到文件（通过调试名称在图中查找）
+    ///
+    /// 参数:
+    ///   - allocator: 分配器
+    ///   - debug_name: 调试名称（必须已通过 setName 设置）
+    ///   - storage_path: 存储目录路径
+    ///   - filename: 输出文件名
+    pub fn debugSaveTensorByName(
+        self: *GraphBuilder,
+        allocator: std.mem.Allocator,
+        debug_name: [:0]const u8,
+        storage_path: []const u8,
+        filename: []const u8,
+    ) !void {
+        try debug_mod.DebugTensorRegistry.saveTensorByName(
+            allocator,
+            self.gf,
+            debug_name,
+            storage_path,
+            filename,
+        );
     }
 };
