@@ -377,6 +377,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mm_graph_mod.addImport("ggml", ggml_mod);
+    mm_graph_mod.addImport("gguf", gguf_mod);
+    mm_graph_mod.addImport("weight_loader", weight_loader_mod);
 
     const mm_audio_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/audio/mod.zig"),
@@ -389,7 +391,6 @@ pub fn build(b: *std.Build) void {
     mm_audio_mod.addImport("weight_loader", weight_loader_mod);
     mm_audio_mod.addImport("fft", fft_mod);
     mm_audio_mod.addImport("graph", mm_graph_mod);
-
 
     const mm_vision_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/vision/mod.zig"),
@@ -411,7 +412,6 @@ pub fn build(b: *std.Build) void {
     utils_mod.addImport("ggml", ggml_mod);
     utils_mod.addImport("gguf", gguf_mod);
     utils_mod.addImport("tokenizer", tokenizer_mod);
-
 
     const mm_manager_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/mod.zig"),
@@ -565,6 +565,8 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("stb_image", stb_image_mod);
     test_root_mod.addImport("utils", utils_mod);
     test_root_mod.addImport("mtmd", mm_manager_mod);
+
+    test_root_mod.addImport("graph", mm_graph_mod);
 
     // 测试工具模块（src/tests/utils.zig），与 src/utils.zig 不同
     const test_utils_mod_for_root = b.createModule(.{

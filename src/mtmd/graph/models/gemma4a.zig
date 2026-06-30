@@ -1,11 +1,22 @@
-//! Gemma4A 音频编码器图构建
+//! Gemma4A 音频编码器 — 模型特定实现
 //!
-//! 实现 Gemma4A Conformer 音频编码器的计算图构建。
+//! 实现 Gemma4A Conformer 音频编码器的：
+//! - 权重结构定义（AudioEncoderWeights）
+//! - 权重加载（loadWeights）
+//! - 计算图构建（buildGraph / buildGraphEx）
+//! - Token 估算（estimateOutputTokens）
+//!
 //! 参考: deps/llama.cpp/tools/mtmd/models/gemma4a.cpp
+//!
+//! 本模块提供两种调用方式：
+//! 1. buildGraph() — 接受 GraphBuilder（用于 vision 管线兼容）
+//! 2. buildGraphEx() — 接受独立参数（用于 audio encoder 直接调用）
 
 const std = @import("std");
 const ggml = @import("ggml");
+const gguf = @import("gguf");
 const graph = @import("../mod.zig");
+const weight_loader = @import("weight_loader");
 
 const GraphBuilder = graph.GraphBuilder;
 const NormType = graph.NormType;
@@ -15,9 +26,71 @@ const VisionHParams = graph.VisionHParams;
 const ViTLayerWeights = graph.ViTLayerWeights;
 const ClampInfo = graph.ClampInfo;
 
-const log = std.log.scoped(.gemma4a_graph);
+const log = std.log.scoped(.gemma4a);
 
-/// 构建 Gemma4A 完整计算图
+/// 音频编码器权重接口（与 VisionEncoderWeights 兼容的字段子集）
+/// 供 buildGraphEx 使用，避免直接依赖 VisionEncoderWeights
+pub const AudioWeights = struct {
+    sscp_conv_w: [2]?*ggml.Tensor,
+    sscp_conv_b: [2]?*ggml.Tensor,
+    sscp_norm_w: [2]?*ggml.Tensor,
+    sscp_inp_proj_w: ?*ggml.Tensor,
+    sscp_inp_proj_b: ?*ggml.Tensor,
+    layers: []const ViTLayerWeights,
+    audio_out_proj_w: ?*ggml.Tensor,
+    audio_out_proj_b: ?*ggml.Tensor,
+    mm_soft_emb_norm_w: ?*ggml.Tensor,
+    mm_input_proj_w: ?*ggml.Tensor,
+};
+
+/// 音频编码器超参数接口
+pub const AudioParams = struct {
+    n_embd: u32,
+    n_head: u32,
+    n_layer: u32,
+    d_head: u32,
+};
+
+/// 从 VisionEncoderWeights 构建 AudioWeights
+pub fn weightsFromVision(w: *const VisionEncoderWeights) AudioWeights {
+    return .{
+        .sscp_conv_w = w.sscp_conv_w,
+        .sscp_conv_b = w.sscp_conv_b,
+        .sscp_norm_w = w.sscp_norm_w,
+        .sscp_inp_proj_w = w.sscp_inp_proj_w,
+        .sscp_inp_proj_b = w.sscp_inp_proj_b,
+        .layers = w.layers,
+        .audio_out_proj_w = w.audio_out_proj_w,
+        .audio_out_proj_b = w.audio_out_proj_b,
+        .mm_soft_emb_norm_w = w.mm_soft_emb_norm_w,
+        .mm_input_proj_w = w.mm_input_proj_w,
+    };
+}
+
+/// 从 VisionHParams 构建 AudioParams
+pub fn paramsFromVision(p: *const VisionHParams) AudioParams {
+    return .{
+        .n_embd = p.n_embd,
+        .n_head = p.n_head,
+        .n_layer = p.n_layer,
+        .d_head = if (p.n_head > 0) p.n_embd / p.n_head else 64,
+    };
+}
+
+/// 构建 Gemma4A 完整计算图（GraphBuilder 版本）
+/// 委托给 buildGraphEx
+pub fn buildGraph(
+    builder: *GraphBuilder,
+    mel_tensor: *ggml.Tensor,
+    clamp_map: *const std.StringHashMap(ClampInfo),
+) !*ggml.CGraph {
+    const audio_w = weightsFromVision(builder.weights);
+    const audio_p = paramsFromVision(builder.hparams);
+    return buildGraphEx(builder.ctx0, builder.gf, &audio_w, &audio_p, mel_tensor, clamp_map);
+}
+
+/// 构建 Gemma4A 完整计算图（独立参数版本）
+/// 可被 audio encoder 直接调用，无需 GraphBuilder
 ///
 /// 处理流程:
 ///   1. 子采样 Conv2D（2 层，每层 stride=2, padding=1）
@@ -27,23 +100,21 @@ const log = std.log.scoped(.gemma4a_graph);
 ///   5. 多模态嵌入器（RMSNorm + 线性投影）
 ///
 /// 参考: llama.cpp gemma4a.cpp build()
-pub fn buildGraph(
-    builder: *GraphBuilder,
+pub fn buildGraphEx(
+    ctx: *ggml.Context,
+    gf: *ggml.CGraph,
+    w: *const AudioWeights,
+    p: *const AudioParams,
     mel_tensor: *ggml.Tensor,
     clamp_map: *const std.StringHashMap(ClampInfo),
 ) !*ggml.CGraph {
-    const ctx = builder.ctx0;
-    const w = builder.weights;
-    const p = builder.hparams;
-
     const norm_eps: f32 = 1e-6;
     const res_weight: f32 = 0.5;
 
     const n_frames: i64 = mel_tensor.ne()[0];
     const n_mel_bins: i64 = mel_tensor.ne()[1];
 
-    log.info("Gemma4A graph: frames={d}, mel_bins={d}, embd={d}, heads={d}, layers={d}",
-        .{ n_frames, n_mel_bins, p.n_embd, p.n_head, p.n_layer });
+    log.info("Gemma4A graph: frames={d}, mel_bins={d}, embd={d}, heads={d}, layers={d}", .{ n_frames, n_mel_bins, p.n_embd, p.n_head, p.n_layer });
 
     // 1. Reshape mel tensor to 4D [n_frames, n_mel_bins, 1, 1]
     var cur = mel_tensor.reshape4d(ctx, n_frames, n_mel_bins, 1, 1);
@@ -52,7 +123,7 @@ pub fn buildGraph(
     // Transpose to frame-major layout [n_mel, n_frames, 1, 1]
     cur = ggml.transpose(ctx, cur);
     cur = ggml.cont(ctx, cur);
-    cur.setName("inp_transposed");
+    cur.setName("debug_audio_encoder_input");
     ggml.setInput(cur);
 
     // 2. Subsampling Conv2D (2 layers, stride=2, padding=1)
@@ -77,21 +148,34 @@ pub fn buildGraph(
 
             cur = cur.relu(ctx);
             cur.setName("conv_act");
+
+            // === DEBUG: set name + setOutput to preserve intermediate tensor ===
+            if (i == 0) {
+                cur.setName("debug_audio_conv2d_0_output");
+                ggml.setOutput(cur);
+            }
+            if (i == 1) {
+                cur.setName("debug_audio_conv2d_1_output");
+                ggml.setOutput(cur);
+            }
         }
     }
 
     // 3. Flatten: [freq, time, ch, 1] -> [ch*freq, time]
     cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
-    cur.setName("flattened");
+    cur.setName("debug_audio_after_cont");
+    ggml.setOutput(cur);
 
     const flat_dim0 = cur.ne()[0] * cur.ne()[1];
     cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
-    cur.setName("flatten_2d");
+    cur.setName("debug_audio_flatten_output");
+    ggml.setOutput(cur);
 
     // 4. Input projection to Conformer embedding dim
     if (w.sscp_inp_proj_w) |proj_w| {
         cur = buildMMWithClamp(ctx, proj_w, cur, clamp_map);
-        cur.setName("inp_proj");
+        cur.setName("debug_audio_input_proj_output");
+        ggml.setOutput(cur);
         if (w.sscp_inp_proj_b) |proj_b| {
             cur = cur.add(ctx, proj_b);
             cur.setName("inp_proj_biased");
@@ -109,24 +193,22 @@ pub fn buildGraph(
     const Np: i64 = B * C; // padded sequence length
     const pad_seq: i64 = Np - n_pos;
 
-    log.info("  chunked attn: C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad={d}",
-        .{ C, P, S, R, B, Np, pad_seq });
+    log.info("  chunked attn: C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad={d}", .{ C, P, S, R, B, Np, pad_seq });
 
     // Create RPE and mask tensors
     ctx.setNoAlloc(false);
     const pos_emb = try ctx.newTensor2d(ggml.Type.f32, @as(i64, @intCast(p.n_embd)), R);
-    pos_emb.setName("pos_emb");
+    pos_emb.setName("debug_audio_pos_emb");
     fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.n_embd), @intCast(P));
 
     const kq_mask = try ctx.newTensor4d(ggml.Type.f32, S, C, B, 1);
-    kq_mask.setName("attn_mask");
+    kq_mask.setName("debug_audio_attn_mask");
     fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos));
     ctx.setNoAlloc(true);
 
     // 6. Conformer Blocks
     for (w.layers, 0..) |*layer, il| {
         _ = il;
-
 
         var residual = cur;
 
@@ -289,6 +371,10 @@ pub fn buildGraph(
             residual;
     }
 
+    // === DEBUG: set name + setOutput for conformer blocks output ===
+    cur.setName("debug_audio_conformer_blocks_output");
+    ggml.setOutput(cur);
+
     // 7. Output projection
     if (w.audio_out_proj_w) |out_w| {
         cur = buildMMWithClamp(ctx, out_w, cur, clamp_map);
@@ -311,11 +397,13 @@ pub fn buildGraph(
         cur.setName("mm_proj");
     }
 
-    cur.setName("audio_output");
-    builder.gf.buildForwardExpand(cur);
+    cur.setName("debug_audio_multimodal_embedder_output");
+    ggml.setOutput(cur);
+
+    gf.buildForwardExpand(cur);
 
     log.info("Gemma4A graph built successfully", .{});
-    return builder.gf;
+    return gf;
 }
 
 // ============================================================================
@@ -408,4 +496,273 @@ fn fillChunkedAttentionMask(
             }
         }
     }
+}
+
+// ============================================================================
+// 音频编码器后端注册
+// ============================================================================
+
+/// Gemma4A 音频编码器后端实例
+pub const backend = graph.AudioEncoderBackend{
+    .name = "gemma4a",
+    .loadParams = loadParams,
+    .loadWeights = loadWeights,
+    .loadClampInfo = loadClampInfo,
+    .buildGraph = buildGraphFromWeights,
+    .estimateOutputTokens = estimateOutputTokens,
+};
+
+/// 从 VisionEncoderWeights 构建计算图的包装函数
+fn buildGraphFromWeights(
+    ctx: *ggml.Context,
+    gf: *ggml.CGraph,
+    w: *const VisionEncoderWeights,
+    p: *const VisionHParams,
+    mel_tensor: *ggml.Tensor,
+    clamp_map: *const std.StringHashMap(ClampInfo),
+) !*ggml.CGraph {
+    const audio_w = weightsFromVision(w);
+    const audio_p = paramsFromVision(p);
+    return buildGraphEx(ctx, gf, &audio_w, &audio_p, mel_tensor, clamp_map);
+}
+
+// ============================================================================
+// 权重加载（从 GGUF 加载 Gemma4A 音频编码器权重到 VisionEncoderWeights）
+// ============================================================================
+
+/// 从 GGUF 元数据读取音频编码器超参数
+pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void {
+    if (gguf_file.getU32("clip.audio.embedding_length")) |v| params.n_embd = v;
+    if (gguf_file.getU32("clip.audio.attention.head_count")) |v| params.n_head = v;
+    if (gguf_file.getU32("clip.audio.block_count")) |v| params.n_layer = v;
+    if (gguf_file.getU32("clip.audio.feed_forward_length")) |v| params.n_ff = v;
+    if (gguf_file.getU32("clip.audio.num_mel_bins")) |v| params.n_mel_bins = v;
+    if (gguf_file.getF32("clip.audio.attention.layer_norm_epsilon")) |v| params.eps = v;
+}
+
+/// 从 GGUF 加载 Gemma4A 音频编码器所有权重到 VisionEncoderWeights
+pub fn loadWeights(
+    allocator: std.mem.Allocator,
+    gguf_file: *const gguf.GGUFFile,
+    ctx: *ggml.Context,
+    w: *VisionEncoderWeights,
+) !void {
+    // 加载子采样卷积权重
+    for (0..2) |i| {
+        var buf: [64]u8 = undefined;
+        const conv_name = try std.fmt.bufPrint(&buf, "a.conv1d.{d}.weight", .{i});
+        w.sscp_conv_w[i] = findTensorInGGUF(ctx, gguf_file, conv_name) catch null;
+
+        const bias_name = try std.fmt.bufPrint(&buf, "a.conv1d.{d}.bias", .{i});
+        w.sscp_conv_b[i] = findTensorInGGUF(ctx, gguf_file, bias_name) catch null;
+
+        const norm_name = try std.fmt.bufPrint(&buf, "a.conv1d.{d}.norm.weight", .{i});
+        w.sscp_norm_w[i] = findTensorInGGUF(ctx, gguf_file, norm_name) catch null;
+    }
+
+    // 子采样输入投影
+    w.sscp_inp_proj_w = findTensorInGGUF(ctx, gguf_file, "a.input_projection.weight") catch null;
+    w.sscp_inp_proj_b = findTensorInGGUF(ctx, gguf_file, "a.input_projection.bias") catch null;
+
+    // 输出投影
+    w.audio_out_proj_w = findTensorInGGUF(ctx, gguf_file, "a.pre_encode.out.weight") catch null;
+    w.audio_out_proj_b = findTensorInGGUF(ctx, gguf_file, "a.pre_encode.out.bias") catch null;
+    w.mm_soft_emb_norm_w = findTensorInGGUF(ctx, gguf_file, "mm.a.soft_emb_norm.weight") catch null;
+    w.mm_input_proj_w = findTensorInGGUF(ctx, gguf_file, "mm.a.input_projection.weight") catch null;
+
+    // 检测实际层数
+    var actual_n_layer: u32 = 0;
+    for (0..64) |il| {
+        var buf: [32]u8 = undefined;
+        const test_name = try std.fmt.bufPrint(&buf, "a.blk.{d}.attn_q.weight", .{il});
+        if (gguf_file.findTensor(test_name) == null) break;
+        actual_n_layer = @intCast(il + 1);
+    }
+    // n_layer 由调用者从 VisionHParams 设置，这里使用检测值覆盖
+    const n_layer: usize = @intCast(actual_n_layer);
+    w.layers = try allocator.alloc(ViTLayerWeights, n_layer);
+
+    for (0..n_layer) |il| {
+        const prefix = try std.fmt.allocPrint(allocator, "a.blk.{d}", .{il});
+        defer allocator.free(prefix);
+        w.layers[il] = loadConformerLayer(ctx, gguf_file, prefix) catch |err| {
+            log.err("Failed to load conformer layer {d}: {}", .{ il, err });
+            return err;
+        };
+    }
+
+    // 日志
+    for (0..2) |i| {
+        if (w.sscp_conv_w[i]) |t| {
+            log.info("  conv1d.{d}.weight: shape=[{d},{d},{d}], name={s}", .{ i, t.ne()[0], t.ne()[1], t.ne()[2], t.getName() });
+        } else {
+            log.warn("  conv1d.{d}.weight: NOT FOUND", .{i});
+        }
+    }
+    if (w.sscp_inp_proj_w) |t| {
+        log.info("  input_projection: shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
+    } else {
+        log.warn("  input_projection: NOT FOUND (a.input_projection.weight)", .{});
+    }
+    if (w.audio_out_proj_w) |t| {
+        log.info("  audio_out_proj:  shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
+    } else {
+        log.warn("  audio_out_proj:  NOT FOUND (a.pre_encode.out.weight)", .{});
+    }
+    if (w.mm_soft_emb_norm_w) |t| {
+        log.info("  mm_soft_emb_norm: shape=[{d}], name={s}", .{ t.ne()[0], t.getName() });
+    } else {
+        log.warn("  mm_soft_emb_norm: NOT FOUND (mm.a.soft_emb_norm.weight)", .{});
+    }
+    if (w.mm_input_proj_w) |t| {
+        log.info("  mm_input_proj:   shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
+    } else {
+        log.warn("  mm_input_proj:   NOT FOUND (mm.a.input_projection.weight)", .{});
+    }
+}
+
+/// 加载 Clamp 信息到 VisionEncoderWeights.clamp_info_map
+pub fn loadClampInfo(
+    allocator: std.mem.Allocator,
+    gguf_file: *const gguf.GGUFFile,
+    w: *VisionEncoderWeights,
+) !void {
+    var clamp_map = std.StringHashMap(ClampInfo).init(allocator);
+    var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| return err;
+    defer weight_names.deinit(allocator);
+
+    // 收集所有权重名称
+    for (w.sscp_conv_w) |t| {
+        if (t) |wt| try weight_names.append(allocator, wt.getName());
+    }
+    if (w.sscp_inp_proj_w) |t| try weight_names.append(allocator, t.getName());
+    if (w.audio_out_proj_w) |t| try weight_names.append(allocator, t.getName());
+    if (w.mm_input_proj_w) |t| try weight_names.append(allocator, t.getName());
+
+    for (w.layers) |*layer| {
+        if (layer.q_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.k_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.v_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.o_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_up_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_down_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.conv_pw1_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.conv_dw_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.conv_pw2_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_up_1_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_down_1_w) |t| try weight_names.append(allocator, t.getName());
+    }
+
+    const weight_suffix = ".weight";
+    const clamp_suffixes = [_][]const u8{ ".input_max", ".input_min", ".output_max", ".output_min" };
+
+    for (weight_names.items) |w_name| {
+        if (!std.mem.endsWith(u8, w_name, weight_suffix)) continue;
+
+        const prefix_len = w_name.len - weight_suffix.len;
+        var clamp_names: [4][]const u8 = undefined;
+
+        for (&clamp_names, clamp_suffixes) |*out_name, suffix| {
+            const new_len = prefix_len + suffix.len;
+            const buf = try allocator.alloc(u8, new_len);
+            errdefer allocator.free(buf);
+            @memcpy(buf[0..prefix_len], w_name[0..prefix_len]);
+            @memcpy(buf[prefix_len..][0..suffix.len], suffix);
+            out_name.* = buf;
+        }
+        defer {
+            for (clamp_names) |n| allocator.free(n);
+        }
+
+        const inp_max_val = readScalarOrDefault(gguf_file, clamp_names[0], std.math.floatMax(f32));
+        const inp_min_val = readScalarOrDefault(gguf_file, clamp_names[1], -std.math.floatMax(f32));
+        const out_max_val = readScalarOrDefault(gguf_file, clamp_names[2], std.math.floatMax(f32));
+        const out_min_val = readScalarOrDefault(gguf_file, clamp_names[3], -std.math.floatMax(f32));
+
+        try clamp_map.put(w_name, ClampInfo{
+            .inp_min = inp_min_val,
+            .inp_max = inp_max_val,
+            .out_min = out_min_val,
+            .out_max = out_max_val,
+        });
+    }
+
+    w.clamp_info_map = clamp_map;
+}
+
+/// 估算 Gemma4A 编码后的 token 数量
+/// Gemma4A 使用 2 层步长为 2 的子采样，每 4 帧 mel 特征产生 1 个输出 token
+pub fn estimateOutputTokens(n_frames: u32) u32 {
+    return n_frames / 4;
+}
+
+// ============================================================================
+// 内部辅助函数
+// ============================================================================
+
+fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
+    return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
+}
+
+fn loadConformerLayer(
+    ctx: *ggml.Context,
+    gguf_file: *const gguf.GGUFFile,
+    prefix: []const u8,
+) !ViTLayerWeights {
+    var layer = ViTLayerWeights{};
+
+    layer.q_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_q.weight");
+    layer.k_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_k.weight");
+    layer.v_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_v.weight");
+    layer.o_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_out.weight");
+    layer.o_b = findLayerWeight(ctx, gguf_file, prefix, "attn_out.bias") catch null;
+    layer.ln_1_w = findLayerWeight(ctx, gguf_file, prefix, "ln1.weight") catch null;
+
+    // FFN 1
+    layer.ff_norm_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight") catch null;
+    layer.ff_up_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight");
+    layer.ff_down_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight");
+
+    // Conformer-specific
+    layer.attn_pre_norm_w = findLayerWeight(ctx, gguf_file, prefix, "attn_pre_norm.weight") catch null;
+    layer.attn_post_norm_w = findLayerWeight(ctx, gguf_file, prefix, "attn_post_norm.weight") catch null;
+    layer.per_dim_scale_w = findLayerWeight(ctx, gguf_file, prefix, "per_dim_scale.weight") catch null;
+    layer.per_dim_k_scale_w = findLayerWeight(ctx, gguf_file, prefix, "per_dim_k_scale.weight") catch null;
+    layer.attn_k_rel_w = findLayerWeight(ctx, gguf_file, prefix, "attn_k_rel.weight") catch null;
+    layer.ff_post_norm_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_post_norm.weight") catch null;
+
+    // Convolution module
+    layer.norm_conv_w = findLayerWeight(ctx, gguf_file, prefix, "norm_conv.weight") catch null;
+    layer.conv_pw1_w = findLayerWeight(ctx, gguf_file, prefix, "conv_pw1.weight") catch null;
+    layer.conv_dw_w = findLayerWeight(ctx, gguf_file, prefix, "conv_dw.weight") catch null;
+    layer.conv_dw_b = findLayerWeight(ctx, gguf_file, prefix, "conv_dw.bias") catch null;
+    layer.conv_norm_w = findLayerWeight(ctx, gguf_file, prefix, "conv_norm.weight") catch null;
+    layer.conv_pw2_w = findLayerWeight(ctx, gguf_file, prefix, "conv_pw2.weight") catch null;
+
+    // FFN 2
+    layer.ff_norm_1_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_norm_1.weight") catch null;
+    layer.ff_up_1_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_up_1.weight");
+    layer.ff_down_1_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_down_1.weight");
+    layer.ff_post_norm_1_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_post_norm_1.weight") catch null;
+
+    // Layer output
+    layer.ln_2_w = findLayerWeight(ctx, gguf_file, prefix, "ln2.weight") catch null;
+
+    return layer;
+}
+
+fn findLayerWeight(
+    ctx: *ggml.Context,
+    gguf_file: *const gguf.GGUFFile,
+    prefix: []const u8,
+    name: []const u8,
+) !*ggml.Tensor {
+    return weight_loader.loadLayerWeight(ctx, gguf_file, prefix, name);
+}
+
+fn readScalarOrDefault(gguf_file: *const gguf.GGUFFile, name: []const u8, default_val: f32) f32 {
+    const tensor_info = gguf_file.findTensor(name) orelse return default_val;
+    const data = gguf_file.getTensorData(tensor_info);
+    if (data.len < 4) return default_val;
+    return @as(*const f32, @ptrCast(@alignCast(data.ptr))).*;
 }

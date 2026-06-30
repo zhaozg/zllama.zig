@@ -16,7 +16,6 @@ const vision = @import("vision");
 const tokenizer = @import("tokenizer");
 const graph = @import("graph");
 
-
 const log = std.log.scoped(.mtmd);
 
 pub const audio_mod = audio;
@@ -258,8 +257,12 @@ pub const MultiModalManager = struct {
         var vision_enc: ?vision.VisionEncoder = null;
 
         if (caps.has_audio) {
-            audio_enc = try audio.AudioEncoder.init(io, gguf_file, ctx, allocator);
-            log.info("Audio encoder initialized", .{});
+            const backend = audio.getBackend(caps.audio_encoder_type) orelse {
+                log.err("Unknown audio encoder type: '{s}'", .{caps.audio_encoder_type});
+                return error.UnknownAudioEncoder;
+            };
+            audio_enc = try audio.AudioEncoder.init(io, gguf_file, ctx, allocator, backend);
+            log.info("Audio encoder initialized: backend={s}", .{backend.name});
         }
 
         if (caps.has_vision) {
@@ -291,7 +294,6 @@ pub const MultiModalManager = struct {
         io: std.Io,
         ctx: *ggml.Context,
         cgraph: *ggml.CGraph,
-
         input: MediaInput,
     ) !*ggml.Tensor {
         return switch (input.media_type) {
@@ -300,7 +302,6 @@ pub const MultiModalManager = struct {
                 if (self.vision_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.VisionEncoderNotAvailable;
                     return enc.encode(ctx, cgraph, input.image_data.?, input.image_width, input.image_height);
-
                 }
                 return error.VisionEncoderNotAvailable;
             },
@@ -310,11 +311,9 @@ pub const MultiModalManager = struct {
                     // 优先使用 mel_tensor（由 melToTensor 创建），否则使用 mel_data 回退
                     if (input.mel_tensor) |mt| {
                         return enc.encode(io, ctx, cgraph, mt);
-
                     } else if (input.mel_data) |md| {
                         // 回退：在 encode 内部创建张量
                         return enc.encodeRaw(io, ctx, cgraph, md, input.mel_bins, input.mel_frames);
-
                     } else {
                         return error.NoAudioData;
                     }

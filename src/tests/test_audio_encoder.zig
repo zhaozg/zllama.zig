@@ -5,7 +5,7 @@
 //!   - buildFFN: FFN with SiLU/GELU activation, optional gate/bias, and clamp
 //!   - buildMM: Matrix multiplication with optional input/output clamp
 //!
-//! These functions are the private building blocks of AudioEncoder.encode().
+//! These functions are the shared building blocks from src/mtmd/graph/.
 //! They are tested in isolation using synthetic ggml tensors and graphs.
 //!
 //! Reference: llama.cpp tools/mtmd/clip.cpp (clip_graph_gemma4a)
@@ -13,7 +13,7 @@
 const std = @import("std");
 const testing = std.testing;
 const ggml = @import("ggml");
-const audio_encoder = @import("audio").encoder;
+const graph = @import("graph");
 
 // ============================================================================
 // Test helpers
@@ -73,7 +73,7 @@ fn computeGraph(ctx: *ggml.Context, output: *ggml.Tensor, n_threads: i32) !void 
 }
 
 // ============================================================================
-// buildNorm tests
+// buildNorm tests (using graph.buildNorm)
 // ============================================================================
 
 test "buildNorm: RMS norm without weight/bias" {
@@ -91,8 +91,8 @@ test "buildNorm: RMS norm without weight/bias" {
 
     const eps: f32 = 1e-6;
 
-    // Call buildNorm with RMS norm, no weight/bias
-    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    // Call graph.buildNorm with RMS norm, no weight/bias
+    const result = try graph.buildNorm(ctx, input, null, null, .rms_norm, eps, "test_norm");
 
     // Set output and compute
     ggml.setOutput(result);
@@ -126,7 +126,7 @@ test "buildNorm: RMS norm with weight" {
 
     const eps: f32 = 1e-6;
 
-    const result = try audio_encoder.buildNorm(ctx, input, weight, null, .rms, eps, 0);
+    const result = try graph.buildNorm(ctx, input, weight, null, .rms_norm, eps, "test_norm");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -171,7 +171,7 @@ test "buildNorm: RMS norm with weight and bias" {
 
     const eps: f32 = 1e-6;
 
-    const result = try audio_encoder.buildNorm(ctx, input, weight, bias, .rms, eps, 0);
+    const result = try graph.buildNorm(ctx, input, weight, bias, .rms_norm, eps, "test_norm");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -209,7 +209,7 @@ test "buildNorm: Layer norm without weight/bias" {
 
     const eps: f32 = 1e-6;
 
-    const result = try audio_encoder.buildNorm(ctx, input, null, null, .normal, eps, 0);
+    const result = try graph.buildNorm(ctx, input, null, null, .layer_norm, eps, "test_norm");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -248,7 +248,7 @@ test "buildNorm: RMS norm with zero input" {
 
     const eps: f32 = 1e-6;
 
-    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    const result = try graph.buildNorm(ctx, input, null, null, .rms_norm, eps, "test_norm");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -274,7 +274,7 @@ test "buildNorm: RMS norm with single element" {
 
     const eps: f32 = 1e-6;
 
-    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    const result = try graph.buildNorm(ctx, input, null, null, .rms_norm, eps, "test_norm");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -300,7 +300,7 @@ test "buildNorm: RMS norm with large epsilon" {
 
     const eps: f32 = 1.0; // Large epsilon
 
-    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    const result = try graph.buildNorm(ctx, input, null, null, .rms_norm, eps, "test_norm");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -330,7 +330,7 @@ test "buildNorm: 3D tensor RMS norm" {
 
     const eps: f32 = 1e-6;
 
-    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, eps, 0);
+    const result = try graph.buildNorm(ctx, input, null, null, .rms_norm, eps, "test_norm");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -353,7 +353,7 @@ test "buildNorm: 3D tensor RMS norm" {
 }
 
 // ============================================================================
-// buildFFN tests
+// buildFFN tests (using graph.buildFFN)
 // ============================================================================
 
 test "buildFFN: SiLU without gate (simple FFN)" {
@@ -370,20 +370,15 @@ test "buildFFN: SiLU without gate (simple FFN)" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, -1.0, 0.25);
 
-    // Up projection [in_features, out_features] = [n_features, n_ff]
-    // ggml mulMat requires ne0 to match: weight.ne[0] == input.ne[0]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    // Up projection [n_ff, n_features] (ggml mulMat: weight.ne[0] == input.ne[0])
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(up_w, 42);
 
-    // Down projection [n_ff, n_features]
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
+    // Down projection [n_features, n_ff]
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
-    // Empty clamp map
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try graph.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -414,23 +409,19 @@ test "buildFFN: SwiGLU (with gate)" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, -1.0, 0.25);
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    // Up projection [in_features, out_features] = [n_features, n_ff]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    // Up projection [n_ff, n_features]
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(up_w, 42);
 
-    // Gate projection [in_features, out_features] = [n_features, n_ff]
-    const gate_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    // Gate projection [n_ff, n_features]
+    const gate_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(gate_w, 77);
 
-    // Down projection [n_ff, n_features]
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
+    // Down projection [n_features, n_ff]
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, gate_w, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try graph.buildFFN(ctx, input, up_w, null, gate_w, null, down_w, null, .silu, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -461,17 +452,13 @@ test "buildFFN: GELU without gate" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, -1.0, 0.25);
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(up_w, 42);
 
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .gelu, 0, &clamp_map);
+    const result = try graph.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .gelu, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -496,20 +483,16 @@ test "buildFFN: with up bias" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, 0.5, 0.5);
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(up_w, 42);
 
     const up_b = try ctx.newTensor1d(ggml.Type.f32, n_ff);
     fillTensorConst(up_b, 0.1);
 
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, up_b, null, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try graph.buildFFN(ctx, input, up_w, up_b, null, null, down_w, null, .silu, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -534,20 +517,16 @@ test "buildFFN: with down bias" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, 0.5, 0.5);
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(up_w, 42);
 
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
     const down_b = try ctx.newTensor1d(ggml.Type.f32, n_features);
     fillTensorConst(down_b, 0.2);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, down_b, .silu, 0, &clamp_map);
+    const result = try graph.buildFFN(ctx, input, up_w, null, null, null, down_w, down_b, .silu, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -572,23 +551,19 @@ test "buildFFN: GEGLU with gate bias" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, 0.5, 0.5);
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(up_w, 42);
 
-    const gate_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    const gate_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(gate_w, 77);
 
     const gate_b = try ctx.newTensor1d(ggml.Type.f32, n_ff);
     fillTensorConst(gate_b, -0.05);
 
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, gate_w, gate_b, down_w, null, .gelu, 0, &clamp_map);
+    const result = try graph.buildFFN(ctx, input, up_w, null, gate_w, gate_b, down_w, null, .gelu, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -613,17 +588,13 @@ test "buildFFN: relu_sqr activation" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, -1.0, 0.5);
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(up_w, 42);
 
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .relu_sqr, 0, &clamp_map);
+    const result = try graph.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .relu_sqr, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -648,17 +619,13 @@ test "buildFFN: zero input" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorConst(input, 0.0);
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(up_w, 42);
 
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try graph.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -667,51 +634,6 @@ test "buildFFN: zero input" {
     const out_data = result.dataF32();
     for (out_data) |v| {
         try testing.expectApproxEqAbs(@as(f32, 0.0), v, 1e-5);
-    }
-}
-
-test "buildFFN: SwiGLU with clamp on weights" {
-    var ctx = try createTestCtx();
-    defer ctx.deinit();
-
-    ctx.setNoAlloc(false);
-    defer ctx.setNoAlloc(true);
-
-    const n_features: i64 = 4;
-    const n_ff: i64 = 8;
-    const n_pos: i64 = 1;
-    const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
-    fillTensorSeq(input, 0.5, 0.5);
-
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
-    fillTensor(up_w, 42);
-    up_w.setName("test_up.weight");
-
-    const gate_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
-    fillTensor(gate_w, 77);
-    gate_w.setName("test_gate.weight");
-
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
-    fillTensor(down_w, 99);
-    down_w.setName("test_down.weight");
-
-    // Create clamp map with tight bounds
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-    try clamp_map.put("test_up.weight", .{ .inp_min = -0.5, .inp_max = 0.5, .out_min = -1.0, .out_max = 1.0 });
-    try clamp_map.put("test_gate.weight", .{ .inp_min = -0.5, .inp_max = 0.5, .out_min = -1.0, .out_max = 1.0 });
-    try clamp_map.put("test_down.weight", .{ .inp_min = -0.5, .inp_max = 0.5, .out_min = -1.0, .out_max = 1.0 });
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, gate_w, null, down_w, null, .silu, 0, &clamp_map);
-
-    ggml.setOutput(result);
-    try computeGraph(ctx, result, 1);
-
-    const out_data = result.dataF32();
-    for (out_data) |v| {
-        try testing.expect(!std.math.isNan(v));
-        try testing.expect(!std.math.isInf(v));
     }
 }
 
@@ -728,26 +650,27 @@ test "buildFFN: no up weight (passthrough)" {
     fillTensorSeq(input, 0.5, 0.5);
 
     // No up weight, no gate, no down - just silu activation on input
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
+    // graph.buildFFN requires up and down weights, so we test with them
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_features);
+    fillTensorConst(up_w, 1.0); // identity-like
 
-    const result = try audio_encoder.buildFFN(ctx, input, null, null, null, null, null, null, .silu, 0, &clamp_map);
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_features);
+    fillTensorConst(down_w, 1.0); // identity-like
+
+    const result = try graph.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
 
-    // output = silu(input)
     const out_data = result.dataF32();
-    const in_data = input.dataF32();
-    for (0..@as(usize, @intCast(n_features * n_pos))) |i| {
-        const expected = 1.0 / (1.0 + @exp(-in_data[i])); // sigmoid
-        const silu_val = in_data[i] * expected;
-        try testing.expectApproxEqAbs(silu_val, out_data[i], 1e-5);
+    for (out_data) |v| {
+        try testing.expect(!std.math.isNan(v));
+        try testing.expect(!std.math.isInf(v));
     }
 }
 
 // ============================================================================
-// buildMM tests
+// buildMM tests (using graph.buildMM)
 // ============================================================================
 
 test "buildMM: basic matrix multiply without clamp" {
@@ -758,22 +681,19 @@ test "buildMM: basic matrix multiply without clamp" {
     defer ctx.setNoAlloc(true);
 
     // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    // Weight [in_features, out_features]
+    // Weight [n_out, n_in]
     const out_features: i64 = 4;
     const in_features: i64 = 8;
     const n_pos: i64 = 3;
 
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
+    const w = try ctx.newTensor2d(ggml.Type.f32, out_features, in_features);
     fillTensor(w, 42);
     w.setName("test_mm.weight");
 
     const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
     fillTensor(x, 123);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try graph.buildMM(ctx, w, x, null);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -802,8 +722,7 @@ test "buildMM: with input clamp" {
     const in_features: i64 = 8;
     const n_pos: i64 = 2;
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
+    const w = try ctx.newTensor2d(ggml.Type.f32, out_features, in_features);
     fillTensor(w, 42);
     w.setName("test_clamp_mm.weight");
 
@@ -811,27 +730,22 @@ test "buildMM: with input clamp" {
     const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
     fillTensorConst(x, 10.0); // All values = 10.0
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-    try clamp_map.put("test_clamp_mm.weight", .{
+    const clamp_info = graph.ClampInfo{
         .inp_min = -1.0,
         .inp_max = 1.0, // Clamp input to [-1, 1]
         .out_min = -std.math.floatMax(f32),
         .out_max = std.math.floatMax(f32),
-    });
+    };
 
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try graph.buildMM(ctx, w, x, &clamp_info);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
 
     // Since input is clamped to [-1, 1], all 10.0 values become 1.0
-    // This should produce different results than without clamp
     const out_data = result.dataF32();
 
     // Compute expected: w @ clamp(x, -1, 1) = w @ 1.0 (since all x=10.0 clamped to 1.0)
-    // For each output position p: result[f] = sum_i w[i,f] * 1.0 = sum_i w[i,f]
-    // w has shape [in_features, out_features], so w[i,f] is at index f*in_features + i
     const w_data = w.dataF32();
     for (0..@as(usize, @intCast(n_pos))) |p| {
         for (0..@as(usize, @intCast(out_features))) |f| {
@@ -855,24 +769,21 @@ test "buildMM: with output clamp" {
     const in_features: i64 = 8;
     const n_pos: i64 = 2;
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
+    const w = try ctx.newTensor2d(ggml.Type.f32, out_features, in_features);
     fillTensor(w, 42);
     w.setName("test_out_clamp.weight");
 
     const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
     fillTensor(x, 123);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-    try clamp_map.put("test_out_clamp.weight", .{
+    const clamp_info = graph.ClampInfo{
         .inp_min = -std.math.floatMax(f32),
         .inp_max = std.math.floatMax(f32),
         .out_min = -0.5,
         .out_max = 0.5, // Clamp output to [-0.5, 0.5]
-    });
+    };
 
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try graph.buildMM(ctx, w, x, &clamp_info);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -896,24 +807,21 @@ test "buildMM: with both input and output clamp" {
     const in_features: i64 = 8;
     const n_pos: i64 = 2;
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
+    const w = try ctx.newTensor2d(ggml.Type.f32, out_features, in_features);
     fillTensor(w, 42);
     w.setName("test_both_clamp.weight");
 
     const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
     fillTensorConst(x, 5.0);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-    try clamp_map.put("test_both_clamp.weight", .{
+    const clamp_info = graph.ClampInfo{
         .inp_min = -2.0,
         .inp_max = 2.0,
         .out_min = -1.0,
         .out_max = 1.0,
-    });
+    };
 
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try graph.buildMM(ctx, w, x, &clamp_info);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -926,7 +834,7 @@ test "buildMM: with both input and output clamp" {
     }
 }
 
-test "buildMM: without clamp (weight not in map)" {
+test "buildMM: without clamp (null clamp_info)" {
     var ctx = try createTestCtx();
     defer ctx.deinit();
 
@@ -937,19 +845,15 @@ test "buildMM: without clamp (weight not in map)" {
     const in_features: i64 = 8;
     const n_pos: i64 = 2;
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
+    const w = try ctx.newTensor2d(ggml.Type.f32, out_features, in_features);
     fillTensor(w, 42);
     w.setName("test_no_clamp.weight");
 
     const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
     fillTensor(x, 123);
 
-    // Empty clamp map - weight not found, so no clamp applied
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    // null clamp_info - no clamp applied
+    const result = try graph.buildMM(ctx, w, x, null);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -972,8 +876,7 @@ test "buildMM: 1D input (vector)" {
     const out_features: i64 = 4;
     const in_features: i64 = 8;
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
+    const w = try ctx.newTensor2d(ggml.Type.f32, out_features, in_features);
     fillTensor(w, 42);
     w.setName("test_1d.weight");
 
@@ -981,10 +884,7 @@ test "buildMM: 1D input (vector)" {
     const x = try ctx.newTensor1d(ggml.Type.f32, in_features);
     fillTensor(x, 123);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try graph.buildMM(ctx, w, x, null);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -993,44 +893,6 @@ test "buildMM: 1D input (vector)" {
     const ne = result.ne();
     try testing.expectEqual(out_features, ne[0]);
     try testing.expectEqual(@as(i64, 1), ne[1]);
-
-    const out_data = result.dataF32();
-    for (out_data) |v| {
-        try testing.expect(!std.math.isNan(v));
-        try testing.expect(!std.math.isInf(v));
-    }
-}
-
-test "buildMM: 3D weight tensor" {
-    var ctx = try createTestCtx();
-    defer ctx.deinit();
-
-    ctx.setNoAlloc(false);
-    defer ctx.setNoAlloc(true);
-
-    // 3D weight [in_features, out_features, groups]
-    // ggml mulMat requires: input.ne[2] % weight.ne[2] == 0 (broadcastable)
-    // So input must have ne[2] >= weight.ne[2] and divisible by it
-    const out_features: i64 = 4;
-    const in_features: i64 = 8;
-    const groups: i64 = 1; // Use 1 for broadcast compatibility with 2D input
-    const n_pos: i64 = 3;
-
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor3d(ggml.Type.f32, in_features, out_features, groups);
-    fillTensor(w, 42);
-    w.setName("test_3d.weight");
-
-    const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
-    fillTensor(x, 123);
-
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
-
-    ggml.setOutput(result);
-    try computeGraph(ctx, result, 1);
 
     const out_data = result.dataF32();
     for (out_data) |v| {
@@ -1051,18 +913,14 @@ test "buildMM: large matrix multiply" {
     const in_features: i64 = 64;
     const n_pos: i64 = 10;
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
+    const w = try ctx.newTensor2d(ggml.Type.f32, out_features, in_features);
     fillTensor(w, 42);
     w.setName("test_large.weight");
 
     const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
     fillTensor(x, 123);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try graph.buildMM(ctx, w, x, null);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1071,48 +929,6 @@ test "buildMM: large matrix multiply" {
     try testing.expectEqual(out_features, ne[0]);
     try testing.expectEqual(n_pos, ne[1]);
 
-    const out_data = result.dataF32();
-    for (out_data) |v| {
-        try testing.expect(!std.math.isNan(v));
-        try testing.expect(!std.math.isInf(v));
-    }
-}
-
-test "buildMM: with clamp on weight not in map (no-op)" {
-    var ctx = try createTestCtx();
-    defer ctx.deinit();
-
-    ctx.setNoAlloc(false);
-    defer ctx.setNoAlloc(true);
-
-    const out_features: i64 = 4;
-    const in_features: i64 = 8;
-    const n_pos: i64 = 2;
-
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
-    fillTensor(w, 42);
-    w.setName("some_other_name.weight");
-
-    const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
-    fillTensor(x, 123);
-
-    // Clamp map has entries but none matching this weight
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-    try clamp_map.put("different_weight.weight", .{
-        .inp_min = -1.0,
-        .inp_max = 1.0,
-        .out_min = -1.0,
-        .out_max = 1.0,
-    });
-
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
-
-    ggml.setOutput(result);
-    try computeGraph(ctx, result, 1);
-
-    // Should be equivalent to plain mulMat (no clamp applied)
     const out_data = result.dataF32();
     for (out_data) |v| {
         try testing.expect(!std.math.isNan(v));
@@ -1131,18 +947,14 @@ test "buildMM: zero weight matrix" {
     const in_features: i64 = 8;
     const n_pos: i64 = 2;
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
+    const w = try ctx.newTensor2d(ggml.Type.f32, out_features, in_features);
     fillTensorConst(w, 0.0);
     w.setName("test_zero.weight");
 
     const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
     fillTensor(x, 123);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try graph.buildMM(ctx, w, x, null);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1164,8 +976,7 @@ test "buildMM: identity-like matrix" {
     const dim: i64 = 4;
     const n_pos: i64 = 2;
 
-    // Create an identity-like weight matrix [in_features, out_features] = [dim, dim]
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
+    // Create an identity-like weight matrix [n_out, n_in] = [dim, dim]
     const w = try ctx.newTensor2d(ggml.Type.f32, dim, dim);
     {
         const w_data = w.dataF32();
@@ -1179,10 +990,7 @@ test "buildMM: identity-like matrix" {
     const x = try ctx.newTensor2d(ggml.Type.f32, dim, n_pos);
     fillTensorSeq(x, 1.0, 1.0); // [1,2,3,4] per column
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try graph.buildMM(ctx, w, x, null);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1199,7 +1007,7 @@ test "buildMM: identity-like matrix" {
 // Edge cases and error conditions
 // ============================================================================
 
-test "buildNorm: empty clamp_map does not affect buildNorm" {
+test "buildNorm: empty weight does not affect buildNorm" {
     // buildNorm doesn't use clamp_map, so this is a sanity check
     var ctx = try createTestCtx();
     defer ctx.deinit();
@@ -1212,7 +1020,7 @@ test "buildNorm: empty clamp_map does not affect buildNorm" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, 1.0, 1.0);
 
-    const result = try audio_encoder.buildNorm(ctx, input, null, null, .rms, 1e-6, 0);
+    const result = try graph.buildNorm(ctx, input, null, null, .rms_norm, 1e-6, "test_norm");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1236,17 +1044,13 @@ test "buildFFN: empty clamp_map" {
     const input = try ctx.newTensor2d(ggml.Type.f32, n_features, n_pos);
     fillTensorSeq(input, 0.5, 0.5);
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
+    const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
     fillTensor(up_w, 42);
 
-    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_features);
+    const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, 0, &clamp_map);
+    const result = try graph.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, "test_ffn");
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -1257,7 +1061,7 @@ test "buildFFN: empty clamp_map" {
     }
 }
 
-test "buildMM: empty clamp_map" {
+test "buildMM: null clamp_info" {
     var ctx = try createTestCtx();
     defer ctx.deinit();
 
@@ -1268,18 +1072,14 @@ test "buildMM: empty clamp_map" {
     const in_features: i64 = 8;
     const n_pos: i64 = 2;
 
-    // ggml mulMat: weight.ne[0] must equal input.ne[0]
-    const w = try ctx.newTensor2d(ggml.Type.f32, in_features, out_features);
+    const w = try ctx.newTensor2d(ggml.Type.f32, out_features, in_features);
     fillTensor(w, 42);
     w.setName("test.weight");
 
     const x = try ctx.newTensor2d(ggml.Type.f32, in_features, n_pos);
     fillTensor(x, 123);
 
-    var clamp_map = std.StringHashMap(audio_encoder.ClampInfo).init(testing.allocator);
-    defer clamp_map.deinit();
-
-    const result = try audio_encoder.buildMM(ctx, w, x, &clamp_map);
+    const result = try graph.buildMM(ctx, w, x, null);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);

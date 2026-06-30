@@ -37,9 +37,20 @@ pub const AudioPreprocessParams = config.AudioPreprocessParams;
 pub const WavInfo = types.WavInfo;
 pub const ProcessedAudio = types.ProcessedAudio;
 
-pub const ConformerLayerWeights = encoder.ConformerLayerWeights;
-pub const AudioEncoderWeights = encoder.AudioEncoderWeights;
+pub const AudioEncoderBackend = encoder.AudioEncoderBackend;
 pub const AudioEncoder = encoder.AudioEncoder;
+
+/// 注册的音频编码器后端列表
+/// 新增音频模型时在此注册
+const registered_backends = struct {
+    pub const gemma4a = @import("graph").model_graphs.gemma4a.backend;
+};
+
+/// 根据模型类型名称查找对应的后端
+pub fn getBackend(name: []const u8) ?*const AudioEncoderBackend {
+    if (std.mem.eql(u8, name, "gemma4a")) return &registered_backends.gemma4a;
+    return null;
+}
 
 // ============================================================================
 // 便捷函数别名（保持向后兼容）

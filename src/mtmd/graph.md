@@ -102,6 +102,25 @@ pub const GraphBuilder = struct {
 };
 ```
 
+### 3.5 AudioEncoderBackend 接口（graph/mod.zig）
+
+音频编码器后端接口，用于将音频编码器的模型特定实现（权重加载、图构建、token 估算）从框架代码中解耦。
+
+```zig
+pub const AudioEncoderBackend = struct {
+    name: []const u8,
+    loadParams: *const fn (gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
+    loadWeights: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
+    loadClampInfo: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
+    buildGraph: *const fn (ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, mel_tensor: *ggml.Tensor, clamp_map: *const std.StringHashMap(ClampInfo)) anyerror!*ggml.CGraph,
+    estimateOutputTokens: *const fn (n_frames: u32) u32,
+};
+```
+
+该接口定义在 `graph/mod.zig` 中，由 `audio/encoder.zig` 重新导出。模型特定实现（如 `gemma4a.zig`）通过导出 `pub const backend = graph.AudioEncoderBackend{ ... }` 来注册。
+
+`audio/encoder.zig` 中的 `AudioEncoder` 使用 `AudioEncoderParams`（来自 `config.zig`）作为内部参数类型，在调用 `backend.buildGraph` 时构建临时的 `VisionHParams` 传递给后端。
+
 ### 3.4 权重结构（types.zig）
 
 完整定义了 `ViTLayerWeights`、`VisionEncoderWeights`、`MobileNetV5Block`、`YASA2Block`、`YASA2Stage`、`QFormerBlock`、`ClampInfo` 等结构，与 `clip-model.h` 一一对应。
@@ -214,6 +233,9 @@ src/mtmd/
 | build.zig 集成 | `build.zig` | ✅ 完成（graph 模块注册） |
 | mtmd/mod.zig 集成 | `src/mtmd/mod.zig` | ✅ 完成（graph 模块导入） |
 | vision/types.zig 兼容层 | `src/mtmd/vision/types.zig` | ✅ 完成（重定向到 graph/types.zig） |
+| AudioEncoderBackend 接口 | `src/mtmd/graph/mod.zig` | ✅ 完成（定义在 graph/mod.zig，由 audio/encoder.zig 重新导出） |
+| Gemma4A backend 注册 | `src/mtmd/graph/models/gemma4a.zig` | ✅ 完成（导出 `backend` 常量） |
+| AudioEncoder 使用 AudioEncoderParams | `src/mtmd/audio/encoder.zig` | ✅ 完成（内部使用 AudioEncoderParams，调用 backend 时构建 VisionHParams） |
 
 ### 10.2 待完成
 

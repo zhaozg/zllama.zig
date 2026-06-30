@@ -4,6 +4,8 @@
 //! 参考: deps/llama.cpp/tools/mtmd/clip-graph.h
 
 const std = @import("std");
+const ggml = @import("ggml");
+const gguf = @import("gguf");
 
 pub const types = @import("types.zig");
 pub const builder = @import("builder.zig");
@@ -49,6 +51,17 @@ pub const ClampInfo = types.ClampInfo;
 pub const Modality = types.Modality;
 pub const ResizeAlgo = types.ResizeAlgo;
 pub const PadStyle = types.PadStyle;
+
+/// 音频编码器后端接口
+/// 每个音频模型实现此接口，提供模型特定的操作
+pub const AudioEncoderBackend = struct {
+    name: []const u8,
+    loadParams: *const fn (gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
+    loadWeights: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
+    loadClampInfo: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
+    buildGraph: *const fn (ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, mel_tensor: *ggml.Tensor, clamp_map: *const std.StringHashMap(ClampInfo)) anyerror!*ggml.CGraph,
+    estimateOutputTokens: *const fn (n_frames: u32) u32,
+};
 
 // 重新导出构建函数
 pub const buildVit = vit.buildVit;
