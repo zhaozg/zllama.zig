@@ -380,6 +380,14 @@ pub fn build(b: *std.Build) void {
     mm_graph_mod.addImport("gguf", gguf_mod);
     mm_graph_mod.addImport("weight_loader", weight_loader_mod);
 
+    const debug_mod = b.createModule(.{
+        .root_source_file = b.path("src/debug.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    debug_mod.addImport("ggml", ggml_mod);
+
     const mm_audio_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/audio/mod.zig"),
         .target = target,
@@ -391,6 +399,7 @@ pub fn build(b: *std.Build) void {
     mm_audio_mod.addImport("weight_loader", weight_loader_mod);
     mm_audio_mod.addImport("fft", fft_mod);
     mm_audio_mod.addImport("graph", mm_graph_mod);
+    mm_audio_mod.addImport("debug", debug_mod);
 
     const mm_vision_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/vision/mod.zig"),
@@ -503,6 +512,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("chat_template", chat_template_mod);
     exe_mod.addImport("prefill", prefill_mod);
     exe_mod.addImport("mtmd", mm_manager_mod);
+    exe_mod.addImport("debug", debug_mod);
 
     const exe = b.addExecutable(.{
         .name = "zllama",
@@ -565,6 +575,7 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("stb_image", stb_image_mod);
     test_root_mod.addImport("utils", utils_mod);
     test_root_mod.addImport("mtmd", mm_manager_mod);
+    test_root_mod.addImport("debug", debug_mod);
 
     test_root_mod.addImport("graph", mm_graph_mod);
 

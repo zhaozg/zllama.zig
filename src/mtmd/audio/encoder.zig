@@ -15,6 +15,7 @@ const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
 const graph = @import("graph");
+const debug = @import("debug");
 const config_mod = @import("config.zig");
 
 const log = std.log.scoped(.audio_encoder);
@@ -70,23 +71,20 @@ pub const AudioEncoder = struct {
             if (weights.sscp_conv_w[i]) |t| {
                 const fname = try std.fmt.allocPrint(allocator, "zllama_audio_conv1d_{d}_weight.json", .{i});
                 defer allocator.free(fname);
-                const helper = @import("helper");
-                helper.mtmdDebugSaveData(io, "debug_audio", fname, "conv1d_weight", t.dataF32()) catch |err| {
+                debug.saveData(io, "debug_audio", fname, "conv1d_weight", t.dataF32()) catch |err| {
                     log.debug("Failed to save conv1d.{d}.weight debug data: {}", .{ i, err });
                 };
             }
             if (weights.sscp_conv_b[i]) |t| {
                 const fname = try std.fmt.allocPrint(allocator, "zllama_audio_conv1d_{d}_bias.json", .{i});
                 defer allocator.free(fname);
-                const helper = @import("helper");
-                helper.mtmdDebugSaveData(io, "debug_audio", fname, "conv1d_bias", t.dataF32()) catch |err| {
+                debug.saveData(io, "debug_audio", fname, "conv1d_bias", t.dataF32()) catch |err| {
                     log.debug("Failed to save conv1d.{d}.bias debug data: {}", .{ i, err });
                 };
             }
         }
         if (weights.sscp_inp_proj_w) |t| {
-            const helper = @import("helper");
-            helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_input_proj_weight.json", "input_proj_weight", t.dataF32()) catch |err| {
+            debug.saveData(io, "debug_audio", "zllama_audio_input_proj_weight.json", "input_proj_weight", t.dataF32()) catch |err| {
                 log.debug("Failed to save input_proj.weight debug data: {}", .{err});
             };
         }
@@ -175,27 +173,26 @@ pub const AudioEncoder = struct {
 
     /// 保存中间张量的调试数据（需在 graph.compute() 之后调用）
     pub fn saveDebugData(_: *const AudioEncoder, io: std.Io, cgraph: *ggml.CGraph) void {
-        const helper = @import("helper");
         const subdir = "debug_audio";
-        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_conv2d_0_output.json", "debug_audio_conv2d_0_output", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_conv2d_0_output.json", "debug_audio_conv2d_0_output", cgraph) catch |err| {
             log.debug("Failed to save conv2d_0_output debug data: {}", .{err});
         };
-        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_conv2d_1_output.json", "debug_audio_conv2d_1_output", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_conv2d_1_output.json", "debug_audio_conv2d_1_output", cgraph) catch |err| {
             log.debug("Failed to save conv2d_1_output debug data: {}", .{err});
         };
-        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_after_cont.json", "debug_audio_after_cont", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_after_cont.json", "debug_audio_after_cont", cgraph) catch |err| {
             log.debug("Failed to save audio_after_cont debug data: {}", .{err});
         };
-        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_flatten_output.json", "debug_audio_flatten_output", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_flatten_output.json", "debug_audio_flatten_output", cgraph) catch |err| {
             log.debug("Failed to save flatten_output debug data: {}", .{err});
         };
-        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_conformer_blocks_output.json", "debug_audio_conformer_blocks_output", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_conformer_blocks_output.json", "debug_audio_conformer_blocks_output", cgraph) catch |err| {
             log.debug("Failed to save conformer_blocks_output debug data: {}", .{err});
         };
-        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_multimodal_embedder_output.json", "debug_audio_multimodal_embedder_output", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_multimodal_embedder_output.json", "debug_audio_multimodal_embedder_output", cgraph) catch |err| {
             log.debug("Failed to save multimodal_embedder_output debug data: {}", .{err});
         };
-        helper.mtmdDebugSaveTensor(io, subdir, "zllama_audio_input_proj_output.json", "debug_audio_input_proj_output", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_input_proj_output.json", "debug_audio_input_proj_output", cgraph) catch |err| {
             log.debug("Failed to save input_proj_output debug data: {}", .{err});
         };
     }

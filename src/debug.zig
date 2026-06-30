@@ -1,27 +1,33 @@
-//! 计算图调试支持模块
+//! 调试工具模块
 //!
 //! 提供张量调试命名注册、中间张量数据保存等功能。
-//! 底层实现委托给 src/debug.zig 中的通用调试工具。
+//! 服务于整个项目，不限于特定模块。
+//!
 //! 参考: deps/llama.cpp/tools/mtmd/clip-impl.h (debugging section)
 //!       deps/llama.cpp/tools/mtmd/clip.cpp (mtmd_debug_save_data usage)
 //!       deps/llama.cpp/tools/mtmd/mtmd.cpp (mtmd_debug_save_data implementation)
 
 const std = @import("std");
 const ggml = @import("ggml");
-const debug_mod = @import("debug");
 
-const log = std.log.scoped(.graph_debug);
+const log = std.log.scoped(.debug);
 
 // ============================================================================
 // 调试张量注册表
 // ============================================================================
 
 /// 调试张量条目
-pub const DebugTensorEntry = debug_mod.DebugTensorEntry;
+pub const DebugTensorEntry = struct {
+    /// 张量指针
+    tensor: *ggml.Tensor,
+    /// 调试名称（用于 setOutput 和文件名）
+    debug_name: []const u8,
+    /// 是否为输入张量（影响 setInput/setOutput 调用）
+    is_input: bool,
+};
 
 /// 调试张量注册表
 /// 保存所有注册了调试命名的张量，用于后续数据保存
-/// 底层使用 src/debug.zig 中的 saveTensor 保存数据
 pub const DebugTensorRegistry = struct {
     /// 存储路径（目录）
     storage_path: []const u8 = "",
@@ -137,8 +143,8 @@ pub const DebugTensorRegistry = struct {
             const filename = try std.fmt.allocPrint(allocator, "{s}_{s}.json", .{ file_prefix, debug_name });
             defer allocator.free(filename);
 
-            // 委托给 src/debug.zig 中的 saveTensor
-            try debug_mod.DebugTensorRegistry.saveTensor(allocator, tensor, storage_path, filename);
+            // 复用 saveTensor 保存单个张量
+            try saveTensor(allocator, tensor, storage_path, filename);
         }
 
         log.info("debug tensor save complete", .{});
@@ -157,8 +163,35 @@ pub const DebugTensorRegistry = struct {
         storage_path: []const u8,
         filename: []const u8,
     ) !void {
-        // 委托给 src/debug.zig 中的实现
-        try debug_mod.DebugTensorRegistry.saveTensor(allocator, tensor, storage_path, filename);
+        _ = allocator;
+        if (tensor.dataType() != .f32) {
+            log.debug("skipping non-f32 tensor: {s} (type={s})", .{
+                tensor.getName(),
+                @tagName(tensor.dataType()),
+            });
+            return;
+        }
+
+        // 确保存储目录存在
+        var dir = std.fs.cwd();
+        if (storage_path.len > 0) {
+            dir = try std.fs.cwd().makeOpenPath(storage_path, .{});
+            defer dir.close();
+        }
+
+        const data = tensor.dataF32();
+        const file = try dir.createFile(filename, .{});
+        defer file.close();
+
+        const writer = file.writer();
+        try writer.writeAll("[\n");
+        for (data, 0..) |val, i| {
+            if (i > 0) try writer.writeAll(",\n");
+            try writer.print("{d:.6}", .{val});
+        }
+        try writer.writeAll("\n]\n");
+
+        log.info("  saved {s}: {d} elements", .{ filename, data.len });
     }
 
     /// 通过调试名称在图中查找张量并保存
@@ -180,9 +213,153 @@ pub const DebugTensorRegistry = struct {
             log.warn("tensor not found in graph: {s}", .{debug_name});
             return;
         };
-        try debug_mod.DebugTensorRegistry.saveTensor(allocator, tensor, storage_path, filename);
+        try saveTensor(allocator, tensor, storage_path, filename);
     }
 };
+
+// ============================================================================
+// 便捷函数：直接保存张量数据（无需注册表）
+// ============================================================================
+
+/// 将浮点数组以 JSON 数组格式写入文件。
+///
+/// 格式：
+/// [
+/// 1.234567,
+/// 2.345678,
+/// ...
+/// 9.876543
+/// ]
+/// 每个值保留 6 位小数。
+///
+/// 参数:
+///   - io: I/O 实例
+///   - file: 已打开的文件
+///   - data: 浮点数据
+pub fn writeJsonArray(io: std.Io, file: std.Io.File, data: []const f32) !void {
+    try file.writeStreamingAll(io, "[\n");
+
+    for (data[0 .. data.len - 1]) |val| {
+        var buf: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{d:.6},\n", .{val}) catch unreachable;
+        try file.writeStreamingAll(io, line);
+    }
+    {
+        var buf: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{d:.6}\n", .{data[data.len - 1]}) catch unreachable;
+        try file.writeStreamingAll(io, line);
+    }
+
+    try file.writeStreamingAll(io, "]");
+}
+
+/// 将浮点数组保存为 JSON 数组文件。
+///
+/// 格式：
+/// [
+/// 1.234567,
+/// 2.345678,
+/// ...
+/// 9.876543
+/// ]
+/// 每个值保留 6 位小数。
+///
+/// 参数:
+///   - io: I/O 实例
+///   - subdir: 子目录（如 "debug_audio"），null 表示当前目录
+///   - fname: 文件名（不含路径）
+///   - title: 数据标题（用于日志）
+///   - data: 浮点数据
+pub fn saveData(io: std.Io, subdir: ?[]const u8, fname: []const u8, title: []const u8, data: []const f32) !void {
+    const cwd = std.Io.Dir.cwd();
+
+    if (subdir) |sd| {
+        cwd.createDirPath(io, sd) catch {}; // 忽略目录已存在错误
+        const dir = try cwd.openDir(io, sd, .{});
+        defer dir.close(io);
+
+        log.info("Save {s} debug data to {s}/{s}", .{ title, sd, fname });
+
+        const file = try dir.createFile(io, fname, .{});
+        defer file.close(io);
+        try writeJsonArray(io, file, data);
+    } else {
+        log.info("Save {s} debug data to {s}", .{ title, fname });
+
+        const file = try cwd.createFile(io, fname, .{});
+        defer file.close(io);
+        try writeJsonArray(io, file, data);
+    }
+}
+
+/// 从计算图中查找指定名称的 F32 张量，将其数据保存为 JSON 数组文件。
+///
+/// 注意：此函数通过 `ggml_graph_get_tensor` 查找张量，然后通过 `dataF32()` 直接
+/// 读取 CPU 内存中的数据。如果张量在 GPU 后端上，`dataF32()` 可能返回空指针，
+/// 此时会回退到 `ggml_backend_tensor_get`。
+///
+/// C++ 参考 (clip.cpp):
+/// ```cpp
+/// auto save_tensor = [&](const char * name, const char * fname) {
+///     ggml_tensor * t = ggml_graph_get_tensor(gf, name);
+///     if (t && t->type == GGML_TYPE_F32) {
+///         std::vector<float> data(ggml_nelements(t));
+///         ggml_backend_tensor_get(t, data.data(), 0, ggml_nbytes(t));
+///         mtmd_debug_save_data(fname, name, data.data(), data.size());
+///     }
+/// };
+/// ```
+///
+/// 参数:
+///   - io: I/O 实例
+///   - subdir: 子目录（如 "debug_audio"），null 表示当前目录
+///   - fname: 输出文件名
+///   - title: 张量在计算图中的调试名称（用于 ggml_graph_get_tensor 查找）
+///   - cgraph: 计算图指针
+pub fn saveTensorFromGraph(io: std.Io, subdir: ?[]const u8, fname: []const u8, title: []const u8, cgraph: *ggml.CGraph) !void {
+    const c = @import("ggml").c;
+
+    // 通过名称从计算图中查找张量
+    // 构造 null-terminated 字符串（ggml_graph_get_tensor 需要 C 字符串）
+    var title_buf: [256]u8 = undefined;
+    if (title.len >= title_buf.len) {
+        log.warn("saveTensorFromGraph: tensor name too long ({d} >= {d})", .{ title.len, title_buf.len });
+        return;
+    }
+    @memcpy(title_buf[0..title.len], title);
+    title_buf[title.len] = 0;
+    const t = c.ggml_graph_get_tensor(@ptrCast(cgraph), &title_buf);
+    if (t == null) {
+        log.warn("saveTensorFromGraph: tensor '{s}' not found in graph", .{title});
+        return;
+    }
+
+    // 仅处理 F32 类型的张量
+    if (t.*.type != c.GGML_TYPE_F32) {
+        log.warn("saveTensorFromGraph: tensor '{s}' is not F32 (type={})", .{ title, t.*.type });
+        return;
+    }
+
+    const n_elems = @as(usize, @intCast(c.ggml_nelements(t)));
+
+    // 使用 dataF32() 直接读取 CPU 内存中的数据。
+    // 注意：如果张量在 GPU 后端上，data 指针可能为 null。
+    // 此时回退到 ggml_backend_tensor_get（需要 backend buffer）。
+    const tensor_data = t.*.data;
+    if (tensor_data != null) {
+        const data = @as([*]f32, @ptrCast(@alignCast(tensor_data)))[0..n_elems];
+        try saveData(io, subdir, fname, title, data);
+    } else {
+        // 回退：通过 backend API 读取
+        const n_bytes = @as(usize, @intCast(c.ggml_nbytes(t)));
+        const allocator = std.heap.page_allocator;
+        const data = try allocator.alloc(f32, n_elems);
+        defer allocator.free(data);
+
+        c.ggml_backend_tensor_get(t, @ptrCast(data.ptr), 0, n_bytes);
+        try saveData(io, subdir, fname, title, data);
+    }
+}
 
 // ============================================================================
 // 测试

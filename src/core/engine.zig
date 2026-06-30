@@ -16,6 +16,7 @@ const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
 const kv_cache = @import("kv_cache");
 const mtmd = @import("mtmd");
+const debug = @import("debug");
 const preprocess = @import("preprocess");
 const audio_mod = mtmd.audio_mod;
 const engine_common = @import("engine_common");
@@ -934,7 +935,7 @@ pub const InferenceEngine = struct {
         var mel = try audio_mod.computeMelSpectrogram(io, self.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
         defer mel.deinit();
 
-        mtmd.helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_mel.json", "audio_mel", mel.data) catch |err| {
+        debug.saveData(io, "debug_audio", "zllama_audio_mel.json", "audio_mel", mel.data) catch |err| {
             logger.info("Save audio mel data fail: {}", .{err});
         };
 
@@ -963,25 +964,25 @@ pub const InferenceEngine = struct {
 
         // === DEBUG: 保存中间张量数据（匹配 llama.cpp 的顺序和方式）===
         // llama.cpp 使用 ggml_graph_get_tensor + ggml_backend_tensor_get 读取
-        // 我们使用 mtmdDebugSaveTensor 实现相同功能
-        mtmd.helper.mtmdDebugSaveTensor(io, "debug_audio", "zllama_audio_encoder_input.json", "debug_audio_encoder_input", audio_graph) catch |err| {
+        // 我们使用 debug.saveTensorFromGraph 实现相同功能
+        debug.saveTensorFromGraph(io, "debug_audio", "zllama_audio_encoder_input.json", "debug_audio_encoder_input", audio_graph) catch |err| {
             logger.info("Save audio debug_audio_encoder_input data fail: {}", .{err});
         };
         if (mm_mgr.audio_encoder) |enc| {
             enc.saveDebugData(io, audio_graph);
         }
         // Save pos_emb and attn_mask via graph lookup (matching llama.cpp)
-        mtmd.helper.mtmdDebugSaveTensor(io, "debug_audio", "zllama_audio_pos_emb.json", "debug_audio_pos_emb", audio_graph) catch |err| {
+        debug.saveTensorFromGraph(io, "debug_audio", "zllama_audio_pos_emb.json", "debug_audio_pos_emb", audio_graph) catch |err| {
             logger.info("Save audio pos_emb data fail: {}", .{err});
         };
-        mtmd.helper.mtmdDebugSaveTensor(io, "debug_audio", "zllama_audio_attn_mask.json", "debug_audio_attn_mask", audio_graph) catch |err| {
+        debug.saveTensorFromGraph(io, "debug_audio", "zllama_audio_attn_mask.json", "debug_audio_attn_mask", audio_graph) catch |err| {
             logger.info("Save audio attn_mask data fail: {}", .{err});
         };
 
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
 
-        mtmd.helper.mtmdDebugSaveData(io, "debug_audio", "zllama_audio_embeddings.json", "audio_embeddings", audio_embeddings.dataF32()) catch |err| {
+        debug.saveData(io, "debug_audio", "zllama_audio_embeddings.json", "audio_embeddings", audio_embeddings.dataF32()) catch |err| {
             logger.info("Save audio embeddings data fail: {}", .{err});
         };
 
