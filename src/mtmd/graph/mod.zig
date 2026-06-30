@@ -63,6 +63,7 @@ pub const VisionEncoderBackend = struct {
     name: []const u8,
     loadParams: *const fn (gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
     loadWeights: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
+    loadClampInfo: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
     buildGraph: *const fn (ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, image_tensor: *ggml.Tensor) anyerror!*ggml.CGraph,
     estimateOutputTokens: *const fn (img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32,
 };

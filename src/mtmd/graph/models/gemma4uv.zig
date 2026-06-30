@@ -10,7 +10,6 @@ const std = @import("std");
 const graph = @import("../mod.zig");
 const gguf = @import("gguf");
 const ggml = @import("ggml");
-
 const GraphBuilder = graph.GraphBuilder;
 const NormType = graph.NormType;
 const FFNOpType = graph.FFNOpType;
@@ -19,23 +18,20 @@ const VisionEncoderWeights = graph.VisionEncoderWeights;
 const VisionHParams = graph.VisionHParams;
 const ViTLayerWeights = graph.ViTLayerWeights;
 const ImageF32 = graph.ImageF32;
+const ClampInfo = graph.ClampInfo;
 
 const log = std.log.scoped(.gemma4uv_graph);
 
 // ============================================================================
 // 视觉编码器后端注册
-// ============================================================================
-
-/// Gemma4UV 视觉编码器后端实例
 pub const backend = graph.VisionEncoderBackend{
     .name = "gemma4uv",
     .loadParams = loadParams,
     .loadWeights = loadWeights,
+    .loadClampInfo = loadClampInfo,
     .buildGraph = buildGraphFromWeights,
     .estimateOutputTokens = estimateOutputTokens,
 };
-
-/// 从 GGUF 元数据读取视觉编码器超参数
 pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
     _ = gguf_file;
     _ = params;
@@ -74,6 +70,58 @@ pub fn loadWeights(
     log.info("Gemma4UV weights loaded (no ViT layers)", .{});
 }
 
+/// 从 GGUF 加载 Gemma4UV 视觉编码器的 clamp 信息
+pub fn loadClampInfo(
+    allocator: std.mem.Allocator,
+    gguf_file: *const gguf.GGUFFile,
+    w: *VisionEncoderWeights,
+) !void {
+    var clamp_map = std.StringHashMap(ClampInfo).init(allocator);
+    var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| return err;
+    defer weight_names.deinit(allocator);
+
+    if (w.patch_embeddings_0) |t| try weight_names.append(allocator, t.getName());
+    if (w.mm_input_proj_w) |t| try weight_names.append(allocator, t.getName());
+
+    const weight_suffix = ".weight";
+    const clamp_suffixes = [_][]const u8{ ".input_max", ".input_min", ".output_max", ".output_min" };
+
+    for (weight_names.items) |w_name| {
+        if (!std.mem.endsWith(u8, w_name, weight_suffix)) continue;
+
+        const prefix_len = w_name.len - weight_suffix.len;
+        var clamp_names: [4][]const u8 = undefined;
+
+        for (&clamp_names, clamp_suffixes) |*out_name, suffix| {
+            const new_len = prefix_len + suffix.len;
+            const buf = try allocator.alloc(u8, new_len);
+            errdefer allocator.free(buf);
+            @memcpy(buf[0..prefix_len], w_name[0..prefix_len]);
+            @memcpy(buf[prefix_len..][0..suffix.len], suffix);
+            out_name.* = buf;
+        }
+        defer {
+            for (clamp_names) |n| allocator.free(n);
+        }
+
+        const inp_max_val = readScalarOrDefault(gguf_file, clamp_names[0], std.math.floatMax(f32));
+        const inp_min_val = readScalarOrDefault(gguf_file, clamp_names[1], -std.math.floatMax(f32));
+        const out_max_val = readScalarOrDefault(gguf_file, clamp_names[2], std.math.floatMax(f32));
+        const out_min_val = readScalarOrDefault(gguf_file, clamp_names[3], -std.math.floatMax(f32));
+
+        try clamp_map.put(w_name, ClampInfo{
+            .inp_min = inp_min_val,
+            .inp_max = inp_max_val,
+            .out_min = out_min_val,
+            .out_max = out_max_val,
+        });
+    }
+
+    w.clamp_info_map = clamp_map;
+    log.info("Gemma4UV clamp info loaded: {d} entries", .{clamp_map.count()});
+}
+
+/// 从 VisionEncoderWeights 构建计算图的包装函数
 /// 从 VisionEncoderWeights 构建计算图的包装函数
 fn buildGraphFromWeights(
     ctx: *ggml.Context,
@@ -179,7 +227,7 @@ pub fn buildGraph(
             for (0..W) |x| {
                 const src_idx = (y * W + x) * 3;
                 const dst_base = y * W + x;
-                dst[dst_base] = src[src_idx];           // R
+                dst[dst_base] = src[src_idx]; // R
                 dst[dst_base + H * W] = src[src_idx + 1]; // G
                 dst[dst_base + 2 * H * W] = src[src_idx + 2]; // B
             }
@@ -220,9 +268,9 @@ pub fn buildGraph(
         }
     }
 
-    // Project to embedding dimension
+    // Project to embedding dimension (with clamp)
     if (w.patch_embeddings_0) |pe| {
-        cur = pe.mulMat(ctx, cur);
+        cur = buildMMWithClamp(ctx, pe, cur, &w.clamp_info_map);
         cur.setName("patch_proj");
     }
     if (w.patch_bias) |pb| {
@@ -286,8 +334,9 @@ pub fn buildGraph(
     cur.setName("mm_pre_norm");
 
     // 投影到 LLM 嵌入空间
+    // 投影到 LLM 嵌入空间 (with clamp)
     if (w.mm_input_proj_w) |proj_w| {
-        cur = proj_w.mulMat(ctx, cur);
+        cur = buildMMWithClamp(ctx, proj_w, cur, &w.clamp_info_map);
         cur.setName("mm_proj");
     }
 
@@ -298,4 +347,35 @@ pub fn buildGraph(
 
     log.info("Gemma4UV graph built successfully", .{});
     return builder.gf;
+}
+
+// ============================================================================
+// 辅助函数
+// ============================================================================
+
+/// 带 clamp 的矩阵乘法
+/// 对应 C++ clip_graph_gemma4v::build_mm()
+fn buildMMWithClamp(
+    ctx: *ggml.Context,
+    w: *ggml.Tensor,
+    x: *ggml.Tensor,
+    clamp_map: *const std.StringHashMap(ClampInfo),
+) *ggml.Tensor {
+    const name = w.getName();
+    if (clamp_map.get(name)) |ci| {
+        const clamped = x.clamp(ctx, ci.inp_min, ci.inp_max);
+        var out = w.mulMat(ctx, clamped);
+        out = out.clamp(ctx, ci.out_min, ci.out_max);
+        return out;
+    } else {
+        return w.mulMat(ctx, x);
+    }
+}
+
+/// 从 GGUF 读取标量值，如果不存在则返回默认值
+fn readScalarOrDefault(gguf_file: *const gguf.GGUFFile, name: []const u8, default_val: f32) f32 {
+    const tensor_info = gguf_file.findTensor(name) orelse return default_val;
+    const data = gguf_file.getTensorData(tensor_info);
+    if (data.len < 4) return default_val;
+    return @as(*const f32, @ptrCast(@alignCast(data.ptr))).*;
 }

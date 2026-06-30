@@ -16,6 +16,7 @@ const VisionEncoderWeights = graph.VisionEncoderWeights;
 const VisionHParams = graph.VisionHParams;
 const ViTLayerWeights = graph.ViTLayerWeights;
 const ImageF32 = graph.ImageF32;
+const ClampInfo = graph.ClampInfo;
 
 const log = std.log.scoped(.gemma4v_graph);
 
@@ -28,6 +29,7 @@ pub const backend = graph.VisionEncoderBackend{
     .name = "gemma4v",
     .loadParams = loadParams,
     .loadWeights = loadWeights,
+    .loadClampInfo = loadClampInfo,
     .buildGraph = buildGraphFromWeights,
     .estimateOutputTokens = estimateOutputTokens,
 };
@@ -84,6 +86,68 @@ pub fn loadWeights(
     }
 
     log.info("Gemma4V weights loaded: {d} ViT layers", .{n_layer});
+}
+
+/// 从 GGUF 加载 Gemma4V 视觉编码器的 clamp 信息
+/// 参考: llama.cpp gemma4a.cpp loadClampInfo() 和 gemma4v.cpp build_mm()
+pub fn loadClampInfo(
+    allocator: std.mem.Allocator,
+    gguf_file: *const gguf.GGUFFile,
+    w: *VisionEncoderWeights,
+) !void {
+    var clamp_map = std.StringHashMap(ClampInfo).init(allocator);
+    var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| return err;
+    defer weight_names.deinit(allocator);
+
+    // 收集所有权重名称（ViT 层 + MM 投影）
+    if (w.patch_embeddings_0) |t| try weight_names.append(allocator, t.getName());
+    if (w.mm_input_proj_w) |t| try weight_names.append(allocator, t.getName());
+
+    for (w.layers) |*layer| {
+        if (layer.q_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.k_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.v_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.o_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_up_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_down_w) |t| try weight_names.append(allocator, t.getName());
+    }
+
+    const weight_suffix = ".weight";
+    const clamp_suffixes = [_][]const u8{ ".input_max", ".input_min", ".output_max", ".output_min" };
+
+    for (weight_names.items) |w_name| {
+        if (!std.mem.endsWith(u8, w_name, weight_suffix)) continue;
+
+        const prefix_len = w_name.len - weight_suffix.len;
+        var clamp_names: [4][]const u8 = undefined;
+
+        for (&clamp_names, clamp_suffixes) |*out_name, suffix| {
+            const new_len = prefix_len + suffix.len;
+            const buf = try allocator.alloc(u8, new_len);
+            errdefer allocator.free(buf);
+            @memcpy(buf[0..prefix_len], w_name[0..prefix_len]);
+            @memcpy(buf[prefix_len..][0..suffix.len], suffix);
+            out_name.* = buf;
+        }
+        defer {
+            for (clamp_names) |n| allocator.free(n);
+        }
+
+        const inp_max_val = readScalarOrDefault(gguf_file, clamp_names[0], std.math.floatMax(f32));
+        const inp_min_val = readScalarOrDefault(gguf_file, clamp_names[1], -std.math.floatMax(f32));
+        const out_max_val = readScalarOrDefault(gguf_file, clamp_names[2], std.math.floatMax(f32));
+        const out_min_val = readScalarOrDefault(gguf_file, clamp_names[3], -std.math.floatMax(f32));
+
+        try clamp_map.put(w_name, ClampInfo{
+            .inp_min = inp_min_val,
+            .inp_max = inp_max_val,
+            .out_min = out_min_val,
+            .out_max = out_max_val,
+        });
+    }
+
+    w.clamp_info_map = clamp_map;
+    log.info("Gemma4V clamp info loaded: {d} entries", .{clamp_map.count()});
 }
 
 /// 从 VisionEncoderWeights 构建计算图的包装函数
@@ -207,8 +271,7 @@ pub fn buildGraph(
     const eps = p.eps;
     const rope_theta = p.rope_theta;
 
-    log.info("Gemma4V graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, rope_theta={d}",
-        .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, rope_theta });
+    log.info("Gemma4V graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, rope_theta={d}", .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, rope_theta });
 
     // 1. 创建输入张量
     // 输入图像: [3, height, width] f32, 值范围 [0, 1]
@@ -225,7 +288,7 @@ pub fn buildGraph(
             for (0..W) |x| {
                 const src_idx = (y * W + x) * 3;
                 const dst_base = y * W + x;
-                dst[dst_base] = src[src_idx];           // R
+                dst[dst_base] = src[src_idx]; // R
                 dst[dst_base + H * W] = src[src_idx + 1]; // G
                 dst[dst_base + 2 * H * W] = src[src_idx + 2]; // B
             }
@@ -305,12 +368,12 @@ pub fn buildGraph(
 
         // --- Self-attention with 2D RoPE ---
         {
-            // QKV projections
-            var Qcur = if (layer.q_w) |qw| qw.mulMat(ctx, attn_in) else return error.MissingQWeight;
+            // QKV projections (with clamp, matching C++ clip_graph_gemma4v::build_mm)
+            var Qcur = if (layer.q_w) |qw| buildMMWithClamp(ctx, qw, attn_in, &w.clamp_info_map) else return error.MissingQWeight;
             Qcur.setName(layer_name);
-            var Kcur = if (layer.k_w) |kw| kw.mulMat(ctx, attn_in) else return error.MissingKWeight;
+            var Kcur = if (layer.k_w) |kw| buildMMWithClamp(ctx, kw, attn_in, &w.clamp_info_map) else return error.MissingKWeight;
             Kcur.setName(layer_name);
-            var Vcur = if (layer.v_w) |vw| vw.mulMat(ctx, attn_in) else return error.MissingVWeight;
+            var Vcur = if (layer.v_w) |vw| buildMMWithClamp(ctx, vw, attn_in, &w.clamp_info_map) else return error.MissingVWeight;
             Vcur.setName(layer_name);
 
             // Reshape to [d_head, n_head, n_patches, n_batch]
@@ -378,20 +441,37 @@ pub fn buildGraph(
             ffn_in = try graph.buildNorm(ctx, ffn_in, ln2_w, layer.ln_2_b, .rms_norm, eps, layer_name);
         }
 
-        // --- FFN ---
+        // --- FFN (with clamp, matching C++ clip_graph_gemma4v::build_mm) ---
         {
-            const ffn_out = try graph.buildFFN(
-                ctx,
-                ffn_in,
-                layer.ff_up_w orelse return error.MissingFFNUpWeight,
-                layer.ff_up_b,
-                layer.ff_gate_w,
-                layer.ff_gate_b,
-                layer.ff_down_w orelse return error.MissingFFNDownWeight,
-                layer.ff_down_b,
-                .silu,
-                layer_name,
-            );
+            // Up projection
+            var up_result = buildMMWithClamp(ctx, layer.ff_up_w orelse return error.MissingFFNUpWeight, ffn_in, &w.clamp_info_map);
+            if (layer.ff_up_b) |b| {
+                up_result = up_result.add(ctx, b);
+            }
+
+            // Gate projection (optional)
+            var gate_result: ?*ggml.Tensor = null;
+            if (layer.ff_gate_w) |g| {
+                gate_result = buildMMWithClamp(ctx, g, ffn_in, &w.clamp_info_map);
+                if (layer.ff_gate_b) |gb| {
+                    gate_result = gate_result.?.add(ctx, gb);
+                }
+            }
+
+            // SiLU activation
+            var activated = up_result.silu(ctx);
+
+            // Gate (element-wise multiply)
+            if (gate_result) |g| {
+                activated = activated.mul(ctx, g);
+            }
+
+            // Down projection
+            var ffn_out = buildMMWithClamp(ctx, layer.ff_down_w orelse return error.MissingFFNDownWeight, activated, &w.clamp_info_map);
+            if (layer.ff_down_b) |b| {
+                ffn_out = ffn_out.add(ctx, b);
+            }
+
             ffn_out.setName(layer_name);
 
             inpL = residual.add(ctx, ffn_out);
@@ -445,13 +525,55 @@ pub fn buildGraph(
         result.setName("std_mul");
     }
 
-    // 8. 投影到 LLM 嵌入空间
-    result = try graph.buildGemma3Projector(ctx, result, w, eps);
-    result.setName("mm_output");
+    // 8. 投影到 LLM 嵌入空间 (with clamp, matching C++ clip_graph_gemma4v::build_mm)
+    // Gemma4MultimodalEmbedder: RMSNorm + linear projection with clamp
+    {
+        result = result.rmsNorm(ctx, eps);
+        result.setName("mm_norm");
+        if (w.mm_soft_emb_norm_w) |sn| {
+            result = result.mul(ctx, graph.reshapeForBroadcast(ctx, sn));
+            result.setName("mm_norm_scaled");
+        }
+        if (w.mm_input_proj_w) |proj| {
+            result = buildMMWithClamp(ctx, proj, result, &w.clamp_info_map);
+            result.setName("mm_output");
+        }
+    }
 
     // 构建计算图
     builder.gf.buildForwardExpand(result);
 
     log.info("Gemma4V graph built successfully", .{});
     return builder.gf;
+}
+
+// ============================================================================
+// 辅助函数
+// ============================================================================
+
+/// 带 clamp 的矩阵乘法
+/// 对应 C++ clip_graph_gemma4v::build_mm()
+fn buildMMWithClamp(
+    ctx: *ggml.Context,
+    w: *ggml.Tensor,
+    x: *ggml.Tensor,
+    clamp_map: *const std.StringHashMap(ClampInfo),
+) *ggml.Tensor {
+    const name = w.getName();
+    if (clamp_map.get(name)) |ci| {
+        const clamped = x.clamp(ctx, ci.inp_min, ci.inp_max);
+        var out = w.mulMat(ctx, clamped);
+        out = out.clamp(ctx, ci.out_min, ci.out_max);
+        return out;
+    } else {
+        return w.mulMat(ctx, x);
+    }
+}
+
+/// 从 GGUF 读取标量值，如果不存在则返回默认值
+fn readScalarOrDefault(gguf_file: *const gguf.GGUFFile, name: []const u8, default_val: f32) f32 {
+    const tensor_info = gguf_file.findTensor(name) orelse return default_val;
+    const data = gguf_file.getTensorData(tensor_info);
+    if (data.len < 4) return default_val;
+    return @as(*const f32, @ptrCast(@alignCast(data.ptr))).*;
 }

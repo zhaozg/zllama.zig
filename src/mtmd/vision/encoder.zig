@@ -107,19 +107,21 @@ pub const VisionEncoder = struct {
         backend.loadParams(gguf_file, &hparams);
 
         log.info("Loading vision encoder: backend={s}, size={d}, patch={d}, embd={d}, heads={d}, layers={d}, output_embd={d}", .{
-            backend.name, params.image_size, params.patch_size,
-            params.n_embd, params.n_head, params.n_layer,
+            backend.name,         params.image_size, params.patch_size,
+            params.n_embd,        params.n_head,     params.n_layer,
             params.n_output_embd,
         });
         log.info("  image_mean=[{d:.4},{d:.4},{d:.4}] image_std=[{d:.4},{d:.4},{d:.4}]", .{
             image_mean[0], image_mean[1], image_mean[2],
-            image_std[0], image_std[1], image_std[2],
+            image_std[0],  image_std[1],  image_std[2],
         });
 
         // 加载所有权重
         var weights = VisionEncoderWeights{};
         try backend.loadWeights(allocator, gguf_file, ctx, &weights);
 
+        // 加载 clamp 信息（用于 Gemma4 等模型的 clamp-aware 矩阵乘法）
+        try backend.loadClampInfo(allocator, gguf_file, &weights);
         return VisionEncoder{
             .params = params,
             .weights = weights,

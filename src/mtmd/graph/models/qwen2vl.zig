@@ -30,6 +30,7 @@ pub const backend = graph.VisionEncoderBackend{
     .name = "qwen2vl",
     .loadParams = loadParams,
     .loadWeights = loadWeights,
+    .loadClampInfo = loadClampInfo,
     .buildGraph = buildGraphFromWeights,
     .estimateOutputTokens = estimateOutputTokens,
 };
@@ -39,6 +40,16 @@ pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams)
     _ = gguf_file;
     _ = params;
     // Qwen2VL 参数已由 encoder.zig 从 clip.vision.* 前缀加载
+}
+
+/// 从 GGUF 加载 clamp 信息（Qwen2VL 不使用 clamp）
+pub fn loadClampInfo(
+    allocator: std.mem.Allocator,
+    gguf_file: *const gguf.GGUFFile,
+    w: *VisionEncoderWeights,
+) !void {
+    _ = gguf_file;
+    w.clamp_info_map = std.StringHashMap(graph.ClampInfo).init(allocator);
 }
 
 /// 从 GGUF 加载 Qwen2VL 视觉编码器所有权重到 VisionEncoderWeights
@@ -230,8 +241,7 @@ pub fn buildGraph(
     const use_window_attn = p.n_wa_pattern > 0;
     const n_wa_pattern: i64 = @intCast(p.n_wa_pattern);
 
-    log.info("Qwen2VL graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, norm={s}, window_attn={}\n",
-        .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, @tagName(norm_t), use_window_attn });
+    log.info("Qwen2VL graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, norm={s}, window_attn={}\n", .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, @tagName(norm_t), use_window_attn });
 
     // 1. 创建输入张量
     const inp_raw = try ctx.newTensor3d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3);

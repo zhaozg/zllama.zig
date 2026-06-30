@@ -34,15 +34,23 @@ pub const backend = graph.VisionEncoderBackend{
     .name = "qwen3vl",
     .loadParams = loadParams,
     .loadWeights = loadWeights,
+    .loadClampInfo = loadClampInfo,
     .buildGraph = buildGraphFromWeights,
     .estimateOutputTokens = estimateOutputTokens,
 };
-
-/// 从 GGUF 元数据读取视觉编码器超参数
 pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
     _ = gguf_file;
     _ = params;
     // Qwen3VL 参数已由 encoder.zig 从 clip.vision.* 前缀加载
+}
+
+pub fn loadClampInfo(
+    allocator: std.mem.Allocator,
+    gguf_file: *const gguf.GGUFFile,
+    w: *VisionEncoderWeights,
+) !void {
+    _ = gguf_file;
+    w.clamp_info_map = std.StringHashMap(graph.ClampInfo).init(allocator);
 }
 
 /// 从 GGUF 加载 Qwen3VL 视觉编码器所有权重到 VisionEncoderWeights
@@ -237,8 +245,7 @@ pub fn buildGraph(
     // Merge factor for deepstack
     const merge_factor: i64 = if (p.n_merge > 0) @intCast(p.n_merge * p.n_merge) else 4;
 
-    log.info("Qwen3VL graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, merge_factor={d}\n",
-        .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, merge_factor });
+    log.info("Qwen3VL graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, merge_factor={d}\n", .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, merge_factor });
 
     // 1. 创建输入张量
     const inp_raw = try ctx.newTensor3d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3);
