@@ -44,8 +44,22 @@
 | `embeddings` | 0.778 | ❌ **显著差异（源于 input_proj）** |
 
 **所有前置步骤（输入、Mel、卷积、Flatten）均已完美对齐，唯一差异锁定在`fn buildMMWithClamp' 过程。**
+
 1. 将 buildMMWithClamp 替换为直接的 ggml_mul_mat 后，input_proj_output 与 C++ 对齐（余弦相似度恢复为 1.0）
 2. 权重本身一致（相似度 1.0），输入数据也一致，所以严重怀疑基于 clamp_map 的 clamp 过程。
+
+## 已修复的差异（2026-06-30）
+
+以下两个差异已在 `src/mtmd/graph/models/gemma4a.zig` 中修复：
+
+1. **`attn_k_rel_w`（原 227 行）**：C++ 使用纯 `ggml_mul_mat`，Zig 之前使用 `buildMMWithClamp`。
+   - **修复**：改为 `k_rel.mulMat(ctx, pos_emb)`（纯矩阵乘法，无 clamp）。
+   - 原因：RPE 权重不需要 clamp，C++ 参考实现中 `build_mm` 仅用于 Q/K/V/O/FFN 等线性投影层。
+
+2. **FFN 权重**：C++ 的 `build_ffn` 使用 `build_mm`（带 clamp），Zig 的 `ffn.zig` 中 `fn buildFFN` 使用纯 `mulMat`。
+   - **修复**：在 `gemma4a.zig` 中新增 `buildFFNWithClamp` 函数，使用 `buildMMWithClamp` 进行所有权重投影（up/gate/down）。
+   - 两个 FFN 调用（FFN1 和 FFN2）均已替换为 `buildFFNWithClamp`。
+   - `ffn.zig` 中的 `buildFFN` 保持不变（通用实现，不依赖 clamp）。
 
 ---
 

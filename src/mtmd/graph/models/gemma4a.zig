@@ -118,7 +118,6 @@ pub fn buildGraphEx(
 
     // 1. Reshape mel tensor to 4D [n_frames, n_mel_bins, 1, 1]
     var cur = mel_tensor.reshape4d(ctx, n_frames, n_mel_bins, 1, 1);
-    cur.setName("inp_raw");
 
     // Transpose to frame-major layout [n_mel, n_frames, 1, 1]
     cur = ggml.transpose(ctx, cur);
@@ -130,11 +129,9 @@ pub fn buildGraphEx(
     for (0..2) |i| {
         if (w.sscp_conv_w[i]) |conv_w| {
             cur = cur.conv2d(ctx, conv_w, 2, 2, 1, 1, 1, 1);
-            cur.setName("conv");
 
             if (w.sscp_conv_b[i]) |conv_b| {
                 cur = cur.add(ctx, conv_b);
-                cur.setName("conv_biased");
             }
 
             // LayerNorm
@@ -143,11 +140,9 @@ pub fn buildGraphEx(
                 cur = cur.norm(ctx, norm_eps);
                 cur = cur.mul(ctx, norm_w);
                 cur = cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
-                cur.setName("conv_normed");
             }
 
             cur = cur.relu(ctx);
-            cur.setName("conv_act");
 
             // === DEBUG: set name + setOutput to preserve intermediate tensor ===
             if (i == 0) {
@@ -174,13 +169,12 @@ pub fn buildGraphEx(
     // 4. Input projection to Conformer embedding dim
     if (w.sscp_inp_proj_w) |proj_w| {
         cur = buildMMWithClamp(ctx, proj_w, cur, clamp_map);
-        cur.setName("debug_audio_input_proj_output");
-        ggml.setOutput(cur);
         if (w.sscp_inp_proj_b) |proj_b| {
             cur = cur.add(ctx, proj_b);
-            cur.setName("inp_proj_biased");
         }
     }
+    cur.setName("debug_audio_input_proj_output");
+    ggml.setOutput(cur);
 
     const n_pos = cur.ne()[1];
 
@@ -212,10 +206,10 @@ pub fn buildGraphEx(
 
         var residual = cur;
 
-        // FFN 1 (half-step)
+        // FFN 1 (half-step) — with clamp, matching C++ clip_graph_gemma4a::build_mm
         if (layer.ff_norm_w != null and layer.ff_up_w != null and layer.ff_down_w != null) {
             cur = try graph.buildNorm(ctx, residual, layer.ff_norm_w.?, null, .rms_norm, norm_eps, "blk");
-            cur = try graph.buildFFN(ctx, cur, layer.ff_up_w.?, null, null, null, layer.ff_down_w.?, null, .silu, "blk");
+            cur = buildFFNWithClamp(ctx, layer.ff_up_w.?, null, null, null, layer.ff_down_w.?, null, .silu, cur, clamp_map);
             if (layer.ff_post_norm_w) |post_norm| {
                 cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, "blk");
             }
@@ -273,8 +267,9 @@ pub fn buildGraphEx(
             var scores = Kblk.mulMat(ctx, Qcur); // [S, C, B, H]
 
             // Relative position attention
+            // NOTE: C++ uses pure ggml_mul_mat for attn_k_rel_w (no clamp)
             if (layer.attn_k_rel_w) |k_rel| {
-                var p_rpe = buildMMWithClamp(ctx, k_rel, pos_emb, clamp_map);
+                var p_rpe = k_rel.mulMat(ctx, pos_emb);
                 p_rpe = p_rpe.reshape3d(ctx, d_head_i, n_head_i, R);
                 p_rpe = p_rpe.permute(ctx, 0, 2, 1, 3).cont(ctx); // [D, R, H]
 
@@ -354,10 +349,10 @@ pub fn buildGraphEx(
             residual = residual.add(ctx, x_conv);
         }
 
-        // FFN 2 (half-step)
+        // FFN 2 (half-step) — with clamp, matching C++ clip_graph_gemma4a::build_mm
         if (layer.ff_norm_1_w != null and layer.ff_up_1_w != null and layer.ff_down_1_w != null) {
             cur = try graph.buildNorm(ctx, residual, layer.ff_norm_1_w.?, null, .rms_norm, norm_eps, "blk");
-            cur = try graph.buildFFN(ctx, cur, layer.ff_up_1_w.?, null, null, null, layer.ff_down_1_w.?, null, .silu, "blk");
+            cur = buildFFNWithClamp(ctx, layer.ff_up_1_w.?, null, null, null, layer.ff_down_1_w.?, null, .silu, cur, clamp_map);
             if (layer.ff_post_norm_1_w) |post_norm| {
                 cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, "blk");
             }
@@ -378,10 +373,8 @@ pub fn buildGraphEx(
     // 7. Output projection
     if (w.audio_out_proj_w) |out_w| {
         cur = buildMMWithClamp(ctx, out_w, cur, clamp_map);
-        cur.setName("out_proj");
         if (w.audio_out_proj_b) |out_b| {
             cur = cur.add(ctx, out_b);
-            cur.setName("out_proj_biased");
         }
     }
 
@@ -426,6 +419,60 @@ fn buildMMWithClamp(
     } else {
         return w.mulMat(ctx, x);
     }
+}
+
+/// 带 clamp 的 FFN 构建
+/// 对应 C++ clip_graph_gemma4a::build_ffn() — 使用 build_mm（带 clamp）进行所有权重投影
+fn buildFFNWithClamp(
+    ctx: *ggml.Context,
+    up: *ggml.Tensor,
+    up_b: ?*ggml.Tensor,
+    gate: ?*ggml.Tensor,
+    gate_b: ?*ggml.Tensor,
+    down: *ggml.Tensor,
+    down_b: ?*ggml.Tensor,
+    type_op: FFNOpType,
+    cur: *ggml.Tensor,
+    clamp_map: *const std.StringHashMap(ClampInfo),
+) *ggml.Tensor {
+    // Up projection (with clamp)
+    var up_result = buildMMWithClamp(ctx, up, cur, clamp_map);
+    if (up_b) |b| {
+        up_result = up_result.add(ctx, b);
+    }
+
+    // Gate projection (optional, for GLU variants)
+    var gate_result: ?*ggml.Tensor = null;
+    if (gate) |g| {
+        gate_result = buildMMWithClamp(ctx, g, cur, clamp_map);
+        if (gate_b) |gb| {
+            gate_result = gate_result.?.add(ctx, gb);
+        }
+    }
+
+    var activated = switch (type_op) {
+        .gelu => up_result.gelu(ctx),
+        .gelu_erf => up_result.geluErf(ctx),
+        .silu => up_result.silu(ctx),
+        .gelu_quick => up_result.geluQuick(ctx),
+        .relu_sqr => blk: {
+            const relu = up_result.relu(ctx);
+            break :blk relu.mul(ctx, relu);
+        },
+    };
+
+    // Gate (element-wise multiply with gate projection)
+    if (gate_result) |g| {
+        activated = activated.mul(ctx, g);
+    }
+
+    // Down projection (with clamp)
+    var result = buildMMWithClamp(ctx, down, activated, clamp_map);
+    if (down_b) |b| {
+        result = result.add(ctx, b);
+    }
+
+    return result;
 }
 
 /// K/V block context extraction via overlapping view
