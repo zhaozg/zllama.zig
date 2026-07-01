@@ -238,28 +238,10 @@ pub fn printModelLoaderInfo(gguf_file: *const gguf.GGUFFile, file_size: u64, fil
     logger.info("file size   = {d:.2} MiB ({d:.2} BPW)", .{ file_size_mib, bpw });
 }
 
-/// 将 TensorDataType 转换为可读字符串
+/// 将 TensorDataType（ggml.Type）转换为可读字符串
+/// 复用 ggml.Type.name() 方法
 pub fn tensorDataTypeToString(dt: gguf.TensorDataType) []const u8 {
-    return switch (dt) {
-        .f32 => "f32",
-        .f16 => "f16",
-        .q4_0 => "q4_0",
-        .q4_1 => "q4_1",
-        .q5_0 => "q5_0",
-        .q5_1 => "q5_1",
-        .q8_0 => "q8_0",
-        .q8_1 => "q8_1",
-        .q2_k => "q2_K",
-        .q3_k => "q3_K",
-        .q4_k => "q4_K",
-        .q5_k => "q5_K",
-        .q6_k => "q6_K",
-        .q8_k => "q8_K",
-        .i8 => "i8",
-        .i16 => "i16",
-        .i32 => "i32",
-        else => "?",
-    };
+    return dt.name();
 }
 
 pub fn fileTypeToString(ft: u32) []const u8 {
@@ -317,9 +299,9 @@ pub fn countTensorBytes(gguf_file: *const gguf.GGUFFile) u64 {
         for (0..tensor.n_dims) |i| {
             n_elems *= tensor.dims[i];
         }
-        // 使用 gguf.TensorDataType 的 typeSize 和 blockSize 计算
-        const type_size = tensor.data_type.typeSize();
-        const blck_size = tensor.data_type.blockSize();
+        // 使用 gguf.TensorDataType（ggml.Type）的 sizeOf 和 blockSize 计算
+        const type_size = tensor.data_type.sizeOf();
+        const blck_size = @as(u64, @intCast(tensor.data_type.blockSize()));
         const n_blocks = (n_elems + blck_size - 1) / blck_size;
         total += n_blocks * type_size;
     }

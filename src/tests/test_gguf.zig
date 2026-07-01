@@ -408,10 +408,10 @@ test "GGUF - v3 alignment" {
 }
 
 test "GGUF - TensorDataType enum" {
-    try testing.expectEqual(@as(usize, 4), gguf.TensorDataType.f32.typeSize());
-    try testing.expectEqual(@as(usize, 2), gguf.TensorDataType.f16.typeSize());
-    try testing.expectEqual(@as(usize, 1), gguf.TensorDataType.f32.blockSize());
-    try testing.expectEqual(@as(usize, 1), gguf.TensorDataType.f16.blockSize());
+    try testing.expectEqual(@as(usize, 4), gguf.TensorDataType.f32.sizeOf());
+    try testing.expectEqual(@as(usize, 2), gguf.TensorDataType.f16.sizeOf());
+    try testing.expectEqual(@as(i64, 1), gguf.TensorDataType.f32.blockSize());
+    try testing.expectEqual(@as(i64, 1), gguf.TensorDataType.f16.blockSize());
 }
 
 test "GGUF - TensorInfo sizeBytes" {

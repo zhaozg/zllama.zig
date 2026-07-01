@@ -4,9 +4,28 @@
 //! v3 使用 64 位字段（tensor_count、metadata_kv_count），无填充，张量数据 32 字节对齐。
 //! v2 使用 64 位字段，有填充。
 //!
+//! 复用 src/ggml/ 中的类型定义：
+//! - GgufValueType（来自 ggml.c.zig）替代 MetadataValueType
+//! - Type（来自 ggml.c.zig）替代 TensorDataType
+//!
 //! 参考: https://github.com/ggerganov/ggml/blob/master/docs/gguf.md
 
 const std = @import("std");
+const ggml = @import("ggml");
+
+// ============================================================================
+// 类型别名（复用 ggml 模块中的类型，保持向后兼容）
+// ============================================================================
+
+/// GGUF 元数据值类型标签（复用 ggml.GgufValueType）
+pub const MetadataValueType = ggml.GgufValueType;
+
+/// GGUF 张量数据类型（复用 ggml.Type）
+pub const TensorDataType = ggml.Type;
+
+// ============================================================================
+// GGUF 容器版本
+// ============================================================================
 
 /// GGUF 容器版本
 pub const GGUFVersion = enum(u32) {
@@ -25,25 +44,12 @@ pub const GGUFVersion = enum(u32) {
     }
 };
 
-/// GGUF 元数据值类型标签
-pub const MetadataValueType = enum(u32) {
-    uint8 = 0,
-    int8 = 1,
-    uint16 = 2,
-    int16 = 3,
-    uint32 = 4,
-    int32 = 5,
-    float32 = 6,
-    bool = 7,
-    string = 8,
-    array = 9,
-    uint64 = 10,
-    int64 = 11,
-    float64 = 12,
-    _,
-};
+// ============================================================================
+// GGUF 元数据值（解析后的形式）
+// ============================================================================
 
 /// GGUF 元数据值（解析后的形式）
+/// 使用 flat struct 而非 tagged union，便于在解析过程中逐步填充。
 pub const MetadataValue = struct {
     value_type: MetadataValueType,
 
@@ -100,6 +106,7 @@ pub const MetadataValue = struct {
             else => null,
         };
     }
+
     pub fn asI32(self: *const MetadataValue) ?i32 {
         return switch (self.value_type) {
             .int32 => self.int32_val,
@@ -115,75 +122,9 @@ pub const MetadataValue = struct {
     }
 };
 
-/// GGUF 张量数据类型
-pub const TensorDataType = enum(u32) {
-    f32 = 0,
-    f16 = 1,
-    q4_0 = 2,
-    q4_1 = 3,
-    q5_0 = 6,
-    q5_1 = 7,
-    q8_0 = 8,
-    q8_1 = 9,
-    q2_k = 10,
-    q3_k = 11,
-    q4_k = 12,
-    q5_k = 13,
-    q6_k = 14,
-    q8_k = 15,
-    iq2_xxs = 16,
-    iq2_xs = 17,
-    iq3_xxs = 18,
-    iq1_s = 19,
-    iq4_nl = 20,
-    iq3_s = 21,
-    iq2_s = 22,
-    iq4_xs = 23,
-    i8 = 24,
-    i16 = 25,
-    i32 = 26,
-    i64 = 27,
-    f64 = 28,
-    iq1_m = 29,
-    bf16 = 30,
-    _,
-
-    /// 返回该数据类型每个元素的字节数（近似值，量化类型为块大小平均）
-    /// 返回该数据类型每个元素的字节数（近似值，量化类型为块大小平均）
-    pub fn typeSize(self: TensorDataType) usize {
-        return switch (self) {
-            .f32 => 4,
-            .f16, .bf16 => 2,
-            .f64, .i64 => 8,
-            .i8 => 1,
-            .i16 => 2,
-            .i32 => 4,
-            .q4_0 => 18,
-            .q4_1 => 20,
-            .q5_0 => 22,
-            .q5_1 => 24,
-            .q8_0 => 34,
-            .q8_1 => 36,
-            .q2_k => 74,
-            .q3_k => 106,
-            .q4_k => 144,
-            .q5_k => 176,
-            .q6_k => 210,
-            .q8_k => 292,
-            else => 4, // 默认返回 f32 大小（兼容未识别类型）
-        };
-    }
-
-    /// 返回该数据类型的块大小
-    pub fn blockSize(self: TensorDataType) usize {
-        return switch (self) {
-            .f32, .f16, .bf16, .f64, .i8, .i16, .i32, .i64 => 1,
-            .q4_0, .q4_1, .q5_0, .q5_1, .q8_0, .q8_1 => 32,
-            .q2_k, .q3_k, .q4_k, .q5_k, .q6_k, .q8_k => 256,
-            else => 1,
-        };
-    }
-};
+// ============================================================================
+// GGUF 张量描述符
+// ============================================================================
 
 /// GGUF 张量描述符
 pub const TensorInfo = struct {
@@ -193,7 +134,7 @@ pub const TensorInfo = struct {
     n_dims: u64,
     /// 各维度大小（最多 4 维）
     dims: [4]u64,
-    /// 数据类型
+    /// 数据类型（复用 ggml.Type）
     data_type: TensorDataType,
     /// 在文件中的偏移量（相对于张量数据起始位置）
     offset: u64,
@@ -204,16 +145,20 @@ pub const TensorInfo = struct {
         for (0..self.n_dims) |i| {
             n_elems *= self.dims[i];
         }
-        const block_size = self.data_type.blockSize();
-        const type_size = self.data_type.typeSize();
+        const block_size = @as(u64, @intCast(self.data_type.blockSize()));
+        const type_size = self.data_type.sizeOf();
         // 对于量化类型，需要按块计算
         if (block_size > 1) {
-            const n_blocks = (n_elems + @as(u64, @intCast(block_size)) - 1) / @as(u64, @intCast(block_size));
+            const n_blocks = (n_elems + block_size - 1) / block_size;
             return @as(usize, @intCast(n_blocks * @as(u64, @intCast(type_size))));
         }
         return @as(usize, @intCast(n_elems * @as(u64, @intCast(type_size))));
     }
 };
+
+// ============================================================================
+// 解析后的 GGUF 文件
+// ============================================================================
 
 /// 解析后的 GGUF 文件
 pub const GGUFFile = struct {
@@ -223,9 +168,9 @@ pub const GGUFFile = struct {
     tensor_count: u64,
     /// 键值元数据映射
     metadata: std.StringHashMapUnmanaged(MetadataValue),
-    /// 张量描述符列表
     /// 元数据键的原始顺序（与 metadata 中的键一一对应）
     metadata_keys: []const []const u8,
+    /// 张量描述符列表
     tensors: std.ArrayList(TensorInfo),
     /// 张量数据在文件中的起始偏移
     tensor_data_offset: u64,
@@ -347,6 +292,10 @@ pub const GGUFFile = struct {
 
 const log = std.log.scoped(.gguf);
 
+// ============================================================================
+// 内部解析辅助函数
+// ============================================================================
+
 /// 读取 GGUF 文件中的字符串（前 8/4 字节长度 + UTF-8 数据）
 fn readString(data: []const u8, pos: *usize, version: GGUFVersion, arena: *std.heap.ArenaAllocator) ![]const u8 {
     const len = if (version == .v3 or version == .v2) blk: {
@@ -454,7 +403,6 @@ fn readMetadataValue(data: []const u8, pos: *usize, version: GGUFVersion, arena:
             val.float64_val = @as(f64, @bitCast(std.mem.readInt(u64, data[pos.*..][0..8], .little)));
             pos.* += 8;
         },
-        else => unreachable,
     }
 
     return val;
@@ -516,11 +464,14 @@ fn readMetadataValueOfType(data: []const u8, pos: *usize, value_type: MetadataVa
             // 嵌套数组暂不支持
             return error.NestedArrayNotSupported;
         },
-        else => unreachable,
     }
 
     return val;
 }
+
+// ============================================================================
+// 主解析函数
+// ============================================================================
 
 /// 解析 GGUF 文件
 /// @param data 完整的 GGUF 文件数据
@@ -577,6 +528,7 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
         pos += 4;
         break :blk @as(u64, mc);
     };
+
     var metadata = std.StringHashMapUnmanaged(MetadataValue){};
     try metadata.ensureTotalCapacity(arena_allocator, @as(u32, @intCast(metadata_kv_count)));
 
@@ -589,7 +541,6 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
         metadata.putAssumeCapacity(key, val);
     }
 
-    // 解析张量信息
     // 解析张量信息（v3 不需要对齐，只有 tensor data 需要对齐）
     var tensors = std.ArrayList(TensorInfo).empty;
     try tensors.ensureTotalCapacity(arena_allocator, @as(usize, @intCast(tensor_count)));
@@ -597,11 +548,7 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
     for (0..@as(usize, @intCast(tensor_count))) |_| {
         const name = try readString(data, &pos, version, &arena);
         if (pos + 4 > data.len) return error.InvalidGGUFFile;
-        const n_dims = if (is_64bit) blk: {
-            const nd = std.mem.readInt(u32, data[pos..][0..4], .little);
-            pos += 4;
-            break :blk nd;
-        } else blk: {
+        const n_dims = blk: {
             const nd = std.mem.readInt(u32, data[pos..][0..4], .little);
             pos += 4;
             break :blk nd;
@@ -666,6 +613,10 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
     };
 }
 
+// ============================================================================
+// 测试
+// ============================================================================
+
 const testing = std.testing;
 
 test "GGUFVersion fromInt" {
@@ -675,13 +626,22 @@ test "GGUFVersion fromInt" {
     try testing.expect(GGUFVersion.fromInt(99) == null);
 }
 
-test "TensorDataType typeSize" {
-    try testing.expectEqual(@as(usize, 4), TensorDataType.f32.typeSize());
-    try testing.expectEqual(@as(usize, 2), TensorDataType.f16.typeSize());
+test "TensorDataType typeSize (via ggml.Type)" {
+    try testing.expectEqual(@as(usize, 4), TensorDataType.f32.sizeOf());
+    try testing.expectEqual(@as(usize, 2), TensorDataType.f16.sizeOf());
 }
 
 test "parse invalid magic" {
     const data = [_]u8{0} ** 16;
     const result = parse(&data, std.testing.allocator);
     try testing.expectError(error.InvalidGGUFFile, result);
+}
+
+test "MetadataValueType is GgufValueType" {
+    try testing.expectEqual(@as(u32, 0), @intFromEnum(MetadataValueType.uint8));
+    try testing.expectEqual(@as(u32, 4), @intFromEnum(MetadataValueType.uint32));
+    try testing.expectEqual(@as(u32, 6), @intFromEnum(MetadataValueType.float32));
+    try testing.expectEqual(@as(u32, 7), @intFromEnum(MetadataValueType.bool));
+    try testing.expectEqual(@as(u32, 8), @intFromEnum(MetadataValueType.string));
+    try testing.expectEqual(@as(u32, 9), @intFromEnum(MetadataValueType.array));
 }
