@@ -337,6 +337,11 @@ pub const Context = opaque {
         c.gguf_set_kv(@ptrCast(self), @ptrCast(src));
     }
 
+    /// 移除指定 key 的 KV 对，返回该 key 之前的 id（-1 表示不存在）
+    pub fn removeKey(self: *Context, key: [:0]const u8) i64 {
+        return c.gguf_remove_key(@ptrCast(self), key.ptr);
+    }
+
     /// 添加张量
     pub fn addTensor(self: *Context, tensor: *const anyopaque) void {
         c.gguf_add_tensor(@ptrCast(self), @ptrCast(tensor));
@@ -352,7 +357,12 @@ pub const Context = opaque {
         c.gguf_set_tensor_data(@ptrCast(self), name.ptr, data);
     }
 
-    /// 写入到文件
+    /// 写入到文件（通过 FILE*）
+    pub fn writeToFilePtr(self: *const Context, file: *anyopaque, only_meta: bool) bool {
+        return c.gguf_write_to_file_ptr(@ptrCast(self), @ptrCast(file), only_meta);
+    }
+
+    /// 写入到文件路径
     pub fn writeToFile(self: *const Context, fname: [:0]const u8, only_meta: bool) bool {
         return c.gguf_write_to_file(@ptrCast(self), fname.ptr, only_meta);
     }
