@@ -1,5 +1,91 @@
 # ggml.zig 绑定设计
 
+## 6. 常见类型不匹配问题（2025-07 修复记录）
+
+### 6.1 `ggml_print_objects` 参数类型
+
+`ggml_print_objects` 接受 `ggml_context*` 而非 `ggml_tensor*`。
+在 Tensor 封装中，`print()` 方法应接受 `ctx: *anyopaque` 参数：
+
+```zig
+pub fn print(self: *Tensor, ctx: *anyopaque) void {
+    _ = self;
+    c.ggml_print_objects(@ptrCast(ctx));
+}
+```
+
+### 6.2 `ggml_pool_2d` 的 `op` 参数类型
+
+`ggml_pool_2d` 的 `op` 参数在 C 头文件中声明为 `enum_ggml_op_pool`，
+在 Zig 的 `@cImport` 中映射为 `c_uint`（unsigned int），而非 `c_int`。
+
+```zig
+// 正确：op 应为 c_uint
+pub fn pool2d(self: *Tensor, ctx: *anyopaque, op: c_uint, k0: i32, k1: i32, s0: i32, s1: i32, p0: f32, p1: f32) *Tensor {
+    return wrap(c.ggml_pool_2d(@ptrCast(ctx), @ptrCast(@alignCast(self)), op, k0, k1, s0, s1, p0, p1));
+}
+```
+
+### 6.3 `ggml_nelements` 返回类型
+
+`ggml_nelements` 返回 `int64_t`，在 Zig 中对应 `i64`，而非 `usize` 或 `i32`。
+
+```zig
+pub fn nElems(self: *Tensor) i64 {
+    return c.ggml_nelements(@ptrCast(@alignCast(self)));
+}
+```
+
+### 6.4 `ggml_log_callback` 签名
+
+ggml 日志回调的 `level` 参数类型为 `c_uint`（`enum ggml_log_level`），
+而非 `c_int`。回调函数签名必须严格匹配：
+
+```zig
+fn defaultLogCallback(level: c_uint, text: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
+    _ = user_data;
+    const log_level: LogLevel = @enumFromInt(level);
+    const msg = std.mem.sliceTo(text, 0);
+    std.debug.print("[ggml] [{s}] {s}", .{ log_level.name(), msg });
+}
+```
+
+### 6.5 `gguf_set_arr_str` 参数类型
+
+`gguf_set_arr_str` 的 `data` 参数类型为 `const char **`，
+在 Zig 中对应 `[]const [*:0]const u8`（切片，元素为 C 字符串指针），
+而非 `[]const []const u8`。
+
+```zig
+pub fn setArrStr(ctx: *GgufCtx, key: [:0]const u8, data: []const [*:0]const u8) void {
+    c.gguf_set_arr_str(ctx, key.ptr, @intCast(data.len), data.ptr);
+}
+```
+
+### 6.6 避免重复定义
+
+在 `opaque {}` 类型中，不允许有同名方法。编辑时需注意：
+- 删除旧定义后再添加新定义
+- 使用 `codedb_outline` 检查是否有重复符号
+- 编译错误 `duplicate opaque member name` 表明存在重复定义
+
+### 6.7 编译检查清单
+
+修改 ggml 绑定后，运行以下命令验证：
+
+```bash
+# 1. 运行测试（检查类型安全）
+zig build test -Doptimize=ReleaseSafe --summary all
+
+# 2. 构建所有目标（检查链接）
+zig build -Doptimize=ReleaseSafe
+
+# 3. 格式化代码
+zig fmt src/ggml/
+```
+
+
+
 > **项目：** zllama.zig — 纯 Zig 实现的多模型本地推理引擎
 
 ## 1. 设计原则
