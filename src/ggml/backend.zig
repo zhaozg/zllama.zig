@@ -43,6 +43,18 @@ pub fn backendGetDefaultBufferType(backend: *Backend) *BackendBufferType {
     return c.ggml_backend_get_default_buffer_type(backend).?;
 }
 
+/// 检查 buffer type 是否为 host 内存（CPU 可访问）
+/// 对于 CPU 和 Metal 后端返回 true，对于 CUDA 等设备后端返回 false
+pub fn backendBuftIsHost(buft: *BackendBufferType) bool {
+    return c.ggml_backend_buft_is_host(@ptrCast(buft));
+}
+
+/// 将数据从 host 内存设置到 tensor（支持 device 内存）
+/// 对于 device 内存的 tensor，内部处理 host->device 拷贝
+pub fn backendTensorSet(tensor: *Tensor, data: []const u8, offset: usize) void {
+    c.ggml_backend_tensor_set(@ptrCast(@alignCast(tensor)), data.ptr, offset, data.len);
+}
+
 /// 为 context 中所有未分配的张量分配内存
 /// 权重张量（已通过 setDataPtr 设置）不会被重新分配
 pub fn backendAllocCtxTensors(ctx: *Context, backend: *Backend) !void {

@@ -39,6 +39,11 @@ pub const backendAllocCtxTensorsFromBuft = @import("backend.zig").backendAllocCt
 pub const backendFree = @import("backend.zig").backendFree;
 pub const loadBackends = @import("backend.zig").loadBackends;
 pub const setInput = @import("backend.zig").setInput;
+pub const backendBuftIsHost = @import("backend.zig").backendBuftIsHost;
+pub const backendTensorSet = @import("backend.zig").backendTensorSet;
+
+/// backend 子模块命名空间
+pub const backend = @import("backend.zig");
 
 pub const ThreadPool = @import("threadpool.zig").ThreadPool;
 

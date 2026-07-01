@@ -110,6 +110,10 @@ pub const Loader = struct {
 
     /// 查找并创建张量（从 GGUF 数据加载）
     /// 如果张量不存在且 flags 包含 NOT_REQUIRED，返回 null
+    ///
+    /// 支持两种加载方式（参考 llama.cpp clip.cpp load_tensors）：
+    /// - host 内存（CPU/Metal）：直接 @memcpy 到 tensor data
+    /// - device 内存（CUDA 等）：通过 ggml_backend_tensor_set 拷贝
     pub fn findOrCreateTensor(
         self: *Loader,
         name: []const u8,

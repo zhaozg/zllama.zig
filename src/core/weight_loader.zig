@@ -2,16 +2,36 @@
 //!
 //! 提供统一的 GGUF 张量查找、创建和加载功能。
 //! 消除各模型实现中重复的 findOrCreateTensor / loadLayerWeight / estimateMemSize 代码。
+//!
+//! 参考 llama.cpp clip.cpp load_tensors 的两种加载方式：
+//! 1. host 内存（CPU/Metal）：直接 @memcpy 到 tensor data
+//! 2. device 内存（CUDA 等）：通过 ggml_backend_tensor_set 拷贝
 
 const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
+const backend = @import("ggml").backend;
 
 const log = std.log.scoped(.weight_loader);
 
 /// 从 GGUF 文件中查找并创建张量，复制权重数据
 /// 如果张量不存在，返回 error.TensorNotFound
+///
+/// 支持两种加载方式：
+/// - 如果 buft 为 null 或 buft 是 host 内存：直接 @memcpy
+/// - 如果 buft 是 device 内存：使用 ggml_backend_tensor_set
 pub fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
+    return findOrCreateTensorWithBuft(ctx, gguf_file, name, null);
+}
+
+/// 带 buffer type 的 findOrCreateTensor
+/// 支持 GPU 后端通过 ggml_backend_tensor_set 加载
+pub fn findOrCreateTensorWithBuft(
+    ctx: *ggml.Context,
+    gguf_file: *const gguf.GGUFFile,
+    name: []const u8,
+    buft: ?*backend.BackendBufferType,
+) !*ggml.Tensor {
     if (gguf_file.findTensor(name)) |info| {
         const n_dims = info.n_dims;
         const dims = info.dims;
@@ -39,12 +59,25 @@ pub fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, n
         if (tensor_bytes.len != tensor_data.len) {
             log.warn("Tensor '{s}' size mismatch: expected {d} bytes, got {d} bytes", .{ name, tensor_bytes.len, tensor_data.len });
         }
-        @memcpy(tensor_bytes, tensor_data);
+
+        // 根据 buffer type 选择加载方式
+        if (buft) |b| {
+            if (backend.backendBuftIsHost(b)) {
+                // host 内存（CPU/Metal）：直接 memcpy
+                @memcpy(tensor_bytes, tensor_data);
+            } else {
+                // device 内存（CUDA 等）：使用 ggml_backend_tensor_set
+                backend.backendTensorSet(tensor, tensor_data, 0);
+            }
+        } else {
+            // 无 buft 信息，默认使用 host 内存方式
+            @memcpy(tensor_bytes, tensor_data);
+        }
 
         return tensor;
     }
 
-    log.debug("findOrCreateTensor('{s}') return TensorNotFound", .{ name } );
+    log.debug("findOrCreateTensor('{s}') return TensorNotFound", .{name});
     return error.TensorNotFound;
 }
 
