@@ -32,6 +32,7 @@ comptime {
     _ = @import("test_utils");
     _ = @import("tests/test_layers.zig");
     _ = @import("tests/test_gguf.zig");
+    _ = @import("tests/test_ggml_gguf.zig");
     _ = @import("tests/test_archs.zig");
     _ = @import("tests/test_kv_cache.zig");
     _ = @import("tests/test_compare_logits.zig");

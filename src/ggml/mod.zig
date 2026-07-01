@@ -42,6 +42,8 @@ pub const setInput = @import("backend.zig").setInput;
 
 pub const ThreadPool = @import("threadpool.zig").ThreadPool;
 
+pub const gguf = @import("gguf.zig");
+
 pub const mulMat = @import("ops.zig").mulMat;
 pub const mul = @import("ops.zig").mul;
 pub const add = @import("ops.zig").add;
