@@ -140,19 +140,21 @@ pub const TensorInfo = struct {
     offset: u64,
 
     /// 计算张量数据的总字节数
+    /// 使用 ggml_row_size 语义：type_size * ne[0] / blck_size * ne[1] * ne[2] * ne[3]
+    /// 参考: ggml_row_size(type, ne) = ggml_type_size(type) * ne / ggml_blck_size(type)
     pub fn sizeBytes(self: *const TensorInfo) usize {
-        var n_elems: u64 = 1;
-        for (0..self.n_dims) |i| {
-            n_elems *= self.dims[i];
-        }
-        const block_size = @as(u64, @intCast(self.data_type.blockSize()));
         const type_size = self.data_type.sizeOf();
-        // 对于量化类型，需要按块计算
-        if (block_size > 1) {
-            const n_blocks = (n_elems + block_size - 1) / block_size;
-            return @as(usize, @intCast(n_blocks * @as(u64, @intCast(type_size))));
+        const blck_size = @as(u64, @intCast(self.data_type.blockSize()));
+
+        // ne[0] 维度按块计算行大小
+        const row_size = type_size * self.dims[0] / blck_size;
+
+        // 乘以其余维度
+        var total: u64 = row_size;
+        for (1..self.n_dims) |i| {
+            total *= self.dims[i];
         }
-        return @as(usize, @intCast(n_elems * @as(u64, @intCast(type_size))));
+        return @as(usize, total);
     }
 };
 

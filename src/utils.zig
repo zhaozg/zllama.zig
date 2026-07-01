@@ -295,15 +295,7 @@ pub fn countTotalParams(gguf_file: *const gguf.GGUFFile) u64 {
 pub fn countTensorBytes(gguf_file: *const gguf.GGUFFile) u64 {
     var total: u64 = 0;
     for (gguf_file.tensors.items) |tensor| {
-        var n_elems: u64 = 1;
-        for (0..tensor.n_dims) |i| {
-            n_elems *= tensor.dims[i];
-        }
-        // 使用 gguf.TensorDataType（ggml.Type）的 sizeOf 和 blockSize 计算
-        const type_size = tensor.data_type.sizeOf();
-        const blck_size = @as(u64, @intCast(tensor.data_type.blockSize()));
-        const n_blocks = (n_elems + blck_size - 1) / blck_size;
-        total += n_blocks * type_size;
+        total += tensor.sizeBytes();
     }
     return total;
 }

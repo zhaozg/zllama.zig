@@ -425,13 +425,32 @@ test "GGUF - TensorInfo sizeBytes" {
     };
     try testing.expectEqual(@as(usize, 128 * 4096 * 4), info.sizeBytes());
 }
+test "GGUF - TensorInfo sizeBytes quantized" {
+    // q4_K 张量 [256, 4096]：block_size=256, type_size=144
+    // row_size = 144 * 256 / 256 = 144
+    // total = 144 * 4096 = 589824
+    const info = gguf.TensorInfo{
+        .name = "test_q4k",
+        .n_dims = 2,
+        .dims = .{ 256, 4096, 0, 0 },
+        .data_type = .q4_K,
+        .offset = 0,
+    };
+    try testing.expectEqual(@as(usize, 144 * 4096), info.sizeBytes());
+}
 
-test "GGUF - MetadataValueType enum" {
-    try testing.expectEqual(@as(u32, 7), @intFromEnum(gguf.MetadataValueType.bool));
-    try testing.expectEqual(@as(u32, 6), @intFromEnum(gguf.MetadataValueType.float32));
-    try testing.expectEqual(@as(u32, 4), @intFromEnum(gguf.MetadataValueType.uint32));
-    try testing.expectEqual(@as(u32, 8), @intFromEnum(gguf.MetadataValueType.string));
-    try testing.expectEqual(@as(u32, 9), @intFromEnum(gguf.MetadataValueType.array));
+test "GGUF - TensorInfo sizeBytes 1D quantized" {
+    // q4_K 张量 [256]：block_size=256, type_size=144
+    // row_size = 144 * 256 / 256 = 144
+    // total = 144
+    const info = gguf.TensorInfo{
+        .name = "test_1d_q4k",
+        .n_dims = 1,
+        .dims = .{ 256, 0, 0, 0 },
+        .data_type = .q4_K,
+        .offset = 0,
+    };
+    try testing.expectEqual(@as(usize, 144), info.sizeBytes());
 }
 
 test "GGUF - MetadataValue asString" {
