@@ -168,10 +168,15 @@ pub fn buildGraphEx(
 
     // 4. Input projection to Conformer embedding dim
     if (w.sscp_inp_proj_w) |proj_w| {
+        log.warn("w.sscp_inp_proj_w is NOT NULL", .{});
         cur = buildMMWithClamp(ctx, proj_w, cur, clamp_map);
         if (w.sscp_inp_proj_b) |proj_b| {
             cur = cur.add(ctx, proj_b);
+        } else {
+            log.warn("w.sscp_inp_proj_b is NULL", .{});
         }
+    } else {
+        log.warn("w.sscp_inp_proj_w is NULL", .{});
     }
     cur.setName("debug_audio_input_proj_output");
     ggml.setOutput(cur);
@@ -412,11 +417,14 @@ fn buildMMWithClamp(
 ) *ggml.Tensor {
     const name = w.getName();
     if (clamp_map.get(name)) |ci| {
+        log.debug("[gemma4a] ggml_clamp('{s}'): min=[{}, {}] max=[{}, {}]", .{
+            name, ci.inp_min, ci.inp_max, ci.out_min, ci.out_max });
         const clamped = x.clamp(ctx, ci.inp_min, ci.inp_max);
         var out = w.mulMat(ctx, clamped);
         out = out.clamp(ctx, ci.out_min, ci.out_max);
         return out;
     } else {
+        log.warn("[gemma4a] not found ClampInfo of '{s}'", .{name});
         return w.mulMat(ctx, x);
     }
 }
@@ -598,7 +606,8 @@ pub fn loadWeights(
     for (0..2) |i| {
         var buf: [64]u8 = undefined;
         const conv_name = try std.fmt.bufPrint(&buf, "a.conv1d.{d}.weight", .{i});
-        w.sscp_conv_w[i] = findTensorInGGUF(ctx, gguf_file, conv_name) catch null;
+        // conv1d.weight 是必需张量（参考 clip.cpp get_tensor 默认 required=true）
+        w.sscp_conv_w[i] = (try findTensorInGGUFWithRequired(ctx, gguf_file, conv_name, true)) orelse return error.TensorNotFound;
 
         const bias_name = try std.fmt.bufPrint(&buf, "a.conv1d.{d}.bias", .{i});
         w.sscp_conv_b[i] = findTensorInGGUF(ctx, gguf_file, bias_name) catch null;
@@ -608,7 +617,8 @@ pub fn loadWeights(
     }
 
     // 子采样输入投影
-    w.sscp_inp_proj_w = findTensorInGGUF(ctx, gguf_file, "a.input_projection.weight") catch null;
+    // a.input_projection.weight 是必需张量（参考 clip.cpp get_tensor 默认 required=true）
+    w.sscp_inp_proj_w = (try findTensorInGGUFWithRequired(ctx, gguf_file, "a.input_projection.weight", true)) orelse return error.TensorNotFound;
     w.sscp_inp_proj_b = findTensorInGGUF(ctx, gguf_file, "a.input_projection.bias") catch null;
 
     // 输出投影
@@ -749,6 +759,22 @@ pub fn estimateOutputTokens(n_frames: u32) u32 {
 
 fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
     return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
+}
+
+/// 从 GGUF 查找张量，支持 required 参数（类似 clip.cpp 的 get_tensor）
+/// 如果 required=true 且张量不存在，返回 error.TensorNotFound
+/// 如果 required=false 且张量不存在，返回 null
+fn findTensorInGGUFWithRequired(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8, required: bool) !?*ggml.Tensor {
+    return weight_loader.findOrCreateTensor(ctx, gguf_file, name) catch |err| {
+        if (err == error.TensorNotFound) {
+            if (required) {
+                log.err("Required tensor '{s}' not found in GGUF file", .{name});
+                return error.TensorNotFound;
+            }
+            return null;
+        }
+        return err;
+    };
 }
 
 fn loadConformerLayer(

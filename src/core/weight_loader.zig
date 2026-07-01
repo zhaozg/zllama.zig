@@ -43,6 +43,8 @@ pub fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, n
 
         return tensor;
     }
+
+    log.debug("findOrCreateTensor('{s}') return TensorNotFound", .{ name } );
     return error.TensorNotFound;
 }
 
