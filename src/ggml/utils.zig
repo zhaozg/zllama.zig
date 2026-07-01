@@ -83,6 +83,13 @@ pub fn recommendedThreads() i32 {
     return @max(1, @divTrunc(n * 3, 4));
 }
 
+fn defaultLogCallback(level: c_uint, text: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
+    _ = user_data;
+    const log_level: LogLevel = @enumFromInt(level);
+    const msg = std.mem.sliceTo(text, 0);
+    // 使用 std.debug.print 输出，它内部使用 Io 实例
+    std.debug.print("[ggml] [{s}] {s}", .{ log_level.name(), msg });
+}
 // ============================================================================
 // 日志系统
 pub const LogLevel = enum(c_uint) {
@@ -104,14 +111,6 @@ pub const LogLevel = enum(c_uint) {
         };
     }
 };
-
-fn defaultLogCallback(level: c_uint, text: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
-    _ = user_data;
-    const log_level: LogLevel = @enumFromInt(level);
-    const msg = std.mem.sliceTo(text, 0);
-    // 使用 std.debug.print 输出，它内部使用 Io 实例
-    std.debug.print("[ggml] [{s}] {s}", .{ log_level.name(), msg });
-}
 
 /// 设置 ggml 日志回调
 pub fn logSet() void {

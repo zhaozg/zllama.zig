@@ -60,8 +60,8 @@ pub const Tensor = opaque {
     pub fn setZero(self: *Tensor) void {
         @memset(self.dataBytes(), 0);
     }
-    pub fn nElems(self: *Tensor) usize {
-        return @as(usize, @intCast(c.ggml_nelements(@ptrCast(@alignCast(self)))));
+    pub fn nElems(self: *Tensor) i64 {
+        return c.ggml_nelements(@ptrCast(@alignCast(self)));
     }
     pub fn nBytes(self: *Tensor) usize {
         return @as(usize, @intCast(c.ggml_nbytes(@ptrCast(@alignCast(self)))));
@@ -116,8 +116,9 @@ pub const Tensor = opaque {
     pub fn geluQuick(self: *Tensor, ctx: *anyopaque) *Tensor {
         return wrap(c.ggml_gelu_quick(@ptrCast(ctx), @ptrCast(@alignCast(self))));
     }
-    pub fn sqr(self: *Tensor, ctx: *anyopaque) *Tensor {
-        return wrap(c.ggml_sqr(@ptrCast(ctx), @ptrCast(@alignCast(self))));
+    pub fn print(self: *Tensor, ctx: *anyopaque) void {
+        _ = self;
+        c.ggml_print_objects(@ptrCast(ctx));
     }
     pub fn sigmoid(self: *Tensor, ctx: *anyopaque) *Tensor {
         return wrap(c.ggml_sigmoid(@ptrCast(ctx), @ptrCast(@alignCast(self))));
@@ -143,6 +144,9 @@ pub const Tensor = opaque {
     pub fn roll(self: *Tensor, ctx: *anyopaque, p0: i32, p1: i32, p2: i32, p3: i32) *Tensor {
         return wrap(c.ggml_roll(@ptrCast(ctx), @ptrCast(@alignCast(self)), p0, p1, p2, p3));
     }
+    pub fn pool2d(self: *Tensor, ctx: *anyopaque, op: c_uint, k0: i32, k1: i32, s0: i32, s1: i32, p0: f32, p1: f32) *Tensor {
+        return wrap(c.ggml_pool_2d(@ptrCast(ctx), @ptrCast(@alignCast(self)), op, k0, k1, s0, s1, p0, p1));
+    }
     pub fn getRows(self: *Tensor, ctx: *anyopaque, b: *Tensor) *Tensor {
         return wrap(c.ggml_get_rows(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(b))));
     }
@@ -167,9 +171,6 @@ pub const Tensor = opaque {
     pub fn conv2d(self: *Tensor, ctx: *anyopaque, kernel: *Tensor, s0: i32, s1: i32, p0: i32, p1: i32, d0: i32, d1: i32) *Tensor {
         return wrap(c.ggml_conv_2d(@ptrCast(ctx), @ptrCast(@alignCast(kernel)), @ptrCast(@alignCast(self)), s0, s1, p0, p1, d0, d1));
     }
-    pub fn pool2d(self: *Tensor, ctx: *anyopaque, op: c_int, k0: i32, k1: i32, s0: i32, s1: i32, p0: f32, p1: f32) *Tensor {
-        return wrap(c.ggml_pool_2d(@ptrCast(ctx), @ptrCast(@alignCast(self)), @as(c_uint, @intCast(op)), @as(c_int, k0), @as(c_int, k1), @as(c_int, s0), @as(c_int, s1), p0, p1));
-    }
     pub fn im2col(self: *Tensor, ctx: *anyopaque, kernel: *Tensor, s0: i32, s1: i32, p0: i32, p1: i32, d0: i32, d1: i32, is_2d: bool, dst_type: Type) *Tensor {
         return wrap(c.ggml_im2col(@ptrCast(ctx), @ptrCast(@alignCast(kernel)), @ptrCast(@alignCast(self)), s0, s1, p0, p1, d0, d1, is_2d, @intFromEnum(dst_type)));
     }
@@ -185,9 +186,6 @@ pub const Tensor = opaque {
     pub fn ropeExt(self: *Tensor, ctx: *anyopaque, pos: *Tensor, freq_factors: ?*Tensor, n_dims: i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
         const fp: [*c]c.struct_ggml_tensor = if (freq_factors) |f| @ptrCast(@alignCast(f)) else null;
         return wrap(c.ggml_rope_ext(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(pos)), fp, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow));
-    }
-    pub fn print(self: *Tensor) void {
-        c.ggml_print_objects(@ptrCast(@alignCast(self)));
     }
 };
 

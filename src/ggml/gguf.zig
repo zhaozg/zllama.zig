@@ -259,7 +259,9 @@ pub const Context = opaque {
     }
 
     // -------------------------------------------------------------------------
-    // 写入操作（用于创建/修改 GGUF 文件）
+    pub fn setArrStr(self: *Context, key: [:0]const u8, data: []const [*:0]const u8) void {
+        c.gguf_set_arr_str(@ptrCast(self), key.ptr, data.ptr, data.len);
+    }
     // -------------------------------------------------------------------------
 
     /// 设置 KV 值（u8）
@@ -325,11 +327,6 @@ pub const Context = opaque {
     /// 设置 KV 值（array data）
     pub fn setArrData(self: *Context, key: [:0]const u8, typ: GgufValueType, data: *const anyopaque, n: usize) void {
         c.gguf_set_arr_data(@ptrCast(self), key.ptr, @intFromEnum(typ), @ptrCast(data), n);
-    }
-
-    /// 设置 KV 值（array string）
-    pub fn setArrStr(self: *Context, key: [:0]const u8, data: []const [:0]const u8) void {
-        c.gguf_set_arr_str(@ptrCast(self), key.ptr, @ptrCast(data.ptr), data.len);
     }
 
     /// 从另一个 context 复制 KV 对
