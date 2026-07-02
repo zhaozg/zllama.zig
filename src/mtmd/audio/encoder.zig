@@ -195,6 +195,23 @@ pub const AudioEncoder = struct {
         debug.saveTensorFromGraph(io, subdir, "zllama_audio_input_proj_output.json", "debug_audio_input_proj_output", cgraph) catch |err| {
             log.debug("Failed to save input_proj_output debug data: {}", .{err});
         };
+
+        debug.saveTensorFromGraph(io, subdir, "zllama_layer0_half_step_1_output.json", "debug_audio_half_step_1_output", cgraph) catch |err| {
+            log.debug("Failed to save half_step_1_output debug data: {}", .{err});
+        };
+        debug.saveTensorFromGraph(io, subdir, "zllama_layer0_self_attention_with_RPE_output.json", "debug_audio_self_attention_with_RPE_output", cgraph) catch |err| {
+            log.debug("Failed to save half_step_1_output debug data: {}", .{err});
+        };
+        debug.saveTensorFromGraph(io, subdir, "zllama_layer0_convolution_output.json", "debug_audio_convolution_output", cgraph) catch |err| {
+            log.debug("Failed to save half_step_1_output debug data: {}", .{err});
+        };
+        debug.saveTensorFromGraph(io, subdir, "zllama_layer0_half_step_2_output.json", "debug_audio_half_step_2_output", cgraph) catch |err| {
+            log.debug("Failed to save half_step_1_output debug data: {}", .{err});
+        };
+        debug.saveTensorFromGraph(io, subdir, "zllama_layer0_norm_output.json", "debug_audio_layer_0_norm_output", cgraph) catch |err| {
+            log.debug("Failed to save half_step_1_output debug data: {}", .{err});
+        };
+
     }
 
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {

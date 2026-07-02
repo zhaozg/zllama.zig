@@ -207,7 +207,7 @@ pub fn buildGraphEx(
 
     // 6. Conformer Blocks
     for (w.layers, 0..) |*layer, il| {
-        _ = il;
+        // _ = il;
 
         var residual = cur;
 
@@ -219,6 +219,10 @@ pub fn buildGraphEx(
                 cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, "blk");
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
+        }
+        if (il==0) {
+            residual.setName("debug_audio_half_step_1_output");
+            ggml.setOutput(residual);
         }
 
         // Chunked local self-attention with RPE
@@ -322,6 +326,10 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, x);
         }
+        if (il==0) {
+            residual.setName("debug_audio_self_attention_with_RPE_output");
+            ggml.setOutput(residual);
+        }
 
         // Convolution Module (GLU + depthwise conv)
         if (layer.norm_conv_w != null and layer.conv_pw1_w != null and
@@ -353,6 +361,10 @@ pub fn buildGraphEx(
             x_conv = buildMMWithClamp(ctx, layer.conv_pw2_w.?, x_conv, clamp_map);
             residual = residual.add(ctx, x_conv);
         }
+        if (il==0) {
+            residual.setName("debug_audio_convolution_output");
+            ggml.setOutput(residual);
+        }
 
         // FFN 2 (half-step) — with clamp, matching C++ clip_graph_gemma4a::build_mm
         if (layer.ff_norm_1_w != null and layer.ff_up_1_w != null and layer.ff_down_1_w != null) {
@@ -363,12 +375,21 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
         }
+        if (il==0) {
+            residual.setName("debug_audio_half_step_2_output");
+            ggml.setOutput(residual);
+        }
 
         // Layer output norm
         cur = if (layer.ln_2_w) |ln2|
             try graph.buildNorm(ctx, residual, ln2, null, .rms_norm, norm_eps, "blk")
         else
             residual;
+
+        if (il==0) {
+            cur.setName("debug_audio_layer_0_norm_output");
+            ggml.setOutput(cur);
+        }
     }
 
     // === DEBUG: set name + setOutput for conformer blocks output ===
@@ -407,6 +428,14 @@ pub fn buildGraphEx(
 // ============================================================================
 // 辅助函数
 // ============================================================================
+fn logTensorMeta(t: *ggml.Tensor, prefix: []const u8) void {
+    const ne = t.ne(); // Ensure tensor shape is computed
+    const nb = t.nb();
+    log.debug("{s}: type={any}, ne=[{},{},{}], nb=[{},{},{}], op={s}", .{ prefix, t.dataType(), ne[0], ne[1], ne[2], nb[0], nb[1], nb[2], t.getOpName() });
+    // 如需打印 src 指针：
+    const c_t: *ggml.c.ggml_tensor = @ptrCast(@alignCast(t));
+    log.debug("{s}: src[0]={*}, src[1]={*}", .{ prefix, c_t.src[0], c_t.src[1] });
+}
 
 /// 带 clamp 的矩阵乘法
 fn buildMMWithClamp(
