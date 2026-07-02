@@ -29,6 +29,7 @@ pub const rope = @import("rope.zig");
 pub const merge = @import("merge.zig");
 pub const stack = @import("stack.zig");
 pub const mm = @import("mm.zig");
+pub const clamp = @import("clamp.zig");
 
 // 重新导出核心类型
 pub const GraphBuilder = builder.GraphBuilder;

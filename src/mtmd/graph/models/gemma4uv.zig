@@ -76,49 +76,14 @@ pub fn loadClampInfo(
     gguf_file: *const gguf.GGUFFile,
     w: *VisionEncoderWeights,
 ) !void {
-    var clamp_map = std.StringHashMap(ClampInfo).init(allocator);
     var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| return err;
     defer weight_names.deinit(allocator);
 
     if (w.patch_embeddings_0) |t| try weight_names.append(allocator, t.getName());
     if (w.mm_input_proj_w) |t| try weight_names.append(allocator, t.getName());
 
-    const weight_suffix = ".weight";
-    const clamp_suffixes = [_][]const u8{ ".input_max", ".input_min", ".output_max", ".output_min" };
-
-    for (weight_names.items) |w_name| {
-        if (!std.mem.endsWith(u8, w_name, weight_suffix)) continue;
-
-        const prefix_len = w_name.len - weight_suffix.len;
-        var clamp_names: [4][]const u8 = undefined;
-
-        for (&clamp_names, clamp_suffixes) |*out_name, suffix| {
-            const new_len = prefix_len + suffix.len;
-            const buf = try allocator.alloc(u8, new_len);
-            errdefer allocator.free(buf);
-            @memcpy(buf[0..prefix_len], w_name[0..prefix_len]);
-            @memcpy(buf[prefix_len..][0..suffix.len], suffix);
-            out_name.* = buf;
-        }
-        defer {
-            for (clamp_names) |n| allocator.free(n);
-        }
-
-        const inp_max_val = readScalarOrDefault(gguf_file, clamp_names[0], std.math.floatMax(f32));
-        const inp_min_val = readScalarOrDefault(gguf_file, clamp_names[1], -std.math.floatMax(f32));
-        const out_max_val = readScalarOrDefault(gguf_file, clamp_names[2], std.math.floatMax(f32));
-        const out_min_val = readScalarOrDefault(gguf_file, clamp_names[3], -std.math.floatMax(f32));
-
-        try clamp_map.put(w_name, ClampInfo{
-            .inp_min = inp_min_val,
-            .inp_max = inp_max_val,
-            .out_min = out_min_val,
-            .out_max = out_max_val,
-        });
-    }
-
-    w.clamp_info_map = clamp_map;
-    log.info("Gemma4UV clamp info loaded: {d} entries", .{clamp_map.count()});
+    w.clamp_info_map = try graph.clamp.loadClampInfoFromWeightNames(allocator, gguf_file, weight_names.items);
+    log.info("Gemma4UV clamp info loaded: {d} entries", .{w.clamp_info_map.count()});
 }
 
 /// 从 VisionEncoderWeights 构建计算图的包装函数
@@ -370,12 +335,4 @@ fn buildMMWithClamp(
     } else {
         return w.mulMat(ctx, x);
     }
-}
-
-/// 从 GGUF 读取标量值，如果不存在则返回默认值
-fn readScalarOrDefault(gguf_file: *const gguf.GGUFFile, name: []const u8, default_val: f32) f32 {
-    const tensor_info = gguf_file.findTensor(name) orelse return default_val;
-    const data = gguf_file.getTensorData(tensor_info);
-    if (data.len < 4) return default_val;
-    return @as(*const f32, @ptrCast(@alignCast(data.ptr))).*;
 }

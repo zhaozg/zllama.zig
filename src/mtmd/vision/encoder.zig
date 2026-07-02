@@ -211,6 +211,7 @@ pub const VisionEncoder = struct {
     }
 
     pub fn deinit(self: *VisionEncoder, allocator: std.mem.Allocator) void {
+        self.weights.clamp_info_map.deinit();
         allocator.free(self.weights.layers);
     }
 };

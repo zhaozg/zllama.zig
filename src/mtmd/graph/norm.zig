@@ -46,7 +46,7 @@ pub fn buildNorm(
     }
 
     // 广播乘法: mw [n_embd] × result [n_embd, n_patches]
-    result = result.mul(ctx, reshapeForBroadcast(ctx, mw));
+    result = result.mul(ctx, mw);
 
     if (mb) |b| {
         result = result.add(ctx, b);

@@ -196,12 +196,10 @@ pub fn buildGraphEx(
 
     // Create RPE and mask tensors
     ctx.setNoAlloc(false);
-    const pos_emb = try ctx.newTensor2d(ggml.Type.f32, @as(i64, @intCast(p.n_embd)), R);
-    pos_emb.setName("debug_audio_pos_emb");
+    const pos_emb = try ctx.newTensor2d(ggml.Type.f32, p.n_embd, R);
     fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.n_embd), @intCast(P));
 
     const kq_mask = try ctx.newTensor4d(ggml.Type.f32, S, C, B, 1);
-    kq_mask.setName("debug_audio_attn_mask");
     fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos));
     ctx.setNoAlloc(true);
 
@@ -343,7 +341,7 @@ pub fn buildGraphEx(
             const gate = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], @as(usize, @intCast(@sizeOf(f32) * d_gate))).cont(ctx).sigmoid(ctx);
             const act = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], 0);
             x_conv = act.mul(ctx, gate);
-            x_conv = x_conv.cont(ctx).permute(ctx, 1, 0, 2, 3).cont(ctx);
+            x_conv = ggml.cont(ctx, ggml.transpose(ctx, x_conv));
 
             // Causal depthwise conv1d
             x_conv = x_conv.pad(ctx, 4, 0, 0, 0);
@@ -446,8 +444,7 @@ fn buildMMWithClamp(
 ) *ggml.Tensor {
     const name = w.getName();
     if (clamp_map.get(name)) |ci| {
-        log.debug("[gemma4a] ggml_clamp('{s}'): min=[{}, {}] max=[{}, {}]", .{
-            name, ci.inp_min, ci.inp_max, ci.out_min, ci.out_max });
+        log.debug("[gemma4a] ggml_clamp('{s}'): min=[{}, {}] max=[{}, {}]", .{ name, ci.inp_min, ci.inp_max, ci.out_min, ci.out_max });
         const clamped = x.clamp(ctx, ci.inp_min, ci.inp_max);
         var out = w.mulMat(ctx, clamped);
         out = out.clamp(ctx, ci.out_min, ci.out_max);
@@ -726,7 +723,6 @@ pub fn loadClampInfo(
     gguf_file: *const gguf.GGUFFile,
     w: *VisionEncoderWeights,
 ) !void {
-    var clamp_map = std.StringHashMap(ClampInfo).init(allocator);
     var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| return err;
     defer weight_names.deinit(allocator);
 
@@ -752,41 +748,8 @@ pub fn loadClampInfo(
         if (layer.ff_down_1_w) |t| try weight_names.append(allocator, t.getName());
     }
 
-    const weight_suffix = ".weight";
-    const clamp_suffixes = [_][]const u8{ ".input_max", ".input_min", ".output_max", ".output_min" };
-
-    for (weight_names.items) |w_name| {
-        if (!std.mem.endsWith(u8, w_name, weight_suffix)) continue;
-
-        const prefix_len = w_name.len - weight_suffix.len;
-        var clamp_names: [4][]const u8 = undefined;
-
-        for (&clamp_names, clamp_suffixes) |*out_name, suffix| {
-            const new_len = prefix_len + suffix.len;
-            const buf = try allocator.alloc(u8, new_len);
-            errdefer allocator.free(buf);
-            @memcpy(buf[0..prefix_len], w_name[0..prefix_len]);
-            @memcpy(buf[prefix_len..][0..suffix.len], suffix);
-            out_name.* = buf;
-        }
-        defer {
-            for (clamp_names) |n| allocator.free(n);
-        }
-
-        const inp_max_val = readScalarOrDefault(gguf_file, clamp_names[0], std.math.floatMax(f32));
-        const inp_min_val = readScalarOrDefault(gguf_file, clamp_names[1], -std.math.floatMax(f32));
-        const out_max_val = readScalarOrDefault(gguf_file, clamp_names[2], std.math.floatMax(f32));
-        const out_min_val = readScalarOrDefault(gguf_file, clamp_names[3], -std.math.floatMax(f32));
-
-        try clamp_map.put(w_name, ClampInfo{
-            .inp_min = inp_min_val,
-            .inp_max = inp_max_val,
-            .out_min = out_min_val,
-            .out_max = out_max_val,
-        });
-    }
-
-    w.clamp_info_map = clamp_map;
+    w.clamp_info_map = try graph.clamp.loadClampInfoFromWeightNames(allocator, gguf_file, weight_names.items);
+    log.info("Gemma4A clamp info loaded: {d} entries", .{w.clamp_info_map.count()});
 }
 
 /// 估算 Gemma4A 编码后的 token 数量
@@ -873,11 +836,4 @@ fn findLayerWeight(
     name: []const u8,
 ) !*ggml.Tensor {
     return weight_loader.loadLayerWeight(ctx, gguf_file, prefix, name);
-}
-
-fn readScalarOrDefault(gguf_file: *const gguf.GGUFFile, name: []const u8, default_val: f32) f32 {
-    const tensor_info = gguf_file.findTensor(name) orelse return default_val;
-    const data = gguf_file.getTensorData(tensor_info);
-    if (data.len < 4) return default_val;
-    return @as(*const f32, @ptrCast(@alignCast(data.ptr))).*;
 }

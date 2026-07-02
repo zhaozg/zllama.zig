@@ -972,13 +972,6 @@ pub const InferenceEngine = struct {
         if (mm_mgr.audio_encoder) |enc| {
             enc.saveDebugData(io, audio_graph);
         }
-        // Save pos_emb and attn_mask via graph lookup (matching llama.cpp)
-        debug.saveTensorFromGraph(io, "debug_audio", "zllama_audio_pos_emb.json", "debug_audio_pos_emb", audio_graph) catch |err| {
-            logger.info("Save audio pos_emb data fail: {}", .{err});
-        };
-        debug.saveTensorFromGraph(io, "debug_audio", "zllama_audio_attn_mask.json", "debug_audio_attn_mask", audio_graph) catch |err| {
-            logger.info("Save audio attn_mask data fail: {}", .{err});
-        };
 
         const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
