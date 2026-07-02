@@ -116,6 +116,18 @@ pub const Tensor = opaque {
     pub fn geluQuick(self: *Tensor, ctx: *anyopaque) *Tensor {
         return wrap(c.ggml_gelu_quick(@ptrCast(ctx), @ptrCast(@alignCast(self))));
     }
+    pub fn swigluSplit(self: *Tensor, ctx: *anyopaque, b: *Tensor) *Tensor {
+        return wrap(c.ggml_swiglu_split(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(b))));
+    }
+    pub fn gegluSplit(self: *Tensor, ctx: *anyopaque, b: *Tensor) *Tensor {
+        return wrap(c.ggml_geglu_split(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(b))));
+    }
+    pub fn gegluErfSplit(self: *Tensor, ctx: *anyopaque, b: *Tensor) *Tensor {
+        return wrap(c.ggml_geglu_erf_split(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(b))));
+    }
+    pub fn gegluQuickSplit(self: *Tensor, ctx: *anyopaque, b: *Tensor) *Tensor {
+        return wrap(c.ggml_geglu_quick_split(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(b))));
+    }
     pub fn print(self: *Tensor, ctx: *anyopaque) void {
         _ = self;
         c.ggml_print_objects(@ptrCast(ctx));

@@ -220,7 +220,7 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
         }
-        if (il==0) {
+        if (il == 0) {
             residual.setName("debug_audio_half_step_1_output");
             ggml.setOutput(residual);
         }
@@ -326,7 +326,7 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, x);
         }
-        if (il==0) {
+        if (il == 0) {
             residual.setName("debug_audio_self_attention_with_RPE_output");
             ggml.setOutput(residual);
         }
@@ -361,7 +361,7 @@ pub fn buildGraphEx(
             x_conv = buildMMWithClamp(ctx, layer.conv_pw2_w.?, x_conv, clamp_map);
             residual = residual.add(ctx, x_conv);
         }
-        if (il==0) {
+        if (il == 0) {
             residual.setName("debug_audio_convolution_output");
             ggml.setOutput(residual);
         }
@@ -375,7 +375,7 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
         }
-        if (il==0) {
+        if (il == 0) {
             residual.setName("debug_audio_half_step_2_output");
             ggml.setOutput(residual);
         }
@@ -386,7 +386,7 @@ pub fn buildGraphEx(
         else
             residual;
 
-        if (il==0) {
+        if (il == 0) {
             cur.setName("debug_audio_layer_0_norm_output");
             ggml.setOutput(cur);
         }
@@ -473,35 +473,48 @@ fn buildFFNWithClamp(
     clamp_map: *const std.StringHashMap(ClampInfo),
 ) *ggml.Tensor {
     // Up projection (with clamp)
-    var up_result = buildMMWithClamp(ctx, up, cur, clamp_map);
+    var tmp = buildMMWithClamp(ctx, up, cur, clamp_map);
     if (up_b) |b| {
-        up_result = up_result.add(ctx, b);
+        tmp = tmp.add(ctx, b);
     }
 
     // Gate projection (optional, for GLU variants)
-    var gate_result: ?*ggml.Tensor = null;
+    var x: *ggml.Tensor = undefined;
     if (gate) |g| {
-        gate_result = buildMMWithClamp(ctx, g, cur, clamp_map);
+        x = buildMMWithClamp(ctx, g, cur, clamp_map);
         if (gate_b) |gb| {
-            gate_result = gate_result.?.add(ctx, gb);
+            x = x.add(ctx, gb);
         }
+    } else {
+        x = tmp;
     }
 
-    var activated = switch (type_op) {
-        .gelu => up_result.gelu(ctx),
-        .gelu_erf => up_result.geluErf(ctx),
-        .silu => up_result.silu(ctx),
-        .gelu_quick => up_result.geluQuick(ctx),
-        .relu_sqr => blk: {
-            const relu = up_result.relu(ctx);
-            break :blk relu.mul(ctx, relu);
-        },
+    // Activation: when gate exists, use fused GLU split op;
+    // when no gate, apply plain activation.
+    // Reference: clip_graph::build_ffn() in deps/llama.cpp/tools/mtmd/clip.cpp
+    const activated = if (gate != null) blk: {
+        break :blk switch (type_op) {
+            .silu => x.swigluSplit(ctx, tmp),
+            .gelu => x.gegluSplit(ctx, tmp),
+            .gelu_erf => x.gegluErfSplit(ctx, tmp),
+            .gelu_quick => x.gegluQuickSplit(ctx, tmp),
+            .relu_sqr => blk2: {
+                const relu_gate = x.relu(ctx);
+                break :blk2 relu_gate.mul(ctx, tmp);
+            },
+        };
+    } else blk: {
+        break :blk switch (type_op) {
+            .silu => x.silu(ctx),
+            .gelu => x.gelu(ctx),
+            .gelu_erf => x.geluErf(ctx),
+            .gelu_quick => x.geluQuick(ctx),
+            .relu_sqr => blk2: {
+                const relu = x.relu(ctx);
+                break :blk2 relu.mul(ctx, relu);
+            },
+        };
     };
-
-    // Gate (element-wise multiply with gate projection)
-    if (gate_result) |g| {
-        activated = activated.mul(ctx, g);
-    }
 
     // Down projection (with clamp)
     var result = buildMMWithClamp(ctx, down, activated, clamp_map);

@@ -122,6 +122,30 @@ pub fn clamp(ctx: *Context, a: *Tensor, min: f32, max: f32) *Tensor {
 }
 
 // ============================================================================
+// GLU 变体操作 (split variants: gate * activation(up))
+// ============================================================================
+
+/// swiglu_split(a, b) = silu(a) * b
+pub fn swigluSplit(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_swiglu_split(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+/// geglu_split(a, b) = gelu(a) * b
+pub fn gegluSplit(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_geglu_split(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+/// geglu_erf_split(a, b) = gelu_erf(a) * b
+pub fn gegluErfSplit(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_geglu_erf_split(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+/// geglu_quick_split(a, b) = gelu_quick(a) * b
+pub fn gegluQuickSplit(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_geglu_quick_split(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+// ============================================================================
 // 张量操作
 // ============================================================================
 
