@@ -1,6 +1,6 @@
 # zllama.zig AI 编程入口
 
-> 本文档用于指导 AI 助手（如 GitHub Copilot、Cursor、Claude）理解并辅助开发 **多模型本地推理引擎**（Zig + ggml）。
+> 本文档用于指导 AI 助手理解并开发 **多模型本地推理引擎**（Zig + ggml）。
 > 请严格遵循以下目标、约束及设计决策。
 
 ## 🎯 项目目标
@@ -14,13 +14,20 @@
 - 达到**可用推理速度**：9B Q4_K_M ≥15 tok/s，27B Q4_K_M ≥5 tok/s（CPU + 多线程）。
 - 提供**最小 BPE 分词器**（从 GGUF 提取词表），无需外部 tokenizer 库。
 - **多模型架构**：通过 GGUF 元数据中的 `general.architecture` 字段自动检测模型类型。
+- 代码实现必需参考 [llama.cpp](deps/llama.cpp] 的 C++ 代码，确保 KV Cache、线性注意力、全注意力等逻辑一致。
 
 ## ⚠️ 核心约束
 
 1. **Zig 0.16.0 特定行为**
    - 必须适配 I/O 接口化（`std.Io`），阻塞操作需通过 `io` 实例。
+   - **所有** I/O 操作必须通过 Io 实例完成，函数签名应显式传递 Io 参数（类似 Allocator 模式）。
    - `build.zig` 中不得使用已废弃的 `exe.linkSystemLibrary`；应通过 `b.addStaticLibrary` 或 `addCSourceFiles` 集成 ggml 源码。
    - 使用 `root_module.addCMacro` 传递 ggml 编译宏（如 `GGML_USE_METAL`）。
+   - 使用 **Juicy Main** 获取预初始化的 Io 实例：`pub fn main(init: std.process.Init) !void { const io = init.io; ... }`。
+   - 不再使用 `std.fs.cwd()` 等旧 API，改用 `std.Io.Dir.cwd().openFile(io, ...)` 模式。
+   - 如需自定义 Io 实现，使用 `std.Io.Threaded`（稳定、功能完整），`std.Io.Evented` 仍处于实验阶段。
+   - **`std.time.Timer` 已被移除**，`std.time.nanoTimestamp()` 不再是推荐方式。
+   - 新 API：使用 `std.Io.Clock.now(.awake, io)` 获取时间戳。
 
 2. **ggml 集成策略**
    - **静态编译 ggml 源码**（推荐），避免预编译库的 ABI 不一致。
@@ -28,34 +35,17 @@
    - 发现未进行zig绑定的在llama.cpp中使用ggml函数, 立即在ggml.zig中绑定，并增加测试用例。
    - 分配类操作（如 `ggml_new_tensor`）必须返回 `!*T` 错误联合，纯计算操作返回 `*T`。
    - 使用 `opaque {}` 类型包装不透明指针（`ggml_context`、`ggml_tensor` 等）。
-   - **⚠️ ggml_permute 语义陷阱**：`ggml_permute(ctx, t, a0, a1, a2, a3)` 的参数是"**新轴→原轴**"映射（而非直觉的"原轴→新轴"）。
-     例：`permute(1,2,0,3)` 在 `[A,B,C,D]` 上得到 `[C,A,B,D]`（新轴0=原轴1=C，新轴1=原轴2=A，新轴2=原轴0=B）。
-     **必须**直接复制 llama.cpp 参考实现中的 permute 参数，严禁自行推导。详见 `deps/ggml.md` 和 `docs/GGML_BINDING.md`。
-   - **⚠️ ggml_mul_mat 维度收缩**：`mul_mat(A, B)` 在 ne[0] 维度收缩，结果 ne[0]=A.ne[1]、ne[1]=B.ne[1]。高维 batch 广播依赖 ne[2]/ne[3]。
-   - **⚠️ permute 后必须 cont**：`ggml_permute` 只改元数据不移动数据，后续 reshape/view 操作前必须调用 `.cont(ctx)` 物化布局。
    - 说明文档: docs/GGML_BINDING.md
 
-3. **Zig 0.16.0 I/O 接口化约束**
-   - **所有**阻塞 I/O 操作必须通过 Io 实例完成，函数签名应显式传递 Io 参数（类似 Allocator 模式）。
-   - 使用 **Juicy Main** 获取预初始化的 Io 实例：`pub fn main(init: std.process.Init) !void { const io = init.io; ... }`。
-   - 不再使用 `std.fs.cwd()` 等旧 API，改用 `std.Io.Dir.cwd().openFile(io, ...)` 模式。
-   - 如需自定义 Io 实现，使用 `std.Io.Threaded`（稳定、功能完整），`std.Io.Evented` 仍处于实验阶段。
-
-4. **多模型架构实现要求**
+3. **模型架构实现要求**
    - 必须从 GGUF 元数据读取 **`general.architecture` 字段**，区分模型类型。
-   - 模型实现放在 `src/models/` 目录，共享算子放在 `src/layers/` 目录。
+   - 文本模型实现放在 `src/models/` 目录，共享算子放在 `src/layers/` 目录。
+   - 视频、音频实现放到 `src/mtmd/graph/models/` 目录。
    - 新增模型只需在 `registry.zig` 增加枚举值和对应 case。
    - 使用 Zig 的 `switch` 实现零成本运行时多态分发。
+   - 图构建过程必需参考 llama.cpp 的 `ggml_cgraph * 模型类::build()` 确保 KV Cache、线性注意力、全注意力等逻辑一致。
 
-5. **时间测量约束（Zig 0.16.0 破坏性变更）**
-   - **`std.time.Timer` 已被移除**，`std.time.nanoTimestamp()` 不再是推荐方式。
-   - 新 API：使用 `std.Io.Clock.now(.awake, io)` 获取时间戳。
-
-6. **GGUF v3 兼容**
-   - v3 使用 64 位字段（`tensor_count`、`metadata_kv_count`），无填充，**张量数据 32 字节对齐**。
-   - 解析器需根据 `version` 字段动态选择读取路径，并对齐分配缓冲区。
-
-7. **内存与性能**
+4. **内存与性能**
    - 使用 **`mmap`**（通过 ggml 后端文件加载）避免模型数据全量驻留物理内存。
    - KV Cache 预分配固定大小张量（`[max_seq_len, n_kv_heads, head_dim]`），增量写入通过 `ggml_view_*` 切片，**禁止每 token 复制历史缓存**。
    - 默认启用 `ggml_graph_plan` + 线程池（物理核心数的 2/3 ~ 3/4）。
@@ -64,23 +54,23 @@
    - 类型映射：确保 Zig 的 f32 严格对应 C 的 float，c_int 对应 i32。
       - 避免使用 Zig 的 f64 传递 Mel 频谱数据。
 
-8. **测试与可调试性**
+5. **测试与可调试性**
    - 提供与 `llama.cpp` 或 HuggingFace 输出对比的测试用例（短 prompt）。
    - 调试模式下可打印张量形状及部分值，Release 模式下完全移除。
    - 善于使用 std.log 模块，利于在开发、调试阶段分析定位问题。
    - 使用 `-Doptimize=ReleaseSafe` 进行编译与测试, 以便缩短运行时间。
 
-9. **默认化设计原则**
+6. **默认化设计原则**
    - **安全、可维护、高性能**，优先考虑代码清晰和正确性，必要时牺牲微小性能提升。
    - 单文件模块应保持清晰的接口和实现分离，避免过度复杂化。
    - 避免文件过大，不能超过 600 行，合理拆分功能模块（如算子、模型实现、核心引擎等）。
 
-10. 复用通用基础能力
+7. 复用通用基础能力
    - 选择原则: 代码实现成熟，生产级验证、服务知名zig应用(如: ghostty, zls, flow等)优先选择。
    - 必需支持 zig 0.16
    - 比如: [uucode](https://github.com/jacobsandlund/uucode)
 
-11. 如何运行 llama-cli
+8. 如何运行 llama-cli
    - 如果你要调用 `llama-cli`, 你必需通过 `echo /exit | llama-cli ...` 的方式调用， 确保它能够正常退出。
 
 ## 🔍 软件工程实践：功能对齐与早期问题发现

@@ -33,10 +33,8 @@ pub fn buildRope2D(
     pos_b: *ggml.Tensor,
     freq_base: f32,
     interleave_freq: bool,
-
 ) !*ggml.Tensor {
     _ = interleave_freq;
-
 
     const d_head = cur.ne()[0];
     const n_head = cur.ne()[1];

@@ -18,6 +18,7 @@ const kv_cache = @import("kv_cache");
 // 导入并重新导出模型实现
 pub const qwen2 = @import("models/qwen2.zig");
 pub const qwen35 = @import("models/qwen35.zig");
+pub const qwen3vl = @import("models/qwen3vl.zig");
 pub const llama = @import("models/llama.zig");
 pub const gemma3 = @import("models/gemma3.zig");
 pub const gemma4 = @import("models/gemma4.zig");
@@ -34,6 +35,7 @@ pub const RopeScaling = struct {
 pub const Architecture = enum {
     qwen2,
     qwen35,
+    qwen3vl,
     llama,
     gemma3,
     gemma4,
@@ -51,6 +53,9 @@ pub const Architecture = enum {
             std.mem.eql(u8, s, "qwen35"))
         {
             return .qwen35;
+        }
+        if (std.mem.eql(u8, s, "qwen3vl")) {
+            return .qwen3vl;
         }
         if (std.mem.eql(u8, s, "llama") or
             std.mem.eql(u8, s, "llama2") or

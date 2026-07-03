@@ -2,10 +2,11 @@
 //!
 //! 实现 Qwen3VL 视觉编码器的计算图构建。
 //! 继承 Qwen2VL 的 temporal merge + spatial merge，但增加:
-//!   - patch_bias
-//!   - 可学习位置嵌入 (resize_position_embeddings)
-//!   - QKV fused weight
+//!   - patch_bias (必须存在)
+//!   - 可学习位置嵌入 (resize_position_embeddings, 必须存在)
+//!   - QKV fused weight (attn_qkv.weight + attn_qkv.bias)
 //!   - Deepstack features
+//!   - class_embedding 必须为 null
 //!
 //! 参考: deps/llama.cpp/tools/mtmd/models/qwen3vl.cpp
 
@@ -38,6 +39,7 @@ pub const backend = graph.VisionEncoderBackend{
     .buildGraph = buildGraphFromWeights,
     .estimateOutputTokens = estimateOutputTokens,
 };
+
 pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
     _ = gguf_file;
     _ = params;
@@ -62,7 +64,7 @@ pub fn loadWeights(
 ) !void {
     // Patch embedding (v.patch_embd.*)
     w.patch_embeddings_0 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;
-    w.patch_embeddings_1 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd_1.weight") catch null;
+    w.patch_embeddings_1 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight.1") catch null;
     w.patch_bias = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.bias") catch null;
 
     // 位置编码
@@ -77,14 +79,14 @@ pub fn loadWeights(
     // 多模态投影
     w.mm_0_w = findTensorInGGUF(ctx, gguf_file, "mm.0.weight") catch null;
     w.mm_0_b = findTensorInGGUF(ctx, gguf_file, "mm.0.bias") catch null;
-    w.mm_1_w = findTensorInGGUF(ctx, gguf_file, "mm.1.weight") catch null;
-    w.mm_1_b = findTensorInGGUF(ctx, gguf_file, "mm.1.bias") catch null;
+    w.mm_1_w = findTensorInGGUF(ctx, gguf_file, "mm.2.weight") catch null;
+    w.mm_1_b = findTensorInGGUF(ctx, gguf_file, "mm.2.bias") catch null;
 
     // 检测实际层数
     var actual_n_layer: u32 = 0;
     for (0..64) |il| {
         var buf: [32]u8 = undefined;
-        const test_name = try std.fmt.bufPrint(&buf, "v.blk.{d}.attn_q.weight", .{il});
+        const test_name = try std.fmt.bufPrint(&buf, "v.blk.{d}.attn_qkv.weight", .{il});
         if (gguf_file.findTensor(test_name) == null) break;
         actual_n_layer = @intCast(il + 1);
     }
@@ -96,12 +98,35 @@ pub fn loadWeights(
         const prefix = try std.fmt.allocPrint(allocator, "v.blk.{d}", .{il});
         defer allocator.free(prefix);
         w.layers[il] = loadViTLayer(ctx, gguf_file, prefix) catch |err| {
-            log.err("Failed to load ViT layer {d}: {}", .{ il, err });
+            log.err("Failed to load ViT layer {d}: {}\n", .{ il, err });
             return err;
         };
     }
 
-    log.info("Qwen3VL weights loaded: {d} ViT layers", .{n_layer});
+    // 加载 Deepstack 权重（全局命名空间 v.deepstack.{idx}.*）
+    // 从 clip.vision.is_deepstack_layers 元数据读取哪些层有 deepstack
+    const is_deepstack_meta = (@constCast(gguf_file)).getBoolArray("clip.vision.is_deepstack_layers");
+    const is_deepstack_owned = is_deepstack_meta == null;
+    const is_deepstack = is_deepstack_meta orelse try allocator.alloc(bool, 0);
+    if (is_deepstack_owned) {
+        defer allocator.free(is_deepstack);
+    }
+
+    // 为每个有 deepstack 的层加载权重
+    for (0..n_layer) |il| {
+        if (il < is_deepstack.len and is_deepstack[il]) {
+            var buf: [64]u8 = undefined;
+            const ds_prefix = try std.fmt.bufPrint(&buf, "v.deepstack.{d}", .{il});
+            w.layers[il].deepstack_norm_w = findTensorInGGUF(ctx, gguf_file, try std.fmt.allocPrint(allocator, "{s}.norm.weight", .{ds_prefix})) catch null;
+            w.layers[il].deepstack_norm_b = findTensorInGGUF(ctx, gguf_file, try std.fmt.allocPrint(allocator, "{s}.norm.bias", .{ds_prefix})) catch null;
+            w.layers[il].deepstack_fc1_w = findTensorInGGUF(ctx, gguf_file, try std.fmt.allocPrint(allocator, "{s}.fc1.weight", .{ds_prefix})) catch null;
+            w.layers[il].deepstack_fc1_b = findTensorInGGUF(ctx, gguf_file, try std.fmt.allocPrint(allocator, "{s}.fc1.bias", .{ds_prefix})) catch null;
+            w.layers[il].deepstack_fc2_w = findTensorInGGUF(ctx, gguf_file, try std.fmt.allocPrint(allocator, "{s}.fc2.weight", .{ds_prefix})) catch null;
+            w.layers[il].deepstack_fc2_b = findTensorInGGUF(ctx, gguf_file, try std.fmt.allocPrint(allocator, "{s}.fc2.bias", .{ds_prefix})) catch null;
+        }
+    }
+
+    log.info("Qwen3VL weights loaded: {d} ViT layers\n", .{n_layer});
 }
 
 /// 从 VisionEncoderWeights 构建计算图的包装函数
@@ -129,6 +154,7 @@ fn buildGraphFromWeights(
         .n_merge = p.n_merge,
         .eps = p.eps,
         .rope_theta = p.rope_theta,
+        .ffn_op = p.ffn_op,
     };
 
     var builder = GraphBuilder{
@@ -169,7 +195,7 @@ fn loadViTLayer(
     const weight_loader = @import("weight_loader");
     var layer = ViTLayerWeights{};
 
-    // Attention
+    // Attention — Qwen3VL uses fused QKV (attn_qkv.weight + attn_qkv.bias)
     layer.ln_1_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln1.weight") catch null;
     layer.ln_1_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln1.bias") catch null;
     layer.qkv_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_qkv.weight") catch null;
@@ -177,23 +203,19 @@ fn loadViTLayer(
     layer.o_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_out.weight") catch null;
     layer.o_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_out.bias") catch null;
 
-    // FFN
+    // FFN — Qwen3VL ViT uses standard FFN (up + down, NO gate)
+    // Note: no ffn_gate.weight in Qwen3VL mmproj
     layer.ln_2_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln2.weight") catch null;
     layer.ln_2_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln2.bias") catch null;
     layer.ff_up_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight") catch null;
     layer.ff_up_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.bias") catch null;
-    layer.ff_gate_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.weight") catch null;
-    layer.ff_gate_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_gate.bias") catch null;
+    layer.ff_gate_w = null; // Qwen3VL ViT has no gate in FFN
+    layer.ff_gate_b = null;
     layer.ff_down_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight") catch null;
     layer.ff_down_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_down.bias") catch null;
 
-    // Deepstack
-    layer.deepstack_norm_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "deepstack_norm.weight") catch null;
-    layer.deepstack_norm_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "deepstack_norm.bias") catch null;
-    layer.deepstack_fc1_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "deepstack_fc1.weight") catch null;
-    layer.deepstack_fc1_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "deepstack_fc1.bias") catch null;
-    layer.deepstack_fc2_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "deepstack_fc2.weight") catch null;
-    layer.deepstack_fc2_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "deepstack_fc2.bias") catch null;
+    // Deepstack weights are loaded globally in loadWeights, not per-layer here
+    // (they use v.deepstack.{idx}.* naming, not v.blk.{d}.deepstack_*)
 
     return layer;
 }
@@ -207,8 +229,8 @@ fn loadViTLayer(
 /// 处理流程:
 ///   1. Temporal merge: 两个 Conv2D 相加 (patch_embeddings_0 + patch_embeddings_1)
 ///   2. Spatial merge: permute + reshape 合并空间维度
-///   3. patch_bias 添加
-///   4. 可学习位置嵌入 (resize_position_embeddings)
+///   3. patch_bias 添加 (必须存在)
+///   4. 可学习位置嵌入 (resize_position_embeddings, 必须存在)
 ///   5. Pre-LN (可选)
 ///   6. ViT blocks (LayerNorm + QKV fused 自注意力 + M-RoPE + FFN + Deepstack)
 ///   7. Post-LN (可选)
@@ -236,39 +258,57 @@ pub fn buildGraph(
     const eps = p.eps;
     const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
 
-    // Qwen3VL uses LayerNorm
+    // Reference: norm_type norm_t = NORM_TYPE_NORMAL; (LayerNorm)
     const norm_t: NormType = .layer_norm;
 
-    // M-RoPE sections: 4 equal parts
-    const mrope_sections = [_]i32{ @intCast(@divExact(d_head, @as(i64, 4))), @intCast(@divExact(d_head, @as(i64, 4))), @intCast(@divExact(d_head, @as(i64, 4))), @intCast(@divExact(d_head, @as(i64, 4))) };
+    // Reference: int mrope_sections[4] = {d_head/4, d_head/4, d_head/4, d_head/4};
+    const mrope_sections = [_]i32{
+        @intCast(@divExact(d_head, @as(i64, 4))),
+        @intCast(@divExact(d_head, @as(i64, 4))),
+        @intCast(@divExact(d_head, @as(i64, 4))),
+        @intCast(@divExact(d_head, @as(i64, 4))),
+    };
 
-    // Merge factor for deepstack
+    // Reference: const int merge_factor = hparams.n_merge > 0 ? hparams.n_merge * hparams.n_merge : 4;
     const merge_factor: i64 = if (p.n_merge > 0) @intCast(p.n_merge * p.n_merge) else 4;
 
     log.info("Qwen3VL graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, merge_factor={d}\n", .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, merge_factor });
 
-    // 1. 创建输入张量
-    const inp_raw = try ctx.newTensor3d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3);
-    inp_raw.setName("inp_raw");
+    // Reference: GGML_ASSERT(model.patch_bias != nullptr);
+    // Reference: GGML_ASSERT(model.position_embeddings != nullptr);
+    // Reference: GGML_ASSERT(model.class_embedding == nullptr);
+    if (w.patch_bias == null) return error.MissingPatchBias;
+    if (w.position_embeddings == null) return error.MissingPositionEmbeddings;
+
+    // ============================================================================
+    // 1. Temporal merge: build_inp_with_temporal_merge()
+    // Reference: ggml_tensor * inp = build_inp_with_temporal_merge();
+    // ============================================================================
+    var inp: *ggml.Tensor = undefined;
     {
-        const dst = inp_raw.dataF32();
-        const src = img.buf;
-        const H: usize = @intCast(img_height);
-        const W: usize = @intCast(img_width);
-        for (0..H) |y| {
-            for (0..W) |x| {
-                const src_idx = (y * W + x) * 3;
-                const dst_base = y * W + x;
-                dst[dst_base] = src[src_idx];
-                dst[dst_base + H * W] = src[src_idx + 1];
-                dst[dst_base + 2 * H * W] = src[src_idx + 2];
+        // Reference: build_inp_raw() -> ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, img.nx(), img.ny(), 3, n_batch)
+        const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3, n_batch);
+        inp_raw.setName("inp_raw");
+        {
+            const dst = inp_raw.dataF32();
+            const src = img.buf;
+            const H: usize = @intCast(img_height);
+            const W: usize = @intCast(img_width);
+            for (0..H) |y| {
+                for (0..W) |x| {
+                    const src_idx = (y * W + x) * 3;
+                    const dst_base = y * W + x;
+                    dst[dst_base] = src[src_idx];
+                    dst[dst_base + H * W] = src[src_idx + 1];
+                    dst[dst_base + 2 * H * W] = src[src_idx + 2];
+                }
             }
         }
-    }
 
-    // 2. Temporal merge: two Conv2D added together
-    var inp: *ggml.Tensor = undefined;
-    if (w.patch_embeddings_0) |pe0| {
+        // Reference: ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1)
+        // Reference: ggml_conv_2d(ctx0, model.patch_embeddings_1, inp_raw, patch_size, patch_size, 0, 0, 1, 1)
+        // Reference: ggml_add(ctx0, conv0, conv1)
+        const pe0 = w.patch_embeddings_0 orelse return error.MissingPatchEmbedding;
         const kw: i32 = @intCast(pe0.ne()[0]);
         const kh: i32 = @intCast(pe0.ne()[1]);
         var conv0 = inp_raw.conv2d(ctx, pe0, kw, kh, 0, 0, 1, 1);
@@ -282,219 +322,204 @@ pub fn buildGraph(
         } else {
             inp = conv0;
         }
-    } else {
-        return error.MissingPatchEmbedding;
     }
 
-    // 3. Spatial merge
-    // [w, h, c, b] -> [c, w, h, b] via permute(1, 2, 0, 3)
-    inp = inp.permute(ctx, 1, 2, 0, 3).cont(ctx);
-    inp.setName("spatial_permuted");
+    // ============================================================================
+    // 2. Spatial merge
+    // Reference: ggml_permute(ctx0, inp, 1, 2, 0, 3) -> [w, h, c, b] -> [c, w, h, b]
+    // ============================================================================
+    {
+        inp = inp.permute(ctx, 1, 2, 0, 3).cont(ctx);
+        inp.setName("spatial_permuted");
 
-    // Reshape to [n_embd * 2, n_patches_x / 2, n_patches_y, batch_size]
-    inp = inp.cont4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
-    inp.setName("spatial_reshaped_1");
+        // Reference: ggml_cont_4d(ctx0, inp, n_embd * 2, n_patches_x / 2, n_patches_y, batch_size)
+        inp = inp.cont4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
+        inp.setName("spatial_reshaped_1");
 
-    // Reshape to [n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2)]
-    inp = inp.reshape4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), 2, n_batch * @divExact(n_patches_y, @as(i64, 2)));
-    inp.setName("spatial_reshaped_2");
+        // Reference: ggml_reshape_4d(ctx0, inp, n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2))
+        inp = inp.reshape4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), 2, n_batch * @divExact(n_patches_y, @as(i64, 2)));
+        inp.setName("spatial_reshaped_2");
 
-    // permute(0, 2, 1, 3)
-    inp = inp.permute(ctx, 0, 2, 1, 3).cont(ctx);
-    inp.setName("spatial_permuted_2");
+        // Reference: ggml_permute(ctx0, inp, 0, 2, 1, 3)
+        inp = inp.permute(ctx, 0, 2, 1, 3).cont(ctx);
+        inp.setName("spatial_permuted_2");
 
-    // cont to [n_embd, n_patches_x * n_patches_y, batch_size]
-    inp = ggml.cont(ctx, inp).reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
-    inp.setName("spatial_merged");
+        // Reference: ggml_cont_3d(ctx0, inp, n_embd, n_patches_x * n_patches_y, batch_size)
+        inp = ggml.cont(ctx, inp).reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
+        inp.setName("spatial_merged");
+    }
 
-    // 4. Add patch_bias
+    // ============================================================================
+    // 3. Add patch bias
+    // Reference: if (model.patch_bias != nullptr) { inp = ggml_add(ctx0, inp, model.patch_bias); }
+    // ============================================================================
     if (w.patch_bias) |pb| {
         inp = inp.add(ctx, pb);
-        inp.setName("patch_bias_added");
+        inp.setName("patch_bias");
     }
 
-    // 5. 可学习位置嵌入 (resize_position_embeddings)
+    // ============================================================================
+    // 4. 可学习位置嵌入 (resize_position_embeddings)
+    // Reference: ggml_tensor * learned_pos_embd = resize_position_embeddings();
+    // ============================================================================
     if (w.position_embeddings) |pos_embd| {
-        // Resize position embeddings to match n_patches
+        // Reference: resize_position_embeddings() — interpolates to match n_patches
         var learned_pos_embd = try graph.resizePositionEmbeddings(ctx, pos_embd, n_patches, 0);
 
         // Apply same spatial merge to position embeddings
+        // Reference: ggml_cont_4d(ctx0, learned_pos_embd, n_embd * 2, n_patches_x / 2, n_patches_y, batch_size)
         learned_pos_embd = learned_pos_embd.cont4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
         learned_pos_embd.setName("pos_embd_reshaped_1");
+
+        // Reference: ggml_reshape_4d(ctx0, learned_pos_embd, n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2))
         learned_pos_embd = learned_pos_embd.reshape4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), 2, n_batch * @divExact(n_patches_y, @as(i64, 2)));
         learned_pos_embd.setName("pos_embd_reshaped_2");
+
+        // Reference: ggml_permute(ctx0, learned_pos_embd, 0, 2, 1, 3)
         learned_pos_embd = learned_pos_embd.permute(ctx, 0, 2, 1, 3).cont(ctx);
         learned_pos_embd.setName("pos_embd_permuted");
+
+        // Reference: ggml_cont_3d(ctx0, learned_pos_embd, n_embd, n_patches_x * n_patches_y, batch_size)
         learned_pos_embd = ggml.cont(ctx, learned_pos_embd).reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
         learned_pos_embd.setName("pos_embd_merged");
 
+        // Reference: inp = ggml_add(ctx0, inp, learned_pos_embd);
         inp = inp.add(ctx, learned_pos_embd);
-        inp.setName("inp_with_pos");
+        inp.setName("inp_pos_emb");
     }
 
     var inpL = inp;
 
+    // ============================================================================
+    // 5. M-RoPE positions
+    // Reference: ggml_tensor * positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, num_position_ids);
+    // ============================================================================
+    const num_position_ids = n_patches * 4;
+    const positions = try ctx.newTensor1d(ggml.Type.i32, num_position_ids);
+    positions.setName("positions");
+    ggml.setInput(positions);
+
+    {
+        const data = positions.dataI32();
+        for (0..@as(usize, @intCast(n_patches))) |i| {
+            const pi: i32 = @intCast(i);
+            data[i * 4 + 0] = pi;
+            data[i * 4 + 1] = pi;
+            data[i * 4 + 2] = pi;
+            data[i * 4 + 3] = pi;
+        }
+    }
+    // ============================================================================
     // 6. Pre-LN (optional)
+    // Reference: if (model.pre_ln_w) { inpL = build_norm(inpL, model.pre_ln_w, model.pre_ln_b, norm_t, eps, -1); }
+    // ============================================================================
     if (w.pre_ln_w) |pln_w| {
         inpL = try graph.buildNorm(ctx, inpL, pln_w, w.pre_ln_b, norm_t, eps, "pre_ln");
     }
 
-    // 7. M-RoPE positions
-    const num_position_ids = n_patches * 4;
-    const positions = try ctx.newTensor1d(ggml.Type.i32, num_position_ids);
-    positions.setName("positions");
-
-    // 8. Deepstack features
+    // ============================================================================
+    // 7. Deepstack features
+    // Reference: ggml_tensor * deepstack_features = nullptr;
+    // ============================================================================
     var deepstack_features: ?*ggml.Tensor = null;
 
-    // 9. ViT blocks
+    // ============================================================================
+    // 8. ViT blocks
+    // Reference: for (int il = 0; il < n_layer; il++)
+    // ============================================================================
     for (w.layers, 0..) |*layer, il| {
         _ = il;
 
-        var cur = inpL;
+        var cur = inpL; // inpL = residual, cur = hidden_states
 
-        // LayerNorm 1
-        cur = try graph.buildNorm(ctx, cur, layer.ln_1_w orelse return error.MissingNormWeight, layer.ln_1_b, norm_t, eps, "blk");
-        cur.setName("blk");
+        // Reference: cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
+        cur = try graph.buildNorm(ctx, cur, layer.ln_1_w orelse return error.MissingNormWeight, layer.ln_1_b, norm_t, eps, "ln1");
 
-        // Self-attention (QKV fused)
+        // Reference: self-attention block
         {
-            // QKV fused projection
-            if (layer.qkv_w) |qkv_w| {
-                cur = qkv_w.mulMat(ctx, cur);
-                cur.setName("blk");
-                if (layer.qkv_b) |qkv_b| {
-                    cur = cur.add(ctx, qkv_b);
-                    cur.setName("blk");
-                }
-
-                // Split Q, K, V from fused output
-                const row_size_q = ggml.Type.rowSize(cur.dataType(), d_head);
-                const row_size_kv = ggml.Type.rowSize(cur.dataType(), d_head);
-                const offset_k = @as(usize, @intCast(ggml.Type.rowSize(cur.dataType(), n_embd)));
-                const offset_v = @as(usize, @intCast(ggml.Type.rowSize(cur.dataType(), 2 * n_embd)));
-
-                var Qcur = cur.view3d(ctx, d_head, n_head, n_patches, row_size_q, cur.nb()[1], 0);
-                Qcur.setName("blk");
-                var Kcur = cur.view3d(ctx, d_head, n_head, n_patches, row_size_kv, cur.nb()[1], offset_k);
-                Kcur.setName("blk");
-                var Vcur = cur.view3d(ctx, d_head, n_head, n_patches, row_size_kv, cur.nb()[1], offset_v);
-                Vcur.setName("blk");
-
-                // M-RoPE
-                Qcur = ggml.ropeMulti(ctx, Qcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
-                Qcur.setName("blk");
-                Kcur = ggml.ropeMulti(ctx, Kcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
-                Kcur.setName("blk");
-
-                // Attention
-                var attn_out = try graph.buildAttn(
-                    ctx,
-                    layer.o_w orelse return error.MissingOutputWeight,
-                    layer.o_b,
-                    Qcur,
-                    Kcur,
-                    Vcur,
-                    null,
-                    kq_scale,
-                    n_head,
-                    "blk",
-                    layer.attn_sinks,
-                );
-                attn_out.setName("blk");
-
-                // Residual
-                cur = inpL.add(ctx, attn_out);
-                cur.setName("blk");
-            } else {
-                // Fallback to separate Q, K, V (like Qwen2VL)
-                var Qcur = if (layer.q_w) |qw| qw.mulMat(ctx, cur) else return error.MissingQWeight;
-                Qcur.setName("blk");
-                if (layer.q_b) |qb| {
-                    Qcur = Qcur.add(ctx, qb);
-                    Qcur.setName("blk");
-                }
-
-                var Kcur = if (layer.k_w) |kw| kw.mulMat(ctx, cur) else return error.MissingKWeight;
-                Kcur.setName("blk");
-                if (layer.k_b) |kb| {
-                    Kcur = Kcur.add(ctx, kb);
-                    Kcur.setName("blk");
-                }
-
-                var Vcur = if (layer.v_w) |vw| vw.mulMat(ctx, cur) else return error.MissingVWeight;
-                Vcur.setName("blk");
-                if (layer.v_b) |vb| {
-                    Vcur = Vcur.add(ctx, vb);
-                    Vcur.setName("blk");
-                }
-
-                Qcur = Qcur.reshape3d(ctx, d_head, n_head, n_patches);
-                Qcur.setName("blk");
-                Kcur = Kcur.reshape3d(ctx, d_head, n_head, n_patches);
-                Kcur.setName("blk");
-                Vcur = Vcur.reshape3d(ctx, d_head, n_head, n_patches);
-                Vcur.setName("blk");
-
-                Qcur = ggml.ropeMulti(ctx, Qcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
-                Qcur.setName("blk");
-                Kcur = ggml.ropeMulti(ctx, Kcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
-                Kcur.setName("blk");
-
-                var attn_out = try graph.buildAttn(
-                    ctx,
-                    layer.o_w orelse return error.MissingOutputWeight,
-                    layer.o_b,
-                    Qcur,
-                    Kcur,
-                    Vcur,
-                    null,
-                    kq_scale,
-                    n_head,
-                    "blk",
-                    layer.attn_sinks,
-                );
-                attn_out.setName("blk");
-
-                cur = inpL.add(ctx, attn_out);
-                cur.setName("blk");
+            // Reference: cur = build_mm(layer.qkv_w, cur);
+            // Reference: cur = ggml_add(ctx0, cur, layer.qkv_b);
+            // Use ggml.mulMat directly since Qwen3VL doesn't use clamping
+            cur = ggml.mulMat(ctx, layer.qkv_w orelse return error.MissingQKVWeight, cur);
+            if (layer.qkv_b) |qkv_b| {
+                cur = cur.add(ctx, qkv_b);
             }
+
+            // Reference: ggml_view_3d for Q, K, V split
+            // Q: offset 0, K: offset n_embd, V: offset 2*n_embd
+            const row_size = ggml.Type.rowSize(cur.dataType(), d_head);
+            const nb1 = cur.nb()[1];
+
+            var Qcur = ctx.view3d(cur, d_head, n_head, n_patches, row_size, nb1, 0);
+            Qcur.setName("Qcur");
+
+            var Kcur = ctx.view3d(cur, d_head, n_head, n_patches, row_size, nb1, @as(usize, @intCast(ggml.Type.rowSize(cur.dataType(), n_embd))));
+            Kcur.setName("Kcur");
+
+            var Vcur = ctx.view3d(cur, d_head, n_head, n_patches, row_size, nb1, @as(usize, @intCast(ggml.Type.rowSize(cur.dataType(), 2 * n_embd))));
+            Vcur.setName("Vcur");
+
+            // Reference: M-RoPE
+            // ggml_rope_multi(ctx0, Qcur, positions, nullptr, d_head/2, mrope_sections, GGML_ROPE_TYPE_VISION, 32768, 10000, 1, 0, 1, 32, 1)
+            const rope_type_vision: i32 = 24; // GGML_ROPE_TYPE_VISION
+            Qcur = ggml.ropeMulti(ctx, Qcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, rope_type_vision, 32768, 10000, 1, 0, 1, 32, 1);
+            Qcur.setName("Qcur_rope");
+            Kcur = ggml.ropeMulti(ctx, Kcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, rope_type_vision, 32768, 10000, 1, 0, 1, 32, 1);
+            Kcur.setName("Kcur_rope");
+
+            // Reference: cur = build_attn(layer.o_w, layer.o_b, Qcur, Kcur, Vcur, nullptr, kq_scale, il);
+            cur = try graph.buildAttn(
+                ctx,
+                layer.o_w orelse return error.MissingOutputWeight,
+                layer.o_b,
+                Qcur,
+                Kcur,
+                Vcur,
+                null,
+                kq_scale,
+                n_head,
+                "attn_out",
+                layer.attn_sinks,
+            );
         }
 
+        // Reference: cur = ggml_add(ctx0, cur, inpL); (residual 1)
+        cur = inpL.add(ctx, cur);
+        inpL = cur; // inpL = residual, cur = hidden_states
+
+        // Reference: layernorm2
+        cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, "ffn_inp_normed");
+
+        // Reference: ffn
+        // build_ffn(cur, layer.ff_up_w, layer.ff_up_b, layer.ff_gate_w, layer.ff_gate_b, layer.ff_down_w, layer.ff_down_b, hparams.ffn_op, il)
+        cur = try graph.buildFFN(
+            ctx,
+            cur,
+            layer.ff_up_w orelse return error.MissingFFNUpWeight,
+            layer.ff_up_b,
+            layer.ff_gate_w,
+            layer.ff_gate_b,
+            layer.ff_down_w orelse return error.MissingFFNDownWeight,
+            layer.ff_down_b,
+            p.ffn_op,
+            "ffn_out",
+        );
+
+        // Reference: cur = ggml_add(ctx0, inpL, cur); (residual 2)
+        cur = inpL.add(ctx, cur);
         inpL = cur;
 
-        // LayerNorm 2
-        cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, "blk");
-        cur.setName("blk");
-
-        // FFN
-        {
-            const ffn_out = try graph.buildFFN(
-                ctx,
-                cur,
-                layer.ff_up_w orelse return error.MissingFFNUpWeight,
-                layer.ff_up_b,
-                layer.ff_gate_w,
-                layer.ff_gate_b,
-                layer.ff_down_w orelse return error.MissingFFNDownWeight,
-                layer.ff_down_b,
-                .gelu,
-                "blk",
-            );
-            ffn_out.setName("blk");
-
-            inpL = inpL.add(ctx, ffn_out);
-            inpL.setName("blk");
-        }
-
-        // Deepstack feature extraction
+        // Reference: Deepstack feature extraction
+        // if (layer.has_deepstack()) { ... }
         if (layer.hasDeepstack()) {
-            var feat = ggml.cont(ctx, inpL).reshape3d(ctx, n_embd * merge_factor, @divExact(n_patches, merge_factor), n_batch);
+            // Reference: ggml_reshape_3d(ctx0, cur, n_embd * merge_factor, n_pos / merge_factor, batch_size)
+            var feat = ggml.cont(ctx, cur).reshape3d(ctx, n_embd * merge_factor, @divExact(n_patches, merge_factor), n_batch);
             feat.setName("deepstack_reshape");
 
-            feat = try graph.buildNorm(ctx, feat, layer.deepstack_norm_w orelse return error.MissingNormWeight, layer.deepstack_norm_b, norm_t, eps, "deepstack");
-            feat.setName("deepstack_norm");
+            // Reference: build_norm(feat, layer.deepstack_norm_w, layer.deepstack_norm_b, norm_t, eps, il)
+            feat = try graph.buildNorm(ctx, feat, layer.deepstack_norm_w orelse return error.MissingNormWeight, layer.deepstack_norm_b, norm_t, eps, "deepstack_norm");
 
+            // Reference: build_ffn(feat, layer.deepstack_fc1_w, layer.deepstack_fc1_b, nullptr, nullptr, layer.deepstack_fc2_w, layer.deepstack_fc2_b, FFN_GELU, il)
             feat = try graph.buildFFN(
                 ctx,
                 feat,
@@ -505,10 +530,10 @@ pub fn buildGraph(
                 layer.deepstack_fc2_w orelse return error.MissingFFNDownWeight,
                 layer.deepstack_fc2_b,
                 .gelu,
-                "deepstack",
+                "deepstack_ffn",
             );
-            feat.setName("deepstack_ffn");
 
+            // Reference: concat along feature dimension
             if (deepstack_features) |dsf| {
                 deepstack_features = dsf.concat(ctx, feat, 0);
                 deepstack_features.?.setName("deepstack_concat");
@@ -518,17 +543,23 @@ pub fn buildGraph(
         }
     }
 
-    // 10. Post-LN (optional)
+    // ============================================================================
+    // 9. Post-LN (optional)
+    // Reference: if (model.post_ln_w) { inpL = build_norm(inpL, model.post_ln_w, model.post_ln_b, norm_t, eps, n_layer); }
+    // ============================================================================
     if (w.post_ln_w) |poln_w| {
         inpL = try graph.buildNorm(ctx, inpL, poln_w, w.post_ln_b, norm_t, eps, "post_ln");
     }
 
-    // 11. Multimodal projection
+    // ============================================================================
+    // 10. Multimodal projection
+    // Reference: ggml_reshape_3d(ctx0, embeddings, n_embd * 4, n_pos / 4, batch_size)
+    // ============================================================================
     var embeddings = inpL;
     embeddings = ggml.cont(ctx, embeddings).reshape3d(ctx, n_embd * 4, @divExact(n_patches, @as(i64, 4)), n_batch);
     embeddings.setName("mm_reshape");
 
-    // FFN projection: mm_0 (GELU) -> mm_1
+    // Reference: build_ffn(embeddings, model.mm_0_w, model.mm_0_b, nullptr, nullptr, model.mm_1_w, model.mm_1_b, FFN_GELU, -1)
     embeddings = try graph.buildFFN(
         ctx,
         embeddings,
@@ -543,7 +574,7 @@ pub fn buildGraph(
     );
     embeddings.setName("mm_proj");
 
-    // Concat deepstack features
+    // Reference: if (deepstack_features) { embeddings = ggml_concat(ctx0, embeddings, deepstack_features, 0); }
     if (deepstack_features) |dsf| {
         embeddings = embeddings.concat(ctx, dsf, 0);
         embeddings.setName("mm_with_deepstack");
@@ -551,9 +582,9 @@ pub fn buildGraph(
 
     embeddings.setName("mm_output");
 
-    // 构建计算图
+    // Reference: ggml_build_forward_expand(gf, embeddings);
     builder.gf.buildForwardExpand(embeddings);
 
-    log.info("Qwen3VL graph built successfully", .{});
+    log.info("Qwen3VL graph built successfully\n", .{});
     return builder.gf;
 }

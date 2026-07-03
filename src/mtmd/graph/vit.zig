@@ -278,7 +278,6 @@ pub fn resizePositionEmbeddings(
     return cur;
 }
 
-
 test "buildVit: basic ViT forward" {
     const testing = std.testing;
     const allocator = testing.allocator;

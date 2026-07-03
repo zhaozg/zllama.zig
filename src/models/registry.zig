@@ -13,6 +13,7 @@ const graph_builder = @import("graph_builder");
 const memory = @import("memory");
 const qwen2 = @import("model").qwen2;
 const qwen35 = @import("model").qwen35;
+const qwen3vl = @import("model").qwen3vl;
 const llama = @import("model").llama;
 const gemma3 = @import("model").gemma3;
 const gemma4 = @import("model").gemma4;
@@ -35,6 +36,15 @@ pub fn createModel(
             try m.init(allocator, gguf_file, io);
             return model_if.ModelInstance{
                 .vtable = &embedding.EmbeddingModel.vtable,
+                .ptr = @as(*anyopaque, @ptrCast(m)),
+            };
+        },
+        .qwen3vl => {
+            var m = try allocator.create(qwen3vl.Qwen3VLModel);
+            errdefer allocator.destroy(m);
+            try m.init(allocator, gguf_file, io);
+            return model_if.ModelInstance{
+                .vtable = &qwen3vl.Qwen3VLModel.vtable,
                 .ptr = @as(*anyopaque, @ptrCast(m)),
             };
         },
@@ -147,6 +157,10 @@ pub fn detectCapabilities(gguf_file: *const gguf.GGUFFile, arch: model_if.Archit
     var caps = model_if.ModelCapabilities{};
 
     switch (arch) {
+        .qwen3vl => {
+            // Qwen3VL: vision capabilities detected from mmproj file
+            // The main model GGUF doesn't have vision tensors
+        },
         .gemma4 => {
             // Gemma 4 E2B: 检查音频编码器（Conformer）张量
             // 张量命名遵循 llama.cpp clip-impl.h 的约定:

@@ -51,7 +51,7 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
     .{ .scope = .vision_encoder, .level = .info },
     .{ .scope = .vision_pipeline, .level = .info },
 
-    .{ .scope = .gemma4a, .level = .debug},
+    .{ .scope = .gemma4a, .level = .debug },
 } };
 
 const logger = std.log.scoped(.main);

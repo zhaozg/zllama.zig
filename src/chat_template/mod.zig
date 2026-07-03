@@ -279,7 +279,7 @@ pub fn kindForArchitecture(arch: model.Architecture, model_name: ?[]const u8) Te
         }
     }
     return switch (arch) {
-        .qwen2, .qwen35, .embedding_qwen2 => .chatml,
+        .qwen2, .qwen35, .qwen3vl, .embedding_qwen2 => .chatml,
         .llama => .llama3,
         .gemma3 => .gemma,
         .gemma4 => .gemma4,

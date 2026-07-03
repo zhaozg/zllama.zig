@@ -216,22 +216,16 @@ pub fn main(init: std.process.Init) !void {
     setLogLevel(resolved_level);
     logger.debug("Log level set to {s}", .{@tagName(resolved_level)});
 
-    // 读取模型文件
+    // 使用 mmap 加载模型文件（支持大文件，零拷贝）
+    const engine_common = @import("engine_common");
+    var mapped_file = try engine_common.mmapFile(io, allocator, args.model_path);
+    defer mapped_file.deinit(io);
+    const gguf_data = mapped_file.data;
     const cwd = std.Io.Dir.cwd();
-    const file = try cwd.openFile(io, args.model_path, .{ .mode = .read_only });
-    defer file.close(io);
-
-    const stat = try file.stat(io);
-    const file_size = @as(usize, @intCast(stat.size));
-    const gguf_data = try allocator.alloc(u8, file_size);
-
-    const bytes_read = try file.readPositionalAll(io, gguf_data, 0);
-    if (bytes_read != file_size) return error.FileReadError;
 
     // 解析 GGUF（gguf.parse 借用 gguf_data，所以 gguf_data 必须在 gguf_file 之前释放）
     var gguf_file = try gguf.parse(gguf_data, allocator);
     defer gguf_file.deinit();
-    defer allocator.free(gguf_data);
     // 初始化分词器
     var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
     defer tok.deinit();
@@ -249,12 +243,7 @@ pub fn main(init: std.process.Init) !void {
         logger.info("init_tokenizer: initializing tokenizer for type {d}", .{tokenizer_type});
     }
     // 打印模型加载信息
-    utils.printModelLoaderInfo(&gguf_file, file_size, args.model_path);
-
-    // 打印分词器信息
-    utils.printTokenizerInfo(&tok, &gguf_file);
-    // 打印模型加载信息
-    utils.printModelLoaderInfo(&gguf_file, file_size, args.model_path);
+    utils.printModelLoaderInfo(&gguf_file, gguf_data.len, args.model_path);
 
     // 打印分词器信息
     utils.printTokenizerInfo(&tok, &gguf_file);

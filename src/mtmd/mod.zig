@@ -223,12 +223,22 @@ pub const MultiModalManager = struct {
             gf.findTensor("mm.soft_emb_norm.weight") != null)
         {
             caps.has_vision = true;
-            // 与 vision.zig 加载代码保持一致的命名前缀
-            caps.vision_encoder_type = if (gf.findTensor("v.patch_norm.1.weight") != null or
+            // 检测视觉编码器类型：
+            // - gemma4uv: 存在 v.patch_norm.1.weight 或 patch_norm_1.weight
+            // - qwen3vl: 存在 v.blk.0.attn_qkv.weight（Qwen3VL 使用 fused QKV）
+            // - qwen2vl: 存在 v.blk.0.attn_q.weight（Qwen2VL 使用 separate QKV）
+            // - gemma4v: 默认（标准 ViT + SigLIP）
+            if (gf.findTensor("v.patch_norm.1.weight") != null or
                 gf.findTensor("patch_norm_1.weight") != null)
-                "gemma4uv"
-            else
-                "gemma4v";
+            {
+                caps.vision_encoder_type = "gemma4uv";
+            } else if (gf.findTensor("v.blk.0.attn_qkv.weight") != null) {
+                caps.vision_encoder_type = "qwen3vl";
+            } else if (gf.findTensor("v.blk.0.attn_q.weight") != null) {
+                caps.vision_encoder_type = "qwen2vl";
+            } else {
+                caps.vision_encoder_type = "gemma4v";
+            }
         }
         if (gf.findTensor("a.conv1d.0.weight") != null or
             gf.findTensor("a.input_projection.weight") != null or
@@ -383,6 +393,11 @@ fn resolveImageMarkers(caps: *const model.ModelCapabilities) struct { beg: []con
         std.mem.eql(u8, caps.vision_encoder_type, "gemma4uv"))
     {
         return .{ .beg = "<|image>", .end = "<image|>" };
+    }
+    if (std.mem.eql(u8, caps.vision_encoder_type, "qwen3vl") or
+        std.mem.eql(u8, caps.vision_encoder_type, "qwen2vl"))
+    {
+        return .{ .beg = "<|vision_start|>", .end = "<|vision_end|>" };
     }
     return .{ .beg = "<start_of_image>", .end = "<end_of_image>" };
 }

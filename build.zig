@@ -534,6 +534,7 @@ pub fn build(b: *std.Build) void {
     tokenize_mod.addImport("gguf", gguf_mod);
     tokenize_mod.addImport("tokenizer", tokenizer_mod);
     tokenize_mod.addImport("utils", utils_mod);
+    tokenize_mod.addImport("engine_common", engine_common_mod);
 
     const tokenize_exe = b.addExecutable(.{
         .name = "zllama-tokenize",

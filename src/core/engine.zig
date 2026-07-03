@@ -129,7 +129,6 @@ pub const InferenceEngine = struct {
         const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
         errdefer ctx_weights.deinit();
         const ctx_kv_cache = try ggml.Context.init(mem_size_estimate);
-        errdefer ctx_kv_cache.deinit();
         const max_seq_len = @min(params.max_seq_len, 2048);
         const hdim_kv = params.n_head_dim;
         const hdim_k = @max(params.n_head_dim, params.n_head_dim_k);
@@ -838,11 +837,12 @@ pub const InferenceEngine = struct {
     pub fn generateWithImage(self: *InferenceEngine, io: std.Io, prompt: []const u8, image_path: [:0]const u8, max_tokens: u32) !void {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_vision) return error.VisionNotSupported;
-        if (self.arch != .gemma4) {
-            logger.warn("Vision only supported for Gemma4.", .{});
-            return self.generate(io, prompt, max_tokens);
+        // 目前仅 Gemma4 和 Qwen3VL 支持完整的视觉推理流水线
+        if (self.arch != .gemma4 and self.arch != .qwen3vl) {
+            logger.err("Vision inference not yet implemented for architecture '{s}'.", .{@tagName(self.arch)});
+            logger.err("  Currently only Gemma4 and Qwen3VL support vision.", .{});
+            return error.VisionNotSupportedForArchitecture;
         }
-        const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
 
         // Log image markers from MtmdContext (ensures mod.zig:232 is executed)
         if (self.mtmd_context) |ctx| {
@@ -854,37 +854,57 @@ pub const InferenceEngine = struct {
         defer img.deinit();
         if (img.width == 0 or img.height == 0) return error.EmptyImage;
 
-        self.ctx_graph.setNoAlloc(false);
-        logger.info("ctx_graph no_alloc after setNoAlloc(false): {}", .{self.ctx_graph.getNoAlloc()});
-        var vision_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
-        const vision_embeddings = try mm_mgr.encodeMedia(io, self.ctx_graph, vision_graph, .{
+        // Use a separate context for the vision encoder to avoid exhausting the main graph context
+        var vision_ctx = try ggml.Context.initNoAlloc(10 * 1024 * 1024 * 1024);
+        defer vision_ctx.deinit();
+
+        vision_ctx.setNoAlloc(false);
+        var vision_graph = try ggml.CGraph.initReserved(vision_ctx, 32768);
+        const vision_embeddings = try mm_mgr.encodeMedia(io, vision_ctx, vision_graph, .{
             .media_type = .image,
             .image_data = img.data,
             .image_width = img.width,
             .image_height = img.height,
         });
-        self.ctx_graph.setNoAlloc(true);
+        vision_ctx.setNoAlloc(true);
+        logger.info("Vision graph built, allocating compute buffers...", .{});
         const buft = ggml.backendCpuBufferType();
         var v_galloc = try ggml.Gallocr.init(buft);
         defer v_galloc.free();
-        if (!v_galloc.allocGraph(vision_graph)) return error.GraphAllocFailed;
+        logger.info("Gallocr allocated, allocating graph...", .{});
+        if (!v_galloc.allocGraph(vision_graph)) {
+            logger.err("GraphAllocFailed for vision graph", .{});
+            return error.GraphAllocFailed;
+        }
+        logger.info("Graph allocated, computing...", .{});
         try vision_graph.compute(self.n_threads);
+        logger.info("Vision graph computed successfully", .{});
 
         const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
         const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
 
         // —— 嵌入维度检查 ——
+        // For Qwen3VL with deepstack, the encoder output dimension is
+        // n_embd * (1 + n_deepstack_layers), where the first n_embd values
+        // are the base embedding and subsequent blocks are deepstack features.
         logger.debug("Vision encoder output: shape=[{d}, {d}] (n_embd×n_tokens)", .{ n_embd_val, n_vision_tokens });
-        logger.debug("  model n_embd={d}, expected embed_dim=1536 for Gemma4", .{self.params.n_embd});
-        if (n_embd_val != @as(usize, @intCast(self.params.n_embd))) {
+        logger.debug("  model n_embd={d}", .{self.params.n_embd});
+        if (self.arch == .qwen3vl) {
+            // Qwen3VL with deepstack: encoder output dim = n_embd * (1 + n_deepstack_layers)
+            // The model's forwardWithEmbdOverride handles the deepstack split internally.
+            logger.debug("  Qwen3VL: allowing encoder dim {d} (n_embd={d} * (1 + deepstack_layers))", .{
+                n_embd_val, self.params.n_embd,
+            });
+        } else if (n_embd_val != @as(usize, @intCast(self.params.n_embd))) {
             logger.err("EMBEDDING DIMENSION MISMATCH: encoder={d} vs model={d}", .{ n_embd_val, self.params.n_embd });
             return error.EmbeddingDimensionMismatch;
         }
-        logger.debug("  ✓ embedding dimension matches model n_embd", .{});
+        logger.debug("  ✓ embedding dimension check passed", .{});
 
         const image_token_id: u32 = blk: {
             if (self.tok.textToToken("<|image|>")) |id| break :blk @as(u32, @intCast(id));
             if (self.tok.textToToken("<image>")) |id| break :blk @as(u32, @intCast(id));
+            if (self.tok.textToToken("<|vision_start|>")) |id| break :blk @as(u32, @intCast(id));
             return error.NoImagePlaceholderToken;
         };
 
@@ -910,7 +930,19 @@ pub const InferenceEngine = struct {
             if (expanded.offsets.len > 0) @as(u32, @intCast(expanded.tokens.items.len)) - expanded.offsets[0].token_offset - expanded.offsets[0].token_count else @as(u32, @intCast(expanded.tokens.items.len)),
             expanded.tokens.items.len,
         });
-        try self.multimodalPrefill(io, gemma4_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt);
+
+        // Dispatch to architecture-specific multimodal prefill
+        switch (self.arch) {
+            .gemma4 => {
+                const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
+                try self.multimodalPrefill(io, gemma4_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt);
+            },
+            .qwen3vl => {
+                const qwen3vl_model: *model_if.qwen3vl.Qwen3VLModel = @ptrCast(@alignCast(self.model.ptr));
+                try self.multimodalPrefillQwen3VL(io, qwen3vl_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt);
+            },
+            else => return error.VisionNotSupportedForArchitecture,
+        }
     }
 
     // ========================================================================
@@ -918,9 +950,11 @@ pub const InferenceEngine = struct {
     pub fn generateWithAudio(self: *InferenceEngine, io: std.Io, prompt: []const u8, audio_path: [:0]const u8, max_tokens: u32) !void {
         var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
         if (!self.capabilities.has_audio) return error.AudioNotSupported;
+        // 目前仅 Gemma4 支持完整的音频推理流水线（mediaForward + 三阶段 prefill）
         if (self.arch != .gemma4) {
-            logger.warn("Audio only supported for Gemma4.", .{});
-            return self.generate(io, prompt, max_tokens);
+            logger.err("Audio inference not yet implemented for architecture '{s}'.", .{@tagName(self.arch)});
+            logger.err("  Currently only Gemma4 supports audio.", .{});
+            return error.AudioNotSupportedForArchitecture;
         }
         const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
 
@@ -1184,6 +1218,148 @@ pub const InferenceEngine = struct {
             try sf.writeStreamingAll(io, "\n");
         }
         if (gen_count > 0) logger.info("Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
+    }
+
+    /// Qwen3VL 多模态 prefill。
+    /// Qwen3VL 使用标准的三阶段 prefill，但 mediaForward 使用 Qwen3VLModel.mediaForward。
+    fn multimodalPrefillQwen3VL(self: *InferenceEngine, io: std.Io, qwen3vl_model: *model_if.qwen3vl.Qwen3VLModel, expanded: *chat_template.TokenizedSegments, media_token_id: u32, n_media_tokens: i32, media_embeddings: *ggml.Tensor, max_tokens: u32, prompt_text: ?[]const u8) !void {
+        const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
+        const media_offset: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else 0;
+        const media_count: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_count else @intCast(n_media_tokens);
+        const prefix_tokens = if (media_offset > 0) expanded.tokens.items[0..media_offset] else &[_]u32{};
+        const suffix_start: u32 = media_offset + media_count;
+        const suffix_tokens = if (suffix_start < n_total_tokens) expanded.tokens.items[suffix_start..@as(usize, @intCast(n_total_tokens))] else &[_]u32{};
+
+        // —— 多模态嵌入替换对齐检查 ——
+        logger.info("=== Qwen3VL Multimodal embedding substitution check ===", .{});
+        logger.info("  media_offset    = {d}", .{media_offset});
+        logger.info("  media_count     = {d}", .{media_count});
+        logger.info("  n_media_tokens  = {d}", .{n_media_tokens});
+        logger.info("  prefix_tokens   = {d}", .{prefix_tokens.len});
+        logger.info("  suffix_tokens   = {d}", .{suffix_tokens.len});
+        logger.info("  n_total_tokens  = {d}", .{n_total_tokens});
+
+        const mediaForwardFn = struct {
+            fn f(mp: *anyopaque, c: *ggml.Context, g: *ggml.CGraph, it: *ggml.Tensor, nt: i32, kvc: ?*kv_cache.KVCache, sp: i32, eo: *ggml.Tensor, eoff: i32, causal: bool) anyerror!*ggml.Tensor {
+                return (@as(*model_if.qwen3vl.Qwen3VLModel, @ptrCast(@alignCast(mp)))).mediaForward(c, g, it, nt, kvc, sp, eo, eoff, causal);
+            }
+        }.f;
+
+        const embd_raw = media_embeddings.dataF32();
+        const embd_dim: u32 = @intCast(media_embeddings.ne()[0]);
+        const embd_heap = try self.allocator.dupe(f32, embd_raw);
+        defer self.allocator.free(embd_heap);
+
+        // —— 嵌入数值有效性验证 ——
+        {
+            const n_total: usize = embd_heap.len;
+            const n_preview: usize = @min(n_total, 5);
+            var all_zero = true;
+            var has_nan = false;
+            for (embd_heap) |v| {
+                if (v != 0.0) all_zero = false;
+                if (std.math.isNan(v)) has_nan = true;
+            }
+            logger.info("Embedding validation: total={d} preview={d:.4} {d:.4} {d:.4} {d:.4} {d:.4} all_zero={} has_nan={}", .{
+                n_total,
+                if (n_preview > 0) embd_heap[0] else @as(f32, 0),
+                if (n_preview > 1) embd_heap[1] else @as(f32, 0),
+                if (n_preview > 2) embd_heap[2] else @as(f32, 0),
+                if (n_preview > 3) embd_heap[3] else @as(f32, 0),
+                if (n_preview > 4) embd_heap[4] else @as(f32, 0),
+                all_zero,
+                has_nan,
+            });
+            if (all_zero) logger.warn("  ⚠ all embedding values are ZERO!", .{});
+            if (has_nan) logger.warn("  ⚠ embedding contains NaN!", .{});
+        }
+        const pr = try prefill_mod.threeStagePrefill(self.ctx_graph, self.model, @ptrCast(@alignCast(qwen3vl_model)), &mediaForwardFn, &self.kv_cache_mgr, prefix_tokens, media_token_id, @intCast(media_count), embd_heap, embd_dim, suffix_tokens, &self.params, self.n_threads, self.allocator);
+
+        // Print verbose prompt if requested
+        if (self.verbose_prompt) {
+            try self.printVerbosePrompt(io, prompt_text, expanded.tokens.items, pr.logits, expanded.offsets);
+        }
+
+        var best_idx: i32 = 0;
+        var best_val: f32 = pr.logits[0];
+        for (pr.logits, 0..) |v, j| {
+            if (v > best_val) {
+                best_val = v;
+                best_idx = @intCast(j);
+            }
+        }
+        self.allocator.free(pr.logits);
+
+        try self.reserveDecodeGallocr();
+        var eog_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        defer eog_buf.deinit(self.allocator);
+        const t_tg_start = engine_common.currentTimeMs();
+
+        var current_token: i32 = best_idx;
+        var pos: i32 = pr.pos;
+        var gen_count: u32 = 0;
+
+        while (gen_count < max_tokens) {
+            if (self.tok.isEog(@intCast(current_token))) {
+                logger.debug("multimodalPrefillQwen3VL: EOG token {d} at pos {d}", .{ current_token, pos });
+                break;
+            }
+
+            // Skip tokens: compute forward but don't output anything.
+            if (self.tok.isSkipToken(@intCast(current_token))) {
+                const step = try self.inc_ctx.beginStep();
+                step.setToken(current_token);
+                var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+                const il = try self.model.buildGraph(&ib, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
+                if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
+                try step.graph.compute(self.n_threads);
+                current_token = sampler.Sampler.sampleGreedy(il);
+                pos += 1;
+                gen_count += 1;
+                continue;
+            }
+
+            // Decode and output the current token
+            var buf: [128]u8 = undefined;
+            const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
+            const decoded = buf[0..n];
+
+            // Check for EOG text in accumulated output
+            if (n > 0) {
+                try eog_buf.appendSlice(self.allocator, decoded);
+                if (self.tok.isEogText(eog_buf.items)) {
+                    if (!self.benchmark) {
+                        const sf = std.Io.File.stdout();
+                        try sf.writeStreamingAll(io, decoded);
+                    }
+                    break;
+                }
+            }
+
+            // Print decoded text
+            if (!self.benchmark and n > 0) {
+                const sf = std.Io.File.stdout();
+                try sf.writeStreamingAll(io, decoded);
+            }
+
+            // Compute next step
+            const step = try self.inc_ctx.beginStep();
+            step.setToken(current_token);
+            var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
+            const il = try self.model.buildGraph(&ib, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
+            if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
+            try step.graph.compute(self.n_threads);
+            current_token = sampler.Sampler.sampleGreedy(il);
+            pos += 1;
+            gen_count += 1;
+        }
+
+        const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;
+        if (!self.benchmark) {
+            const sf = std.Io.File.stdout();
+            try sf.writeStreamingAll(io, "\n");
+        }
+        if (gen_count > 0) logger.info("Qwen3VL Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
     }
 
     /// 新的多模态 tokenize 方法：
