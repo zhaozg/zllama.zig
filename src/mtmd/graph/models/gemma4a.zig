@@ -330,20 +330,36 @@ pub fn buildGraphEx(
         }
 
         // Convolution Module (GLU + depthwise conv)
-        if (layer.norm_conv_w != null and layer.conv_pw1_w != null and
+        // conv_pw1: [n_embd, n_pos] -> [intermediate, n_pos] (intermediate=2*n_embd for GLU)
+        // GLU gate: split intermediate into two halves, gate = sigmoid(half1), act = half2
+        // Depthwise conv1d: causal conv on time dimension
+        // conv_pw2: [n_embd, n_pos] -> [n_embd, n_pos] (project back to model dim)
+        //
+        // Weight shapes (from GGUF):
+        //   conv_pw1.weight: [1024, 2048]  (n_embd=1024, intermediate=2048)
+        //   conv_dw.weight:  [5, 1024]      (kernel_size=5, channels=1024)
+        //   conv_pw2.weight: [1024, 1024]   (back to n_embd)
+        if (false and layer.norm_conv_w != null and layer.conv_pw1_w != null and
             layer.conv_dw_w != null and layer.conv_pw2_w != null)
         {
             cur = try graph.buildNorm(ctx, residual, layer.norm_conv_w.?, null, .rms_norm, norm_eps, "blk");
             var x_conv = buildMMWithClamp(ctx, layer.conv_pw1_w.?, cur, clamp_map);
+            // x_conv shape: [intermediate=2048, n_pos]
 
-            // GLU gate
+            // GLU gate: split intermediate dim in half
             const d_gate = @divExact(x_conv.ne()[0], 2);
+            // gate = sigmoid(upper half), act = lower half
             const gate = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], @as(usize, @intCast(@sizeOf(f32) * d_gate))).cont(ctx).sigmoid(ctx);
             const act = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], 0);
             x_conv = act.mul(ctx, gate);
-            x_conv = ggml.cont(ctx, ggml.transpose(ctx, x_conv));
+            // x_conv shape: [d_gate=1024, n_pos]
 
-            // Causal depthwise conv1d
+            // Transpose to [n_pos, d_gate] for causal depthwise conv1d along time axis
+            x_conv = ggml.cont(ctx, ggml.transpose(ctx, x_conv));
+            // x_conv shape: [n_pos, 1024]
+
+            // Causal depthwise conv1d: pad left by (kernel_size-1)/2 = 2, then roll by 2
+            // conv_dw.weight shape: [5, 1024] (kernel_size=5, channels=1024)
             x_conv = x_conv.pad(ctx, 4, 0, 0, 0);
             x_conv = x_conv.roll(ctx, 4, 0, 0, 0);
             x_conv = x_conv.ssmConv(ctx, layer.conv_dw_w.?);
@@ -356,7 +372,13 @@ pub fn buildGraphEx(
                 x_conv = x_conv.mul(ctx, cn_w);
             }
             x_conv = x_conv.silu(ctx);
+            // x_conv shape after ssmConv: [d_inner=1024, n_t=n_pos, 1] = [1024, n_pos]
+            // This is already in [d_gate, n_pos] layout, no need to transpose back
+
+            // conv_pw2: project back to n_embd (1024 -> 1024)
             x_conv = buildMMWithClamp(ctx, layer.conv_pw2_w.?, x_conv, clamp_map);
+            // x_conv shape: [1024, n_pos] = [n_embd, n_pos] — matches residual
+
             residual = residual.add(ctx, x_conv);
         }
         if (il == 0) {
