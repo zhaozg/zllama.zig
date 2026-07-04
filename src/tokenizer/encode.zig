@@ -35,6 +35,9 @@ const preTokenizeGPT2 = @import("models/gpt2.zig").preTokenizeGPT2;
 const preTokenizeQwen = @import("models/qwen.zig").preTokenizeQwen;
 const preTokenizeNewlineOnly = @import("models/newline_only.zig").preTokenizeNewlineOnly;
 const tryMatchContractionOrWord = @import("models/tryMatchContractionOrWord.zig").tryMatchContractionOrWord;
+const encode_config = @import("encode_config.zig");
+const encode_spm = @import("encode_spm.zig");
+const encode_word = @import("encode_word.zig");
 
 const log = std.log.scoped(.tokenizer);
 
@@ -195,33 +198,6 @@ fn escapeWhitespace(text: []const u8, allocator: std.mem.Allocator) ![]u8 {
     return buf[0..j];
 }
 
-/// 获取给定位置 UTF-8 字符的字节长度
-// ============================================================================
-// GPT-2 字节编码转换
-// ============================================================================
-
-/// 将文本转换为 GPT-2 字节编码
-pub fn toGpt2ByteEncoding(text: []const u8, bytesToUnicodeFn: *const fn (byte: u8, ctx: ?*anyopaque) []const u8, ctx: ?*anyopaque, allocator: std.mem.Allocator) ![]u8 {
-    var total_len: usize = 0;
-    for (text) |byte| {
-        total_len += bytesToUnicodeFn(byte, ctx).len;
-    }
-
-    var result = try std.ArrayListUnmanaged(u8).initCapacity(allocator, total_len);
-    errdefer result.deinit(allocator);
-
-    for (text) |byte| {
-        const mapped = bytesToUnicodeFn(byte, ctx);
-        try result.appendSlice(allocator, mapped);
-    }
-
-    return result.items;
-}
-
-// ============================================================================
-// 特殊 Token 预分词（parse_special 模式）
-// ============================================================================
-
 /// 特殊 token 替换结果：文本中的特殊 token 已被替换为 token ID
 /// 用于 parse_special 模式下的预处理
 const SpecialTokenSegment = struct {
@@ -318,171 +294,6 @@ fn findMatchingSpecial(text: []const u8, pos: usize, cache: []const mod.CacheSpe
 }
 
 // ============================================================================
-// SPM 编码（基于字符的 bigram 合并）
-// ============================================================================
-
-/// SPM bigram 用于优先级队列
-const SpmBigram = struct {
-    left: i32,
-    right: i32,
-    score: f32,
-    size: usize,
-
-    fn lessThan(context: void, a: @This(), b: @This()) std.math.Order {
-        _ = context;
-        // SPM: higher score = higher priority (less negative = more likely to merge)
-        // Matches llama.cpp: l.score < r.score means l has lower priority
-        if (a.score > b.score) return .lt;
-        if (a.score < b.score) return .gt;
-        // When scores are equal, prefer leftmost pair (smaller left index)
-        // This matches llama.cpp behavior: leftmost pair gets merged first
-        // when scores are tied, ensuring correct tokenization of repeated chars
-        if (a.left < b.left) return .lt;
-        if (a.left > b.left) return .gt;
-        return .eq;
-    }
-};
-
-/// SPM 符号
-const SpmSymbol = struct {
-    text: []const u8, // pointer into the original text
-    n: usize,
-    prev: i32,
-    next: i32,
-};
-
-/// SPM 编码：将文本编码为 token ID 列表
-/// 参考 llama.cpp 的 llm_tokenizer_spm_session::tokenize
-/// 流程：
-/// 1. 将文本拆分为 UTF-8 字符
-/// 2. 使用优先级队列反复合并 score 最高的相邻 token 对
-/// 3. 合并后的 token 字符串必须在词表中存在
-fn encodeSPM(
-    text: []const u8,
-    config: *const EncodeConfig,
-    allocator: std.mem.Allocator,
-) !std.ArrayListUnmanaged(u32) {
-    var tokens: std.ArrayListUnmanaged(u32) = .empty;
-
-    if (text.len == 0) return tokens;
-
-    // 1. 拆分为 UTF-8 字符
-    var symbols = std.ArrayListUnmanaged(SpmSymbol){ .items = &.{}, .capacity = 0 };
-    defer symbols.deinit(allocator);
-
-    var offs: usize = 0;
-    var index: i32 = 0;
-    while (offs < text.len) {
-        const ch_len = unicode.charLen(text, offs);
-        try symbols.append(allocator, SpmSymbol{
-            .text = text[offs..],
-            .n = ch_len,
-            .prev = index - 1,
-            .next = if (offs + ch_len >= text.len) -1 else index + 1,
-        });
-        offs += ch_len;
-        index += 1;
-    }
-
-    if (symbols.items.len == 0) return tokens;
-
-    // 2. 初始化优先级队列
-    var work_queue = std.PriorityQueue(SpmBigram, void, SpmBigram.lessThan).initContext({});
-    defer work_queue.deinit(allocator);
-
-    for (1..symbols.items.len) |i| {
-        tryAddSpmBigram(&symbols, &work_queue, @intCast(i - 1), @intCast(i), config);
-    }
-
-    // 3. 反复合并 score 最高的 pair
-    while (work_queue.count() > 0) {
-        const bigram = work_queue.pop().?;
-
-        const left_idx = @as(usize, @intCast(bigram.left));
-        const right_idx = @as(usize, @intCast(bigram.right));
-
-        // 检查符号是否已被合并
-        if (left_idx >= symbols.items.len or right_idx >= symbols.items.len) continue;
-        if (symbols.items[left_idx].next != bigram.right) continue;
-        if (symbols.items[right_idx].prev != bigram.left) continue;
-
-        // 检查 size 是否匹配
-        if (symbols.items[left_idx].n + symbols.items[right_idx].n != bigram.size) continue;
-
-        // 合并右符号到左符号
-        symbols.items[left_idx].n += symbols.items[right_idx].n;
-        symbols.items[right_idx].n = 0;
-
-        // 从链表中移除右符号
-        symbols.items[left_idx].next = symbols.items[right_idx].next;
-        if (symbols.items[right_idx].next >= 0) {
-            symbols.items[@as(usize, @intCast(symbols.items[right_idx].next))].prev = bigram.left;
-        }
-
-        // 添加新的 bigram
-        tryAddSpmBigram(&symbols, &work_queue, symbols.items[left_idx].prev, bigram.left, config);
-        tryAddSpmBigram(&symbols, &work_queue, bigram.left, symbols.items[left_idx].next, config);
-    }
-
-    // 4. 从符号链表重建 token 列表
-    {
-        var i: i32 = 0;
-        while (i >= 0) {
-            const idx = @as(usize, @intCast(i));
-            const sym = &symbols.items[idx];
-            if (sym.n > 0) {
-                const token_text = sym.text[0..sym.n];
-                // 查找 token
-                if (config.textToTokenFn(token_text, config.ctx)) |tid| {
-                    try tokens.append(allocator, tid);
-                } else {
-                    // 回退到字节 token
-                    for (token_text) |byte| {
-                        const tid = config.byteToTokenIdFn(byte, config.ctx);
-                        try tokens.append(allocator, tid);
-                    }
-                }
-            }
-            i = sym.next;
-        }
-    }
-
-    return tokens;
-}
-
-/// 尝试添加 SPM bigram 到优先级队列
-fn tryAddSpmBigram(
-    symbols: *std.ArrayListUnmanaged(SpmSymbol),
-    queue: *std.PriorityQueue(SpmBigram, void, SpmBigram.lessThan),
-    left: i32,
-    right: i32,
-    config: *const EncodeConfig,
-) void {
-    if (left < 0 or right < 0) return;
-    const left_idx = @as(usize, @intCast(left));
-    const right_idx = @as(usize, @intCast(right));
-    if (left_idx >= symbols.items.len or right_idx >= symbols.items.len) return;
-
-    const left_sym = &symbols.items[left_idx];
-    const right_sym = &symbols.items[right_idx];
-
-    // 构建合并后的文本
-    const merged_text = left_sym.text[0 .. left_sym.n + right_sym.n];
-
-    // 查找合并后的 token
-    const token_id = config.textToTokenFn(merged_text, config.ctx) orelse return;
-
-    const score = config.tokenScoreFn(token_id, config.ctx);
-
-    queue.push(config.allocator, SpmBigram{
-        .left = left,
-        .right = right,
-        .score = score,
-        .size = merged_text.len,
-    }) catch {};
-}
-
-// ============================================================================
 // 编码主函数
 // ============================================================================
 
@@ -569,7 +380,7 @@ pub fn encode(
             spm_needs_free = true;
 
             // SPM 编码
-            var spm_tokens = try encodeSPM(spm_text, config, config.allocator);
+            var spm_tokens = try encode_spm.encodeSPM(spm_text, config, config.allocator);
             defer spm_tokens.deinit(config.allocator);
             try tokens.appendSlice(config.allocator, spm_tokens.items);
         }
@@ -589,7 +400,7 @@ pub fn encode(
 
         var is_first_word = true;
         for (pre_tok.words.items) |word| {
-            var word_tokens = try encodeWord(word, add_space_prefix, ignore_merges, is_first_word, config);
+            var word_tokens = try encode_word.encodeWord(word, add_space_prefix, ignore_merges, is_first_word, config);
             defer word_tokens.deinit(config.allocator);
             try tokens.appendSlice(config.allocator, word_tokens.items);
             is_first_word = false;
@@ -638,234 +449,14 @@ fn encodeSegment(
             continue;
         }
 
-        var word_tokens = try encodeWord(word, add_space_prefix, ignore_merges, is_first_word, config);
+        var word_tokens = try encode_word.encodeWord(word, add_space_prefix, ignore_merges, is_first_word, config);
         defer word_tokens.deinit(config.allocator);
         try tokens.appendSlice(config.allocator, word_tokens.items);
         is_first_word = false;
     }
 
-    return tokens;
-}
-
-/// 编码单个词
-fn encodeWord(
-    word: []const u8,
-    add_space_prefix: bool,
-    _: bool, // ignore_merges — single-char whole-word matching is always attempted
-    is_first: bool,
-    config: *const EncodeConfig,
-) !std.ArrayListUnmanaged(u32) {
-    var tokens: std.ArrayListUnmanaged(u32) = .empty;
-
-    // 阶段 0：优先匹配原始单词（不添加任何前缀，不进行字节编码）
-    // 仅当单词以空白开头时执行此匹配，这意味着预分词器已经将空白包含在单词中
-    // （如 MPT 的 "  " 匹配 token 50276）。对于不以空白开头的单词，
-    // 后续的 add_space_prefix 会添加空格前缀，此时匹配原始单词可能得到错误结果
-    // （如 "½" 匹配到 token 121 而非正确的 GPT-2 编码形式 "Â½"）。
-    if (word.len > 0 and unicode.isAsciiWhitespace(word[0])) {
-        if (config.textToTokenFn(word, config.ctx)) |token_id| {
-            try tokens.append(config.allocator, token_id);
-            return tokens;
-        }
-    }
-
-    const is_spm_model = config.model == .llama or config.model == .spm;
-
-    // 步骤 1：确定基础文本（可能添加空格前缀）
-    // 对于 escape_whitespaces 的模型（gemma-4 等），将空格转为 ▁ (U+2581)
-    // 对于 SPM 模型，首词不添加空格前缀（除非词本身以空格开头）
-    const BaseText = struct {
-        text: []const u8,
-        needs_free: bool,
-    };
-    const base = if (add_space_prefix and (!is_spm_model or !is_first)) blk: {
-        if (is_spm_model) {
-            if (word.len > 0 and unicode.isAsciiWhitespace(word[0])) {
-                var ws_end: usize = 1;
-                while (ws_end < word.len and unicode.isAsciiWhitespace(word[ws_end])) ws_end += 1;
-                if (ws_end < word.len) {
-                    break :blk BaseText{
-                        .text = try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] }),
-                        .needs_free = true,
-                    };
-                }
-            }
-            break :blk BaseText{
-                .text = try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word }),
-                .needs_free = true,
-            };
-        } else if (config.escape_whitespaces) {
-            if (word.len > 0 and unicode.isAsciiWhitespace(word[0])) {
-                var ws_end: usize = 1;
-                while (ws_end < word.len and unicode.isAsciiWhitespace(word[ws_end])) ws_end += 1;
-                if (ws_end < word.len) {
-                    break :blk BaseText{
-                        .text = try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] }),
-                        .needs_free = true,
-                    };
-                }
-                // Word is all whitespace — keep as-is for token lookup
-            }
-            break :blk BaseText{ .text = word, .needs_free = false };
-        } else {
-            // If word already starts with whitespace (captured by ?\p{L}+ etc.),
-            // don't add another space — it's already there from pre-tokenization.
-            if (word.len > 0 and unicode.isAsciiWhitespace(word[0])) {
-                break :blk BaseText{ .text = word, .needs_free = false };
-            }
-            break :blk BaseText{
-                .text = try std.fmt.allocPrint(config.allocator, " {s}", .{word}),
-                .needs_free = true,
-            };
-        }
-    } else if (config.escape_whitespaces and word.len > 0 and unicode.isAsciiWhitespace(word[0])) blk: {
-        var ws_end: usize = 1;
-        while (ws_end < word.len and unicode.isAsciiWhitespace(word[ws_end])) ws_end += 1;
-        if (ws_end < word.len) {
-            break :blk BaseText{
-                .text = try std.fmt.allocPrint(config.allocator, "{s}{s}", .{ SPM_SPACE, word[ws_end..] }),
-                .needs_free = true,
-            };
-        }
-        // Word is all whitespace — keep as-is for token lookup
-        break :blk BaseText{ .text = word, .needs_free = false };
-    } else BaseText{ .text = word, .needs_free = false };
-
-    const base_text = base.text;
-    const base_needs_free = base.needs_free;
-    errdefer {
-        if (base_needs_free) config.allocator.free(base_text);
-    }
-
-    // 步骤 2：对基础文本进行 GPT-2 字节编码（如果需要）
-    const use_gpt2_encoding = config.bytesToUnicodeFn != null and config.merges.count() > 0;
-
-    const final_text: []const u8 = if (use_gpt2_encoding) blk: {
-        const encoded = try toGpt2ByteEncoding(base_text, config.bytesToUnicodeFn.?, config.ctx, config.allocator);
-        if (base_needs_free) config.allocator.free(base_text);
-        break :blk encoded;
-    } else base_text;
-
-    const final_needs_free = if (use_gpt2_encoding) true else base_needs_free;
-
-    defer {
-        if (final_needs_free) config.allocator.free(@constCast(final_text));
-    }
-
-    // 阶段 1：整词优先匹配
-    // 无论 ignore_merges 值如何，预分词得到的每个单词都应先尝试直接查表。
-    // 如果词表中存在该单词，直接使用其 token ID，避免不必要的拆分和 BPE 合并。
-    // 这是确保与 llama-tokenize 行为一致的关键。
-    if (config.textToTokenFn(final_text, config.ctx)) |token_id| {
-        try tokens.append(config.allocator, token_id);
-        return tokens;
-    }
-
-    // 阶段 2：Tokenization
-    // BPE 模型：先拆分为最小单元，再 BPE 合并。
-    // - GPT-2 byte-encoded BPE (llama-bpe, qwen2 等): 通过 unicodeToByte
-    //   映射回原始 byte，用 byteToTokenIdFn 查找字节 token。
-    // - Non-byte-encoded BPE (gemma-4, bert): 直接按 UTF-8 字符查找 token。
-    if (config.merges.count() > 0) {
-        var pos: usize = 0;
-        while (pos < final_text.len) {
-            if (config.unicodeToByte) |utb| {
-                // GPT-2 byte-encoded BPE: decode each UTF-8 code point back to raw byte
-                const ch_len = std.unicode.utf8ByteSequenceLength(final_text[pos]) catch 1;
-                const ch = final_text[pos .. pos + @as(usize, ch_len)];
-                if (utb.get(ch)) |byte| {
-                    const tid = config.byteToTokenIdFn(byte, config.ctx);
-                    try tokens.append(config.allocator, tid);
-                    pos += ch.len;
-                } else {
-                    const tid = config.byteToTokenIdFn(final_text[pos], config.ctx);
-                    try tokens.append(config.allocator, tid);
-                    pos += 1;
-                }
-            } else {
-                // Non-byte-encoded BPE: character-level lookup
-                const ch_len = std.unicode.utf8ByteSequenceLength(final_text[pos]) catch 1;
-                const ch = final_text[pos .. pos + @as(usize, ch_len)];
-                if (config.textToTokenFn(ch, config.ctx)) |tid| {
-                    try tokens.append(config.allocator, tid);
-                } else if (config.escape_whitespaces and ch.len == 1 and unicode.isAsciiWhitespace(ch[0])) {
-                    if (config.textToTokenFn(SPM_SPACE, config.ctx)) |tid| {
-                        try tokens.append(config.allocator, tid);
-                    } else {
-                        const tid = config.byteToTokenIdFn(ch[0], config.ctx);
-                        try tokens.append(config.allocator, tid);
-                    }
-                } else {
-                    for (ch) |byte| {
-                        const tid = config.byteToTokenIdFn(byte, config.ctx);
-                        try tokens.append(config.allocator, tid);
-                    }
-                }
-                pos += ch.len;
-            }
-        }
-    } else {
-        // 非 BPE 模型（SPM 等）：Trie 贪婪最长匹配
-        var pos: usize = 0;
-        while (pos < final_text.len) {
-            const match = trie.longestMatch(config.trie_root, final_text, pos);
-            if (match) |m| {
-                try tokens.append(config.allocator, m.token_id);
-                pos += m.len;
-            } else {
-                if (is_spm_model) {
-                    try tokens.append(config.allocator, config.special.unk);
-                    const ch_len = std.unicode.utf8ByteSequenceLength(final_text[pos]) catch 1;
-                    pos += ch_len;
-                } else if (config.unicodeToByte) |utb| {
-                    const ch_len = std.unicode.utf8ByteSequenceLength(final_text[pos]) catch 1;
-                    const ch = final_text[pos .. pos + @as(usize, ch_len)];
-                    if (utb.get(ch)) |byte| {
-                        try tokens.append(config.allocator, config.byteToTokenIdFn(byte, config.ctx));
-                        pos += ch.len;
-                    } else {
-                        try tokens.append(config.allocator, config.byteToTokenIdFn(final_text[pos], config.ctx));
-                        pos += 1;
-                    }
-                } else {
-                    try tokens.append(config.allocator, config.byteToTokenIdFn(final_text[pos], config.ctx));
-                    pos += 1;
-                }
-            }
-        }
-    }
-
-    // 阶段 3：BPE 合并（如果有合并规则）
-    // 注意：即使 ignore_merges=true，如果整个词不在词表中，仍然需要 BPE 合并
-    // 这与 llama.cpp 的行为一致
-    if (config.merges.count() > 0) {
-        try bpe.applyBpeMerges(&tokens, config.merges, config.tokenToStringFn, config.textToTokenFn, config.ctx, config.allocator);
-    }
 
     return tokens;
 }
 
-// ============================================================================
-// 编码配置
-// ============================================================================
-
-/// 编码所需的配置和回调函数
-pub const EncodeConfig = struct {
-    allocator: std.mem.Allocator,
-    special: types.SpecialTokens,
-    pre_type: types.PreTokenizerType,
-    model: types.TokenizerModel,
-    vocab: std.ArrayListUnmanaged(types.VocabEntry),
-    merges: std.StringHashMap(u32),
-    trie_root: *const trie.TrieNode,
-    tokenToStringFn: *const fn (token_id: u32, ctx: ?*anyopaque) ?[]const u8,
-    textToTokenFn: *const fn (text: []const u8, ctx: ?*anyopaque) ?u32,
-    byteToTokenIdFn: *const fn (byte: u8, ctx: ?*anyopaque) u32,
-    bytesToUnicodeFn: ?*const fn (byte: u8, ctx: ?*anyopaque) []const u8 = null,
-    unicodeToByte: ?*const std.StringHashMap(u8) = null,
-    tokenScoreFn: *const fn (token_id: u32, ctx: ?*anyopaque) f32 = undefined,
-    escape_whitespaces: bool = false,
-    ctx: ?*anyopaque,
-    /// 缓存的特殊 token 列表（按 text 长度降序排列），用于 parse_special 模式
-    cache_special_tokens: ?[]const mod.CacheSpecialToken = null,
-};
+pub const EncodeConfig = encode_config.EncodeConfig;
