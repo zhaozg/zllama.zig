@@ -902,6 +902,7 @@ pub const InferenceEngine = struct {
         logger.debug("  ✓ embedding dimension check passed", .{});
 
         const image_token_id: u32 = blk: {
+            if (self.tok.textToToken("<|image_pad|>")) |id| break :blk @as(u32, @intCast(id));
             if (self.tok.textToToken("<|image|>")) |id| break :blk @as(u32, @intCast(id));
             if (self.tok.textToToken("<image>")) |id| break :blk @as(u32, @intCast(id));
             if (self.tok.textToToken("<|vision_start|>")) |id| break :blk @as(u32, @intCast(id));
@@ -1362,13 +1363,10 @@ pub const InferenceEngine = struct {
         if (gen_count > 0) logger.info("Qwen3VL Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
     }
 
-    /// 新的多模态 tokenize 方法：
-    /// 1. 对整个 formatted_prompt 进行 tokenize（含 parse_special=true）
-    /// 2. 在 token 序列中找到媒体特殊 token 的位置
-    /// 3. 将其替换为 N 个相同的特殊 token（重复 N 次）
-    ///
-    /// 这与旧的 tokenizeWithPlaceholders 不同，后者在 tokenizer 编码之前
-    /// 扫描占位符字符串，导致 parse_special 无法正确编码特殊 token。
+    /// Scans the formatted prompt string for media placeholders (e.g., "<|image|>"),
+    /// then does segment-by-segment tokenization. This is a string-based approach
+    /// (matching llama.cpp's split-by-marker logic), unlike the old token-ID-based
+    /// approach which failed when "<|image|>" was not a single special token.
     fn tokenizeWithMediaPlaceholders(
         self: *InferenceEngine,
         formatted_prompt: []const u8,
@@ -1376,31 +1374,21 @@ pub const InferenceEngine = struct {
         media_token_count: u32,
         media_type: chat_template.MediaType,
     ) !chat_template.TokenizedSegments {
-        // Step 1: 对整个 formatted_prompt 进行 tokenize（含 parse_special=true）
-        var all_tokens = try self.tok.encode(formatted_prompt, false, true);
-        errdefer all_tokens.deinit(self.allocator);
+        // Step 1: Scan the formatted_prompt string for media placeholders.
+        // This is a string-based scan (matching llama.cpp's split by <__media__> marker).
+        const all_placeholders = try chat_template.scanPlaceholders(formatted_prompt, self.allocator);
+        defer self.allocator.free(all_placeholders);
 
-        // Step 2: 在 token 序列中找到媒体特殊 token 的位置
-        // 注意：<|image|> 或 <|audio|> 在 parse_special 模式下会被编码为单个特殊 token
-        var offsets = std.ArrayListUnmanaged(chat_template.PlaceholderInfo){ .items = &.{}, .capacity = 0 };
-        errdefer offsets.deinit(self.allocator);
-
-        // 先扫描所有媒体 token 的位置
-        var media_positions = std.ArrayListUnmanaged(usize){ .items = &.{}, .capacity = 0 };
-        defer media_positions.deinit(self.allocator);
-
-        for (all_tokens.items, 0..) |token, pos| {
-            if (token == media_token_id) {
-                try media_positions.append(self.allocator, pos);
-            }
+        // Count only placeholders of the requested media_type
+        var match_count: usize = 0;
+        for (all_placeholders) |ph| {
+            if (ph.media_type == media_type) match_count += 1;
+        }
+        if (match_count == 0) {
+            logger.warn("tokenizeWithMediaPlaceholders: no '{s}' placeholder found in prompt!", .{@tagName(media_type)});
         }
 
-        if (media_positions.items.len == 0) {
-            logger.warn("tokenizeWithMediaPlaceholders: no media token {d} found in prompt!", .{media_token_id});
-        }
-
-        // 获取媒体开始/结束标记（与 llama.cpp add_media 对应）
-        // 这些标记告诉模型"接下来是图像/音频嵌入"
+        // Step 2: Get beg/end markers (matching llama.cpp add_media: img_beg/img_end)
         const beg_marker: []const u8 = blk: {
             if (self.mtmd_context) |ctx| {
                 break :blk switch (media_type) {
@@ -1422,7 +1410,7 @@ pub const InferenceEngine = struct {
             break :blk "";
         };
 
-        // Tokenize 开始/结束标记
+        // Step 3: Tokenize beg/end markers
         var beg_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
         defer beg_tokens.deinit(self.allocator);
         if (beg_marker.len > 0) {
@@ -1439,30 +1427,31 @@ pub const InferenceEngine = struct {
             try end_tokens.appendSlice(self.allocator, encoded.items);
         }
 
-        // Step 3: 构建新的 token 序列，将每个媒体 token 替换为:
-        //   [beg_tokens] + [media_token_id × media_token_count] + [end_tokens]
-        // 这匹配 llama.cpp add_media 的行为:
-        //   add_text(img_beg) + chunk + add_text(img_end)
-        const extra_per_media = beg_tokens.items.len + end_tokens.items.len;
-        const total_new_tokens = all_tokens.items.len + media_positions.items.len * (media_token_count - 1 + extra_per_media);
+        // Step 4: Build new token sequence segment by segment.
         var new_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
         errdefer new_tokens.deinit(self.allocator);
-        try new_tokens.ensureTotalCapacityPrecise(self.allocator, total_new_tokens);
 
-        var src_idx: usize = 0;
-        for (media_positions.items, 0..) |media_pos, media_idx| {
-            // 复制媒体 token 之前的 token
-            while (src_idx < media_pos) {
-                try new_tokens.append(self.allocator, all_tokens.items[src_idx]);
-                src_idx += 1;
+        var offsets = std.ArrayListUnmanaged(chat_template.PlaceholderInfo){ .items = &.{}, .capacity = 0 };
+        errdefer offsets.deinit(self.allocator);
+
+        var consumed: usize = 0;
+        for (all_placeholders) |ph| {
+            if (ph.media_type != media_type) continue;
+
+            // Tokenize text before this placeholder
+            const text_segment = formatted_prompt[consumed..ph.start];
+            if (text_segment.len > 0) {
+                var encoded = try self.tok.encode(text_segment, false, true);
+                defer encoded.deinit(self.allocator);
+                try new_tokens.appendSlice(self.allocator, encoded.items);
             }
 
-            // 添加开始标记（如 <|image>）
+            // Add beg tokens (e.g. <|vision_start|>)
             for (beg_tokens.items) |t| {
                 try new_tokens.append(self.allocator, t);
             }
 
-            // 记录偏移（指向媒体嵌入开始位置）
+            // Record placeholder offset (pointing to where media tokens start)
             try offsets.append(self.allocator, .{
                 .start = 0,
                 .length = 0,
@@ -1471,31 +1460,34 @@ pub const InferenceEngine = struct {
                 .token_offset = @intCast(new_tokens.items.len),
             });
 
-            // 展开媒体 token 为 N 个相同的 token（这些将被替换为实际嵌入）
+            // Insert repeated media tokens (these will be replaced by vision/audio embeddings)
             for (0..media_token_count) |_| {
                 try new_tokens.append(self.allocator, media_token_id);
             }
 
-            // 添加结束标记（如 <image|>）
+            // Add end tokens (e.g. <|vision_end|>)
             for (end_tokens.items) |t| {
                 try new_tokens.append(self.allocator, t);
             }
 
-            src_idx += 1; // 跳过原来的媒体 token
-            _ = media_idx;
+            consumed = ph.start + ph.length;
         }
-        // 复制剩余的 token
-        while (src_idx < all_tokens.items.len) {
-            try new_tokens.append(self.allocator, all_tokens.items[src_idx]);
-            src_idx += 1;
-        }
-        logger.info("tokenizeWithMediaPlaceholders: {d} -> {d} tokens, {d} media placeholders expanded to {d} tokens each (beg={d} end={d} tokens)", .{
-            all_tokens.items.len, new_tokens.items.len, offsets.items.len, media_token_count,
-            beg_tokens.items.len, end_tokens.items.len,
-        });
 
-        // 释放旧的 token 列表，返回新的
-        all_tokens.deinit(self.allocator);
+        // Tokenize remaining text after last placeholder
+        if (consumed < formatted_prompt.len) {
+            var encoded = try self.tok.encode(formatted_prompt[consumed..], false, true);
+            defer encoded.deinit(self.allocator);
+            try new_tokens.appendSlice(self.allocator, encoded.items);
+        }
+
+        logger.info("tokenizeWithMediaPlaceholders: {d} '{s}' placeholders expanded to {d} tokens each (total tokens={d}, beg={d} end={d})", .{
+            offsets.items.len,
+            @tagName(media_type),
+            media_token_count,
+            new_tokens.items.len,
+            beg_tokens.items.len,
+            end_tokens.items.len,
+        });
 
         return chat_template.TokenizedSegments{
             .tokens = new_tokens,
