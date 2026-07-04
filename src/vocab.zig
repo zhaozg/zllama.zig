@@ -100,7 +100,7 @@ pub const TokenAttr = packed struct(u32) {
     }
 };
 
-pub const PreType = @import("./pretype.zig").PreType;
+pub const PreType = @import("pretype").PreType;
 
 // ============================================================================
 // Token 数据结构
