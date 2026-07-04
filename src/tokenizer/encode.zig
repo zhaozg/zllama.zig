@@ -455,7 +455,6 @@ fn encodeSegment(
         is_first_word = false;
     }
 
-
     return tokens;
 }
 

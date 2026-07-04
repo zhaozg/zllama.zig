@@ -51,6 +51,81 @@ pub const EngineContext = struct {
 
 pub const ImageGenResult = struct {};
 
+/// 计算动态分辨率的目标尺寸。
+/// 对于支持动态分辨率的模型（如 Qwen3VL），使用 calcSizePreservedRatio；
+/// 对于固定尺寸模型（如 Gemma4），直接使用 image_size。
+fn computeTargetSize(
+    enc: *const mtmd.vision_mod.VisionEncoder,
+    src_width: u32,
+    src_height: u32,
+) preprocess.Size2D {
+    const p = &enc.params;
+
+    // 如果设置了 min_pixels 和 max_pixels，使用动态分辨率
+    if (p.image_min_pixels > 0 and p.image_max_pixels > 0) {
+        const align_size = p.patch_size * p.n_merge;
+        if (align_size > 0) {
+            const result = preprocess.calcSizePreservedRatio(
+                src_width,
+                src_height,
+                align_size,
+                p.image_min_pixels,
+                p.image_max_pixels,
+            );
+            logger.info("Dynamic resize: {d}x{d} -> {d}x{d} (align={d}, min_px={d}, max_px={d})", .{
+                src_width,  src_height,         result.width,       result.height,
+                align_size, p.image_min_pixels, p.image_max_pixels,
+            });
+            return result;
+        }
+    }
+
+    // 回退：固定正方形缩放
+    logger.info("Fixed resize: {d}x{d} -> {d}x{d}", .{ src_width, src_height, p.image_size, p.image_size });
+    return .{ .width = p.image_size, .height = p.image_size };
+}
+
+/// 加载图像原始数据（不缩放），返回原始尺寸和 RGB 数据
+fn loadImageRaw(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) !preprocess.ProcessedImage {
+    const cwd = std.Io.Dir.cwd();
+    const file = try cwd.openFile(io, file_path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    const raw = try allocator.alloc(u8, @intCast(stat.size));
+    defer allocator.free(raw);
+    const total_read = try file.readPositionalAll(io, raw, 0);
+    if (total_read != raw.len) return error.FileReadError;
+
+    var w: c_int = 0;
+    var h: c_int = 0;
+    var comp: c_int = 0;
+    const stb = @import("stb_image");
+    const pixels = stb.loadFromMemory(raw.ptr, @intCast(raw.len), &w, &h, &comp, 3);
+    if (pixels == null) {
+        const reason = stb.failureReason();
+        logger.err("stb_image failed to load {s}: {s}", .{ file_path, reason });
+        return error.ImageDecodeFailed;
+    }
+    defer stb.free(pixels);
+
+    const src_w: u32 = @intCast(w);
+    const src_h: u32 = @intCast(h);
+    const pixel_bytes = pixels.?[0..@as(usize, @intCast(src_w * src_h * 3))];
+
+    const owned = try allocator.alloc(u8, pixel_bytes.len);
+    @memcpy(owned, pixel_bytes);
+
+    logger.info("Loaded raw image: {d}x{d}", .{ src_w, src_h });
+
+    return preprocess.ProcessedImage{
+        .data = owned,
+        .width = src_w,
+        .height = src_h,
+        .allocator = allocator,
+    };
+}
+
 /// Generate text from an image + prompt.
 pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, image_path: [:0]const u8, max_tokens: u32) !void {
     const mm_mgr = ectx.mm_manager orelse return error.MMProjNotLoaded;
@@ -65,12 +140,28 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
         logger.info("Image markers from MtmdContext: '{s}' / '{s}'", .{ ctx.img_beg, ctx.img_end });
     }
 
-    const target_size: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.image_size else 896;
-    var img = try preprocess.loadImage(ectx.allocator, io, image_path, target_size, null);
+    // 步骤 1: 先用 stb_image 加载原始图像尺寸（不缩放）
+    var raw_img = try loadImageRaw(ectx.allocator, io, image_path);
+    defer raw_img.deinit();
+
+    // 步骤 2: 计算目标尺寸（动态分辨率或固定正方形）
+    const enc = mm_mgr.vision_encoder.?;
+    const target = computeTargetSize(&enc, raw_img.width, raw_img.height);
+
+    // 步骤 3: 缩放到目标尺寸
+    const resized_data = try preprocess.resizeRGB(ectx.allocator, raw_img.data, raw_img.width, raw_img.height, target.width, target.height);
+    var img = preprocess.ProcessedImage{
+        .data = resized_data,
+        .width = target.width,
+        .height = target.height,
+        .allocator = ectx.allocator,
+    };
     defer img.deinit();
+
     if (img.width == 0 or img.height == 0) return error.EmptyImage;
 
-    var vision_ctx = try ggml.Context.initNoAlloc(10 * 1024 * 1024 * 1024);
+    // 使用更大的上下文内存，支持 896x896 等大尺寸图像
+    var vision_ctx = try ggml.Context.initNoAlloc(12 * 1024 * 1024 * 1024);
     defer vision_ctx.deinit();
 
     vision_ctx.setNoAlloc(false);
@@ -276,7 +367,8 @@ fn multimodalPrefill(
             if (n_preview > 2) embd_heap[2] else @as(f32, 0),
             if (n_preview > 3) embd_heap[3] else @as(f32, 0),
             if (n_preview > 4) embd_heap[4] else @as(f32, 0),
-            all_zero, has_nan,
+            all_zero,
+            has_nan,
         });
         if (all_zero) logger.warn("  ⚠ all embedding values are ZERO!", .{});
         if (has_nan) logger.warn("  ⚠ embedding contains NaN!", .{});
@@ -291,7 +383,10 @@ fn multimodalPrefill(
     var best_idx: i32 = 0;
     var best_val: f32 = pr.logits[0];
     for (pr.logits, 0..) |v, j| {
-        if (v > best_val) { best_val = v; best_idx = @intCast(j); }
+        if (v > best_val) {
+            best_val = v;
+            best_idx = @intCast(j);
+        }
     }
     ectx.allocator.free(pr.logits);
 
@@ -314,7 +409,8 @@ fn multimodalPrefill(
             if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
             try step.graph.compute(ectx.n_threads);
             current_token = sampler.Sampler.sampleGreedy(il);
-            pos += 1; gen_count += 1;
+            pos += 1;
+            gen_count += 1;
             continue;
         }
         var buf: [128]u8 = undefined;
@@ -323,11 +419,17 @@ fn multimodalPrefill(
         if (n > 0) {
             try eog_buf.appendSlice(ectx.allocator, decoded);
             if (ectx.tok.isEogText(eog_buf.items)) {
-                if (!ectx.benchmark) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, decoded); }
+                if (!ectx.benchmark) {
+                    const sf = std.Io.File.stdout();
+                    try sf.writeStreamingAll(io, decoded);
+                }
                 break;
             }
         }
-        if (!ectx.benchmark and n > 0) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, decoded); }
+        if (!ectx.benchmark and n > 0) {
+            const sf = std.Io.File.stdout();
+            try sf.writeStreamingAll(io, decoded);
+        }
         const step = try ectx.inc_ctx.beginStep();
         step.setToken(current_token);
         var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &ectx.params, ectx.allocator);
@@ -335,11 +437,15 @@ fn multimodalPrefill(
         if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
         try step.graph.compute(ectx.n_threads);
         current_token = sampler.Sampler.sampleGreedy(il);
-        pos += 1; gen_count += 1;
+        pos += 1;
+        gen_count += 1;
     }
 
     const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;
-    if (!ectx.benchmark) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, "\n"); }
+    if (!ectx.benchmark) {
+        const sf = std.Io.File.stdout();
+        try sf.writeStreamingAll(io, "\n");
+    }
     if (gen_count > 0) logger.info("Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
 }
 
@@ -382,7 +488,10 @@ fn multimodalPrefillQwen3VL(
     var best_idx: i32 = 0;
     var best_val: f32 = pr.logits[0];
     for (pr.logits, 0..) |v, j| {
-        if (v > best_val) { best_val = v; best_idx = @intCast(j); }
+        if (v > best_val) {
+            best_val = v;
+            best_idx = @intCast(j);
+        }
     }
     ectx.allocator.free(pr.logits);
 
@@ -405,7 +514,8 @@ fn multimodalPrefillQwen3VL(
             if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
             try step.graph.compute(ectx.n_threads);
             current_token = sampler.Sampler.sampleGreedy(il);
-            pos += 1; gen_count += 1;
+            pos += 1;
+            gen_count += 1;
             continue;
         }
         var buf: [128]u8 = undefined;
@@ -414,11 +524,17 @@ fn multimodalPrefillQwen3VL(
         if (n > 0) {
             try eog_buf.appendSlice(ectx.allocator, decoded);
             if (ectx.tok.isEogText(eog_buf.items)) {
-                if (!ectx.benchmark) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, decoded); }
+                if (!ectx.benchmark) {
+                    const sf = std.Io.File.stdout();
+                    try sf.writeStreamingAll(io, decoded);
+                }
                 break;
             }
         }
-        if (!ectx.benchmark and n > 0) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, decoded); }
+        if (!ectx.benchmark and n > 0) {
+            const sf = std.Io.File.stdout();
+            try sf.writeStreamingAll(io, decoded);
+        }
         const step = try ectx.inc_ctx.beginStep();
         step.setToken(current_token);
         var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &ectx.params, ectx.allocator);
@@ -426,11 +542,15 @@ fn multimodalPrefillQwen3VL(
         if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
         try step.graph.compute(ectx.n_threads);
         current_token = sampler.Sampler.sampleGreedy(il);
-        pos += 1; gen_count += 1;
+        pos += 1;
+        gen_count += 1;
     }
 
     const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;
-    if (!ectx.benchmark) { const sf = std.Io.File.stdout(); try sf.writeStreamingAll(io, "\n"); }
+    if (!ectx.benchmark) {
+        const sf = std.Io.File.stdout();
+        try sf.writeStreamingAll(io, "\n");
+    }
     if (gen_count > 0) logger.info("Qwen3VL Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
 }
 
@@ -468,13 +588,21 @@ pub fn tokenizeWithMediaPlaceholders(
 
     const beg_marker: []const u8 = blk: {
         if (ectx.mtmd_context) |ctx| {
-            break :blk switch (media_type) { .image => ctx.img_beg, .audio => ctx.aud_beg, .none => "" };
+            break :blk switch (media_type) {
+                .image => ctx.img_beg,
+                .audio => ctx.aud_beg,
+                .none => "",
+            };
         }
         break :blk "";
     };
     const end_marker: []const u8 = blk: {
         if (ectx.mtmd_context) |ctx| {
-            break :blk switch (media_type) { .image => ctx.img_end, .audio => ctx.aud_end, .none => "" };
+            break :blk switch (media_type) {
+                .image => ctx.img_end,
+                .audio => ctx.aud_end,
+                .none => "",
+            };
         }
         break :blk "";
     };
@@ -509,10 +637,16 @@ pub fn tokenizeWithMediaPlaceholders(
             defer encoded.deinit(ectx.allocator);
             try new_tokens.appendSlice(ectx.allocator, encoded.items);
         }
-        for (beg_tokens.items) |t| { try new_tokens.append(ectx.allocator, t); }
+        for (beg_tokens.items) |t| {
+            try new_tokens.append(ectx.allocator, t);
+        }
         try offsets.append(ectx.allocator, .{ .start = 0, .length = 0, .media_type = media_type, .token_count = media_token_count, .token_offset = @intCast(new_tokens.items.len) });
-        for (0..media_token_count) |_| { try new_tokens.append(ectx.allocator, media_token_id); }
-        for (end_tokens.items) |t| { try new_tokens.append(ectx.allocator, t); }
+        for (0..media_token_count) |_| {
+            try new_tokens.append(ectx.allocator, media_token_id);
+        }
+        for (end_tokens.items) |t| {
+            try new_tokens.append(ectx.allocator, t);
+        }
         consumed = ph.start + ph.length;
     }
 

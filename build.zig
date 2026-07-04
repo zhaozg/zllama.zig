@@ -558,6 +558,8 @@ pub fn build(b: *std.Build) void {
     multimodal_mod.addImport("verbose", verbose_mod);
     multimodal_mod.addImport("graph_context", graph_context_mod);
     // 主可执行文件 zllama
+    multimodal_mod.addImport("stb_image", stb_image_mod);
+
     // ======================================================================
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

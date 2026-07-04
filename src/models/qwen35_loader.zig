@@ -54,7 +54,6 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !QwenP
     return p;
 }
 
-
 /// 根据 GGUF 文件中实际张量数据大小估计所需内存
 /// 加上 ggml 元数据开销（每个张量 ~256 字节）和 20% 安全余量
 pub fn estimateMemSize(gguf_file: *const gguf.GGUFFile) usize {
@@ -69,7 +68,6 @@ pub fn estimateMemSize(gguf_file: *const gguf.GGUFFile) usize {
     log.info("Estimated weights memory: {d} MB (raw: {d} MB, {d} tensors)", .{ total / (1024 * 1024), raw_data_size / (1024 * 1024), n_tensors });
     return total;
 }
-
 
 pub fn loadWeights(gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, params: *const QwenParams, allocator: std.mem.Allocator) !QwenWeights {
     const n_layer: usize = @intCast(params.base.n_layer);

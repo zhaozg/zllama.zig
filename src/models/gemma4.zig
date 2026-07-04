@@ -134,7 +134,6 @@ pub const Gemma4Weights = struct {
 // buildPerLayerInputs / buildLayer / buildAttention / buildOutput 等命名方法。
 // Gemma4Model 的 forward 方法变为 thin wrapper，委托给 Gemma4Graph。
 
-
 // ============================================================================
 // Gemma 4 模型
 // ============================================================================

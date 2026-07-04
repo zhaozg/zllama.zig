@@ -561,9 +561,7 @@ pub fn isFullAttentionLayer(layer_idx: u32, interval: u32) bool {
     return (layer_idx + 1) % interval == 0;
 }
 
-
 const qwen35_loader = @import("qwen35_loader.zig");
-
 
 const testing = std.testing;
 

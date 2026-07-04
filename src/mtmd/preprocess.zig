@@ -2,6 +2,7 @@
 //!
 //! 提供图像数据的预处理功能：
 //! - 图像：resize（双线性插值）+ 像素归一化
+//! - 动态分辨率计算（calcSizePreservedRatio）
 //!
 //! 音频预处理已移至 src/mtmd/audio/ 子模块。
 //! 通过 `@import("audio")` 或 `@import("mm").audio_mod` 访问。
@@ -9,12 +10,80 @@
 //! 图像格式支持：PPM (P6 binary), JPEG, PNG, BMP, GIF, TGA (via stb_image)
 //!
 //! 参考: llama.cpp tools/mtmd/clip-impl.h (clip_image_preprocess)
+//!       llama.cpp tools/mtmd/mtmd-image.cpp (calc_size_preserved_ratio)
 
 const std = @import("std");
 const ggml = @import("ggml");
 const stb_image = @import("stb_image");
 
 const log = std.log.scoped(.mm_preprocess);
+
+/// 2D 尺寸类型，用于 calcSizePreservedRatio 等函数的返回值
+pub const Size2D = struct { width: u32, height: u32 };
+
+// ============================================================================
+// 动态分辨率计算
+// ============================================================================
+
+fn fnRoundByFactor(x: f64, factor: f64) f64 {
+    return std.math.round(x / factor) * factor;
+}
+
+fn fnCeilByFactor(x: f64, factor: f64) f64 {
+    return std.math.ceil(x / factor) * factor;
+}
+
+fn fnFloorByFactor(x: f64, factor: f64) f64 {
+    return std.math.floor(x / factor) * factor;
+}
+
+/// 计算保持宽高比的缩放尺寸，使宽高均为 align_size 的倍数，
+/// 且总像素数在 [min_pixels, max_pixels] 范围内。
+///
+/// 这是 Qwen3VL 等支持动态分辨率模型的核心预处理逻辑。
+/// 参考: llama.cpp mtmd-image.cpp calc_size_preserved_ratio() (line 161)
+///
+/// @param src_width  原始图像宽度
+/// @param src_height 原始图像高度
+/// @param align_size 对齐单位（patch_size * n_merge，Qwen3VL: 16*2=32）
+/// @param min_pixels 最小像素数（来自 GGUF clip.vision.image_min_pixels）
+/// @param max_pixels 最大像素数（来自 GGUF clip.vision.image_max_pixels）
+/// @returns 缩放后的目标宽高
+pub fn calcSizePreservedRatio(
+    src_width: u32,
+    src_height: u32,
+    align_size: u32,
+    min_pixels: u32,
+    max_pixels: u32,
+) Size2D {
+    const width: f64 = @floatFromInt(src_width);
+    const height: f64 = @floatFromInt(src_height);
+    const align_f: f64 = @floatFromInt(align_size);
+
+    // 始终先向上对齐
+    var h_bar = @max(align_f, fnRoundByFactor(height, align_f));
+    var w_bar = @max(align_f, fnRoundByFactor(width, align_f));
+
+    const min_px: f64 = @floatFromInt(min_pixels);
+    const max_px: f64 = @floatFromInt(max_pixels);
+
+    if (h_bar * w_bar > max_px) {
+        // 超出最大像素限制，按比例缩小
+        const beta = std.math.sqrt((height * width) / max_px);
+        h_bar = @max(align_f, fnFloorByFactor(height / beta, align_f));
+        w_bar = @max(align_f, fnFloorByFactor(width / beta, align_f));
+    } else if (h_bar * w_bar < min_px) {
+        // 低于最小像素限制，按比例放大
+        const beta = std.math.sqrt(min_px / (height * width));
+        h_bar = fnCeilByFactor(height * beta, align_f);
+        w_bar = fnCeilByFactor(width * beta, align_f);
+    }
+
+    return .{
+        .width = @intFromFloat(w_bar),
+        .height = @intFromFloat(h_bar),
+    };
+}
 
 // ============================================================================
 // 图像预处理
@@ -198,6 +267,19 @@ pub fn fromRawRGB(
         .height = target_size,
         .allocator = allocator,
     };
+}
+
+/// 缩放 RGB 图像到指定宽高（支持非正方形）
+/// 这是 bilinearResizeRGB 的公共包装，供外部模块使用。
+pub fn resizeRGB(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+) ![]u8 {
+    return bilinearResizeRGB(allocator, src, src_w, src_h, dst_w, dst_h);
 }
 
 // ============================================================================

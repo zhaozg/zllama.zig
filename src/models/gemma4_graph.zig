@@ -377,9 +377,15 @@ pub const Gemma4Graph = struct {
             const cache_len: i64 = if (kv_cache_mgr) |cache| @as(i64, @intCast(cache.currentLen())) else n_tokens_i64;
 
             attn_out = attention.scaledDotProductAttention(ctx, q_use, k_attn, v_attn, .{
-                .n_head = n_head_eff, .n_kv_head = n_kv_head, .head_dim = head_dim_k,
-                .n_tokens = n_tokens_i64, .cache_len = cache_len, .start_pos = start_pos,
-                .scale_factor = p.f_attention_scale, .attn_logit_softcap = p.attn_logit_softcapping, .causal = causal,
+                .n_head = n_head_eff,
+                .n_kv_head = n_kv_head,
+                .head_dim = head_dim_k,
+                .n_tokens = n_tokens_i64,
+                .cache_len = cache_len,
+                .start_pos = start_pos,
+                .scale_factor = p.f_attention_scale,
+                .attn_logit_softcap = p.attn_logit_softcapping,
+                .causal = causal,
             }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
             attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
@@ -401,9 +407,15 @@ pub const Gemma4Graph = struct {
             const cache_len: i64 = @as(i64, @intCast(cache.currentLen()));
 
             attn_out = attention.scaledDotProductAttention(ctx, q_use, k_cache, v_cache, .{
-                .n_head = n_head_eff, .n_kv_head = n_kv_head_cache, .head_dim = head_dim_k_cache,
-                .n_tokens = n_tokens_i64, .cache_len = cache_len, .start_pos = start_pos,
-                .scale_factor = p.f_attention_scale, .attn_logit_softcap = p.attn_logit_softcapping, .causal = causal,
+                .n_head = n_head_eff,
+                .n_kv_head = n_kv_head_cache,
+                .head_dim = head_dim_k_cache,
+                .n_tokens = n_tokens_i64,
+                .cache_len = cache_len,
+                .start_pos = start_pos,
+                .scale_factor = p.f_attention_scale,
+                .attn_logit_softcap = p.attn_logit_softcapping,
+                .causal = causal,
             }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
             attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);

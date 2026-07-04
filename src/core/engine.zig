@@ -205,15 +205,21 @@ pub const InferenceEngine = struct {
     }
 
     pub fn deinit(self: *InferenceEngine) void {
-        if (self.mtmd_context) |ctx| { ctx.deinit(); }
-        if (self.mm_manager) |*m| { m.deinit(); }
+        if (self.mtmd_context) |ctx| {
+            ctx.deinit();
+        }
+        if (self.mm_manager) |*m| {
+            m.deinit();
+        }
         self.inc_ctx.deinit();
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
         self.model.deinit(self.allocator);
         if (self.params.model_name.len > 0) self.allocator.free(self.params.model_name);
         if (self.mapped_file) |*mf| {
-            if (!mf.is_mmap) { self.allocator.free(mf.data); }
+            if (!mf.is_mmap) {
+                self.allocator.free(mf.data);
+            }
         } else {
             self.allocator.free(self.gguf_data);
         }
@@ -320,7 +326,9 @@ pub const InferenceEngine = struct {
         for (tokens) |token_id| {
             var buf: [128]u8 = undefined;
             const n = try self.tok.decodeSingle(token_id, &buf);
-            if (n > 0) { try stdout_file.writeStreamingAll(io, buf[0..n]); }
+            if (n > 0) {
+                try stdout_file.writeStreamingAll(io, buf[0..n]);
+            }
         }
         try stdout_file.writeStreamingAll(io, "\n");
     }
@@ -352,16 +360,28 @@ pub const InferenceEngine = struct {
         try decode_mod.reserveDecodeGallocr(self.allocator, &self.kv_cache_mgr, &self.inc_ctx, self.model, &self.params);
 
         const dr = try decode_mod.runDecodeLoop(
-            self.allocator, io, self.model, &self.params, &self.tok,
-            &self.kv_cache_mgr, &self.inc_ctx, self.n_threads,
-            first_token, prefill.pos, max_tokens,
+            self.allocator,
+            io,
+            self.model,
+            &self.params,
+            &self.tok,
+            &self.kv_cache_mgr,
+            &self.inc_ctx,
+            self.n_threads,
+            first_token,
+            prefill.pos,
+            max_tokens,
             .{
                 .buildStep = undefined,
                 .sample = struct {
-                    fn f(_: *anyopaque, l: *ggml.Tensor) i32 { return sampler.Sampler.sampleGreedy(l); }
+                    fn f(_: *anyopaque, l: *ggml.Tensor) i32 {
+                        return sampler.Sampler.sampleGreedy(l);
+                    }
                 }.f,
                 .skipToken = struct {
-                    fn f(c: *anyopaque, t: i32) bool { return (@as(*InferenceEngine, @ptrCast(@alignCast(c)))).tok.isSkipToken(@intCast(t)); }
+                    fn f(c: *anyopaque, t: i32) bool {
+                        return (@as(*InferenceEngine, @ptrCast(@alignCast(c)))).tok.isSkipToken(@intCast(t));
+                    }
                 }.f,
                 .onComplete = null,
             },
@@ -372,7 +392,9 @@ pub const InferenceEngine = struct {
         const stdout_file = std.Io.File.stdout();
         try stdout_file.writeStreamingAll(io, "\n");
         decode_mod.printStats(self.arch, self.params.model_name, self.n_threads, n_prompt_tokens, dr.gen_count, prefill.pp_time_s, dr.tg_time_s, self.benchmark);
-        if (!self.benchmark) { try stdout_file.writeStreamingAll(io, "\n"); }
+        if (!self.benchmark) {
+            try stdout_file.writeStreamingAll(io, "\n");
+        }
     }
 
     // ========================================================================
@@ -406,7 +428,10 @@ pub const InferenceEngine = struct {
             try stdout.writeStreamingAll(io, ">>> ");
             var reader = stdin.reader(io, &line_buf);
             const line_slice = reader.interface.takeDelimiterExclusive('\n') catch |err| {
-                if (err == error.EndOfStream) { try stdout.writeStreamingAll(io, "\n"); break; }
+                if (err == error.EndOfStream) {
+                    try stdout.writeStreamingAll(io, "\n");
+                    break;
+                }
                 return err;
             };
             const line = std.mem.trimEnd(u8, line_slice, "\r");
@@ -418,7 +443,8 @@ pub const InferenceEngine = struct {
 
             if (line[0] == '/') {
                 if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) {
-                    try stdout.writeStreamingAll(io, "Bye.\n"); break;
+                    try stdout.writeStreamingAll(io, "Bye.\n");
+                    break;
                 } else if (std.mem.eql(u8, line, "/help")) {
                     try stdout.writeStreamingAll(io, "Available commands:\n  /help  /clear  /exit  /reset  /new\n");
                 } else if (std.mem.eql(u8, line, "/clear")) {
@@ -472,7 +498,8 @@ pub const InferenceEngine = struct {
                 if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
                 try step.graph.compute(self.n_threads);
                 current_token = sampler.Sampler.sampleGreedy(inc_logits);
-                pos += 1; gen_count += 1;
+                pos += 1;
+                gen_count += 1;
             }
             try stdout.writeStreamingAll(io, "\n");
 

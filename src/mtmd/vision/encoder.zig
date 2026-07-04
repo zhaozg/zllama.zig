@@ -80,6 +80,28 @@ pub const VisionEncoder = struct {
         if (gguf_file.getF32("clip.vision.attention.layer_norm_epsilon")) |v| params.norm_eps = v;
         if (gguf_file.getF32("clip.vision.rope_theta")) |v| params.rope_theta = v;
 
+        // 读取动态分辨率参数（用于 Qwen3VL 等支持动态尺寸的模型）
+        // 参考: llama.cpp clip.cpp 中 KEY_IMAGE_MIN_PIXELS / KEY_IMAGE_MAX_PIXELS
+        if (gguf_file.getU32("clip.vision.image_min_pixels")) |v| params.image_min_pixels = v;
+        if (gguf_file.getU32("clip.vision.image_max_pixels")) |v| params.image_max_pixels = v;
+
+        // 如果 GGUF 中没有 min/max_pixels，但模型支持动态分辨率（如 Qwen3VL），
+        // 使用默认的 token 限制计算像素值。
+        // 参考: llama.cpp clip-model.h set_limit_image_tokens()
+        if (params.image_min_pixels == 0 and params.image_max_pixels == 0) {
+            // Qwen3VL 默认: min_tokens=8, max_tokens=4096
+            // patch_area = patch_size * patch_size * n_merge * n_merge
+            const patch_area = params.patch_size * params.patch_size * params.n_merge * params.n_merge;
+            if (patch_area > 0) {
+                // 默认值参考 llama.cpp Qwen3VL 的 set_limit_image_tokens(8, 4096)
+                params.image_min_pixels = 8 * patch_area;
+                params.image_max_pixels = 4096 * patch_area;
+                log.info("  dynamic resize (default): min_pixels={d}, max_pixels={d}, patch_area={d}", .{
+                    params.image_min_pixels, params.image_max_pixels, patch_area,
+                });
+            }
+        }
+
         // 读取图像归一化参数
         var image_mean: [3]f32 = .{ 0.0, 0.0, 0.0 };
         var image_std: [3]f32 = .{ 1.0, 1.0, 1.0 };
@@ -115,6 +137,12 @@ pub const VisionEncoder = struct {
             image_mean[0], image_mean[1], image_mean[2],
             image_std[0],  image_std[1],  image_std[2],
         });
+        if (params.image_min_pixels > 0 or params.image_max_pixels > 0) {
+            log.info("  dynamic resize: min_pixels={d}, max_pixels={d}, align={d}", .{
+                params.image_min_pixels,            params.image_max_pixels,
+                params.patch_size * params.n_merge,
+            });
+        }
 
         // 加载所有权重
         var weights = VisionEncoderWeights{};
@@ -167,8 +195,11 @@ pub const VisionEncoder = struct {
         inp.setName("vision_input");
 
         // 2. 构建 VisionHParams 用于 backend 调用
+        //    注意：对于动态分辨率模型，image_size 使用实际缩放后的尺寸
+        //    Qwen3VL 的 buildGraph 使用 image_size 计算 n_patches_x/n_patches_y，
+        //    所以必须传入实际尺寸而非 GGUF 中的固定值。
         var hparams = graph.VisionHParams{
-            .image_size = p.image_size,
+            .image_size = img_width, // 使用实际缩放后的宽度
             .patch_size = p.patch_size,
             .n_embd = p.n_embd,
             .n_head = p.n_head,

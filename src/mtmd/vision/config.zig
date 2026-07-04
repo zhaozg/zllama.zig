@@ -76,4 +76,14 @@ pub const VisionEncoderParams = struct {
 
     /// FFN activation
     ffn_op: FfnOp = .silu,
+
+    /// 动态分辨率：最小像素数（用于 Qwen3VL 等支持动态尺寸的模型）
+    /// 来自 GGUF: clip.vision.image_min_pixels
+    /// 参考: llama.cpp mtmd-image.cpp calc_size_preserved_ratio()
+    image_min_pixels: u32 = 0,
+
+    /// 动态分辨率：最大像素数（用于 Qwen3VL 等支持动态尺寸的模型）
+    /// 来自 GGUF: clip.vision.image_max_pixels
+    /// 参考: llama.cpp mtmd-image.cpp calc_size_preserved_ratio()
+    image_max_pixels: u32 = 0,
 };
