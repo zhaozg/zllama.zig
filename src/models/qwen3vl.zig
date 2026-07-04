@@ -216,6 +216,8 @@ pub const Qwen3VLModel = struct {
 
             // RoPE with multi sections — reference: ggml_rope_multi on Qcur and Kcur
             q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, 40, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, 40, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+
             // KV Cache: setKv expects [head_dim, n_kv_head, n_tokens]
             if (kv_cache_mgr) |cache| {
                 cache.setKv(ctx, graph, i, k, v, @intCast(n_tokens_i64));
@@ -282,6 +284,9 @@ pub const Qwen3VLModel = struct {
 
             // Residual connection
             cur = ggml.add(ctx, ffn_inp, ffn_out);
+            // build_cvec equivalent: ggml_cont (reference: cur = build_cvec(cur, il))
+            cur = ggml.cont(ctx, cur);
+
             {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.l_out", .{i}) catch unreachable;
                 name_buf[name.len] = 0;
@@ -439,7 +444,7 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Qwen3
 
     p.base.max_seq_len = getU32Prefixed(gguf_file, "context_length") orelse 32768;
     p.base.rope_theta = getF32Prefixed(gguf_file, "rope.freq_base") orelse 10000000.0;
-    p.base.rope_dim = getU32Prefixed(gguf_file, "rope.dimension_count") orelse @divExact(p.base.n_head_dim, @as(u32, 2));
+    p.base.rope_dim = getU32Prefixed(gguf_file, "rope.dimension_count") orelse p.base.n_head_dim;
     p.base.norm_eps = getF32Prefixed(gguf_file, "attention.layer_norm_rms_epsilon") orelse 1e-6;
     p.base.model_name = gguf_file.getString("general.name") orelse "";
     p.base.tokenizer_name = gguf_file.getString("tokenizer.ggml.model") orelse "gpt2";
