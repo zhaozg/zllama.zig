@@ -111,7 +111,8 @@ pub const GraphBuilder = struct {
         norm_t: NormType,
         ffn_t: FFNOpType,
         learned_pos_embd: ?*ggml.Tensor,
-        add_pos: *const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights, *ggml.Tensor) *ggml.Tensor,
+        add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights, *ggml.Tensor, ?*anyopaque) *ggml.Tensor,
+        add_pos_data: ?*anyopaque,
         opts: BuildVitOpts,
     ) !*ggml.Tensor {
         return vit_builder.buildVit(
@@ -124,6 +125,7 @@ pub const GraphBuilder = struct {
             self.weights,
             self.hparams,
             add_pos,
+            add_pos_data,
             opts,
         );
     }

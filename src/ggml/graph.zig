@@ -61,15 +61,21 @@ pub const CGraph = opaque {
 
         c.ggml_backend_cpu_set_n_threads(cpu_backend, n_threads);
 
-        // Try GPU backend first (Metal/CUDA), fall back to CPU
+        log.info("Starting graph compute ({d} nodes, {d} threads)...", .{ c.ggml_graph_n_nodes(@ptrCast(self)), n_threads });
+        if (c.ggml_backend_graph_compute(cpu_backend, @ptrCast(self)) == 0) {
+            log.info("Graph compute succeeded", .{});
+            return;
+        }
+        log.warn("ggml_backend_graph_compute failed, falling back to GPU", .{});
+
+        // Try GPU backend second (Metal/CUDA)
         const gpu_backend = c.ggml_backend_init_best();
         if (gpu_backend) |gpu| {
             defer c.ggml_backend_free(gpu);
             if (c.ggml_backend_graph_compute(gpu, @ptrCast(self)) == 0) return;
-            log.warn("ggml_backend_graph_compute failed, falling back to CPU", .{});
+            log.warn("GPU compute failed", .{});
         }
 
-        if (c.ggml_backend_graph_compute(cpu_backend, @ptrCast(self)) == 0) return;
         return error.ComputeError;
     }
 

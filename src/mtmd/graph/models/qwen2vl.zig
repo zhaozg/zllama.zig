@@ -73,11 +73,15 @@ pub fn loadWeights(
     w.post_ln_w = findTensorInGGUF(ctx, gguf_file, "v.post_ln.weight") catch null;
     w.post_ln_b = findTensorInGGUF(ctx, gguf_file, "v.post_ln.bias") catch null;
 
-    // 多模态投影
+    // 多模态投影 - 支持两种风格:
+    // 1. Qwen2VL 风格: mm.0.weight / mm.1.weight (MLP)
+    // 2. Gemma3 风格: mm.input_projection.weight (单线性层)
     w.mm_0_w = findTensorInGGUF(ctx, gguf_file, "mm.0.weight") catch null;
     w.mm_0_b = findTensorInGGUF(ctx, gguf_file, "mm.0.bias") catch null;
     w.mm_1_w = findTensorInGGUF(ctx, gguf_file, "mm.1.weight") catch null;
     w.mm_1_b = findTensorInGGUF(ctx, gguf_file, "mm.1.bias") catch null;
+    w.mm_input_proj_w = findTensorInGGUF(ctx, gguf_file, "mm.input_projection.weight") catch null;
+    w.mm_soft_emb_norm_w = findTensorInGGUF(ctx, gguf_file, "mm.soft_emb_norm.weight") catch null;
 
     // 检测实际层数
     var actual_n_layer: u32 = 0;
@@ -208,7 +212,7 @@ fn loadViTLayer(
 ///   3. Pre-LN (可选)
 ///   4. ViT blocks (LayerNorm + 自注意力 + M-RoPE + FFN)
 ///   5. Post-LN (可选)
-///   6. 多模态投影 (FFN)
+///   6. 多模态投影 (FFN 或单线性层)
 ///
 /// 参考: llama.cpp qwen2vl.cpp build()
 pub fn buildGraph(
@@ -378,10 +382,10 @@ pub fn buildGraph(
             Vcur = Vcur.reshape3d(ctx, d_head, n_head, n_patches);
             Vcur.setName("blk");
 
-            // M-RoPE
-            Qcur = ggml.ropeMulti(ctx, Qcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
+            // M-RoPE (GGML_ROPE_TYPE_VISION = 24)
+            Qcur = ggml.ropeMulti(ctx, Qcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 24, 32768, 10000, 1, 0, 1, 32, 1);
             Qcur.setName("blk");
-            Kcur = ggml.ropeMulti(ctx, Kcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 0, 32768, 10000, 1, 0, 1, 32, 1);
+            Kcur = ggml.ropeMulti(ctx, Kcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 24, 32768, 10000, 1, 0, 1, 32, 1);
             Kcur.setName("blk");
 
             // Attention
@@ -441,22 +445,39 @@ pub fn buildGraph(
 
     // 9. Multimodal projection
     var embeddings = inpL;
-    embeddings = ggml.cont(ctx, embeddings).reshape3d(ctx, n_embd * 4, @divExact(n_patches, @as(i64, 4)), n_batch);
-    embeddings.setName("mm_reshape");
 
-    // FFN projection: mm_0 (GELU) -> mm_1
-    embeddings = try graph.buildFFN(
-        ctx,
-        embeddings,
-        w.mm_0_w orelse return error.MissingMMWeight,
-        w.mm_0_b,
-        null,
-        null,
-        w.mm_1_w orelse return error.MissingMMWeight,
-        w.mm_1_b,
-        .gelu,
-        "mm_proj",
-    );
+    // 支持两种投影方式:
+    // 1. Qwen2VL 风格: mm.0 (GELU) -> mm.1 (MLP), 需要 spatial merge reshape
+    // 2. Gemma3 风格: mm.input_projection (单线性层), 使用原始 ViT 输出
+    if (w.mm_0_w != null and w.mm_1_w != null) {
+        // Qwen2VL 风格: spatial merge + MLP 投影
+        embeddings = ggml.cont(ctx, embeddings).reshape3d(ctx, n_embd * 4, @divExact(n_patches, @as(i64, 4)), n_batch);
+        embeddings.setName("mm_reshape");
+
+        embeddings = try graph.buildFFN(
+            ctx,
+            embeddings,
+            w.mm_0_w.?,
+            w.mm_0_b,
+            null,
+            null,
+            w.mm_1_w.?,
+            w.mm_1_b,
+            .gelu,
+            "mm_proj",
+        );
+    } else if (w.mm_input_proj_w != null) {
+        // Gemma3 风格: 直接使用原始 ViT 输出 [n_embd, n_patches]
+        embeddings = embeddings.rmsNorm(ctx, eps);
+        embeddings.setName("mm_norm");
+        if (w.mm_soft_emb_norm_w) |sn| {
+            embeddings = embeddings.mul(ctx, graph.reshapeForBroadcast(ctx, sn));
+            embeddings.setName("mm_norm_scaled");
+        }
+        embeddings = w.mm_input_proj_w.?.mulMat(ctx, embeddings);
+    } else {
+        return error.MissingMMWeight;
+    }
     embeddings.setName("mm_proj");
 
     // Window attention reorder back (if applicable)

@@ -181,7 +181,7 @@ MultiModalManager.encodeMedia()          (src/mtmd/mod.zig:317)
 
 ```bash
 # 生成 zllama 调试数据
-echo "/exit" | ./zig-out/bin/zllama -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf --mmproj ~/.cache/models/mmproj-BF16.gguf --audio ~/.cache/models/hello.wav -p " "
+./zig-out/bin/zllama -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf --mmproj ~/.cache/models/gemma-4-E2B-mmproj-BF16.gguf --audio ~/.cache/models/hello.wav -p " "
 
 # 对比 Mel 频谱
 python3 tools/compare-float.py --file1 debug_audio/llama_audio_mel.json --file2 debug_audio/zllama_audio_mel.json --verbose

@@ -193,6 +193,12 @@ pub const FlashAttnType = enum(i8) {
 pub const BuildVitOpts = struct {
     /// 注意力掩码（可选）
     attn_mask: ?*ggml.Tensor = null,
+    /// 是否对 V 应用 RMSNorm（gemma4v 需要）
+    v_norm: bool = false,
+    /// V 归一化的 epsilon
+    v_norm_eps: f32 = 1e-6,
+    /// KQ 缩放因子（默认 1/sqrt(d_head)，gemma4v 使用 1.0）
+    kq_scale: ?f32 = null,
 };
 
 // ============================================================================

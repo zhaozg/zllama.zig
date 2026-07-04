@@ -33,7 +33,9 @@ const log = std.log.scoped(.graph_vit);
 ///   - learned_pos_embd: 可学习位置嵌入 [n_embd, n_pos]（可选）
 ///   - weights: 视觉编码器权重
 ///   - hparams: 视觉编码器超参数
-///   - add_pos: 添加位置嵌入的回调函数
+///   - add_pos: 添加位置嵌入的回调函数（对 Q/K 应用 2D RoPE 等）
+///             回调签名: fn (ctx, cur, layer, user_data) -> cur
+///   - add_pos_data: 传递给 add_pos 回调的用户数据指针
 ///   - opts: 构建选项
 ///
 /// 返回: 编码后的张量 [n_embd, n_patches]
@@ -48,15 +50,15 @@ pub fn buildVit(
     learned_pos_embd: ?*ggml.Tensor,
     weights: *const VisionEncoderWeights,
     hparams: *const VisionHParams,
-    add_pos: *const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights, *ggml.Tensor) *ggml.Tensor,
+    add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights, *ggml.Tensor, ?*anyopaque) *ggml.Tensor,
+    add_pos_data: ?*anyopaque,
     opts: BuildVitOpts,
 ) !*ggml.Tensor {
     const n_embd = inp.ne()[0];
-    _ = add_pos;
-
     const n_patches = inp.ne()[1];
     const n_head: i64 = @intCast(hparams.n_head);
-    const d_head = n_embd / n_head;
+    const n_head_kv: i64 = if (hparams.n_head_kv > 0) @intCast(hparams.n_head_kv) else n_head;
+    const d_head = @divExact(n_embd, n_head);
     const n_batch: i64 = 1;
     const eps = hparams.eps;
 
@@ -122,15 +124,10 @@ pub fn buildVit(
             // Reshape to [d_head, n_head, n_patches, n_batch]
             Qcur = Qcur.reshape4d(ctx, d_head, n_head, n_patches, n_batch);
             Qcur.setName("blk");
-            Kcur = Kcur.reshape4d(ctx, d_head, n_head, n_patches, n_batch);
+            Kcur = Kcur.reshape4d(ctx, d_head, n_head_kv, n_patches, n_batch);
             Kcur.setName("blk");
-            Vcur = Vcur.reshape4d(ctx, d_head, n_head, n_patches, n_batch);
+            Vcur = Vcur.reshape4d(ctx, d_head, n_head_kv, n_patches, n_batch);
             Vcur.setName("blk");
-
-            // 2D RoPE (if position embeddings are provided via add_pos callback)
-            // The add_pos callback handles position-specific modifications
-            // For models with 2D RoPE, the caller should apply it before calling buildVit
-            // or via the add_pos callback
 
             // Q/K norm (optional)
             if (layer.q_norm) |qn| {
@@ -140,8 +137,21 @@ pub fn buildVit(
                 Kcur = try norm_builder.buildNorm(ctx, Kcur, kn, null, norm_t, eps, "blk");
             }
 
+            // 2D RoPE via add_pos callback (matching C++ clip_graph::build_vit)
+            if (add_pos) |cb| {
+                Qcur = cb(ctx, Qcur, layer, Qcur, add_pos_data);
+                Kcur = cb(ctx, Kcur, layer, Kcur, add_pos_data);
+            }
+
+            // Vcur RMSNorm (gemma4v specific, controlled by opts)
+            if (opts.v_norm) {
+                Vcur = Vcur.rmsNorm(ctx, opts.v_norm_eps);
+                Vcur.setName("blk");
+            }
+
             // Attention
-            const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
+            // kq_scale: gemma4v uses 1.0, other models use 1/sqrt(d_head)
+            const kq_scale = opts.kq_scale orelse (1.0 / @sqrt(@as(f32, @floatFromInt(d_head))));
             var attn_out = try attn_builder.buildAttn(
                 ctx,
                 layer.o_w orelse return error.MissingOutputWeight,
@@ -330,7 +340,7 @@ test "buildVit: basic ViT forward" {
 
     // Simple add_pos callback that does nothing
     const addPosFn = struct {
-        fn f(_: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, _: *ggml.Tensor) *ggml.Tensor {
+        fn f(_: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, _: *ggml.Tensor, _: ?*anyopaque) *ggml.Tensor {
             return cur;
         }
     }.f;
@@ -345,6 +355,7 @@ test "buildVit: basic ViT forward" {
         &weights,
         &hparams,
         addPosFn,
+        null,
         .{},
     );
 

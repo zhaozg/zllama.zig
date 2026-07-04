@@ -339,7 +339,7 @@ pub fn buildGraphEx(
         //   conv_pw1.weight: [1024, 2048]  (n_embd=1024, intermediate=2048)
         //   conv_dw.weight:  [5, 1024]      (kernel_size=5, channels=1024)
         //   conv_pw2.weight: [1024, 1024]   (back to n_embd)
-        if (false and layer.norm_conv_w != null and layer.conv_pw1_w != null and
+        if (layer.norm_conv_w != null and layer.conv_pw1_w != null and
             layer.conv_dw_w != null and layer.conv_pw2_w != null)
         {
             cur = try graph.buildNorm(ctx, residual, layer.norm_conv_w.?, null, .rms_norm, norm_eps, "blk");

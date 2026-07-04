@@ -21,6 +21,77 @@ const ClampInfo = graph.ClampInfo;
 const log = std.log.scoped(.gemma4v_graph);
 
 // ============================================================================
+// 2D RoPE add_pos 回调上下文
+// ============================================================================
+
+/// 2D RoPE add_pos 回调的上下文数据
+/// 参考: gemma4v.cpp add_pos lambda (lines 46-93)
+pub const AddPosContext = struct {
+    pos_x_tensor: *ggml.Tensor,
+    pos_y_tensor: *ggml.Tensor,
+    rope_theta_val: f32,
+    n_batch_val: i64,
+
+    pub fn callback(
+        ctx_ptr: *ggml.Context,
+        cur_tensor: *ggml.Tensor,
+        _: *const ViTLayerWeights,
+        _: *ggml.Tensor,
+        user_data: ?*anyopaque,
+    ) *ggml.Tensor {
+        const self = @as(*AddPosContext, @ptrCast(@alignCast(user_data.?)));
+        const n_dim = cur_tensor.ne()[0];
+        const n_head_val = cur_tensor.ne()[1];
+        const n_pos_val = cur_tensor.ne()[2];
+        const n_dim_half = @divExact(n_dim, @as(i64, 2));
+
+        // first half: use pos_x
+        var first = cur_tensor.view4d(
+            ctx_ptr,
+            n_dim_half, n_head_val, n_pos_val, self.n_batch_val,
+            cur_tensor.nb()[1],
+            cur_tensor.nb()[2],
+            cur_tensor.nb()[3],
+            0,
+        );
+        first = first.ropeExt(
+            ctx_ptr,
+            self.pos_x_tensor,
+            null,
+            @intCast(n_dim_half),
+            2, // GGML_ROPE_TYPE_NEOX
+            0,
+            self.rope_theta_val,
+            1.0, 0.0, 1.0, 0.0, 0.0,
+        );
+
+        // second half: use pos_y
+        const offset: usize = @intCast(n_dim_half * @sizeOf(f32));
+        var second = cur_tensor.view4d(
+            ctx_ptr,
+            n_dim_half, n_head_val, n_pos_val, self.n_batch_val,
+            cur_tensor.nb()[1],
+            cur_tensor.nb()[2],
+            cur_tensor.nb()[3],
+            offset,
+        );
+        second = second.ropeExt(
+            ctx_ptr,
+            self.pos_y_tensor,
+            null,
+            @intCast(n_dim_half),
+            2, // GGML_ROPE_TYPE_NEOX
+            0,
+            self.rope_theta_val,
+            1.0, 0.0, 1.0, 0.0, 0.0,
+        );
+
+        const result = first.concat(ctx_ptr, second, 0);
+        return result;
+    }
+};
+
+// ============================================================================
 // 视觉编码器后端注册
 // ============================================================================
 
@@ -238,10 +309,15 @@ pub fn buildGraph(
 
     log.info("Gemma4V graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, rope_theta={d}", .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, rope_theta });
 
+    // ========================================================================
     // 1. 创建输入张量
+    // ========================================================================
     // 输入图像: [3, height, width] f32, 值范围 [0, 1]
-    const inp_raw = try ctx.newTensor3d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3);
+    // 参考: gemma4v.cpp build_inp_raw()
+    const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3, n_batch);
     inp_raw.setName("inp_raw");
+    ggml.setInput(inp_raw);
+
     // 填充输入数据（由调用者负责）
     // 这里假设 img.buf 包含 RGBRGBRGB... 格式的 f32 数据
     {
@@ -260,7 +336,10 @@ pub fn buildGraph(
         }
     }
 
+    // ========================================================================
     // 2. Scale + bias: patches * 2 - 1
+    // 参考: gemma4v.cpp: ggml_scale_bias(ctx0, inp_raw, 2.0f, -1.0f)
+    // ========================================================================
     var cur = inp_raw;
     cur = cur.scale(ctx, 2.0);
     cur.setName("inp_scaled");
@@ -269,23 +348,52 @@ pub fn buildGraph(
         bias_t.dataF32()[0] = -1.0;
         bias_t.setName("inp_bias");
         cur = cur.add(ctx, bias_t);
-        cur.setName("inp_biased");
+        cur.setName("inp_raw_scaled");
     }
 
+    // ========================================================================
     // 3. Conv2D patch embedding
+    // 参考: gemma4v.cpp: ggml_conv_2d + reshape + transpose
+    // ========================================================================
     if (w.patch_embeddings_0) |pe| {
         const kw: i32 = @intCast(pe.ne()[0]);
         const kh: i32 = @intCast(pe.ne()[1]);
         cur = cur.conv2d(ctx, pe, kw, kh, 0, 0, 1, 1);
         cur.setName("inp_conv");
 
-        // Reshape to [n_embd, n_patches]
-        cur = cur.reshape3d(ctx, n_patches, n_embd, 1);
+        // Reshape to [n_patches, n_embd, n_batch] then transpose to [n_embd, n_patches, n_batch]
+        cur = cur.reshape3d(ctx, n_patches, n_embd, n_batch);
         cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
-        cur.setName("inp_patches");
+        cur.setName("inp");
+        // note: no patch bias (gemma4v.cpp line 16)
     }
 
+    // ========================================================================
     // 4. 2D 位置编码
+    // 参考: gemma4v.cpp: pos_x, pos_y as input tensors + get_rows
+    // ========================================================================
+    // 创建位置索引张量作为输入（匹配 C++ set_input）
+    const pos_x = try ctx.newTensor1d(ggml.Type.i32, n_patches);
+    pos_x.setName("pos_x");
+    ggml.setInput(pos_x);
+
+    const pos_y = try ctx.newTensor1d(ggml.Type.i32, n_patches);
+    pos_y.setName("pos_y");
+    ggml.setInput(pos_y);
+
+    // 填充位置索引
+    {
+        const px = pos_x.dataI32();
+        const py = pos_y.dataI32();
+        for (0..@as(usize, @intCast(n_patches_y))) |iy| {
+            for (0..@as(usize, @intCast(n_patches_x))) |ix| {
+                const idx = iy * @as(usize, @intCast(n_patches_x)) + ix;
+                px[idx] = @intCast(ix);
+                py[idx] = @intCast(iy);
+            }
+        }
+    }
+
     if (w.position_embeddings) |pos_embd| {
         const pos_size = pos_embd.ne()[1];
         const row_size = ggml.Type.rowSize(pos_embd.dataType(), n_embd);
@@ -296,168 +404,65 @@ pub fn buildGraph(
         const tbl_y = pos_embd.view2d(ctx, n_embd, pos_size, row_size, @as(usize, @intCast(pos_size)) * row_size);
         tbl_y.setName("pos_tbl_y");
 
-        // 位置索引
-        const indices = try graph.createPositionIndices(ctx, n_patches, n_patches_x);
-
         // getRows: [n_embd, n_patches]
-        const emb_x = tbl_x.getRows(ctx, indices.pos_x);
+        const emb_x = tbl_x.getRows(ctx, pos_x);
         emb_x.setName("pos_emb_x");
-        const emb_y = tbl_y.getRows(ctx, indices.pos_y);
+        const emb_y = tbl_y.getRows(ctx, pos_y);
         emb_y.setName("pos_emb_y");
 
         cur = cur.add(ctx, emb_x);
-        cur.setName("inp_with_pos_x");
         cur = cur.add(ctx, emb_y);
-        cur.setName("inp_with_pos");
+        cur.setName("pos_embd");
     }
 
-    // 5. ViT blocks
-    var inpL = cur.reshape2d(ctx, n_embd, n_patches * n_batch);
-    inpL.setName("vit_input");
+    // ========================================================================
+    // 5. ViT blocks (via buildVit with 2D RoPE add_pos callback)
+    // 参考: gemma4v.cpp: build_vit(inp, n_patches, NORM_TYPE_RMS, hparams.ffn_op, nullptr, add_pos)
+    // ========================================================================
+    var add_pos_ctx = AddPosContext{
+        .pos_x_tensor = pos_x,
+        .pos_y_tensor = pos_y,
+        .rope_theta_val = rope_theta,
+        .n_batch_val = n_batch,
+    };
 
-    // 创建 2D RoPE 位置索引
-    const vit_indices = try graph.createPositionIndices(ctx, n_patches, n_patches_x);
-    const d_head_half = @divExact(d_head, @as(i64, 2));
+    // 使用 buildVit 构建 ViT 主干
+    // 注意: gemma4v 使用 kq_scale=1.0 (set in gemma4v.cpp line 95)
+    // 并且对 V 应用 RMSNorm (gemma4v.cpp line 448-450)
+    const vit_opts = BuildVitOpts{
+        .v_norm = true,
+        .v_norm_eps = eps,
+        .kq_scale = 1.0,
+    };
 
-    for (w.layers, 0..) |*layer, il| {
-        var layer_buf: [32]u8 = undefined;
-        const layer_name = try std.fmt.bufPrintZ(&layer_buf, "blk.{d}", .{il});
+    cur = try graph.buildVit(
+        ctx,
+        cur,
+        n_patches,
+        .rms_norm,
+        p.ffn_op,
+        null, // learned_pos_embd - already handled above
+        w,
+        p,
+        AddPosContext.callback,
+        &add_pos_ctx,
+        vit_opts,
+    );
 
-        var residual = inpL;
-
-        // --- Pre-attention RMSNorm ---
-        var attn_in = inpL;
-        if (layer.ln_1_w) |ln1_w| {
-            attn_in = try graph.buildNorm(ctx, attn_in, ln1_w, layer.ln_1_b, .rms_norm, eps, layer_name);
-        }
-
-        // --- Self-attention with 2D RoPE ---
-        {
-            // QKV projections (with clamp, matching C++ clip_graph_gemma4v::build_mm)
-            var Qcur = if (layer.q_w) |qw| buildMMWithClamp(ctx, qw, attn_in, &w.clamp_info_map) else return error.MissingQWeight;
-            Qcur.setName(layer_name);
-            var Kcur = if (layer.k_w) |kw| buildMMWithClamp(ctx, kw, attn_in, &w.clamp_info_map) else return error.MissingKWeight;
-            Kcur.setName(layer_name);
-            var Vcur = if (layer.v_w) |vw| buildMMWithClamp(ctx, vw, attn_in, &w.clamp_info_map) else return error.MissingVWeight;
-            Vcur.setName(layer_name);
-
-            // Reshape to [d_head, n_head, n_patches, n_batch]
-            Qcur = Qcur.reshape4d(ctx, d_head, n_head, n_patches, n_batch);
-            Qcur.setName(layer_name);
-            Kcur = Kcur.reshape4d(ctx, d_head, n_head, n_patches, n_batch);
-            Kcur.setName(layer_name);
-            Vcur = Vcur.reshape4d(ctx, d_head, n_head, n_patches, n_batch);
-            Vcur.setName(layer_name);
-
-            // 2D RoPE: first half uses pos_x, second half uses pos_y
-            {
-                // First half
-                const first_q = Qcur.view4d(ctx, d_head_half, n_head, n_patches, n_batch, Qcur.nb()[1], Qcur.nb()[2], Qcur.nb()[3], 0);
-                const first_k = Kcur.view4d(ctx, d_head_half, n_head, n_patches, n_batch, Kcur.nb()[1], Kcur.nb()[2], Kcur.nb()[3], 0);
-                const rope_first_q = first_q.ropeExt(ctx, vit_indices.pos_x, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                rope_first_q.setName(layer_name);
-                const rope_first_k = first_k.ropeExt(ctx, vit_indices.pos_x, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                rope_first_k.setName(layer_name);
-
-                // Second half
-                const offset: usize = @intCast(d_head_half * @sizeOf(f32));
-                const second_q = Qcur.view4d(ctx, d_head_half, n_head, n_patches, n_batch, Qcur.nb()[1], Qcur.nb()[2], Qcur.nb()[3], offset);
-                const second_k = Kcur.view4d(ctx, d_head_half, n_head, n_patches, n_batch, Kcur.nb()[1], Kcur.nb()[2], Kcur.nb()[3], offset);
-                const rope_second_q = second_q.ropeExt(ctx, vit_indices.pos_y, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                rope_second_q.setName(layer_name);
-                const rope_second_k = second_k.ropeExt(ctx, vit_indices.pos_y, null, @intCast(d_head_half), 2, 0, rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-                rope_second_k.setName(layer_name);
-
-                Qcur = rope_first_q.concat(ctx, rope_second_q, 0);
-                Qcur.setName(layer_name);
-                Kcur = rope_first_k.concat(ctx, rope_second_k, 0);
-                Kcur.setName(layer_name);
-            }
-
-            // Vcur RMSNorm (gemma4v-specific)
-            Vcur = Vcur.rmsNorm(ctx, eps);
-            Vcur.setName(layer_name);
-
-            // Attention
-            const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
-            var attn_out = try graph.buildAttn(
-                ctx,
-                layer.o_w orelse return error.MissingOutputWeight,
-                layer.o_b,
-                Qcur,
-                Kcur,
-                Vcur,
-                null,
-                kq_scale,
-                n_head,
-                layer_name,
-                layer.attn_sinks,
-            );
-            attn_out.setName(layer_name);
-
-            // Residual
-            residual = residual.add(ctx, attn_out);
-            residual.setName(layer_name);
-        }
-
-        // --- Pre-FFN RMSNorm ---
-        var ffn_in = residual;
-        if (layer.ln_2_w) |ln2_w| {
-            ffn_in = try graph.buildNorm(ctx, ffn_in, ln2_w, layer.ln_2_b, .rms_norm, eps, layer_name);
-        }
-
-        // --- FFN (with clamp, matching C++ clip_graph_gemma4v::build_mm) ---
-        {
-            // Up projection
-            var up_result = buildMMWithClamp(ctx, layer.ff_up_w orelse return error.MissingFFNUpWeight, ffn_in, &w.clamp_info_map);
-            if (layer.ff_up_b) |b| {
-                up_result = up_result.add(ctx, b);
-            }
-
-            // Gate projection (optional)
-            var gate_result: ?*ggml.Tensor = null;
-            if (layer.ff_gate_w) |g| {
-                gate_result = buildMMWithClamp(ctx, g, ffn_in, &w.clamp_info_map);
-                if (layer.ff_gate_b) |gb| {
-                    gate_result = gate_result.?.add(ctx, gb);
-                }
-            }
-
-            // SiLU activation
-            var activated = up_result.silu(ctx);
-
-            // Gate (element-wise multiply)
-            if (gate_result) |g| {
-                activated = activated.mul(ctx, g);
-            }
-
-            // Down projection
-            var ffn_out = buildMMWithClamp(ctx, layer.ff_down_w orelse return error.MissingFFNDownWeight, activated, &w.clamp_info_map);
-            if (layer.ff_down_b) |b| {
-                ffn_out = ffn_out.add(ctx, b);
-            }
-
-            ffn_out.setName(layer_name);
-
-            inpL = residual.add(ctx, ffn_out);
-            inpL.setName(layer_name);
-        }
-    }
-
+    // ========================================================================
     // 6. Pooling (平均池化下采样)
+    // 参考: gemma4v.cpp: Gemma4VisionPooler (lines 103-119)
+    // ========================================================================
     const kernel_size: i64 = @intCast(p.n_merge);
-    var pooled = inpL;
     {
-        // [n_embd, n_patches] -> [n_patches_x, n_patches_y, n_embd, 1]
-        pooled = pooled.permute(ctx, 1, 0, 2, 3).cont(ctx);
-        pooled.setName("pool_permuted");
-        pooled = pooled.cont4d(ctx, n_patches_x, n_patches_y, n_embd, 1);
-        pooled.setName("pool_4d");
+        // [n_embd, n_patches] -> [n_patches_x, n_patches_y, n_embd, n_batch]
+        cur = ggml.cont4d(ctx, ggml.transpose(ctx, cur), n_patches_x, n_patches_y, n_embd, n_batch);
+        cur.setName("pool_4d");
 
         // Average pooling
-        pooled = pooled.pool2d(
+        cur = cur.pool2d(
             ctx,
-            1,
+            1, // GGML_OP_POOL_AVG
             @as(i32, @intCast(kernel_size)),
             @as(i32, @intCast(kernel_size)),
             @as(i32, @intCast(kernel_size)),
@@ -465,48 +470,48 @@ pub fn buildGraph(
             0,
             0,
         );
-        pooled.setName("pool_avg");
+        cur.setName("pool_avg");
 
         const out_x = @divExact(n_patches_x, kernel_size);
         const out_y = @divExact(n_patches_y, kernel_size);
-        pooled = pooled.reshape3d(ctx, out_x * out_y, n_embd, 1);
-        pooled.setName("pool_reshaped");
-        pooled = pooled.permute(ctx, 1, 0, 2, 3).cont(ctx);
-        pooled.setName("pool_result");
-
-        // Scale by sqrt(n_embd)
-        pooled = pooled.scale(ctx, @sqrt(@as(f32, @floatFromInt(n_embd))));
-        pooled.setName("pool_scaled");
+        // [out_x, out_y, n_embd, n_batch] -> [n_embd, out_x * out_y, n_batch]
+        cur = cur.reshape3d(ctx, out_x * out_y, n_embd, n_batch);
+        cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
+        cur = cur.scale(ctx, @sqrt(@as(f32, @floatFromInt(n_embd))));
+        cur.setName("pooled");
     }
 
+    // ========================================================================
     // 7. 标准化 (std_bias, std_scale)
-    var result = pooled;
+    // 参考: gemma4v.cpp: hidden_states = (hidden_states - self.std_bias) * self.std_scale
+    // ========================================================================
     if (w.std_bias) |sb| {
-        result = result.sub(ctx, sb);
-        result.setName("std_sub");
+        cur = cur.sub(ctx, sb);
+        cur.setName("std_sub");
     }
     if (w.std_scale) |ss| {
-        result = result.mul(ctx, graph.reshapeForBroadcast(ctx, ss));
-        result.setName("std_mul");
+        cur = cur.mul(ctx, graph.reshapeForBroadcast(ctx, ss));
+        cur.setName("std_scaled");
     }
 
-    // 8. 投影到 LLM 嵌入空间 (with clamp, matching C++ clip_graph_gemma4v::build_mm)
-    // Gemma4MultimodalEmbedder: RMSNorm + linear projection with clamp
+    // ========================================================================
+    // 8. 投影到 LLM 嵌入空间
+    // 参考: gemma4v.cpp: Gemma4MultimodalEmbedder (lines 122-130)
+    // ========================================================================
     {
-        result = result.rmsNorm(ctx, eps);
-        result.setName("mm_norm");
-        if (w.mm_soft_emb_norm_w) |sn| {
-            result = result.mul(ctx, graph.reshapeForBroadcast(ctx, sn));
-            result.setName("mm_norm_scaled");
-        }
+        // embedding_pre_projection_norm
+        cur = cur.rmsNorm(ctx, eps);
+        cur.setName("mm_norm");
+
+        // 使用带 clamp 的矩阵乘法（匹配 C++ build_mm）
         if (w.mm_input_proj_w) |proj| {
-            result = buildMMWithClamp(ctx, proj, result, &w.clamp_info_map);
-            result.setName("mm_output");
+            cur = buildMMWithClamp(ctx, proj, cur, &w.clamp_info_map);
+            cur.setName("projected");
         }
     }
 
     // 构建计算图
-    builder.gf.buildForwardExpand(result);
+    builder.gf.buildForwardExpand(cur);
 
     log.info("Gemma4V graph built successfully", .{});
     return builder.gf;
