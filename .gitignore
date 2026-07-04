@@ -5,5 +5,6 @@
 codedb.snapshot
 *.bin
 *.json
+*.bak
 /debug_audio
 mtmd-ref-logits

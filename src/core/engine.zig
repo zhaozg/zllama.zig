@@ -23,23 +23,19 @@ const engine_common = @import("engine_common");
 const prefill_mod = @import("prefill");
 
 const chat_template = @import("chat_template");
+const decode_mod = @import("decode");
+const verbose_mod = @import("verbose");
+const embedding_mod = @import("embedding_gen");
+const multimodal_mod = @import("multimodal");
+
 const CliArgs = @import("../cli_args.zig").CliArgs;
 const loadMMProj = @import("loader.zig").loadMMProj;
 
 const logger = std.log.scoped(.engine);
 
 // ============================================================================
-// VTable types for strategy dispatch
+// Prefill result
 // ============================================================================
-
-/// Callbacks for the shared decode loop.
-const DecodeCallbacks = struct {
-    buildStep: *const fn (ctx: *anyopaque, token: i32, pos: i32) anyerror!*ggml.Tensor,
-    sample: *const fn (ctx: *anyopaque, logits: *ggml.Tensor) i32,
-    skipToken: *const fn (ctx: *anyopaque, token: i32) bool,
-    afterToken: ?*const fn (ctx: *anyopaque, token: i32, decoded: []const u8) anyerror!bool = null,
-    onComplete: ?*const fn (ctx: *anyopaque, n_decoded: i32, tg_time_s: f64) void = null,
-};
 
 const PrefillResult = struct {
     logits: []f32,
@@ -80,20 +76,15 @@ pub const InferenceEngine = struct {
     no_chat_template: bool = false,
     no_jinja: bool = false,
 
-    /// Result of the decode loop.
-    const DecodeResult = struct { gen_count: i32, tg_time_s: f64 };
-
     // ========================================================================
     // init / deinit
     // ========================================================================
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
-        // 使用 Arena 管理 init 阶段的临时分配，减少碎片
         var init_arena = std.heap.ArenaAllocator.init(allocator);
         defer init_arena.deinit();
         _ = init_arena.allocator();
 
-        // 使用 mmap 加载模型文件（零拷贝，启动速度提升 2-3 倍）
         var mapped_file = try engine_common.mmapFile(io, allocator, model_path);
         errdefer mapped_file.deinit(io);
         const gguf_data = mapped_file.data;
@@ -150,15 +141,8 @@ pub const InferenceEngine = struct {
                 if (capabilities.has_vision) logger.info("  Vision: yes ({s})", .{capabilities.vision_encoder_type});
                 if (capabilities.has_audio) logger.info("  Audio : yes ({s}, {d} Hz)", .{ capabilities.audio_encoder_type, capabilities.audio_sample_rate });
             }
-            // Create MtmdContext for high-level multimodal operations
             if (mm_manager) |*mgr| {
-                mtmd_context = try mtmd.MtmdContext.init(
-                    allocator,
-                    mgr,
-                    @intCast(params.n_embd),
-                    mtmd.contextParamsDefault(),
-                    &tok,
-                );
+                mtmd_context = try mtmd.MtmdContext.init(allocator, mgr, @intCast(params.n_embd), mtmd.contextParamsDefault(), &tok);
                 logger.info("MtmdContext initialized for multimodal processing", .{});
             }
         } else if (capabilities.has_vision or capabilities.has_audio) {
@@ -172,8 +156,6 @@ pub const InferenceEngine = struct {
         if (cli_args.no_chat_template) {
             chat_template_source = null;
         } else if (cli_args.chat_template_name.len > 0) {
-            // Priority 1: User explicitly provides a template via --chat-template.
-            // Try preset name first; if unrecognized, treat as custom Jinja string.
             if (chat_template.TemplateKind.fromString(cli_args.chat_template_name)) |kind| {
                 chat_template_source = chat_template.TemplateSource{ .preset = kind };
                 logger.info("Chat template: {s} (from --chat-template)", .{cli_args.chat_template_name});
@@ -183,21 +165,11 @@ pub const InferenceEngine = struct {
                 logger.info("Chat template: custom Jinja ({d} bytes) (from --chat-template)", .{cli_args.chat_template_name.len});
             }
         } else if (gguf_file.getString("tokenizer.chat_template")) |tmpl_str| {
-            // Priority 2: GGUF built-in template (auto-detected from model metadata).
             const owned = try allocator.dupe(u8, tmpl_str);
             chat_template_source = chat_template.TemplateSource{ .gguf_builtin = owned };
             logger.info("Chat template: from GGUF metadata ({d} bytes)", .{tmpl_str.len});
         }
-        // Priority 3 (fallback): Architecture default — handled in applyChatTemplate().
-        // TODO: enable jinja template
-        // if (cli_args.debug or cli_args.verbose) {
-        //     const source = chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(arch, null) };
-        //     if (chat_template.debugPrintTemplate(allocator, source, arch, null)) |debug_info| {
-        //         defer allocator.free(debug_info);
-        //         logger.info("{s}", .{debug_info});
-        //     } else |_| {}
-        // }
-        //
+
         const sampler_state = sampler.Sampler.init(.{
             .temperature = cli_args.temperature,
             .top_k = cli_args.top_k,
@@ -233,23 +205,15 @@ pub const InferenceEngine = struct {
     }
 
     pub fn deinit(self: *InferenceEngine) void {
-        if (self.mtmd_context) |ctx| {
-            ctx.deinit();
-        }
-        if (self.mm_manager) |*m| {
-            m.deinit();
-        }
+        if (self.mtmd_context) |ctx| { ctx.deinit(); }
+        if (self.mm_manager) |*m| { m.deinit(); }
         self.inc_ctx.deinit();
         self.ctx_graph.deinit();
         self.ctx_kv_cache.deinit();
         self.model.deinit(self.allocator);
         if (self.params.model_name.len > 0) self.allocator.free(self.params.model_name);
-        // 释放 mmap 映射或堆内存
-        // mmap 映射在进程退出时由 OS 自动回收，无需显式 unmap
         if (self.mapped_file) |*mf| {
-            if (!mf.is_mmap) {
-                self.allocator.free(mf.data);
-            }
+            if (!mf.is_mmap) { self.allocator.free(mf.data); }
         } else {
             self.allocator.free(self.gguf_data);
         }
@@ -266,17 +230,13 @@ pub const InferenceEngine = struct {
     }
 
     // ========================================================================
-    // Public chat template API
+    // Chat template API
     // ========================================================================
 
-    /// Apply chat template for a single-turn user prompt.
-    /// Returns the formatted prompt (caller owns memory).
     pub fn applyChatTemplate(self: *InferenceEngine, user_prompt: []const u8) ![]const u8 {
         return self.applyChatTemplateWithMedia(user_prompt, null);
     }
 
-    /// Apply chat template for a single-turn user prompt with optional media attachment.
-    /// Returns the formatted prompt (caller owns memory).
     pub fn applyChatTemplateWithMedia(self: *InferenceEngine, user_prompt: []const u8, media: ?chat_template.Media) ![]const u8 {
         if (self.no_chat_template) return self.allocator.dupe(u8, user_prompt);
         const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
@@ -284,15 +244,9 @@ pub const InferenceEngine = struct {
         var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
         defer tmpl.deinit(self.allocator);
 
-        // If media is present, ensure the placeholder marker is in the content.
-        // This is needed because:
-        //   - Built-in presets (gemma4.zig) use appendMediaContent() which adds the marker
-        //   - Jinja rendering only sees msg.content (no media field), so the marker
-        //     must already be embedded in the content string
         const effective_prompt = if (media) |m| blk: {
             break :blk try chat_template.ensurePlaceholderInContent(user_prompt, m.type, self.allocator);
         } else user_prompt;
-        // Only free if ensurePlaceholderInContent allocated new memory
         const needs_free = media != null and effective_prompt.ptr != user_prompt.ptr;
         defer if (needs_free) self.allocator.free(effective_prompt);
 
@@ -305,9 +259,6 @@ pub const InferenceEngine = struct {
         return tmpl.apply(self.allocator, &messages, system, true);
     }
 
-    /// Apply chat template for multi-turn conversation (chat history).
-    /// The last message in chat_history should be the new user message.
-    /// Returns the formatted prompt (caller owns memory).
     pub fn applyChatTemplateMultiTurn(self: *InferenceEngine, chat_history: []const chat_template.ChatMessage) ![]const u8 {
         if (self.no_chat_template) {
             if (chat_history.len == 0) return self.allocator.dupe(u8, "");
@@ -318,30 +269,11 @@ pub const InferenceEngine = struct {
         var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
         defer tmpl.deinit(self.allocator);
         const system = if (self.system_prompt.len > 0) self.system_prompt else null;
-        const result = tmpl.apply(self.allocator, chat_history, system, true);
-        logger.info("Prompt base on template: {s}", .{try result});
-        return result;
+        return tmpl.apply(self.allocator, chat_history, system, true);
     }
 
     // ========================================================================
-    // Shared: gallocr reservation
-    // ========================================================================
-
-    fn reserveDecodeGallocr(self: *InferenceEngine) !void {
-        const saved_lens = try self.kv_cache_mgr.getAllLengths(self.allocator);
-        defer self.allocator.free(saved_lens);
-        const max_pos: u32 = self.kv_cache_mgr.max_seq_len -| 1;
-        self.kv_cache_mgr.setAllLengths(max_pos);
-        const reserve_step = try self.inc_ctx.beginStep();
-        reserve_step.setToken(0);
-        var reserve_builder = graph_builder.GraphBuilder.init(reserve_step.ctx, reserve_step.graph, &self.params, self.allocator);
-        _ = try self.model.buildGraph(&reserve_builder, reserve_step.input_token, 1, @ptrCast(&self.kv_cache_mgr), @intCast(max_pos));
-        try self.inc_ctx.reserveGallocr(reserve_step.graph);
-        for (self.kv_cache_mgr.layers, 0..) |*layer, i| layer.current_len = saved_lens[i];
-    }
-
-    // ========================================================================
-    // Shared: text prefill
+    // Text prefill
     // ========================================================================
 
     fn textPrefill(self: *InferenceEngine, input_tokens: []const u32) !PrefillResult {
@@ -379,96 +311,7 @@ pub const InferenceEngine = struct {
     }
 
     // ========================================================================
-    // Shared: decode loop
-    // ========================================================================
-
-    fn runDecodeLoop(self: *InferenceEngine, io: std.Io, first_token: i32, start_pos: i32, max_tokens: u32, callbacks: DecodeCallbacks, ctx: *anyopaque) !DecodeResult {
-        var current_token: i32 = first_token;
-        var pos: i32 = start_pos;
-        var gen_count: u32 = 0;
-        var eog_detect_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
-        defer eog_detect_buf.deinit(self.allocator);
-        const t_tg_start = engine_common.currentTimeMs();
-
-        while (gen_count < max_tokens) {
-            if (self.tok.isEog(@intCast(current_token))) break;
-
-            if (callbacks.skipToken(ctx, current_token)) {
-                const step = try self.inc_ctx.beginStep();
-                step.setToken(current_token);
-                var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
-                const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
-                if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-                try step.graph.compute(self.n_threads);
-                current_token = callbacks.sample(ctx, inc_logits);
-                pos += 1;
-                gen_count += 1;
-                continue;
-            }
-
-            var buf: [128]u8 = undefined;
-            const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
-            const decoded = buf[0..n];
-
-            if (n > 0) {
-                try eog_detect_buf.appendSlice(self.allocator, decoded);
-                if (self.tok.isEogText(eog_detect_buf.items)) {
-                    if (!self.benchmark) {
-                        const stdout_file = std.Io.File.stdout();
-                        try stdout_file.writeStreamingAll(io, decoded);
-                    }
-                    break;
-                }
-            }
-
-            if (!self.benchmark and n > 0) {
-                const stdout_file = std.Io.File.stdout();
-                try stdout_file.writeStreamingAll(io, decoded);
-            }
-
-            if (callbacks.afterToken) |cb| {
-                if (!try cb(ctx, current_token, decoded)) break;
-            }
-
-            const step = try self.inc_ctx.beginStep();
-            step.setToken(current_token);
-            var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
-            const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
-            if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-            try step.graph.compute(self.n_threads);
-            current_token = callbacks.sample(ctx, inc_logits);
-            pos += 1;
-            gen_count += 1;
-        }
-
-        const t_tg_end = engine_common.currentTimeMs();
-        const tg_time_s = @as(f64, @floatFromInt(t_tg_end - t_tg_start)) / 1000.0;
-        if (callbacks.onComplete) |cb| cb(ctx, @intCast(gen_count), tg_time_s);
-        return .{ .gen_count = @intCast(gen_count), .tg_time_s = tg_time_s };
-    }
-
-    // ========================================================================
-    // Shared: print stats
-    // ========================================================================
-
-    fn printStats(self: *InferenceEngine, n_prompt_tokens: i32, gen_count: i32, pp_time_s: f64, tg_time_s: f64) void {
-        if (self.benchmark) {
-            engine_common.printBenchmark(.{
-                .model_name = if (self.params.model_name.len > 0) self.params.model_name else @tagName(self.arch),
-                .arch_name = @tagName(self.arch),
-                .n_threads = self.n_threads,
-                .n_prompt_tokens = n_prompt_tokens,
-                .n_decode = gen_count,
-                .pp_time_s = pp_time_s,
-                .tg_time_s = tg_time_s,
-            });
-        } else if (gen_count > 0) {
-            engine_common.printSummary(gen_count, pp_time_s + tg_time_s);
-        }
-    }
-
-    // ========================================================================
-    // Shared: stream prompt tokens
+    // Stream prompt tokens
     // ========================================================================
 
     fn streamPromptTokens(self: *InferenceEngine, io: std.Io, tokens: []const u32) !void {
@@ -477,135 +320,18 @@ pub const InferenceEngine = struct {
         for (tokens) |token_id| {
             var buf: [128]u8 = undefined;
             const n = try self.tok.decodeSingle(token_id, &buf);
-            if (n > 0) {
-                try stdout_file.writeStreamingAll(io, buf[0..n]);
-            }
+            if (n > 0) { try stdout_file.writeStreamingAll(io, buf[0..n]); }
         }
         try stdout_file.writeStreamingAll(io, "\n");
     }
 
     // ========================================================================
-    // Public API: text-only generation
+    // Text generation (public API)
     // ========================================================================
-
-    /// Print verbose prompt information: prompt text, token IDs, decoded text, and logits preview.
-    /// Matches llama.cpp's --verbose-prompt output format.
-    /// If `media_offsets` is provided, media placeholder regions in the token sequence
-    /// are displayed as `<__media_<type>_<count>tokens__>` instead of repeating the same token.
-    fn printVerbosePrompt(self: *InferenceEngine, io: std.Io, prompt_text: ?[]const u8, input_tokens: []const u32, logits: []const f32, media_offsets: ?[]const chat_template.PlaceholderInfo) !void {
-        const stderr_file = std.Io.File.stderr();
-
-        // Use a local buffer for formatted output
-        var line_buf: [4096]u8 = undefined;
-
-        // Print header
-        const header = "\n========== Verbose Prompt ==========\n";
-        _ = try stderr_file.writeStreamingAll(io, header);
-
-        // Print original prompt text (like llama.cpp: LOG_INF("%s: prompt: '%s'\n", ...))
-        if (prompt_text) |text| {
-            const prompt_line = try std.fmt.bufPrint(&line_buf, "prompt: '{s}'\n", .{text});
-            _ = try stderr_file.writeStreamingAll(io, prompt_line);
-        }
-
-        // Print token count (like llama.cpp: "number of tokens in prompt = %zu")
-        {
-            var count_buf: [128]u8 = undefined;
-            const count_line = try std.fmt.bufPrint(&count_buf, "number of tokens in prompt = {d}\n", .{input_tokens.len});
-            _ = try stderr_file.writeStreamingAll(io, count_line);
-        }
-
-        // Print each prompt token with ID and decoded text (like llama.cpp: "%6d -> '%s'")
-        // For special tokens (like media placeholders), try to show the actual token text.
-        // If media_offsets is provided, collapse media placeholder regions into a single line.
-        if (media_offsets) |offsets| {
-            var off_idx: usize = 0;
-            var i: usize = 0;
-            while (i < input_tokens.len) : (i += 1) {
-                // Check if current position is the start of a media placeholder region
-                if (off_idx < offsets.len and i == offsets[off_idx].token_offset) {
-                    const info = offsets[off_idx];
-                    const media_label = switch (info.media_type) {
-                        .image => "image",
-                        .audio => "audio",
-                        .none => "media",
-                    };
-                    const line = try std.fmt.bufPrint(&line_buf, "{d:6}: token {d:6} -> '<__media_{s}_{d}tokens__>'  (placeholder, {d} tokens)\n", .{
-                        i, input_tokens[i], media_label, info.token_count, info.token_count,
-                    });
-                    _ = try stderr_file.writeStreamingAll(io, line);
-                    i += info.token_count - 1;
-                    off_idx += 1;
-                } else {
-                    var dec_buf: [128]u8 = undefined;
-                    const n = try self.tok.decodeSingle(input_tokens[i], &dec_buf);
-                    const display = if (n > 0) dec_buf[0..n] else blk: {
-                        if (self.tok.vocab.tokenText(input_tokens[i])) |text| {
-                            break :blk text;
-                        }
-                        break :blk "(special)";
-                    };
-                    const line = try std.fmt.bufPrint(&line_buf, "{d:6} -> '{s}'\n", .{ input_tokens[i], display });
-                    _ = try stderr_file.writeStreamingAll(io, line);
-                }
-            }
-        } else {
-            for (input_tokens) |token_id| {
-                var dec_buf: [128]u8 = undefined;
-                const n = try self.tok.decodeSingle(token_id, &dec_buf);
-                const display = if (n > 0) dec_buf[0..n] else blk: {
-                    if (self.tok.vocab.tokenText(token_id)) |text| {
-                        break :blk text;
-                    }
-                    break :blk "(special)";
-                };
-                const line = try std.fmt.bufPrint(&line_buf, "{d:6} -> '{s}'\n", .{ token_id, display });
-                _ = try stderr_file.writeStreamingAll(io, line);
-            }
-        }
-
-        // Print logits preview (top-10 values) — zllama-specific enhancement
-        {
-            const logits_header = "\n--- Logits preview (last token, top-10) ---\n";
-            _ = try stderr_file.writeStreamingAll(io, logits_header);
-        }
-
-        // Find top-k logits
-        const top_k: usize = @min(10, logits.len);
-        var indices = try self.allocator.alloc(usize, logits.len);
-        defer self.allocator.free(indices);
-        for (0..logits.len) |i| indices[i] = i;
-
-        // Partial sort: find top-k
-        std.mem.sort(usize, indices, logits, struct {
-            fn lessThan(ctx: []const f32, a: usize, b: usize) bool {
-                return ctx[a] > ctx[b];
-            }
-        }.lessThan);
-
-        for (0..top_k) |i| {
-            const idx = indices[i];
-            var dec_buf: [128]u8 = undefined;
-            const n = try self.tok.decodeSingle(@intCast(idx), &dec_buf);
-            const display = if (n > 0) dec_buf[0..n] else blk: {
-                if (self.tok.vocab.tokenText(@intCast(idx))) |text| {
-                    break :blk text;
-                }
-                break :blk "(special)";
-            };
-            const line = try std.fmt.bufPrint(&line_buf, "  {d:6}: token {d:6} -> '{s}' (logit={d:.4})\n", .{ i, idx, display, logits[idx] });
-            _ = try stderr_file.writeStreamingAll(io, line);
-        }
-
-        const footer = "========================================\n\n";
-        _ = try stderr_file.writeStreamingAll(io, footer);
-    }
 
     pub fn generate(self: *InferenceEngine, io: std.Io, prompt: []const u8, max_tokens: u32) !void {
         const formatted_prompt = try self.applyChatTemplate(prompt);
         defer self.allocator.free(formatted_prompt);
-
-        logger.info("formatted_prompt: {s}", .{formatted_prompt});
 
         var input_tokens = try self.tok.encode(formatted_prompt, true, true);
         defer input_tokens.deinit(self.allocator);
@@ -616,84 +342,49 @@ pub const InferenceEngine = struct {
         const prefill = try self.textPrefill(input_tokens.items);
         defer self.allocator.free(prefill.logits);
 
-        // Print verbose prompt if requested
         if (self.verbose_prompt) {
-            try self.printVerbosePrompt(io, formatted_prompt, input_tokens.items, prefill.logits, null);
+            try verbose_mod.printVerbosePrompt(io, self.allocator, &self.tok, formatted_prompt, input_tokens.items, prefill.logits, null);
         }
 
         const first_token = sampler.Sampler.sampleGreedyFromLogits(prefill.logits);
         try self.streamPromptTokens(io, input_tokens.items);
-        try self.reserveDecodeGallocr();
 
-        const dr = try self.runDecodeLoop(io, first_token, prefill.pos, max_tokens, .{
-            .buildStep = undefined,
-            .sample = struct {
-                fn f(_: *anyopaque, l: *ggml.Tensor) i32 {
-                    return sampler.Sampler.sampleGreedy(l);
-                }
-            }.f,
-            .skipToken = struct {
-                fn f(c: *anyopaque, t: i32) bool {
-                    return (@as(*InferenceEngine, @ptrCast(@alignCast(c)))).tok.isSkipToken(@intCast(t));
-                }
-            }.f,
-            .onComplete = null,
-        }, @ptrCast(self));
+        try decode_mod.reserveDecodeGallocr(self.allocator, &self.kv_cache_mgr, &self.inc_ctx, self.model, &self.params);
+
+        const dr = try decode_mod.runDecodeLoop(
+            self.allocator, io, self.model, &self.params, &self.tok,
+            &self.kv_cache_mgr, &self.inc_ctx, self.n_threads,
+            first_token, prefill.pos, max_tokens,
+            .{
+                .buildStep = undefined,
+                .sample = struct {
+                    fn f(_: *anyopaque, l: *ggml.Tensor) i32 { return sampler.Sampler.sampleGreedy(l); }
+                }.f,
+                .skipToken = struct {
+                    fn f(c: *anyopaque, t: i32) bool { return (@as(*InferenceEngine, @ptrCast(@alignCast(c)))).tok.isSkipToken(@intCast(t)); }
+                }.f,
+                .onComplete = null,
+            },
+            @ptrCast(self),
+            self.benchmark,
+        );
 
         const stdout_file = std.Io.File.stdout();
         try stdout_file.writeStreamingAll(io, "\n");
-        self.printStats(n_prompt_tokens, dr.gen_count, prefill.pp_time_s, dr.tg_time_s);
-
-        if (!self.benchmark) {
-            try stdout_file.writeStreamingAll(io, "\n");
-        }
+        decode_mod.printStats(self.arch, self.params.model_name, self.n_threads, n_prompt_tokens, dr.gen_count, prefill.pp_time_s, dr.tg_time_s, self.benchmark);
+        if (!self.benchmark) { try stdout_file.writeStreamingAll(io, "\n"); }
     }
 
     // ========================================================================
-    // Public API: embedding generation
+    // Embedding generation (public API)
     // ========================================================================
 
     pub fn generateEmbedding(self: *InferenceEngine, io: std.Io, prompt: []const u8) ![]f32 {
-        var input_tokens = try self.tok.encode(prompt, true, true);
-        defer input_tokens.deinit(self.allocator);
-        const n_tokens: i32 = @intCast(input_tokens.items.len);
-        if (n_tokens == 0) return error.EmptyInput;
-
-        self.ctx_graph.setNoAlloc(false);
-        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_tokens);
-        self.ctx_graph.setNoAlloc(true);
-        {
-            const data = input_tensor.dataBytes();
-            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_tokens))];
-            for (input_tokens.items, 0..) |token, j| slice[j] = @as(i32, @intCast(token));
-        }
-
-        var graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
-        var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, &self.params, self.allocator);
-        const embedding_vector = try self.model.buildGraph(&builder, input_tensor, n_tokens, null, 0);
-
-        const buft = ggml.backendCpuBufferType();
-        var galloc = try ggml.Gallocr.init(buft);
-        defer galloc.free();
-        if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
-        try graph.compute(self.n_threads);
-
-        const result_data = embedding_vector.dataF32();
-        const n_embd = @as(usize, @intCast(self.params.n_embd));
-        const result = try self.allocator.alloc(f32, n_embd);
-        @memcpy(result, result_data[0..n_embd]);
-
-        const stdout_file = std.Io.File.stdout();
-        var buf: [128]u8 = undefined;
-        for (result) |v| {
-            const line = try std.fmt.bufPrint(&buf, "{d:.6}\n", .{v});
-            try stdout_file.writeStreamingAll(io, line);
-        }
-        return result;
+        return embedding_mod.generateEmbedding(self.allocator, io, self.model, &self.params, &self.tok, self.ctx_graph, self.n_threads, prompt);
     }
 
     // ========================================================================
-    // Public API: chat loop
+    // Chat loop (public API)
     // ========================================================================
 
     pub fn chatLoop(self: *InferenceEngine, io: std.Io) !void {
@@ -715,10 +406,7 @@ pub const InferenceEngine = struct {
             try stdout.writeStreamingAll(io, ">>> ");
             var reader = stdin.reader(io, &line_buf);
             const line_slice = reader.interface.takeDelimiterExclusive('\n') catch |err| {
-                if (err == error.EndOfStream) {
-                    try stdout.writeStreamingAll(io, "\n");
-                    break;
-                }
+                if (err == error.EndOfStream) { try stdout.writeStreamingAll(io, "\n"); break; }
                 return err;
             };
             const line = std.mem.trimEnd(u8, line_slice, "\r");
@@ -730,10 +418,9 @@ pub const InferenceEngine = struct {
 
             if (line[0] == '/') {
                 if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) {
-                    try stdout.writeStreamingAll(io, "Bye.\n");
-                    break;
+                    try stdout.writeStreamingAll(io, "Bye.\n"); break;
                 } else if (std.mem.eql(u8, line, "/help")) {
-                    try stdout.writeStreamingAll(io, "Available commands:\n  /help  /clear  /exit  /reset  /new  /image  /audio\n");
+                    try stdout.writeStreamingAll(io, "Available commands:\n  /help  /clear  /exit  /reset  /new\n");
                 } else if (std.mem.eql(u8, line, "/clear")) {
                     try stdout.writeStreamingAll(io, "\x1b[2J\x1b[H");
                 } else if (std.mem.eql(u8, line, "/reset")) {
@@ -745,39 +432,12 @@ pub const InferenceEngine = struct {
                     self.kv_cache_mgr.reset();
                     self.model.resetSSMStates();
                     try stdout.writeStreamingAll(io, "New conversation started.\n");
-                } else if (std.mem.startsWith(u8, line, "/image ")) {
-                    const rest = line[7..];
-                    const sp = std.mem.indexOf(u8, rest, " ") orelse {
-                        try stdout.writeStreamingAll(io, "Usage: /image <path> <prompt>\n");
-                        continue;
-                    };
-                    try stdout.writeStreamingAll(io, "Processing image...\n");
-                    try chat_history.append(self.allocator, chat_template.ChatMessage.withMedia("user", rest[sp + 1 ..], .{ .type = .image, .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } } }));
-                    self.generateWithImage(io, rest[sp + 1 ..], @ptrCast(@constCast(rest[0..sp])), 256) catch {
-                        try stdout.writeStreamingAll(io, "Image processing failed.\n");
-                    };
-                    try stdout.writeStreamingAll(io, "\n");
-                    continue;
-                } else if (std.mem.startsWith(u8, line, "/audio ")) {
-                    const rest = line[7..];
-                    const sp = std.mem.indexOf(u8, rest, " ") orelse {
-                        try stdout.writeStreamingAll(io, "Usage: /audio <path> <prompt>\n");
-                        continue;
-                    };
-                    try stdout.writeStreamingAll(io, "Processing audio...\n");
-                    try chat_history.append(self.allocator, chat_template.ChatMessage.withMedia("user", rest[sp + 1 ..], .{ .type = .audio, .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } } }));
-                    self.generateWithAudio(io, rest[sp + 1 ..], @ptrCast(@constCast(rest[0..sp])), 256) catch {
-                        try stdout.writeStreamingAll(io, "Audio processing failed.\n");
-                    };
-                    try stdout.writeStreamingAll(io, "\n");
-                    continue;
                 } else {
                     try stdout.writeStreamingAll(io, "Unknown command. Try /help.\n");
                 }
                 continue;
             }
 
-            // Normal message handling
             try chat_history.append(self.allocator, chat_template.ChatMessage.init("user", line));
             const formatted_prompt = try self.applyChatTemplateMultiTurn(chat_history.items);
             defer self.allocator.free(formatted_prompt);
@@ -796,7 +456,7 @@ pub const InferenceEngine = struct {
             var output_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
             defer output_tokens.deinit(self.allocator);
 
-            try self.reserveDecodeGallocr();
+            try decode_mod.reserveDecodeGallocr(self.allocator, &self.kv_cache_mgr, &self.inc_ctx, self.model, &self.params);
 
             while (gen_count < 512) {
                 if (self.tok.isEog(@intCast(current_token))) break;
@@ -812,8 +472,7 @@ pub const InferenceEngine = struct {
                 if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
                 try step.graph.compute(self.n_threads);
                 current_token = sampler.Sampler.sampleGreedy(inc_logits);
-                pos += 1;
-                gen_count += 1;
+                pos += 1; gen_count += 1;
             }
             try stdout.writeStreamingAll(io, "\n");
 
@@ -831,675 +490,39 @@ pub const InferenceEngine = struct {
     }
 
     // ========================================================================
-    // Public API: vision generation
+    // Multimodal generation (public API) — delegates to multimodal.zig
     // ========================================================================
 
     pub fn generateWithImage(self: *InferenceEngine, io: std.Io, prompt: []const u8, image_path: [:0]const u8, max_tokens: u32) !void {
-        var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
-        if (!self.capabilities.has_vision) return error.VisionNotSupported;
-        // 目前仅 Gemma4 和 Qwen3VL 支持完整的视觉推理流水线
-        if (self.arch != .gemma4 and self.arch != .qwen3vl) {
-            logger.err("Vision inference not yet implemented for architecture '{s}'.", .{@tagName(self.arch)});
-            logger.err("  Currently only Gemma4 and Qwen3VL support vision.", .{});
-            return error.VisionNotSupportedForArchitecture;
-        }
-
-        // Log image markers from MtmdContext (ensures mod.zig:232 is executed)
-        if (self.mtmd_context) |ctx| {
-            logger.info("Image markers from MtmdContext: '{s}' / '{s}'", .{ ctx.img_beg, ctx.img_end });
-        }
-
-        const target_size: u32 = if (mm_mgr.vision_encoder) |enc| enc.params.image_size else 896;
-        var img = try preprocess.loadImage(self.allocator, io, image_path, target_size, null);
-        defer img.deinit();
-        if (img.width == 0 or img.height == 0) return error.EmptyImage;
-
-        // Use a separate context for the vision encoder to avoid exhausting the main graph context
-        var vision_ctx = try ggml.Context.initNoAlloc(10 * 1024 * 1024 * 1024);
-        defer vision_ctx.deinit();
-
-        vision_ctx.setNoAlloc(false);
-        var vision_graph = try ggml.CGraph.initReserved(vision_ctx, 32768);
-        const vision_embeddings = try mm_mgr.encodeMedia(io, vision_ctx, vision_graph, .{
-            .media_type = .image,
-            .image_data = img.data,
-            .image_width = img.width,
-            .image_height = img.height,
-        });
-        vision_ctx.setNoAlloc(true);
-        logger.info("Vision graph built, allocating compute buffers...", .{});
-        const buft = ggml.backendCpuBufferType();
-        var v_galloc = try ggml.Gallocr.init(buft);
-        defer v_galloc.free();
-        logger.info("Gallocr allocated, allocating graph...", .{});
-        if (!v_galloc.allocGraph(vision_graph)) {
-            logger.err("GraphAllocFailed for vision graph", .{});
-            return error.GraphAllocFailed;
-        }
-        logger.info("Graph allocated, computing...", .{});
-        try vision_graph.compute(self.n_threads);
-        logger.info("Vision graph computed successfully", .{});
-
-        const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
-        const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
-
-        // —— 嵌入维度检查 ——
-        // For Qwen3VL with deepstack, the encoder output dimension is
-        // n_embd * (1 + n_deepstack_layers), where the first n_embd values
-        // are the base embedding and subsequent blocks are deepstack features.
-        logger.debug("Vision encoder output: shape=[{d}, {d}] (n_embd×n_tokens)", .{ n_embd_val, n_vision_tokens });
-        logger.debug("  model n_embd={d}", .{self.params.n_embd});
-        if (self.arch == .qwen3vl) {
-            // Qwen3VL with deepstack: encoder output dim = n_embd * (1 + n_deepstack_layers)
-            // The model's forwardWithEmbdOverride handles the deepstack split internally.
-            logger.debug("  Qwen3VL: allowing encoder dim {d} (n_embd={d} * (1 + deepstack_layers))", .{
-                n_embd_val, self.params.n_embd,
-            });
-        } else if (n_embd_val != @as(usize, @intCast(self.params.n_embd))) {
-            logger.err("EMBEDDING DIMENSION MISMATCH: encoder={d} vs model={d}", .{ n_embd_val, self.params.n_embd });
-            return error.EmbeddingDimensionMismatch;
-        }
-        logger.debug("  ✓ embedding dimension check passed", .{});
-
-        const image_token_id: u32 = blk: {
-            if (self.tok.textToToken("<|image_pad|>")) |id| break :blk @as(u32, @intCast(id));
-            if (self.tok.textToToken("<|image|>")) |id| break :blk @as(u32, @intCast(id));
-            if (self.tok.textToToken("<image>")) |id| break :blk @as(u32, @intCast(id));
-            if (self.tok.textToToken("<|vision_start|>")) |id| break :blk @as(u32, @intCast(id));
-            return error.NoImagePlaceholderToken;
-        };
-
-        // The Gemma4 template now handles media marker placement on its own line.
-        // We pass the raw prompt (without placeholder) to applyChatTemplateWithMedia,
-        // and the template's appendMediaContent function adds the marker.
-        const formatted_prompt = if (self.no_chat_template) blk: {
-            // Without chat template, we need to add the placeholder ourselves
-            const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .image, self.allocator);
-            break :blk with_ph;
-        } else try self.applyChatTemplateWithMedia(prompt, chat_template.Media{ .type = .image, .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } } });
-        defer self.allocator.free(formatted_prompt);
-
-        logger.info("formatted_prompt: {s}", .{formatted_prompt});
-
-        // 使用新的 tokenize 方法：先正常 tokenize（含 parse_special），
-        // 然后在 token 序列中找到 <|image|> 特殊 token 的位置并展开
-        var expanded = try self.tokenizeWithMediaPlaceholders(formatted_prompt, image_token_id, @intCast(n_vision_tokens), .image);
-        defer expanded.deinit();
-        logger.info("Vision input: {d} prefix tokens + {d} image tokens + {d} suffix tokens = {d} total", .{
-            if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else @as(u32, 0),
-            n_vision_tokens,
-            if (expanded.offsets.len > 0) @as(u32, @intCast(expanded.tokens.items.len)) - expanded.offsets[0].token_offset - expanded.offsets[0].token_count else @as(u32, @intCast(expanded.tokens.items.len)),
-            expanded.tokens.items.len,
-        });
-
-        // Dispatch to architecture-specific multimodal prefill
-        switch (self.arch) {
-            .gemma4 => {
-                const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
-                try self.multimodalPrefill(io, gemma4_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt);
-            },
-            .qwen3vl => {
-                const qwen3vl_model: *model_if.qwen3vl.Qwen3VLModel = @ptrCast(@alignCast(self.model.ptr));
-                try self.multimodalPrefillQwen3VL(io, qwen3vl_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt);
-            },
-            else => return error.VisionNotSupportedForArchitecture,
-        }
+        var ectx = self.toMultimodalContext();
+        return multimodal_mod.generateWithImage(&ectx, io, prompt, image_path, max_tokens);
     }
 
-    // ========================================================================
-    // Public API: audio generation
     pub fn generateWithAudio(self: *InferenceEngine, io: std.Io, prompt: []const u8, audio_path: [:0]const u8, max_tokens: u32) !void {
-        var mm_mgr = self.mm_manager orelse return error.MMProjNotLoaded;
-        if (!self.capabilities.has_audio) return error.AudioNotSupported;
-        // 目前仅 Gemma4 支持完整的音频推理流水线（mediaForward + 三阶段 prefill）
-        if (self.arch != .gemma4) {
-            logger.err("Audio inference not yet implemented for architecture '{s}'.", .{@tagName(self.arch)});
-            logger.err("  Currently only Gemma4 supports audio.", .{});
-            return error.AudioNotSupportedForArchitecture;
-        }
-        const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(self.model.ptr));
-
-        // Log audio markers from MtmdContext (ensures mod.zig:232 is executed)
-        if (self.mtmd_context) |ctx| {
-            logger.info("Audio markers from MtmdContext: '{s}' / '{s}'", .{ ctx.aud_beg, ctx.aud_end });
-        }
-        const wav_result = try audio_mod.loadWav(self.allocator, io, audio_path);
-        defer self.allocator.free(wav_result.samples);
-        if (wav_result.samples.len == 0) return error.EmptyAudio;
-
-        const preprocess_params = audio_mod.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else audio_mod.AUDIO_N_MEL_BINS);
-        var mel = try audio_mod.computeMelSpectrogram(io, self.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
-        defer mel.deinit();
-
-        debug.saveData(io, "debug_audio", "zllama_audio_mel.json", "audio_mel", mel.data) catch |err| {
-            logger.info("Save audio mel data fail: {}", .{err});
-        };
-
-        self.ctx_graph.setNoAlloc(false);
-        var audio_graph = try ggml.CGraph.initReserved(self.ctx_graph, 32768);
-
-        // [4] melToTensor: 将 Mel 数据包装为 ggml F32 张量 [n_frames, n_mel_bins]
-        // 匹配设计文档 MTMD_ARCHITECTURE.md 第5节音频处理流水线
-        const mel_tensor = try audio_mod.melToTensor(self.ctx_graph, mel.data, mel.n_frames, mel.n_mel_bins);
-        mel_tensor.setName("mel_input");
-
-        const audio_embeddings = try mm_mgr.encodeMedia(io, self.ctx_graph, audio_graph, .{
-            .media_type = .audio,
-            .mel_tensor = mel_tensor,
-            .mel_data = mel.data,
-            .mel_bins = mel.n_mel_bins,
-            .mel_frames = mel.n_frames,
-            .audio_length_sec = @as(f32, @floatFromInt(wav_result.info.num_samples)) / @as(f32, @floatFromInt(wav_result.info.sample_rate)),
-        });
-        self.ctx_graph.setNoAlloc(true);
-        const buft = ggml.backendCpuBufferType();
-        var a_galloc = try ggml.Gallocr.init(buft);
-        defer a_galloc.free();
-        if (!a_galloc.allocGraph(audio_graph)) return error.GraphAllocFailed;
-        try audio_graph.compute(self.n_threads);
-
-        // === DEBUG: 保存中间张量数据（匹配 llama.cpp 的顺序和方式）===
-        // llama.cpp 使用 ggml_graph_get_tensor + ggml_backend_tensor_get 读取
-        // 我们使用 debug.saveTensorFromGraph 实现相同功能
-        debug.saveTensorFromGraph(io, "debug_audio", "zllama_audio_encoder_input.json", "debug_audio_encoder_input", audio_graph) catch |err| {
-            logger.info("Save audio debug_audio_encoder_input data fail: {}", .{err});
-        };
-        if (mm_mgr.audio_encoder) |enc| {
-            enc.saveDebugData(io, audio_graph);
-        }
-
-        const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
-        const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
-
-        debug.saveData(io, "debug_audio", "zllama_audio_embeddings.json", "audio_embeddings", audio_embeddings.dataF32()) catch |err| {
-            logger.info("Save audio embeddings data fail: {}", .{err});
-        };
-
-        // —— 嵌入维度检查 ——
-        logger.debug("Audio encoder output: shape=[{d}, {d}] (n_embd×n_tokens)", .{ n_embd_val, n_audio_tokens });
-        logger.debug("  model n_embd={d}, expected embed_dim=1536 for Gemma4", .{self.params.n_embd});
-        if (n_embd_val != @as(usize, @intCast(self.params.n_embd))) {
-            logger.err("EMBEDDING DIMENSION MISMATCH: encoder={d} vs model={d}", .{ n_embd_val, self.params.n_embd });
-            return error.EmbeddingDimensionMismatch;
-        }
-        logger.debug("  ✓ embedding dimension matches model n_embd", .{});
-
-        const audio_token_id: u32 = blk: {
-            if (self.tok.textToToken("<|audio|>")) |id| break :blk @as(u32, @intCast(id));
-            if (self.tok.textToToken("<audio>")) |id| break :blk @as(u32, @intCast(id));
-            return error.NoAudioPlaceholderToken;
-        };
-
-        // The Gemma4 template now handles media marker placement on its own line.
-        // We pass the raw prompt (without placeholder) to applyChatTemplateWithMedia,
-        // and the template's appendMediaContent function adds the marker.
-        const formatted_prompt = if (self.no_chat_template) blk: {
-            // Without chat template, we need to add the placeholder ourselves
-            const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .audio, self.allocator);
-            break :blk with_ph;
-        } else try self.applyChatTemplateWithMedia(prompt, chat_template.Media{ .type = .audio, .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } } });
-        defer self.allocator.free(formatted_prompt);
-
-        logger.info("formatted_prompt: {s}", .{formatted_prompt});
-
-        // 使用新的 tokenize 方法：先正常 tokenize（含 parse_special），
-        // 然后在 token 序列中找到 <|audio|> 特殊 token 的位置并展开
-        var expanded = try self.tokenizeWithMediaPlaceholders(formatted_prompt, audio_token_id, @intCast(n_audio_tokens), .audio);
-        defer expanded.deinit();
-        logger.info("Audio input: {d} prefix tokens + {d} audio tokens + {d} suffix tokens = {d} total", .{
-            if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else @as(u32, 0),
-            n_audio_tokens,
-            if (expanded.offsets.len > 0) @as(u32, @intCast(expanded.tokens.items.len)) - expanded.offsets[0].token_offset - expanded.offsets[0].token_count else @as(u32, @intCast(expanded.tokens.items.len)),
-            expanded.tokens.items.len,
-        });
-        try self.multimodalPrefill(io, gemma4_model, &expanded, audio_token_id, @intCast(n_audio_tokens), audio_embeddings, max_tokens, formatted_prompt);
+        var ectx = self.toMultimodalContext();
+        return multimodal_mod.generateWithAudio(&ectx, io, prompt, audio_path, max_tokens);
     }
 
-    // ========================================================================
-    // Shared: three-stage multimodal prefill + decode
-    // ========================================================================
-
-    fn multimodalPrefill(self: *InferenceEngine, io: std.Io, gemma4_model: *model_if.gemma4.Gemma4Model, expanded: *chat_template.TokenizedSegments, media_token_id: u32, n_media_tokens: i32, media_embeddings: *ggml.Tensor, max_tokens: u32, prompt_text: ?[]const u8) !void {
-        const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
-        const media_offset: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else 0;
-        const media_count: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_count else @intCast(n_media_tokens);
-        const prefix_tokens = if (media_offset > 0) expanded.tokens.items[0..media_offset] else &[_]u32{};
-        const suffix_start: u32 = media_offset + media_count;
-        const suffix_tokens = if (suffix_start < n_total_tokens) expanded.tokens.items[suffix_start..@as(usize, @intCast(n_total_tokens))] else &[_]u32{};
-
-        // —— 多模态嵌入替换对齐检查 ——
-        logger.info("=== Multimodal embedding substitution check ===", .{});
-        logger.info("  media_offset    = {d}  (token position where media placeholder starts)", .{media_offset});
-        logger.info("  media_count     = {d}  (number of placeholder tokens in token sequence)", .{media_count});
-        logger.info("  n_media_tokens  = {d}  (actual embedding frames from encoder)", .{n_media_tokens});
-        logger.info("  prefix_tokens   = {d}", .{prefix_tokens.len});
-        logger.info("  suffix_tokens   = {d}", .{suffix_tokens.len});
-        logger.info("  n_total_tokens  = {d}", .{n_total_tokens});
-        if (media_count != @as(u32, @intCast(n_media_tokens))) {
-            logger.warn("  ⚠ MISMATCH: media_count ({d}) != n_media_tokens ({d}) — embedding substitution may be misaligned!", .{ media_count, n_media_tokens });
-        } else {
-            logger.info("  ✓ media_count == n_media_tokens — embedding substitution aligned", .{});
-        }
-
-        // —— Token 序列验证：打印 pos 和 token ID ——
-        logger.debug("=== Token sequence verification (before prefill) ===", .{});
-        if (prefix_tokens.len > 0) {
-            const pre_head: usize = @min(prefix_tokens.len, 8);
-            const pre_tail_start: usize = if (prefix_tokens.len > pre_head) prefix_tokens.len - @min(4, prefix_tokens.len - pre_head) else prefix_tokens.len;
-            logger.debug("  prefix[pos 0..{d}]: head={any} ... tail={any}", .{ prefix_tokens.len, prefix_tokens[0..pre_head], prefix_tokens[pre_tail_start..] });
-        }
-        logger.debug("  media[pos {d}..{d}]: token_id={d} × {d}", .{ media_offset, media_offset + media_count, media_token_id, media_count });
-        if (suffix_tokens.len > 0) {
-            const suf_head: usize = @min(suffix_tokens.len, 8);
-            const suf_tail_start: usize = if (suffix_tokens.len > suf_head) suffix_tokens.len - @min(4, suffix_tokens.len - suf_head) else suffix_tokens.len;
-            const suf_pos_start = media_offset + media_count;
-            logger.debug("  suffix[pos {d}..{d}]: head={any} ... tail={any}", .{ suf_pos_start, suf_pos_start + suffix_tokens.len, suffix_tokens[0..suf_head], suffix_tokens[suf_tail_start..] });
-        }
-
-        const mediaForwardFn = struct {
-            fn f(mp: *anyopaque, c: *ggml.Context, g: *ggml.CGraph, it: *ggml.Tensor, nt: i32, kvc: ?*kv_cache.KVCache, sp: i32, eo: *ggml.Tensor, eoff: i32, causal: bool) anyerror!*ggml.Tensor {
-                return (@as(*model_if.gemma4.Gemma4Model, @ptrCast(@alignCast(mp)))).mediaForward(c, g, it, nt, kvc, sp, eo, eoff, causal);
-            }
-        }.f;
-
-        const embd_raw = media_embeddings.dataF32();
-        const embd_dim: u32 = @intCast(media_embeddings.ne()[0]);
-        const embd_heap = try self.allocator.dupe(f32, embd_raw);
-        defer self.allocator.free(embd_heap);
-
-        self.model.resetSSMStates();
-        // —— 嵌入数值有效性验证 ——
-        {
-            const n_total: usize = embd_heap.len;
-            const n_preview: usize = @min(n_total, 5);
-            var all_zero = true;
-            var has_nan = false;
-            for (embd_heap) |v| {
-                if (v != 0.0) all_zero = false;
-                if (std.math.isNan(v)) has_nan = true;
-            }
-            logger.info("Embedding validation: total={d} preview={d:.4} {d:.4} {d:.4} {d:.4} {d:.4} all_zero={} has_nan={}", .{
-                n_total,
-                if (n_preview > 0) embd_heap[0] else @as(f32, 0),
-                if (n_preview > 1) embd_heap[1] else @as(f32, 0),
-                if (n_preview > 2) embd_heap[2] else @as(f32, 0),
-                if (n_preview > 3) embd_heap[3] else @as(f32, 0),
-                if (n_preview > 4) embd_heap[4] else @as(f32, 0),
-                all_zero,
-                has_nan,
-            });
-            if (all_zero) logger.warn("  ⚠ all embedding values are ZERO!", .{});
-            if (has_nan) logger.warn("  ⚠ embedding contains NaN!", .{});
-        }
-        const pr = try prefill_mod.threeStagePrefill(self.ctx_graph, self.model, @ptrCast(@alignCast(gemma4_model)), &mediaForwardFn, &self.kv_cache_mgr, prefix_tokens, media_token_id, @intCast(media_count), embd_heap, embd_dim, suffix_tokens, &self.params, self.n_threads, self.allocator);
-
-        // Print verbose prompt if requested
-        if (self.verbose_prompt) {
-            try self.printVerbosePrompt(io, prompt_text, expanded.tokens.items, pr.logits, expanded.offsets);
-        }
-
-        var best_idx: i32 = 0;
-        var best_val: f32 = pr.logits[0];
-        for (pr.logits, 0..) |v, j| {
-            if (v > best_val) {
-                best_val = v;
-                best_idx = @intCast(j);
-            }
-        }
-        self.allocator.free(pr.logits);
-
-        try self.reserveDecodeGallocr();
-        var eog_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
-        defer eog_buf.deinit(self.allocator);
-        const t_tg_start = engine_common.currentTimeMs();
-
-        var current_token: i32 = best_idx;
-        var pos: i32 = pr.pos;
-        var gen_count: u32 = 0;
-
-        while (gen_count < max_tokens) {
-            if (self.tok.isEog(@intCast(current_token))) {
-                logger.debug("multimodalPrefill: EOG token {d} at pos {d}", .{ current_token, pos });
-                break;
-            }
-
-            // Skip tokens: compute forward but don't output anything.
-            // Use a loop to handle consecutive skip tokens (e.g. <|channel|>...<channel|> blocks).
-            if (self.tok.isSkipToken(@intCast(current_token))) {
-                const step = try self.inc_ctx.beginStep();
-                step.setToken(current_token);
-                var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
-                const il = try self.model.buildGraph(&ib, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
-                if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-                try step.graph.compute(self.n_threads);
-                current_token = sampler.Sampler.sampleGreedy(il);
-                pos += 1;
-                gen_count += 1;
-                continue;
-            }
-
-            // Decode and output the current token
-            var buf: [128]u8 = undefined;
-            const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
-            const decoded = buf[0..n];
-
-            // Check for EOG text in accumulated output
-            if (n > 0) {
-                try eog_buf.appendSlice(self.allocator, decoded);
-                if (self.tok.isEogText(eog_buf.items)) {
-                    if (!self.benchmark) {
-                        const sf = std.Io.File.stdout();
-                        try sf.writeStreamingAll(io, decoded);
-                    }
-                    break;
-                }
-            }
-
-            // Print decoded text
-            if (!self.benchmark and n > 0) {
-                const sf = std.Io.File.stdout();
-                try sf.writeStreamingAll(io, decoded);
-            }
-
-            // Compute next step
-            const step = try self.inc_ctx.beginStep();
-            step.setToken(current_token);
-            var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
-            const il = try self.model.buildGraph(&ib, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
-            if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-            try step.graph.compute(self.n_threads);
-            current_token = sampler.Sampler.sampleGreedy(il);
-            pos += 1;
-            gen_count += 1;
-        }
-
-        const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;
-        if (!self.benchmark) {
-            const sf = std.Io.File.stdout();
-            try sf.writeStreamingAll(io, "\n");
-        }
-        if (gen_count > 0) logger.info("Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
-    }
-
-    /// Qwen3VL 多模态 prefill。
-    /// Qwen3VL 使用标准的三阶段 prefill，但 mediaForward 使用 Qwen3VLModel.mediaForward。
-    fn multimodalPrefillQwen3VL(self: *InferenceEngine, io: std.Io, qwen3vl_model: *model_if.qwen3vl.Qwen3VLModel, expanded: *chat_template.TokenizedSegments, media_token_id: u32, n_media_tokens: i32, media_embeddings: *ggml.Tensor, max_tokens: u32, prompt_text: ?[]const u8) !void {
-        const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
-        const media_offset: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else 0;
-        const media_count: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_count else @intCast(n_media_tokens);
-        const prefix_tokens = if (media_offset > 0) expanded.tokens.items[0..media_offset] else &[_]u32{};
-        const suffix_start: u32 = media_offset + media_count;
-        const suffix_tokens = if (suffix_start < n_total_tokens) expanded.tokens.items[suffix_start..@as(usize, @intCast(n_total_tokens))] else &[_]u32{};
-
-        // —— 多模态嵌入替换对齐检查 ——
-        logger.info("=== Qwen3VL Multimodal embedding substitution check ===", .{});
-        logger.info("  media_offset    = {d}", .{media_offset});
-        logger.info("  media_count     = {d}", .{media_count});
-        logger.info("  n_media_tokens  = {d}", .{n_media_tokens});
-        logger.info("  prefix_tokens   = {d}", .{prefix_tokens.len});
-        logger.info("  suffix_tokens   = {d}", .{suffix_tokens.len});
-        logger.info("  n_total_tokens  = {d}", .{n_total_tokens});
-
-        const mediaForwardFn = struct {
-            fn f(mp: *anyopaque, c: *ggml.Context, g: *ggml.CGraph, it: *ggml.Tensor, nt: i32, kvc: ?*kv_cache.KVCache, sp: i32, eo: *ggml.Tensor, eoff: i32, causal: bool) anyerror!*ggml.Tensor {
-                return (@as(*model_if.qwen3vl.Qwen3VLModel, @ptrCast(@alignCast(mp)))).mediaForward(c, g, it, nt, kvc, sp, eo, eoff, causal);
-            }
-        }.f;
-
-        const embd_raw = media_embeddings.dataF32();
-        const embd_dim: u32 = @intCast(media_embeddings.ne()[0]);
-        const embd_heap = try self.allocator.dupe(f32, embd_raw);
-        defer self.allocator.free(embd_heap);
-
-        // —— 嵌入数值有效性验证 ——
-        {
-            const n_total: usize = embd_heap.len;
-            const n_preview: usize = @min(n_total, 5);
-            var all_zero = true;
-            var has_nan = false;
-            for (embd_heap) |v| {
-                if (v != 0.0) all_zero = false;
-                if (std.math.isNan(v)) has_nan = true;
-            }
-            logger.info("Embedding validation: total={d} preview={d:.4} {d:.4} {d:.4} {d:.4} {d:.4} all_zero={} has_nan={}", .{
-                n_total,
-                if (n_preview > 0) embd_heap[0] else @as(f32, 0),
-                if (n_preview > 1) embd_heap[1] else @as(f32, 0),
-                if (n_preview > 2) embd_heap[2] else @as(f32, 0),
-                if (n_preview > 3) embd_heap[3] else @as(f32, 0),
-                if (n_preview > 4) embd_heap[4] else @as(f32, 0),
-                all_zero,
-                has_nan,
-            });
-            if (all_zero) logger.warn("  ⚠ all embedding values are ZERO!", .{});
-            if (has_nan) logger.warn("  ⚠ embedding contains NaN!", .{});
-        }
-        const pr = try prefill_mod.threeStagePrefill(self.ctx_graph, self.model, @ptrCast(@alignCast(qwen3vl_model)), &mediaForwardFn, &self.kv_cache_mgr, prefix_tokens, media_token_id, @intCast(media_count), embd_heap, embd_dim, suffix_tokens, &self.params, self.n_threads, self.allocator);
-
-        // Print verbose prompt if requested
-        if (self.verbose_prompt) {
-            try self.printVerbosePrompt(io, prompt_text, expanded.tokens.items, pr.logits, expanded.offsets);
-        }
-
-        var best_idx: i32 = 0;
-        var best_val: f32 = pr.logits[0];
-        for (pr.logits, 0..) |v, j| {
-            if (v > best_val) {
-                best_val = v;
-                best_idx = @intCast(j);
-            }
-        }
-        self.allocator.free(pr.logits);
-
-        try self.reserveDecodeGallocr();
-        var eog_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
-        defer eog_buf.deinit(self.allocator);
-        const t_tg_start = engine_common.currentTimeMs();
-
-        var current_token: i32 = best_idx;
-        var pos: i32 = pr.pos;
-        var gen_count: u32 = 0;
-
-        while (gen_count < max_tokens) {
-            if (self.tok.isEog(@intCast(current_token))) {
-                logger.debug("multimodalPrefillQwen3VL: EOG token {d} at pos {d}", .{ current_token, pos });
-                break;
-            }
-
-            // Skip tokens: compute forward but don't output anything.
-            if (self.tok.isSkipToken(@intCast(current_token))) {
-                const step = try self.inc_ctx.beginStep();
-                step.setToken(current_token);
-                var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
-                const il = try self.model.buildGraph(&ib, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
-                if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-                try step.graph.compute(self.n_threads);
-                current_token = sampler.Sampler.sampleGreedy(il);
-                pos += 1;
-                gen_count += 1;
-                continue;
-            }
-
-            // Decode and output the current token
-            var buf: [128]u8 = undefined;
-            const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
-            const decoded = buf[0..n];
-
-            // Check for EOG text in accumulated output
-            if (n > 0) {
-                try eog_buf.appendSlice(self.allocator, decoded);
-                if (self.tok.isEogText(eog_buf.items)) {
-                    if (!self.benchmark) {
-                        const sf = std.Io.File.stdout();
-                        try sf.writeStreamingAll(io, decoded);
-                    }
-                    break;
-                }
-            }
-
-            // Print decoded text
-            if (!self.benchmark and n > 0) {
-                const sf = std.Io.File.stdout();
-                try sf.writeStreamingAll(io, decoded);
-            }
-
-            // Compute next step
-            const step = try self.inc_ctx.beginStep();
-            step.setToken(current_token);
-            var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
-            const il = try self.model.buildGraph(&ib, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
-            if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-            try step.graph.compute(self.n_threads);
-            current_token = sampler.Sampler.sampleGreedy(il);
-            pos += 1;
-            gen_count += 1;
-        }
-
-        const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;
-        if (!self.benchmark) {
-            const sf = std.Io.File.stdout();
-            try sf.writeStreamingAll(io, "\n");
-        }
-        if (gen_count > 0) logger.info("Qwen3VL Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
-    }
-
-    /// Scans the formatted prompt string for media placeholders (e.g., "<|image|>"),
-    /// then does segment-by-segment tokenization. This is a string-based approach
-    /// (matching llama.cpp's split-by-marker logic), unlike the old token-ID-based
-    /// approach which failed when "<|image|>" was not a single special token.
-    fn tokenizeWithMediaPlaceholders(
-        self: *InferenceEngine,
-        formatted_prompt: []const u8,
-        media_token_id: u32,
-        media_token_count: u32,
-        media_type: chat_template.MediaType,
-    ) !chat_template.TokenizedSegments {
-        // Step 1: Scan the formatted_prompt string for media placeholders.
-        // This is a string-based scan (matching llama.cpp's split by <__media__> marker).
-        const all_placeholders = try chat_template.scanPlaceholders(formatted_prompt, self.allocator);
-        defer self.allocator.free(all_placeholders);
-
-        // Count only placeholders of the requested media_type
-        var match_count: usize = 0;
-        for (all_placeholders) |ph| {
-            if (ph.media_type == media_type) match_count += 1;
-        }
-        if (match_count == 0) {
-            logger.warn("tokenizeWithMediaPlaceholders: no '{s}' placeholder found in prompt!", .{@tagName(media_type)});
-        }
-
-        // Step 2: Get beg/end markers (matching llama.cpp add_media: img_beg/img_end)
-        const beg_marker: []const u8 = blk: {
-            if (self.mtmd_context) |ctx| {
-                break :blk switch (media_type) {
-                    .image => ctx.img_beg,
-                    .audio => ctx.aud_beg,
-                    .none => "",
-                };
-            }
-            break :blk "";
-        };
-        const end_marker: []const u8 = blk: {
-            if (self.mtmd_context) |ctx| {
-                break :blk switch (media_type) {
-                    .image => ctx.img_end,
-                    .audio => ctx.aud_end,
-                    .none => "",
-                };
-            }
-            break :blk "";
-        };
-
-        // Step 3: Tokenize beg/end markers
-        var beg_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
-        defer beg_tokens.deinit(self.allocator);
-        if (beg_marker.len > 0) {
-            var encoded = try self.tok.encode(beg_marker, false, true);
-            defer encoded.deinit(self.allocator);
-            try beg_tokens.appendSlice(self.allocator, encoded.items);
-        }
-
-        var end_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
-        defer end_tokens.deinit(self.allocator);
-        if (end_marker.len > 0) {
-            var encoded = try self.tok.encode(end_marker, false, true);
-            defer encoded.deinit(self.allocator);
-            try end_tokens.appendSlice(self.allocator, encoded.items);
-        }
-
-        // Step 4: Build new token sequence segment by segment.
-        var new_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
-        errdefer new_tokens.deinit(self.allocator);
-
-        var offsets = std.ArrayListUnmanaged(chat_template.PlaceholderInfo){ .items = &.{}, .capacity = 0 };
-        errdefer offsets.deinit(self.allocator);
-
-        var consumed: usize = 0;
-        for (all_placeholders) |ph| {
-            if (ph.media_type != media_type) continue;
-
-            // Tokenize text before this placeholder
-            const text_segment = formatted_prompt[consumed..ph.start];
-            if (text_segment.len > 0) {
-                var encoded = try self.tok.encode(text_segment, false, true);
-                defer encoded.deinit(self.allocator);
-                try new_tokens.appendSlice(self.allocator, encoded.items);
-            }
-
-            // Add beg tokens (e.g. <|vision_start|>)
-            for (beg_tokens.items) |t| {
-                try new_tokens.append(self.allocator, t);
-            }
-
-            // Record placeholder offset (pointing to where media tokens start)
-            try offsets.append(self.allocator, .{
-                .start = 0,
-                .length = 0,
-                .media_type = media_type,
-                .token_count = media_token_count,
-                .token_offset = @intCast(new_tokens.items.len),
-            });
-
-            // Insert repeated media tokens (these will be replaced by vision/audio embeddings)
-            for (0..media_token_count) |_| {
-                try new_tokens.append(self.allocator, media_token_id);
-            }
-
-            // Add end tokens (e.g. <|vision_end|>)
-            for (end_tokens.items) |t| {
-                try new_tokens.append(self.allocator, t);
-            }
-
-            consumed = ph.start + ph.length;
-        }
-
-        // Tokenize remaining text after last placeholder
-        if (consumed < formatted_prompt.len) {
-            var encoded = try self.tok.encode(formatted_prompt[consumed..], false, true);
-            defer encoded.deinit(self.allocator);
-            try new_tokens.appendSlice(self.allocator, encoded.items);
-        }
-
-        logger.info("tokenizeWithMediaPlaceholders: {d} '{s}' placeholders expanded to {d} tokens each (total tokens={d}, beg={d} end={d})", .{
-            offsets.items.len,
-            @tagName(media_type),
-            media_token_count,
-            new_tokens.items.len,
-            beg_tokens.items.len,
-            end_tokens.items.len,
-        });
-
-        return chat_template.TokenizedSegments{
-            .tokens = new_tokens,
-            .offsets = try offsets.toOwnedSlice(self.allocator),
+    fn toMultimodalContext(self: *InferenceEngine) multimodal_mod.EngineContext {
+        return .{
             .allocator = self.allocator,
+            .ctx_graph = self.ctx_graph,
+            .arch = self.arch,
+            .model = self.model,
+            .params = self.params,
+            .tok = self.tok,
+            .kv_cache_mgr = &self.kv_cache_mgr,
+            .n_threads = self.n_threads,
+            .verbose_prompt = self.verbose_prompt,
+            .benchmark = self.benchmark,
+            .inc_ctx = &self.inc_ctx,
+            .mm_manager = if (self.mm_manager) |*m| m else null,
+            .mtmd_context = self.mtmd_context,
+            .capabilities = self.capabilities,
+            .chat_template_source = self.chat_template_source,
+            .system_prompt = self.system_prompt,
+            .no_chat_template = self.no_chat_template,
+            .no_jinja = self.no_jinja,
         };
     }
 };
-
-fn tokenizeTextSegment(ctx: ?*anyopaque, text: []const u8, alloc: std.mem.Allocator) ![]u32 {
-    const tok: *tokenizer.Tokenizer = @ptrCast(@alignCast(ctx orelse return error.NullCtx));
-    var result = try tok.encode(text, false, true);
-    defer result.deinit(alloc);
-    return try result.toOwnedSlice(alloc);
-}

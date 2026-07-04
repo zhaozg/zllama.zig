@@ -24,7 +24,8 @@ pub const gemma3 = @import("models/gemma3.zig");
 pub const gemma4 = @import("models/gemma4.zig");
 pub const embedding = @import("models/embedding.zig");
 
-/// RoPE 缩放配置
+pub const gemma4_graph = @import("models/gemma4_graph.zig");
+
 pub const RopeScaling = struct {
     rope_type: []const u8 = "",
     factor: f32 = 1.0,

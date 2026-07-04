@@ -357,6 +357,43 @@ pub fn build(b: *std.Build) void {
     // Let chat_template module import minja for Jinja rendering fallback
     chat_template_mod.addImport("minja", minja_mod);
 
+    // --- 核心引擎子模块（从 engine.zig 拆分 refact.md §1） ---
+    const decode_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/decode.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    decode_mod.addImport("ggml", ggml_mod);
+    decode_mod.addImport("model", model_mod);
+    decode_mod.addImport("graph_builder", graph_builder_mod);
+    decode_mod.addImport("graph_context", graph_context_mod);
+    decode_mod.addImport("kv_cache", kv_cache_mod);
+    decode_mod.addImport("tokenizer", tokenizer_mod);
+    decode_mod.addImport("sampler", sampler_mod);
+    decode_mod.addImport("engine_common", engine_common_mod);
+
+    const verbose_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/verbose.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    verbose_mod.addImport("tokenizer", tokenizer_mod);
+    verbose_mod.addImport("chat_template", chat_template_mod);
+
+    const embedding_gen_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/embedding_gen.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    embedding_gen_mod.addImport("ggml", ggml_mod);
+    embedding_gen_mod.addImport("model", model_mod);
+    embedding_gen_mod.addImport("graph_builder", graph_builder_mod);
+    embedding_gen_mod.addImport("tokenizer", tokenizer_mod);
+
+
     // ======================================================================
     // 多模态模块
     // ======================================================================
@@ -488,6 +525,30 @@ pub fn build(b: *std.Build) void {
         tokenize_mod.addImport("mm", mm_manager_mod);
         mm_manager_mod.addImport("tokenize", tokenize_mod);
     }
+
+
+    // --- 核心引擎多模态子模块（从 engine.zig 拆分 refact.md §1） ---
+    const multimodal_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/multimodal.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    multimodal_mod.addImport("ggml", ggml_mod);
+    multimodal_mod.addImport("model", model_mod);
+    multimodal_mod.addImport("graph_builder", graph_builder_mod);
+    multimodal_mod.addImport("kv_cache", kv_cache_mod);
+    multimodal_mod.addImport("tokenizer", tokenizer_mod);
+    multimodal_mod.addImport("sampler", sampler_mod);
+    multimodal_mod.addImport("chat_template", chat_template_mod);
+    multimodal_mod.addImport("mtmd", mm_manager_mod);
+    multimodal_mod.addImport("debug", debug_mod);
+    multimodal_mod.addImport("preprocess", mm_preprocess_mod);
+    multimodal_mod.addImport("engine_common", engine_common_mod);
+    multimodal_mod.addImport("prefill", prefill_mod);
+    multimodal_mod.addImport("decode", decode_mod);
+    multimodal_mod.addImport("verbose", verbose_mod);
+    multimodal_mod.addImport("graph_context", graph_context_mod);
     // 主可执行文件 zllama
     // ======================================================================
     const exe_mod = b.createModule(.{
@@ -515,6 +576,10 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("prefill", prefill_mod);
     exe_mod.addImport("mtmd", mm_manager_mod);
     exe_mod.addImport("debug", debug_mod);
+    exe_mod.addImport("decode", decode_mod);
+    exe_mod.addImport("verbose", verbose_mod);
+    exe_mod.addImport("embedding_gen", embedding_gen_mod);
+    exe_mod.addImport("multimodal", multimodal_mod);
 
     const exe = b.addExecutable(.{
         .name = "zllama",
@@ -579,6 +644,10 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("utils", utils_mod);
     test_root_mod.addImport("mtmd", mm_manager_mod);
     test_root_mod.addImport("debug", debug_mod);
+    test_root_mod.addImport("decode", decode_mod);
+    test_root_mod.addImport("verbose", verbose_mod);
+    test_root_mod.addImport("embedding_gen", embedding_gen_mod);
+    test_root_mod.addImport("multimodal", multimodal_mod);
 
     test_root_mod.addImport("graph", mm_graph_mod);
 
