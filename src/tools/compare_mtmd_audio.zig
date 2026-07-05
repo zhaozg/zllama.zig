@@ -314,8 +314,6 @@ pub const MtmdAudioComparator = struct {
 
         model.setKVCacheContext(kv_cache_ctx);
 
-        const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(model.ptr));
-
         const audio_token_count: i32 = @intCast(n_audio_tokens);
         const audio_embd_offset: u32 = if (expanded.offsets.len > 0)
             expanded.offsets[0].token_offset
@@ -335,18 +333,10 @@ pub const MtmdAudioComparator = struct {
             prefix_tokens.len, audio_token_count, suffix_tokens.len,
         });
 
-        // Adapter: Gemma4Model.forwardWithEmbdOverride → prefill.MediaForwardFn
-        const mediaForwardFn = struct {
-            fn f(mp: *anyopaque, c: *ggml.Context, g: *ggml.CGraph, it: *ggml.Tensor, nt: i32, kvc: ?*kv_cache.KVCache, sp: i32, eo: *ggml.Tensor, eoff: i32, causal: bool) anyerror!*ggml.Tensor {
-                return (@as(*model_if.gemma4.Gemma4Model, @ptrCast(@alignCast(mp)))).mediaForward(c, g, it, nt, kvc, sp, eo, eoff, causal);
-            }
-        }.f;
-
+        // Adapter removed: model.buildMM() is now a vtable function.
         const pr = try prefill.threeStagePrefill(
             graph_ctx,
             model,
-            @ptrCast(@alignCast(gemma4_model)),
-            &mediaForwardFn,
             &kv_cache_mgr,
             prefix_tokens,
             audio_token_id,

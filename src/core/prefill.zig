@@ -44,31 +44,11 @@ pub const PrefillResult = struct {
     }
 };
 
-/// Function pointer type for the media embedding forward pass (Pass 2).
-/// The callee must build a graph with embedding override for non-causal attention.
-/// The input_tokens parameter provides token IDs for per-layer embedding lookup
-/// (typically the media placeholder token ID repeated n_media times).
-pub const MediaForwardFn = *const fn (
-    /// Concrete model pointer (e.g., *Gemma4Model)
-    model_ptr: *anyopaque,
-    ctx: *ggml.Context,
-    graph: *ggml.CGraph,
-    input_tokens: *ggml.Tensor,
-    n_tokens: i32,
-    kv_cache_mgr: ?*kv_cache.KVCache,
-    start_pos: i32,
-    embd_override: *ggml.Tensor,
-    embd_offset: i32,
-    causal: bool,
-) anyerror!*ggml.Tensor;
-
 /// Execute a three-stage multimodal prefill.
 ///
 /// Parameters:
 /// - graph_ctx: ggml context for graph building (caller owns, RESET between passes)
-/// - model_instance: the model instance (for Pass 1 and Pass 3 via buildGraph)
-/// - model_ptr: opaque pointer to the concrete model (for Pass 2 via mediaForwardFn)
-/// - mediaForwardFn: function to build the media pass graph
+/// - model_instance: the model instance (for Pass 1/2/3 via buildGraph and buildMM)
 /// - kv_cache_mgr: KV cache manager (shared across all three passes)
 /// - prefix_tokens: token IDs for text before the placeholder
 /// - media_token_id: the placeholder token ID (e.g., <|image|> or <|audio|>)
@@ -82,8 +62,6 @@ pub const MediaForwardFn = *const fn (
 pub fn threeStagePrefill(
     graph_ctx: *ggml.Context,
     model_instance: model.ModelInstance,
-    model_ptr: *anyopaque,
-    mediaForwardFn: MediaForwardFn,
     kv_cache_mgr: *kv_cache.KVCache,
     prefix_tokens: []const u32,
     media_token_id: u32,
@@ -192,13 +170,12 @@ pub fn threeStagePrefill(
             }
 
             var p2_graph = try ggml.CGraph.initReserved(graph_ctx, 16384);
-            _ = try mediaForwardFn(
-                model_ptr,
+            _ = try model_instance.buildMM(
                 graph_ctx,
                 p2_graph,
                 p2_input,
                 chunk_size,
-                kv_cache_ptr,
+                @ptrCast(kv_cache_ptr),
                 chunk_pos,
                 p2_embd,
                 0,

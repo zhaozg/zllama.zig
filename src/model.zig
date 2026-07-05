@@ -165,6 +165,18 @@ pub const ModelInstance = struct {
     pub fn deinit(self: ModelInstance, allocator: std.mem.Allocator) void {
         self.vtable.deinit(self.ptr, allocator);
     }
+
+    /// Build a multimodal forward graph with embedding override.
+    /// For models that support vision/audio (gemma4, qwen3vl), builds
+    /// the LLM forward pass with pre-computed media embeddings substituted
+    /// in place of placeholder tokens. Returns error.MMNotSupported for
+    /// text-only models.
+    pub fn buildMM(self: ModelInstance, ctx: *ggml.Context, graph: *ggml.CGraph, input_tokens: *ggml.Tensor, n_tokens: i32, cache: ?*anyopaque, pos: i32, embd_override: *ggml.Tensor, embd_offset: i32, causal: bool) !*ggml.Tensor {
+        if (self.vtable.buildMM) |f| {
+            return f(self.ptr, ctx, graph, input_tokens, n_tokens, cache, pos, embd_override, embd_offset, causal);
+        }
+        return error.MMNotSupported;
+    }
 };
 
 /// 模型虚表定义
@@ -179,6 +191,10 @@ pub const ModelVTable = struct {
     /// 非 null 时，返回的切片长度必须等于 n_layer。
     /// 调用者负责释放返回的切片。
     getPerLayerMaxSeqLen: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) ?[]u32 = null,
+    /// 构建多模态前向图（带嵌入覆盖）。
+    /// 用于视觉/音频等媒体 token 的非因果注意力前向。
+    /// 返回 null 或未设置表示该模型不支持多模态。
+    buildMM: ?*const fn (ptr: *anyopaque, ctx: *ggml.Context, graph: *ggml.CGraph, input_tokens: *ggml.Tensor, n_tokens: i32, cache: ?*anyopaque, pos: i32, embd_override: *ggml.Tensor, embd_offset: i32, causal: bool) anyerror!*ggml.Tensor = null,
 };
 
 /// 模型能力描述

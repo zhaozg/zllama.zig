@@ -365,6 +365,7 @@ pub const Qwen3VLModel = struct {
         .getParams = getParamsAdapter,
         .resetSSMStates = null,
         .setKVCacheContext = null,
+        .buildMM = buildMMAdapter,
     };
 
     fn deinitAdapter(data: *anyopaque, allocator: std.mem.Allocator) void {
@@ -389,6 +390,23 @@ pub const Qwen3VLModel = struct {
     fn getParamsAdapter(data: *anyopaque) *const model.ModelParams {
         const self = @as(*Qwen3VLModel, @ptrCast(@alignCast(data)));
         return self.getParams();
+    }
+
+    fn buildMMAdapter(
+        data: *anyopaque,
+        ctx: *ggml.Context,
+        graph: *ggml.CGraph,
+        input_tokens: *ggml.Tensor,
+        n_tokens: i32,
+        cache: ?*anyopaque,
+        pos: i32,
+        embd_override: *ggml.Tensor,
+        embd_offset: i32,
+        causal: bool,
+    ) anyerror!*ggml.Tensor {
+        const self = @as(*Qwen3VLModel, @ptrCast(@alignCast(data)));
+        const kv_cache_mgr: ?*kv_cache.KVCache = if (cache) |c| @ptrCast(@alignCast(c)) else null;
+        return self.mediaForward(ctx, graph, input_tokens, n_tokens, kv_cache_mgr, pos, embd_override, embd_offset, causal);
     }
 };
 

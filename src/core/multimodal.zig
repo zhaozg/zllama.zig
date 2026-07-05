@@ -1,8 +1,8 @@
 //! Multimodal generation — vision + audio inference pipelines.
 //!
 //! Extracted from engine.zig (refact.md §1) to keep files ≤600 lines.
-//! Contains generateWithImage, generateWithAudio, multimodalPrefill (Gemma4),
-//! multimodalPrefillQwen3VL, and tokenizeWithMediaPlaceholders.
+//! Contains generateWithImage, generateWithAudio, multimodalPrefillUnified,
+//! and tokenizeWithMediaPlaceholders.
 //!
 //! Reference: llama.cpp llama_mmd.h / gemma4.cpp / qwen3vl.cpp
 
@@ -76,7 +76,7 @@ fn computeTargetSize(
                 effective_max_pixels,
             );
             logger.info("Dynamic resize: {d}x{d} -> {d}x{d} (align={d}, min_px={d}, max_px={d})", .{
-                src_width,  src_height,         result.width,       result.height,
+                src_width,  src_height,         result.width,         result.height,
                 align_size, p.image_min_pixels, effective_max_pixels,
             });
             return result;
@@ -217,17 +217,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     var expanded = try tokenizeWithMediaPlaceholders(ectx, formatted_prompt, image_token_id, @intCast(n_vision_tokens), .image);
     defer expanded.deinit();
 
-    switch (ectx.arch) {
-        .gemma4 => {
-            const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(ectx.model.ptr));
-            try multimodalPrefill(ectx, io, gemma4_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt);
-        },
-        .qwen3vl => {
-            const qwen3vl_model: *model_if.qwen3vl.Qwen3VLModel = @ptrCast(@alignCast(ectx.model.ptr));
-            try multimodalPrefillQwen3VL(ectx, io, qwen3vl_model, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt);
-        },
-        else => return error.VisionNotSupportedForArchitecture,
-    }
+    try multimodalPrefillUnified(ectx, io, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt, @tagName(ectx.arch));
 }
 
 /// Generate text from an audio file + prompt.
@@ -239,7 +229,6 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
         logger.err("  Currently only Gemma4 supports audio.", .{});
         return error.AudioNotSupportedForArchitecture;
     }
-    const gemma4_model: *model_if.gemma4.Gemma4Model = @ptrCast(@alignCast(ectx.model.ptr));
 
     if (ectx.mtmd_context) |ctx| {
         logger.info("Audio markers from MtmdContext: '{s}' / '{s}'", .{ ctx.aud_beg, ctx.aud_end });
@@ -311,20 +300,20 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
 
     var expanded = try tokenizeWithMediaPlaceholders(ectx, formatted_prompt, audio_token_id, @intCast(n_audio_tokens), .audio);
     defer expanded.deinit();
-    try multimodalPrefill(ectx, io, gemma4_model, &expanded, audio_token_id, @intCast(n_audio_tokens), audio_embeddings, max_tokens, formatted_prompt);
+    try multimodalPrefillUnified(ectx, io, &expanded, audio_token_id, @intCast(n_audio_tokens), audio_embeddings, max_tokens, formatted_prompt, "Audio");
 }
 
-/// Three-stage multimodal prefill + decode for Gemma4.
-fn multimodalPrefill(
+/// Unified three-stage multimodal prefill + decode (all architectures via vtable).
+fn multimodalPrefillUnified(
     ectx: *EngineContext,
     io: std.Io,
-    gemma4_model: *model_if.gemma4.Gemma4Model,
     expanded: *chat_template.TokenizedSegments,
     media_token_id: u32,
     n_media_tokens: i32,
     media_embeddings: *ggml.Tensor,
     max_tokens: u32,
     prompt_text: ?[]const u8,
+    label: []const u8,
 ) !void {
     const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
     const media_offset: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else 0;
@@ -333,18 +322,12 @@ fn multimodalPrefill(
     const suffix_start: u32 = media_offset + media_count;
     const suffix_tokens = if (suffix_start < n_total_tokens) expanded.tokens.items[suffix_start..@as(usize, @intCast(n_total_tokens))] else &[_]u32{};
 
-    logger.info("=== Multimodal embedding substitution check ===", .{});
+    logger.info("=== Multimodal embedding substitution check ({s}) ===", .{label});
     logger.info("  media_offset    = {d}", .{media_offset});
     logger.info("  media_count     = {d}", .{media_count});
     logger.info("  n_media_tokens  = {d}", .{n_media_tokens});
     logger.info("  prefix_tokens   = {d}", .{prefix_tokens.len});
     logger.info("  suffix_tokens   = {d}", .{suffix_tokens.len});
-
-    const mediaForwardFn = struct {
-        fn f(mp: *anyopaque, c: *ggml.Context, g: *ggml.CGraph, it: *ggml.Tensor, nt: i32, kvc: ?*kv_cache.KVCache, sp: i32, eo: *ggml.Tensor, eoff: i32, causal: bool) anyerror!*ggml.Tensor {
-            return (@as(*model_if.gemma4.Gemma4Model, @ptrCast(@alignCast(mp)))).mediaForward(c, g, it, nt, kvc, sp, eo, eoff, causal);
-        }
-    }.f;
 
     const embd_raw = media_embeddings.dataF32();
     const embd_dim: u32 = @intCast(media_embeddings.ne()[0]);
@@ -375,7 +358,20 @@ fn multimodalPrefill(
         if (has_nan) logger.warn("  ⚠ embedding contains NaN!", .{});
     }
 
-    const pr = try prefill_mod.threeStagePrefill(ectx.ctx_graph, ectx.model, @ptrCast(@alignCast(gemma4_model)), &mediaForwardFn, ectx.kv_cache_mgr, prefix_tokens, media_token_id, @intCast(media_count), embd_heap, embd_dim, suffix_tokens, &ectx.params, ectx.n_threads, ectx.allocator);
+    const pr = try prefill_mod.threeStagePrefill(
+        ectx.ctx_graph,
+        ectx.model,
+        ectx.kv_cache_mgr,
+        prefix_tokens,
+        media_token_id,
+        @intCast(media_count),
+        embd_heap,
+        embd_dim,
+        suffix_tokens,
+        &ectx.params,
+        ectx.n_threads,
+        ectx.allocator,
+    );
 
     if (ectx.verbose_prompt) {
         try verbose_mod.printVerbosePrompt(io, ectx.allocator, &ectx.tok, prompt_text, expanded.tokens.items, pr.logits, expanded.offsets);
@@ -447,112 +443,7 @@ fn multimodalPrefill(
         const sf = std.Io.File.stdout();
         try sf.writeStreamingAll(io, "\n");
     }
-    if (gen_count > 0) logger.info("Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
-}
-
-/// Three-stage multimodal prefill + decode for Qwen3VL.
-fn multimodalPrefillQwen3VL(
-    ectx: *EngineContext,
-    io: std.Io,
-    qwen3vl_model: *model_if.qwen3vl.Qwen3VLModel,
-    expanded: *chat_template.TokenizedSegments,
-    media_token_id: u32,
-    n_media_tokens: i32,
-    media_embeddings: *ggml.Tensor,
-    max_tokens: u32,
-    prompt_text: ?[]const u8,
-) !void {
-    const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
-    const media_offset: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else 0;
-    const media_count: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_count else @intCast(n_media_tokens);
-    const prefix_tokens = if (media_offset > 0) expanded.tokens.items[0..media_offset] else &[_]u32{};
-    const suffix_start: u32 = media_offset + media_count;
-    const suffix_tokens = if (suffix_start < n_total_tokens) expanded.tokens.items[suffix_start..@as(usize, @intCast(n_total_tokens))] else &[_]u32{};
-
-    const mediaForwardFn = struct {
-        fn f(mp: *anyopaque, c: *ggml.Context, g: *ggml.CGraph, it: *ggml.Tensor, nt: i32, kvc: ?*kv_cache.KVCache, sp: i32, eo: *ggml.Tensor, eoff: i32, causal: bool) anyerror!*ggml.Tensor {
-            return (@as(*model_if.qwen3vl.Qwen3VLModel, @ptrCast(@alignCast(mp)))).mediaForward(c, g, it, nt, kvc, sp, eo, eoff, causal);
-        }
-    }.f;
-
-    const embd_raw = media_embeddings.dataF32();
-    const embd_dim: u32 = @intCast(media_embeddings.ne()[0]);
-    const embd_heap = try ectx.allocator.dupe(f32, embd_raw);
-    defer ectx.allocator.free(embd_heap);
-
-    const pr = try prefill_mod.threeStagePrefill(ectx.ctx_graph, ectx.model, @ptrCast(@alignCast(qwen3vl_model)), &mediaForwardFn, ectx.kv_cache_mgr, prefix_tokens, media_token_id, @intCast(media_count), embd_heap, embd_dim, suffix_tokens, &ectx.params, ectx.n_threads, ectx.allocator);
-
-    if (ectx.verbose_prompt) {
-        try verbose_mod.printVerbosePrompt(io, ectx.allocator, &ectx.tok, prompt_text, expanded.tokens.items, pr.logits, expanded.offsets);
-    }
-
-    var best_idx: i32 = 0;
-    var best_val: f32 = pr.logits[0];
-    for (pr.logits, 0..) |v, j| {
-        if (v > best_val) {
-            best_val = v;
-            best_idx = @intCast(j);
-        }
-    }
-    ectx.allocator.free(pr.logits);
-
-    try decode_mod.reserveDecodeGallocr(ectx.allocator, ectx.kv_cache_mgr, ectx.inc_ctx, ectx.model, &ectx.params);
-    var eog_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
-    defer eog_buf.deinit(ectx.allocator);
-    const t_tg_start = engine_common.currentTimeMs();
-
-    var current_token: i32 = best_idx;
-    var pos: i32 = pr.pos;
-    var gen_count: u32 = 0;
-
-    while (gen_count < max_tokens) {
-        if (ectx.tok.isEog(@intCast(current_token))) break;
-        if (ectx.tok.isSkipToken(@intCast(current_token))) {
-            const step = try ectx.inc_ctx.beginStep();
-            step.setToken(current_token);
-            var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &ectx.params, ectx.allocator);
-            const il = try ectx.model.buildGraph(&ib, step.input_token, 1, @ptrCast(ectx.kv_cache_mgr), pos);
-            if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-            try step.graph.compute(ectx.n_threads);
-            current_token = sampler.Sampler.sampleGreedy(il);
-            pos += 1;
-            gen_count += 1;
-            continue;
-        }
-        var buf: [128]u8 = undefined;
-        const n = try ectx.tok.decodeSingle(@intCast(current_token), &buf);
-        const decoded = buf[0..n];
-        if (n > 0) {
-            try eog_buf.appendSlice(ectx.allocator, decoded);
-            if (ectx.tok.isEogText(eog_buf.items)) {
-                if (!ectx.benchmark) {
-                    const sf = std.Io.File.stdout();
-                    try sf.writeStreamingAll(io, decoded);
-                }
-                break;
-            }
-        }
-        if (!ectx.benchmark and n > 0) {
-            const sf = std.Io.File.stdout();
-            try sf.writeStreamingAll(io, decoded);
-        }
-        const step = try ectx.inc_ctx.beginStep();
-        step.setToken(current_token);
-        var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &ectx.params, ectx.allocator);
-        const il = try ectx.model.buildGraph(&ib, step.input_token, 1, @ptrCast(ectx.kv_cache_mgr), pos);
-        if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-        try step.graph.compute(ectx.n_threads);
-        current_token = sampler.Sampler.sampleGreedy(il);
-        pos += 1;
-        gen_count += 1;
-    }
-
-    const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;
-    if (!ectx.benchmark) {
-        const sf = std.Io.File.stdout();
-        try sf.writeStreamingAll(io, "\n");
-    }
-    if (gen_count > 0) logger.info("Qwen3VL Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
+    if (gen_count > 0) logger.info("{s} Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ label, gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
 }
 
 // ============================================================================
