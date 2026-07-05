@@ -155,6 +155,13 @@ pub const ModelInstance = struct {
         }
     }
 
+    pub fn getPerLayerMaxSeqLen(self: ModelInstance, allocator: std.mem.Allocator) ?[]u32 {
+        if (self.vtable.getPerLayerMaxSeqLen) |f| {
+            return f(self.ptr, allocator);
+        }
+        return null;
+    }
+
     pub fn deinit(self: ModelInstance, allocator: std.mem.Allocator) void {
         self.vtable.deinit(self.ptr, allocator);
     }
@@ -167,6 +174,11 @@ pub const ModelVTable = struct {
     resetSSMStates: ?*const fn (ptr: *anyopaque) void = null,
     setKVCacheContext: ?*const fn (ptr: *anyopaque, ctx: *ggml.Context) void = null,
     deinit: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void,
+    /// 获取每层的最大序列长度（ISWA 模式）。
+    /// 返回 null 表示所有层使用相同的 max_seq_len。
+    /// 非 null 时，返回的切片长度必须等于 n_layer。
+    /// 调用者负责释放返回的切片。
+    getPerLayerMaxSeqLen: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) ?[]u32 = null,
 };
 
 /// 模型能力描述

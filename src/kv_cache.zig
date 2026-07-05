@@ -13,6 +13,8 @@ pub const LayerCache = struct {
     k: *ggml.Tensor, // [head_dim_k, n_kv_head, max_seq_len]
     v: *ggml.Tensor, // [head_dim_v, n_kv_head, max_seq_len]
     current_len: u32, // 当前已使用的长度
+    /// 本层最大序列长度（SWA 层使用滑动窗口大小，非 SWA 层使用完整上下文）
+    max_seq_len: u32,
     /// 实际存储在本层的 n_kv_head（可能小于全局 max）
     n_kv_head_actual: u32,
     /// 实际存储在本层的 K head_dim
@@ -54,11 +56,31 @@ pub const KVCache = struct {
         max_seq_len: u32,
         allocator: std.mem.Allocator,
     ) !KVCache {
+        // 所有层使用相同的 max_seq_len
+        const per_layer_lens = try allocator.alloc(u32, n_layer);
+        defer allocator.free(per_layer_lens);
+        @memset(per_layer_lens, max_seq_len);
+        return initWithPerLayerLens(ctx, n_layer, n_kv_head, head_dim_k, head_dim_v, per_layer_lens, allocator);
+    }
+
+    /// 初始化 KV Cache，每层可指定不同的 max_seq_len（ISWA 模式）
+    /// SWA 层使用滑动窗口大小，非 SWA 层使用完整上下文长度。
+    /// 参考 llama.cpp llama_kv_cache_iswa 的双缓存设计。
+    pub fn initWithPerLayerLens(
+        ctx: *ggml.Context,
+        n_layer: u32,
+        n_kv_head: u32,
+        head_dim_k: u32,
+        head_dim_v: u32,
+        per_layer_max_seq_len: []const u32,
+        allocator: std.mem.Allocator,
+    ) !KVCache {
         var layers = try allocator.alloc(LayerCache, n_layer);
 
         for (0..n_layer) |i| {
-            // K Cache: [head_dim_k, n_kv_head, max_seq_len]
-            const k = try ctx.newTensor3d(.f32, @intCast(head_dim_k), @intCast(n_kv_head), @intCast(max_seq_len));
+            const layer_max_seq = per_layer_max_seq_len[i];
+            // K Cache: [head_dim_k, n_kv_head, layer_max_seq]
+            const k = try ctx.newTensor3d(.f32, @intCast(head_dim_k), @intCast(n_kv_head), @intCast(layer_max_seq));
             {
                 var buf: [64]u8 = undefined;
                 const slice = try std.fmt.bufPrint(&buf, "cache.k.{d}", .{i});
@@ -66,8 +88,8 @@ pub const KVCache = struct {
                 k.setName(buf[0..slice.len :0]);
             }
 
-            // V Cache: [head_dim_v, n_kv_head, max_seq_len]
-            const v = try ctx.newTensor3d(.f32, @intCast(head_dim_v), @intCast(n_kv_head), @intCast(max_seq_len));
+            // V Cache: [head_dim_v, n_kv_head, layer_max_seq]
+            const v = try ctx.newTensor3d(.f32, @intCast(head_dim_v), @intCast(n_kv_head), @intCast(layer_max_seq));
             {
                 var buf: [64]u8 = undefined;
                 const slice = try std.fmt.bufPrint(&buf, "cache.v.{d}", .{i});
@@ -79,17 +101,24 @@ pub const KVCache = struct {
                 .k = k,
                 .v = v,
                 .current_len = 0,
+                .max_seq_len = layer_max_seq,
                 .n_kv_head_actual = n_kv_head,
                 .head_dim_k_actual = head_dim_k,
                 .head_dim_v_actual = head_dim_v,
             };
         }
 
-        log.info("KV Cache initialized: {d} layers, K:[{d}, {d}, {d}] V:[{d}, {d}, {d}]", .{ n_layer, head_dim_k, n_kv_head, max_seq_len, head_dim_v, n_kv_head, max_seq_len });
+        // 计算全局 max_seq_len（所有层的最大值）
+        var global_max: u32 = 0;
+        for (per_layer_max_seq_len) |l| {
+            if (l > global_max) global_max = l;
+        }
+
+        log.info("KV Cache initialized: {d} layers, K:[{d}, {d}, *] V:[{d}, {d}, *], max_seq={d}", .{ n_layer, head_dim_k, n_kv_head, head_dim_v, n_kv_head, global_max });
 
         return KVCache{
             .layers = layers,
-            .max_seq_len = max_seq_len,
+            .max_seq_len = global_max,
             .n_kv_head = n_kv_head,
             .head_dim = head_dim_k,
             .head_dim_k = head_dim_k,
@@ -111,10 +140,12 @@ pub const KVCache = struct {
 
     /// 获取指定层的 K Cache 视图 [head_dim_k_actual, n_kv_head_actual, seq_len]
     /// 对于共享 KV 层（current_len == 0），使用全局最大长度。
+    /// 视图长度限制在该层的 max_seq_len 以内，防止越界。
     pub fn getKView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
-        // 使用全局最大长度而非层自身长度，支持共享 KV 层
-        const len: i64 = @intCast(self.currentLen());
+        // 使用全局最大长度，但限制在该层的 max_seq_len 以内
+        const global_len = self.currentLen();
+        const len: i64 = @intCast(@min(global_len, layer.max_seq_len));
         const hdim: i64 = @intCast(layer.head_dim_k_actual);
         const nkv: i64 = @intCast(layer.n_kv_head_actual);
 
@@ -127,9 +158,11 @@ pub const KVCache = struct {
 
     /// 获取指定层的 V Cache 视图 [head_dim_v_actual, n_kv_head_actual, seq_len]
     /// 对于共享 KV 层（current_len == 0），使用全局最大长度。
+    /// 视图长度限制在该层的 max_seq_len 以内，防止越界。
     pub fn getVView(self: *KVCache, ctx: *ggml.Context, layer_idx: usize) *ggml.Tensor {
         const layer = &self.layers[layer_idx];
-        const len: i64 = @intCast(self.currentLen());
+        const global_len = self.currentLen();
+        const len: i64 = @intCast(@min(global_len, layer.max_seq_len));
         const hdim: i64 = @intCast(layer.head_dim_v_actual);
         const nkv: i64 = @intCast(layer.n_kv_head_actual);
 
@@ -152,6 +185,12 @@ pub const KVCache = struct {
     ) void {
         const layer = &self.layers[layer_idx];
         const offset = layer.current_len;
+
+        // 检查是否超出本层最大序列长度
+        if (offset + n_tokens > layer.max_seq_len) {
+            log.err("setKv layer {d}: offset={d} + n_tokens={d} > max_seq_len={d}", .{ layer_idx, offset, n_tokens, layer.max_seq_len });
+            @panic("KV cache overflow: exceeded per-layer max_seq_len");
+        }
 
         // 使用实际张量维度（支持 per-layer 变化的 n_kv_head/head_dim）
         const actual_hdim_k: i64 = new_k.ne()[0];
@@ -185,9 +224,11 @@ pub const KVCache = struct {
     /// 设置所有层的 cache 长度为指定值。
     /// 用于构建 worst-case 计算图进行 gallocr 预规划。
     /// 调用者负责在预规划完成后恢复原始长度。
+    /// 每层的长度会被限制在该层的 (max_seq_len - 1) 以内，
+    /// 确保后续 setKv 写入 1 个 token 时不会溢出。
     pub fn setAllLengths(self: *KVCache, len: u32) void {
         for (self.layers) |*layer| {
-            layer.current_len = len;
+            layer.current_len = @min(len, layer.max_seq_len -| 1);
         }
     }
 

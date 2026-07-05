@@ -122,11 +122,21 @@ pub const InferenceEngine = struct {
         const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
         errdefer ctx_weights.deinit();
         const ctx_kv_cache = try ggml.Context.init(mem_size_estimate);
-        const max_seq_len = @min(params.max_seq_len, 2048);
+        const max_seq_len = params.max_seq_len;
         const hdim_kv = params.n_head_dim;
         const hdim_k = @max(params.n_head_dim, params.n_head_dim_k);
         const hdim_v = if (params.n_head_dim_v > 0) @max(params.n_head_dim, params.n_head_dim_v) else hdim_kv;
-        var kv_cache_mgr = try kv_cache.KVCache.initWithKVDim(ctx_kv_cache, params.n_layer, params.n_kv_head, hdim_k, hdim_v, max_seq_len, allocator);
+        var kv_cache_mgr: kv_cache.KVCache = undefined;
+        {
+            // 检查模型是否支持每层不同的 max_seq_len（ISWA 模式）
+            const per_layer_lens = model.getPerLayerMaxSeqLen(allocator);
+            if (per_layer_lens) |lens| {
+                defer allocator.free(lens);
+                kv_cache_mgr = try kv_cache.KVCache.initWithPerLayerLens(ctx_kv_cache, params.n_layer, params.n_kv_head, hdim_k, hdim_v, lens, allocator);
+            } else {
+                kv_cache_mgr = try kv_cache.KVCache.initWithKVDim(ctx_kv_cache, params.n_layer, params.n_kv_head, hdim_k, hdim_v, max_seq_len, allocator);
+            }
+        }
         errdefer kv_cache_mgr.deinit(allocator);
         model.setKVCacheContext(ctx_kv_cache);
         const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);

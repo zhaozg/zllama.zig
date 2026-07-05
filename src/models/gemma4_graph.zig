@@ -390,14 +390,14 @@ pub const Gemma4Graph = struct {
                 }
             }
 
-            const cache_len: i64 = if (kv_cache_mgr) |cache| blk: {
-                if (causal) {
-                    break :blk @as(i64, @intCast(cache.currentLen()));
-                } else {
-                    // For non-causal pass, use n_tokens as the effective length
-                    // since we're attending to all media tokens simultaneously.
-                    break :blk n_tokens_i64;
-                }
+            // Use the actual K tensor's sequence length (ne[2]) for cache_len,
+            // not the global currentLen(), because getKView may clamp to per-layer max_seq_len.
+            const cache_len: i64 = if (causal and kv_cache_mgr != null) blk: {
+                break :blk k_attn.ne()[2];
+            } else if (!causal and kv_cache_mgr != null) blk: {
+                // For non-causal pass, use n_tokens as the effective length
+                // since we're attending to all media tokens simultaneously.
+                break :blk n_tokens_i64;
             } else n_tokens_i64;
 
             attn_out = attention.scaledDotProductAttention(ctx, q_use, k_attn, v_attn, .{
@@ -430,7 +430,9 @@ pub const Gemma4Graph = struct {
                     q_use = ggml.reshape3d(ctx, q, head_dim_k_cache, n_head_eff, n_tokens_i64);
                 }
 
-                const cache_len: i64 = @as(i64, @intCast(cache.currentLen()));
+                // Use the actual K cache tensor's sequence length (ne[2]),
+                // not the global currentLen(), because getKView may clamp to per-layer max_seq_len.
+                const cache_len: i64 = k_cache.ne()[2];
 
                 attn_out = attention.scaledDotProductAttention(ctx, q_use, k_cache, v_cache, .{
                     .n_head = n_head_eff,

@@ -316,6 +316,7 @@ pub const Gemma4Model = struct {
         .buildGraph = buildGraphAdapter,
         .getParams = getParamsAdapter,
         .resetSSMStates = resetSSMStatesAdapter,
+        .getPerLayerMaxSeqLen = getPerLayerMaxSeqLenAdapter,
     };
 
     fn deinitAdapter(data: *anyopaque, allocator: std.mem.Allocator) void {
@@ -345,6 +346,28 @@ pub const Gemma4Model = struct {
 
     fn resetSSMStatesAdapter(data: *anyopaque) void {
         _ = data;
+    }
+
+    fn getPerLayerMaxSeqLenAdapter(data: *anyopaque, allocator: std.mem.Allocator) ?[]u32 {
+        const self: *Gemma4Model = @ptrCast(@alignCast(data));
+        const n_layer = self.params.base.n_layer;
+        const n_swa = self.params.n_swa;
+        const max_seq = self.params.base.max_seq_len;
+
+        // 如果没有 SWA 或 SWA 窗口为 0，所有层使用相同的 max_seq_len
+        if (n_swa == 0) return null;
+
+        const lens = allocator.alloc(u32, n_layer) catch return null;
+        for (0..n_layer) |i| {
+            if (self.params.is_swa_layer.items[i]) {
+                // SWA 层使用滑动窗口大小
+                lens[i] = n_swa;
+            } else {
+                // 非 SWA 层使用完整上下文长度
+                lens[i] = max_seq;
+            }
+        }
+        return lens;
     }
 };
 
