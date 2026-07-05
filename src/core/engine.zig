@@ -72,6 +72,10 @@ pub const InferenceEngine = struct {
     mtmd_context: ?*mtmd.MtmdContext = null,
     capabilities: model_if.ModelCapabilities = .{},
 
+    /// GPU backend (Metal/CUDA) — nil if CPU-only
+    gpu_backend: ?*ggml.Backend = null,
+    gpu_enabled: bool = false,
+
     chat_template_source: ?chat_template.TemplateSource = null,
     system_prompt: []const u8 = "",
     no_chat_template: bool = false,
@@ -85,6 +89,28 @@ pub const InferenceEngine = struct {
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
         // Register ggml CPU backend (and optionally Metal/CUDA) once at engine init.
         ggml.loadBackends();
+        if (cli_args.verbose) {
+            ggml.logAvailableBackends();
+        }
+
+        // Detect GPU backend if requested
+        var gpu_backend: ?*ggml.Backend = null;
+        var gpu_enabled: bool = cli_args.gpu;
+        if (cli_args.gpu) {
+            gpu_backend = ggml.detectBestBackend() catch |err| blk: {
+                logger.warn("GPU backend init failed ({}), falling back to CPU", .{err});
+                break :blk null;
+            };
+            if (gpu_backend != null and !ggml.backendIsGpu(gpu_backend.?)) {
+                logger.info("Best backend is not GPU; using CPU for consistency", .{});
+                ggml.backendFree(gpu_backend.?);
+                gpu_backend = null;
+                gpu_enabled = false;
+            }
+            if (gpu_backend) |b| {
+                logger.info("GPU backend enabled: {s}", .{ggml.backendName(b)});
+            }
+        }
 
         var init_arena = std.heap.ArenaAllocator.init(allocator);
         defer init_arena.deinit();
@@ -217,10 +243,15 @@ pub const InferenceEngine = struct {
             .no_chat_template = cli_args.no_chat_template,
             .no_jinja = cli_args.no_jinja,
             .image_max_pixels = cli_args.image_max_pixels,
+            .gpu_backend = gpu_backend,
+            .gpu_enabled = gpu_enabled,
         };
     }
 
     pub fn deinit(self: *InferenceEngine) void {
+        if (self.gpu_backend) |b| {
+            ggml.backendFree(b);
+        }
         if (self.mtmd_context) |ctx| {
             ctx.deinit();
         }

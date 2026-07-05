@@ -285,12 +285,17 @@ pub fn computeGraph(graph: *ggml.CGraph, n_threads: i32) !void {
     const cpu = try ggml.backendCpuInit();
     defer ggml.backendFree(cpu);
     ggml.backendCpuSetNThreads(cpu, n_threads);
-    const buft = ggml.backendGetDefaultBufferType(cpu);
+    try computeGraphOnBackend(graph, cpu);
+}
+
+/// Execute a ggml compute graph on a specific backend.
+pub fn computeGraphOnBackend(graph: *ggml.CGraph, backend: *ggml.Backend) !void {
+    const buft = ggml.backendGetDefaultBufferType(backend);
     var galloc = try ggml.Gallocr.init(buft);
     defer galloc.free();
     if (!galloc.reserve(graph)) return error.GraphReserveFailed;
     if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
-    if (!ggml.backendGraphCompute(cpu, graph)) return error.ComputeFailed;
+    if (!ggml.backendGraphCompute(backend, graph)) return error.ComputeFailed;
 }
 
 test "currentTimeUs monotonic" {

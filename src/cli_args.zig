@@ -17,6 +17,8 @@ pub const CliArgs = struct {
     benchmark: bool = false,
     chat: bool = false,
     info: bool = false,
+    /// GPU acceleration (auto-detect Metal/CUDA, falls back to CPU)
+    gpu: bool = false,
     // Embedding
     embed: bool = false,
     pooling: []const u8 = "mean",
@@ -57,6 +59,8 @@ pub const CliArgs = struct {
                 result.verbose_prompt = true;
             } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
                 result.debug = true;
+            } else if (std.mem.eql(u8, arg, "--gpu")) {
+                result.gpu = true;
             } else if (std.mem.eql(u8, arg, "--chat") or std.mem.eql(u8, arg, "-c")) {
                 result.chat = true;
             } else if (std.mem.eql(u8, arg, "--mmproj")) {
@@ -105,6 +109,7 @@ pub const CliArgs = struct {
             \\  --verbose-prompt      打印详细的 prompt token 序列和 logits 预览
             \\  -d, --debug           调试日志输出 (debug 级别)
             \\  --benchmark           benchmark 模式
+            \\\\  --gpu                 启用 GPU 加速 (Metal/CUDA, 需编译时支持)
             \\  -c, --chat            交互式聊天模式
             \\
             \\对话模板选项:

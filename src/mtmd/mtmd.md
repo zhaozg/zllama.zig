@@ -453,8 +453,8 @@ pub fn encode(...) {
 | # | 任务 | 涉及文件 | 状态 |
 |---|------|----------|------|
 | 9 | **动态分辨率预处理** | `preprocess.zig` — 完善 `calcSizePreservedRatio` 调用链 | ✅ 已完成 |
-| 10 | **批量编码 (batch)** | `mod.zig` — `mtmd_batch` 接口 | ⬜ |
-| 11 | **GPU backend 支持** | 基于 P0#1，添加 Metal/CUDA 初始化 | ⬜ |
+| 10 | **批量编码 (batch)** | `helper.zig` — 连续图片 chunk 分组 + `supportBatch` 检测，日志标记 | ✅ 分组逻辑完成（单图编码因 ViT 图构建器限制暂不支持多图批量） |
+| 11 | **GPU backend 支持** | `ggml/backend.zig` — DeviceType 枚举, detectBestBackend, logAvailableBackends; `engine.zig` — `--gpu` 标志, gpu_backend 字段; `engine_common.zig` — computeGraphOnBackend | ✅ 基础设施完成（CPU 默认，`--gpu` 启用 Metal/CUDA） |
 | 12 | **调试代码清理** | 移除 graph 中的 `setOutput` 调试代码 | ✅ 已完成 |
 
 ### P3 — 低（长期改进）
@@ -517,4 +517,4 @@ pub fn encode(...) {
 
 ---
 
-*最后更新: 2026-07-07 (推理流程差距已关闭: ggml.loadBackends() 单次调用, engine_common.computeGraph() 共享助手, helper.zig compute_ctx 4GB, mtmd.md §6 更新)*
+*最后更新: 2026-07-07 (P2#10 批量编码分组逻辑, P2#11 GPU backend 基础设施: DeviceType/detectBestBackend/logAvailableBackends/--gpu, computeGraphOnBackend)*

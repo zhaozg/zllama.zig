@@ -47,6 +47,11 @@ pub const loadBackends = @import("backend.zig").loadBackends;
 pub const setInput = @import("backend.zig").setInput;
 pub const backendBuftIsHost = @import("backend.zig").backendBuftIsHost;
 pub const backendTensorSet = @import("backend.zig").backendTensorSet;
+pub const DeviceType = @import("backend.zig").DeviceType;
+pub const detectBestBackend = @import("backend.zig").detectBestBackend;
+pub const backendName = @import("backend.zig").backendName;
+pub const backendIsGpu = @import("backend.zig").backendIsGpu;
+pub const logAvailableBackends = @import("backend.zig").logAvailableBackends;
 
 /// backend 子模块命名空间
 pub const backend = @import("backend.zig");

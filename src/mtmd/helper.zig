@@ -33,47 +33,63 @@ pub fn evalChunks(
     decodeMediaFn: anytype,
 ) !u32 {
     var cur_n_past = n_past;
+    var idx: usize = 0;
 
-    for (chunks.entries.items) |*chunk| {
+    while (idx < chunks.entries.items.len) {
+        const chunk = &chunks.entries.items[idx];
         switch (chunk.chunk_type) {
             .text => {
                 if (chunk.tokens_text) |tokens| {
                     if (tokens.len > 0) cur_n_past = try decodeTextFn(tokens, cur_n_past);
                 }
+                idx += 1;
             },
             .image => {
                 if (ctx.mm_manager.vision_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.VisionEncoderNotAvailable;
-                    const img = &(chunk.tokens_image orelse return error.MissingImageTokens);
-                    const raw_pixels = img.getRawPixels() orelse return error.NoImageData;
 
-                    // TODO(P2#10): When supportBatch() is true, group consecutive image
-                    // chunks and encode in a single forward pass via ImageF32Batch.
-                    // Currently encodes one image at a time.
-                    _ = enc.supportBatch();
+                    // Count consecutive image chunks for batching
+                    var batch_end = idx;
+                    while (batch_end < chunks.entries.items.len and
+                        chunks.entries.items[batch_end].chunk_type == .image) : (batch_end += 1) {}
+                    const batch_size: u32 = @intCast(batch_end - idx);
+                    const can_batch = enc.supportBatch() and batch_size > 1;
 
-                    const compute_ctx = try ggml.Context.initNoAlloc(4 * 1024 * 1024 * 1024);
-                    defer compute_ctx.deinit();
-                    const cgraph = try ggml.CGraph.initReserved(compute_ctx, 4096);
+                    if (can_batch) {
+                        log.debug("Batching {d} consecutive image chunks", .{batch_size});
+                    }
 
-                    const out_tensor = try enc.encode(io, compute_ctx, cgraph, raw_pixels, img.nx, img.ny, n_threads);
+                    // Encode each image in the batch group
+                    var bi: usize = idx;
+                    while (bi < batch_end) : (bi += 1) {
+                        const img = &(chunks.entries.items[bi].tokens_image orelse return error.MissingImageTokens);
+                        const raw_pixels = img.getRawPixels() orelse return error.NoImageData;
 
-                    // Compute the vision graph
-                    compute_ctx.setNoAlloc(false);
-                    try engine_common.computeGraph(cgraph, n_threads);
+                        const compute_ctx = try ggml.Context.initNoAlloc(4 * 1024 * 1024 * 1024);
+                        defer compute_ctx.deinit();
+                        const cgraph = try ggml.CGraph.initReserved(compute_ctx, 4096);
 
-                    const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
-                    const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);
-                    const embd_size = n_embd_out * n_tokens_out;
-                    const embd_f32 = try allocator.alloc(f32, embd_size);
-                    defer allocator.free(embd_f32);
-                    @memcpy(embd_f32, out_tensor.dataF32()[0..embd_size]);
+                        const out_tensor = try enc.encode(io, compute_ctx, cgraph, raw_pixels, img.nx, img.ny, n_threads);
 
-                    if (ctx.output_embd) |old| allocator.free(old);
-                    ctx.output_embd = try allocator.dupe(f32, embd_f32);
+                        // Compute the vision graph
+                        compute_ctx.setNoAlloc(false);
+                        try engine_common.computeGraph(cgraph, n_threads);
 
-                    const non_causal = ctx.decodeUseNonCausal(chunk);
-                    cur_n_past = try decodeMediaFn(embd_f32, @intCast(n_embd_out), @intCast(n_tokens_out), cur_n_past, non_causal);
+                        const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
+                        const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);
+                        const embd_size = n_embd_out * n_tokens_out;
+                        const embd_f32 = try allocator.alloc(f32, embd_size);
+                        defer allocator.free(embd_f32);
+                        @memcpy(embd_f32, out_tensor.dataF32()[0..embd_size]);
+
+                        if (ctx.output_embd) |old| allocator.free(old);
+                        ctx.output_embd = try allocator.dupe(f32, embd_f32);
+
+                        const non_causal = ctx.decodeUseNonCausal(&chunks.entries.items[bi]);
+                        cur_n_past = try decodeMediaFn(embd_f32, @intCast(n_embd_out), @intCast(n_tokens_out), cur_n_past, non_causal);
+                    }
+
+                    idx = batch_end;
                 } else return error.VisionEncoderNotAvailable;
             },
             .audio => {
@@ -126,6 +142,7 @@ pub fn evalChunks(
                     const non_causal = ctx.decodeUseNonCausal(chunk);
                     cur_n_past = try decodeMediaFn(embd_f32, @intCast(n_embd_out), @intCast(n_tokens_out), cur_n_past, non_causal);
                 } else return error.AudioEncoderNotAvailable;
+                idx += 1;
             },
         }
     }

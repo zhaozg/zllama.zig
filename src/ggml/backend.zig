@@ -112,6 +112,108 @@ pub fn loadBackends() void {
     log.info("Backends loaded", .{});
 }
 
+/// Backend device types for init_by_type
+pub const DeviceType = enum(c_uint) {
+    cpu = 0,
+    gpu = 1,
+    igpu = 2,
+    accel = 3,
+    meta = 4,
+};
+
+/// Detect and return the best available backend (tries GPU first, falls back to CPU).
+/// Caller owns the returned backend and must call backendFree() when done.
+pub fn detectBestBackend() !*Backend {
+    // Try best auto-detected backend first
+    if (backendInitBest()) |best| {
+        const name = backendName(best);
+        log.info("Best backend: {s}", .{name});
+        return best;
+    }
+    // Try GPU explicitly
+    if (backendInitByType(@intFromEnum(DeviceType.gpu), null)) |gpu| {
+        const name = backendName(gpu);
+        log.info("GPU backend: {s}", .{name});
+        return gpu;
+    }
+    // Fallback to CPU
+    log.info("Using CPU backend", .{});
+    return backendCpuInit();
+}
+
+/// Get backend name string (caller must not free)
+pub fn backendName(backend: *Backend) []const u8 {
+    const ptr = c.ggml_backend_name(@ptrCast(backend));
+    if (ptr == null) return "(unknown)";
+    return std.mem.span(ptr);
+}
+
+/// Check if a backend is a GPU (Metal/CUDA/Vulkan)
+pub fn backendIsGpu(backend: *Backend) bool {
+    const dev = c.ggml_backend_get_device(@ptrCast(backend)) orelse return false;
+    const dev_type = c.ggml_backend_dev_type(dev);
+    return dev_type == @intFromEnum(DeviceType.gpu) or dev_type == @intFromEnum(DeviceType.igpu);
+}
+
+/// Get name for a backend device
+pub fn backendDevName(dev: *c.struct_ggml_backend_device) []const u8 {
+    const ptr = c.ggml_backend_dev_name(dev);
+    if (ptr == null) return "(unknown)";
+    return std.mem.span(ptr);
+}
+
+/// Get description for a backend device
+pub fn backendDevDescription(dev: *c.struct_ggml_backend_device) []const u8 {
+    const ptr = c.ggml_backend_dev_description(dev);
+    if (ptr == null) return "(unknown)";
+    return std.mem.span(ptr);
+}
+
+/// Get total/free memory for a backend device
+pub fn backendDevMemory(dev: *c.struct_ggml_backend_device) struct { free: usize, total: usize } {
+    var free: usize = 0;
+    var total: usize = 0;
+    c.ggml_backend_dev_memory(dev, &free, &total);
+    return .{ .free = free, .total = total };
+}
+
+/// Log available backends for diagnostics
+pub fn logAvailableBackends() void {
+    const reg_count = c.ggml_backend_reg_count();
+    log.info("Available ggml backends: {d}", .{reg_count});
+    var i: usize = 0;
+    while (i < reg_count) : (i += 1) {
+        const reg = c.ggml_backend_reg_get(i) orelse continue;
+        const reg_name = c.ggml_backend_reg_name(reg);
+        const dev_count = c.ggml_backend_reg_dev_count(reg);
+        log.info("  [{d}] {s} ({d} devices)", .{ i, if (reg_name != null) std.mem.span(reg_name) else "(unnamed)", dev_count });
+        var j: usize = 0;
+        while (j < dev_count) : (j += 1) {
+            const dev = c.ggml_backend_reg_dev_get(reg, j) orelse continue;
+            const dev_name = c.ggml_backend_dev_name(dev);
+            const dev_desc = c.ggml_backend_dev_description(dev);
+            var mem_free: usize = 0;
+            var mem_total: usize = 0;
+            c.ggml_backend_dev_memory(dev, &mem_free, &mem_total);
+            if (mem_total > 0) {
+                log.info("    [{d}] {s} — {s} (memory: {d:.1} GB free / {d:.1} GB total)", .{
+                    j,
+                    if (dev_name != null) std.mem.span(dev_name) else "(unnamed)",
+                    if (dev_desc != null) std.mem.span(dev_desc) else "",
+                    @as(f64, @floatFromInt(mem_free)) / 1e9,
+                    @as(f64, @floatFromInt(mem_total)) / 1e9,
+                });
+            } else {
+                log.info("    [{d}] {s} — {s}", .{
+                    j,
+                    if (dev_name != null) std.mem.span(dev_name) else "(unnamed)",
+                    if (dev_desc != null) std.mem.span(dev_desc) else "",
+                });
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Backend Scheduler 封装
 // ============================================================================
