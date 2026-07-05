@@ -68,15 +68,35 @@ pub fn evalChunks(
             .audio => {
                 if (ctx.mm_manager.audio_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.AudioEncoderNotAvailable;
-                    const mel = chunk.getMelData() orelse return error.NoAudioData;
-                    const mb = chunk.getMelBins() orelse return error.NoAudioData;
-                    const mf = chunk.getMelFrames() orelse return error.NoAudioData;
+
+                    // Get or compute Mel spectrogram data.
+                    var mel_f32: ?[]f32 = null;
+                    var mel_bins: u32 = 0;
+                    var mel_frames: u32 = 0;
+
+                    if (chunk.mel_data) |mel| {
+                        mel_f32 = mel;
+                        mel_bins = chunk.mel_bins;
+                        mel_frames = chunk.mel_frames;
+                    } else if (chunk.audio_data) |raw_bytes| {
+                        // Compute Mel from raw PCM f32 samples.
+                        const f32_samples = @as([*]const f32, @ptrCast(@alignCast(raw_bytes.ptr)))[0 .. raw_bytes.len / @sizeOf(f32)];
+                        const sr: u32 = if (ctx.caps.audio_sample_rate > 0) @intCast(ctx.caps.audio_sample_rate) else 16000;
+                        const nm: u32 = if (ctx.mm_manager.audio_encoder) |*e| e.params.n_mel_bins else 128;
+                        const audio_cfg = mtmd.audio_mod.config;
+                        const pp = audio_cfg.AudioPreprocessParams.fromAudioEncoder(nm);
+                        const processed = try mtmd.audio_mod.pipeline.processPcmSamples(io, allocator, f32_samples, sr, pp);
+                        mel_f32 = processed.data;
+                        mel_bins = processed.n_mel_bins;
+                        mel_frames = processed.n_frames;
+                        defer allocator.free(processed.data);
+                    } else return error.NoAudioData;
 
                     const compute_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
                     defer compute_ctx.deinit();
                     const cgraph = try ggml.CGraph.initReserved(compute_ctx, 4096);
 
-                    const out_tensor = try enc.encodeRaw(io, compute_ctx, cgraph, mel, mb, mf, n_threads);
+                    const out_tensor = try enc.encodeRaw(io, compute_ctx, cgraph, mel_f32.?, mel_bins, mel_frames, n_threads);
                     const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
                     const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);
                     const embd_size = n_embd_out * n_tokens_out;

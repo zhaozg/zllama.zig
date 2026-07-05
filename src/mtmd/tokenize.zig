@@ -69,11 +69,11 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.In
 fn addAudioChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.InputChunks, bm: mtmd.Bitmap) !void {
     if (!ctx.supportAudio()) return error.AudioNotSupported;
     if (ctx.aud_beg.len > 0) try addTextChunk(ctx, al, chunks, ctx.aud_beg, true);
-    // Audio Mel conversion deferred to encode step (evalChunks).
+    // Store raw audio data; Mel computation happens in evalChunks.
     var n_tokens: u32 = 0;
     if (ctx.mm_manager.audio_encoder) |*enc| {
         n_tokens = enc.estimateOutputTokens(@as(f32, @floatFromInt(@max(bm.nx, 1))) / @as(f32, @floatFromInt(@max(@as(u32, @intCast(ctx.caps.audio_sample_rate)), 1))));
     }
-    try chunks.append(.{ .chunk_type = .audio, .tokens_audio_n = n_tokens, .id = bm.id });
+    try chunks.append(.{ .chunk_type = .audio, .tokens_audio_n = n_tokens, .id = bm.id, .audio_data = bm.data });
     if (ctx.aud_end.len > 0) try addTextChunk(ctx, al, chunks, ctx.aud_end, true);
 }

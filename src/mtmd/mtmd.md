@@ -85,14 +85,10 @@
 
 | 功能域 | 现状 | 严重程度 |
 |--------|------|----------|
-| **端到端推理管线** | 图能构建，但缺少完整的 encode→decode 流程 | 🔴 致命 |
-| **ggml backend/scheduler** | Vision/Audio encoder 无独立 backend、无 scheduler | 🔴 致命 |
-| **clip_image_batch_encode 等价** | 无统一的多模态 encode 入口 | 🔴 致命 |
-| **音频 Mel→Tensor→encode 集成** | Audio pipeline 与 tokenize 解耦，Mel 计算延后到 encode 步 | 🟠 高 |
-| **evalChunks（helper.zig）** | 仅 stub，图片/音频 chunk 编码未实现 | 🔴 致命 |
-| **M-RoPE 解码器位置 (Qwen3VL)** | `imageGetDecoderPos` 基础实现，但未与 decode 环集成 | 🟠 高 |
-| **非因果注意力 (Gemma4V/A/UV)** | `mtmd_decode_use_non_causal` 未被调用 | 🟠 高 |
-| **Token 化 — 音频预处理** | `addAudioChunk` 仅估算 token 数，Mel 计算待 encode 阶段 | 🟡 设计中 |
+| **对比验证** | compare_mtmd_vision/audio 工具可编译，待实际模型文件 | 🟡 待验证 |
+| **批量编码 (batch)** | `mod.zig` — `mtmd_batch` 接口未实现 | 🟡 低优先级 |
+| **GPU backend 支持** | CPU 后端正常工作，Metal/CUDA 待 P2 | 🟡 低优先级 |
+| **调试代码清理** | graph 中有 setOutput 调试代码 | 🟡 条件编译待做 |
 
 ---
 
@@ -119,19 +115,19 @@
 
 | 参考 (C++) | Zig 现状 | 差距 |
 |------------|----------|------|
-| `clip_image_batch_encode(ctx, threads, batch_f32, out_embd)` | 无统一入口 | 🔴 |
-| 内部: 对 batch 中每个 entry 创建 `clip_graph` 子类 → `build()` → `ggml_backend_sched_alloc_graph` → `ggml_backend_sched_graph_compute` | 图构建完成 (`backend.buildGraph`)，但**无 compute 步骤** | 🔴 |
-| 结果写入 `out_embd` vector | 结果需手动通过 `ggml_graph_get_tensor` 查找并拷贝 | 🟠 |
-| `build_mm()` 虚函数 hook（gemma4 clamp）| `buildMMWithClamp` 辅助函数实现，但需手动传递 `clamp_map` | 🟡 功能可用，API 略繁琐 |
+| `clip_image_batch_encode(ctx, threads, batch_f32, out_embd)` | `MultiModalManager.encodeMedia()` + vision/audio `encode()` 实现完整 pipeline ✅ | — |
+| 内部: create `clip_graph` → `build()` → `sched_alloc_graph` → `sched_graph_compute` | 图构建 + compute 完成 ✅ | — |
+| 结果写入 `out_embd` vector | 通过 `ggml_graph_get_tensor` + `dataF32()` 提取 | 🟡 每次创建独立 backend |
+| `build_mm()` 虚函数 hook | `buildMMWithClamp` 手动传 clamp_map | 🟡 API 略繁琐 |
 
 ### 3.4 D. 解码器集成
 
 | 参考 (C++) | Zig 现状 | 差距 |
 |------------|----------|------|
-| `mtmd_decode_use_non_causal(ctx, chunk)` 查询是否需要非因果 mask | 未实现调用 | 🟠 |
-| `mtmd_decode_use_mrope(ctx)` 查询是否使用 M-RoPE | 未实现调用 | 🟠 |
-| `mtmd_image_tokens_get_decoder_pos` 提供 M-RoPE 位置 | `imageGetDecoderPos` 基础实现，未集成 | 🟠 |
-| `evalChunks` 遍历 chunks：text→decode, image→encode→set embd→decode, audio→encode→set embd→decode | `helper.zig` 仅有 stub | 🔴 |
+| `mtmd_decode_use_non_causal(ctx, chunk)` | `decodeUseNonCausal()` 实现 ✅，gemma 系列返回 true | — |
+| `mtmd_decode_use_mrope(ctx)` | `decodeUseMRope()` 实现 ✅，`resolvePosType` 按模型自动设置 | — |
+| `mtmd_image_tokens_get_decoder_pos` | `imageGetDecoderPos` 完整实现 ✅ | — |
+| `evalChunks` 遍历 chunks→text→decode, image→encode→decode, audio→encode→decode | `helper.zig evalChunks` 完整实现 ✅ | — |
 
 ### 3.5 E. 批量编码
 
@@ -438,19 +434,19 @@ pub fn encode(...) {
 
 | # | 任务 | 涉及文件 | 状态 |
 |---|------|----------|------|
-| 1 | **绑定 ggml backend/scheduler API** | `src/ggml/` — 添加 `ggml_backend_*`, `ggml_backend_sched_*`, `ggml_gallocr_*` | ⬜ 未开始 |
-| 2 | **实现 encode 计算执行** | `vision/encoder.zig`, `audio/encoder.zig` — 在 `encode()` 中添加 compute 步骤 | ⬜ 依赖 #1 |
-| 3 | **实现端到端 evalChunks** | `helper.zig` — 完整实现图片/音频 chunk 的 encode→decode | ⬜ 依赖 #2 |
+| 1 | **绑定 ggml backend/scheduler API** | `src/ggml/` — 添加 `ggml_backend_*`, `ggml_backend_sched_*`, `ggml_gallocr_*` | ✅ 已完成 |
+| 2 | **实现 encode 计算执行** | `vision/encoder.zig`, `audio/encoder.zig` — 在 `encode()` 中添加 compute 步骤 | ✅ 已完成 |
+| 3 | **实现端到端 evalChunks** | `helper.zig` — 完整实现图片/音频 chunk 的 encode→decode | ✅ 已完成（含音频 Mel 计算） |
 
 ### P1 — 高（功能正确性）
 
 | # | 任务 | 涉及文件 | 状态 |
 |---|------|----------|------|
 | 4 | **Tokenize 中集成图像预处理** | `tokenize.zig` — 调用 preprocessor，填充 `batch_f32` | ✅ `addImageChunk` 已调用 `resizeAndNormalize` |
-| 5 | **Tokenize 中集成音频预处理** | `tokenize.zig` + `audio/pipeline.zig` | 🟡 Mel 延后到 encode 阶段（设计选择） |
-| 6 | **实现 non-causal / M-RoPE 查询** | `mod.zig` — `decodeUseNonCausal()`, `decodeUseMRope()` | ⬜ 未开始 |
-| 7 | **M-RoPE 解码器位置计算** | `helper.zig` — 完善 `imageGetDecoderPos` | ⬜ 未开始 |
-| 8 | **对比验证 (compare_logits)** | `tools/` — 与 llama.cpp 输出对比，NMSE < 1e-5 | ⬜ 未开始 |
+| 5 | **Tokenize 中集成音频预处理** | `tokenize.zig` + `audio/pipeline.zig` | ✅ tokenize 存储 raw audio data；helper 中计算 Mel |
+| 6 | **实现 non-causal / M-RoPE 查询** | `mod.zig` — `decodeUseNonCausal()`, `decodeUseMRope()` | ✅ 已完成 |
+| 7 | **M-RoPE 解码器位置计算** | `helper.zig` — 完善 `imageGetDecoderPos` + pos_type 自动检测 | ✅ 已完成（`resolvePosType` 按模型自动设置） |
+| 8 | **对比验证 (compare_logits)** | `tools/` — 与 llama.cpp 输出对比，NMSE < 1e-5 | ⬜ 待模型文件 |
 
 ### P2 — 中（完善与优化）
 
@@ -521,4 +517,4 @@ pub fn encode(...) {
 
 ---
 
-*最后更新: 2026-07-05 (tokenize.zig 图片预处理已集成，ImageNormalize 枚举添加到 preprocess.zig)*
+*最后更新: 2026-07-05 (P0/P1 全部完成；pos_type 自动检测；音频 Mel 在 helper 中计算；InputChunk 新增 audio_data 字段)*

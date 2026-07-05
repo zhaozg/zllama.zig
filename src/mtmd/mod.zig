@@ -115,6 +115,8 @@ pub const InputChunk = struct {
     mel_data: ?[]const f32 = null,
     mel_bins: u32 = 0,
     mel_frames: u32 = 0,
+    /// Raw audio PCM data (f32 samples as bytes, from Bitmap.data), used when Mel not pre-computed
+    audio_data: ?[]const u8 = null,
 
     pub fn nPos(self: InputChunk) u32 {
         return switch (self.chunk_type) {
@@ -368,6 +370,15 @@ fn resolveAudioMarkers(caps: *const model.ModelCapabilities) struct { beg: []con
     return .{ .beg = "", .end = "" };
 }
 
+fn resolvePosType(caps: *const model.ModelCapabilities) PosType {
+    if (caps.has_vision) {
+        if (std.mem.eql(u8, caps.vision_encoder_type, "qwen3vl") or
+            std.mem.eql(u8, caps.vision_encoder_type, "qwen2vl"))
+            return .mrope;
+    }
+    return .normal;
+}
+
 // ============================================================================
 // MtmdContext — 多模态上下文
 // ============================================================================
@@ -410,7 +421,7 @@ pub const MtmdContext = struct {
             .img_end = img.end,
             .aud_beg = aud.beg,
             .aud_end = aud.end,
-            .pos_type = .normal,
+            .pos_type = resolvePosType(&caps),
         };
         return self;
     }
