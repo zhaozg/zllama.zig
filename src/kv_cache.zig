@@ -174,6 +174,7 @@ pub const KVCache = struct {
     /// new_k: [head_dim, n_kv_head, n_tokens]（RoPE 后，permute 前的形状）
     /// new_v: [head_dim, n_kv_head, n_tokens]
     /// 自动适配 per-layer 维度差异，使用父张量 stride 创建视图
+    /// 溢出时：SWA 层滑动窗口，只保留最近 max_seq_len 个 token；非 SWA 层 panic。
     pub fn setKv(
         self: *KVCache,
         ctx: *ggml.Context,
@@ -184,22 +185,60 @@ pub const KVCache = struct {
         n_tokens: u32,
     ) void {
         const layer = &self.layers[layer_idx];
-        const offset = layer.current_len;
+        var offset = layer.current_len;
+        var n_write = n_tokens;
+        var k_src = new_k;
+        var v_src = new_v;
 
-        // 检查是否超出本层最大序列长度
+        // Overflow handling: for SWA layers, slide the window
         if (offset + n_tokens > layer.max_seq_len) {
-            log.err("setKv layer {d}: offset={d} + n_tokens={d} > max_seq_len={d}", .{ layer_idx, offset, n_tokens, layer.max_seq_len });
-            @panic("KV cache overflow: exceeded per-layer max_seq_len");
+            // Keep only the most recent max_seq_len tokens
+            const total = offset + n_tokens;
+            const keep = @min(total, layer.max_seq_len);
+            const discard = total - keep;
+
+            if (discard >= n_tokens) {
+                // All new tokens are discarded, nothing to write
+                return;
+            }
+
+            if (discard >= offset) {
+                // All old cache is discarded; write tail of new tokens at position 0
+                const skip_new = discard - offset;
+                n_write = n_tokens - skip_new;
+                const tail_start: usize = @as(usize, @intCast(skip_new)) * @sizeOf(f32);
+                // Use view of the tail of new_k/new_v
+                const actual_hdim_k_tail: i64 = new_k.ne()[0];
+                const actual_nkv_k_tail: i64 = new_k.ne()[1];
+                const k_parent_nb_tail = new_k.nb();
+                k_src = ctx.view3d(new_k, actual_hdim_k_tail, actual_nkv_k_tail, @intCast(n_write), k_parent_nb_tail[1], k_parent_nb_tail[2], @intCast(tail_start));
+                const actual_hdim_v_tail: i64 = new_v.ne()[0];
+                const v_parent_nb_tail = new_v.nb();
+                v_src = ctx.view3d(new_v, actual_hdim_v_tail, actual_nkv_k_tail, @intCast(n_write), v_parent_nb_tail[1], v_parent_nb_tail[2], @intCast(tail_start));
+                offset = 0;
+            } else {
+                // Partial overflow: write only as many new tokens as can fit
+                n_write = layer.max_seq_len - offset;
+                const skip_new = n_tokens - n_write;
+                const tail_start: usize = @as(usize, @intCast(skip_new)) * @sizeOf(f32);
+                const actual_hdim_k_tail: i64 = new_k.ne()[0];
+                const actual_nkv_k_tail: i64 = new_k.ne()[1];
+                const k_parent_nb_tail = new_k.nb();
+                k_src = ctx.view3d(new_k, actual_hdim_k_tail, actual_nkv_k_tail, @intCast(n_write), k_parent_nb_tail[1], k_parent_nb_tail[2], @intCast(tail_start));
+                const actual_hdim_v_tail: i64 = new_v.ne()[0];
+                const v_parent_nb_tail = new_v.nb();
+                v_src = ctx.view3d(new_v, actual_hdim_v_tail, actual_nkv_k_tail, @intCast(n_write), v_parent_nb_tail[1], v_parent_nb_tail[2], @intCast(tail_start));
+            }
         }
 
         // 使用实际张量维度（支持 per-layer 变化的 n_kv_head/head_dim）
-        const actual_hdim_k: i64 = new_k.ne()[0];
-        const actual_nkv_k: i64 = new_k.ne()[1];
-        const actual_hdim_v: i64 = new_v.ne()[0];
-        const actual_nkv_v: i64 = new_v.ne()[1];
+        const actual_hdim_k: i64 = k_src.ne()[0];
+        const actual_nkv_k: i64 = k_src.ne()[1];
+        const actual_hdim_v: i64 = v_src.ne()[0];
+        const actual_nkv_v: i64 = v_src.ne()[1];
 
         // 首次写入时更新本层的实际维度
-        if (offset == 0) {
+        if (layer.current_len == 0 and offset == 0) {
             layer.n_kv_head_actual = @intCast(actual_nkv_k);
             layer.head_dim_k_actual = @intCast(actual_hdim_k);
             layer.head_dim_v_actual = @intCast(actual_hdim_v);
@@ -210,15 +249,15 @@ pub const KVCache = struct {
         const v_parent_nb = layer.v.nb();
 
         // layer.k: [head_dim_k_cache, n_kv_head_cache, max_seq_len]
-        const k_dst = ctx.view3d(layer.k, actual_hdim_k, actual_nkv_k, @intCast(n_tokens), k_parent_nb[1], k_parent_nb[2], @intCast(offset * k_parent_nb[2]));
-        const k_cpy = ggml.cpy(ctx, new_k, k_dst);
+        const k_dst = ctx.view3d(layer.k, actual_hdim_k, actual_nkv_k, @intCast(n_write), k_parent_nb[1], k_parent_nb[2], @intCast(offset * k_parent_nb[2]));
+        const k_cpy = ggml.cpy(ctx, k_src, k_dst);
         graph.buildForwardExpand(k_cpy);
 
-        const v_dst = ctx.view3d(layer.v, actual_hdim_v, actual_nkv_v, @intCast(n_tokens), v_parent_nb[1], v_parent_nb[2], @intCast(offset * v_parent_nb[2]));
-        const v_cpy = ggml.cpy(ctx, new_v, v_dst);
+        const v_dst = ctx.view3d(layer.v, actual_hdim_v, actual_nkv_v, @intCast(n_write), v_parent_nb[1], v_parent_nb[2], @intCast(offset * v_parent_nb[2]));
+        const v_cpy = ggml.cpy(ctx, v_src, v_dst);
         graph.buildForwardExpand(v_cpy);
 
-        layer.current_len += n_tokens;
+        layer.current_len = offset + n_write;
     }
 
     /// 设置所有层的 cache 长度为指定值。

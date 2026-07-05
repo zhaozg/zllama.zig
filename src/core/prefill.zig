@@ -165,54 +165,63 @@ pub fn threeStagePrefill(
     }
 
     // ===================================================================
-    // Pass 2: Media tokens only (non-causal attention)
+    // Pass 2: Media tokens in chunks (non-causal attention)
     // Positions: prefix_len .. prefix_len + n_media - 1
-    // Uses media_embeddings as override input and placeholder token IDs
-    // for per-layer embedding lookup.
+    // Chunked to avoid OOM from O(n_tokens²) attention for large vision sequences.
     // ===================================================================
     {
-        graph_ctx.reset();
-        graph_ctx.setNoAlloc(false);
+        const CHUNK_SIZE: i32 = 256;
+        var chunk_start: i32 = 0;
+        while (chunk_start < n_media) {
+            const chunk_size: i32 = @min(CHUNK_SIZE, n_media - chunk_start);
+            const chunk_pos: i32 = prefix_len + chunk_start;
+            const embd_offset: usize = @as(usize, @intCast(chunk_start)) * @as(usize, @intCast(n_embd_val));
+            const embd_len: usize = @as(usize, @intCast(chunk_size)) * @as(usize, @intCast(n_embd_val));
+            const chunk_embd_data = media_embeddings_data[embd_offset..][0..embd_len];
 
-        // Create fresh media embeddings tensor in the reset context
-        const p2_embd = try createMediaTensor(graph_ctx, media_embeddings_data, n_embd_val, n_media);
+            graph_ctx.reset();
+            graph_ctx.setNoAlloc(false);
 
-        // Input tokens for per-layer embedding: placeholder token ID repeated n_media times
-        const p2_input = try graph_ctx.newTensor1d(.i32, n_media);
-        {
-            const data = p2_input.dataBytes();
-            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_media))];
-            @memset(slice, @as(i32, @intCast(media_token_id)));
+            const p2_embd = try createMediaTensor(graph_ctx, chunk_embd_data, n_embd_val, chunk_size);
+
+            const p2_input = try graph_ctx.newTensor1d(.i32, chunk_size);
+            {
+                const data = p2_input.dataBytes();
+                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(chunk_size))];
+                @memset(slice, @as(i32, @intCast(media_token_id)));
+            }
+
+            var p2_graph = try ggml.CGraph.initReserved(graph_ctx, 16384);
+            _ = try mediaForwardFn(
+                model_ptr,
+                graph_ctx,
+                p2_graph,
+                p2_input,
+                chunk_size,
+                kv_cache_ptr,
+                chunk_pos,
+                p2_embd,
+                0,
+                false, // non-causal
+            );
+            graph_ctx.setNoAlloc(true);
+
+            var p2_galloc = try ggml.Gallocr.init(buft);
+            defer p2_galloc.free();
+            if (!p2_galloc.allocGraph(p2_graph)) {
+                log.err("Graph alloc failed: media pass chunk {d}", .{chunk_start});
+                return error.GraphAllocFailed;
+            }
+
+            const t2_start = engine_common.currentTimeMs();
+            try p2_graph.compute(n_threads);
+            const t2_end = engine_common.currentTimeMs();
+            pp_time_s += @as(f64, @floatFromInt(t2_end - t2_start)) / 1000.0;
+
+            chunk_start += chunk_size;
         }
 
-        var p2_graph = try ggml.CGraph.initReserved(graph_ctx, 16384);
-        _ = try mediaForwardFn(
-            model_ptr,
-            graph_ctx,
-            p2_graph,
-            p2_input,
-            n_media,
-            kv_cache_ptr,
-            prefix_len,
-            p2_embd,
-            0,
-            false, // non-causal
-        );
-        graph_ctx.setNoAlloc(true);
-
-        var p2_galloc = try ggml.Gallocr.init(buft);
-        defer p2_galloc.free();
-        if (!p2_galloc.allocGraph(p2_graph)) {
-            log.err("Graph alloc failed: media pass", .{});
-            return error.GraphAllocFailed;
-        }
-
-        const t2_start = engine_common.currentTimeMs();
-        try p2_graph.compute(n_threads);
-        const t2_end = engine_common.currentTimeMs();
-        pp_time_s += @as(f64, @floatFromInt(t2_end - t2_start)) / 1000.0;
-        log.debug("Pass 2 (media): {d} tokens in {d:.3}s ✓", .{ n_media, @as(f64, @floatFromInt(t2_end - t2_start)) / 1000.0 });
-        log.debug("  -> mediaForward called with: start_pos={d}, n_tokens={d}, causal=false, embd_dim={d}", .{ prefix_len, n_media, n_embd_val });
+        log.debug("Pass 2 (media): {d} tokens in {d} chunks, non-causal", .{ n_media, @divTrunc(n_media + CHUNK_SIZE - 1, CHUNK_SIZE) });
         log.debug("  -> KV cache current_len after Pass 2: {d}", .{kv_cache_mgr.currentLen()});
     }
 
