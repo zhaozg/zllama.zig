@@ -46,6 +46,11 @@ pub fn evalChunks(
                     const img = &(chunk.tokens_image orelse return error.MissingImageTokens);
                     const raw_pixels = img.getRawPixels() orelse return error.NoImageData;
 
+                    // TODO(P2#10): When supportBatch() is true, group consecutive image
+                    // chunks and encode in a single forward pass via ImageF32Batch.
+                    // Currently encodes one image at a time.
+                    _ = enc.supportBatch();
+
                     const compute_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
                     defer compute_ctx.deinit();
                     const cgraph = try ggml.CGraph.initReserved(compute_ctx, 4096);

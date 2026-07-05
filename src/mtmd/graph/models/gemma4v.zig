@@ -98,6 +98,7 @@ pub const AddPosContext = struct {
 /// Gemma4V 视觉编码器后端实例
 pub const backend = graph.VisionEncoderBackend{
     .name = "gemma4v",
+    .supportBatch = true,
     .loadParams = loadParams,
     .loadWeights = loadWeights,
     .loadClampInfo = loadClampInfo,

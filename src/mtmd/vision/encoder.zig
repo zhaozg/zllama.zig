@@ -93,6 +93,11 @@ pub const VisionEncoder = struct {
         return self.weights.patch_embeddings_0 != null;
     }
 
+    /// Whether this encoder supports batch processing (multiple images in one forward pass).
+    pub fn supportBatch(self: *const VisionEncoder) bool {
+        return self.backend.supportBatch;
+    }
+
     pub fn setUserMaxPixels(self: *VisionEncoder, max_pixels: u32) void {
         self.params.user_max_pixels = max_pixels;
     }

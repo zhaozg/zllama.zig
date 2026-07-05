@@ -62,6 +62,7 @@ pub const DebugTensorRegistry = debug.DebugTensorRegistry;
 /// 每个视觉模型实现此接口，提供模型特定的操作
 pub const VisionEncoderBackend = struct {
     name: []const u8,
+    supportBatch: bool = false,
     loadParams: *const fn (gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
     loadWeights: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
     loadClampInfo: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
