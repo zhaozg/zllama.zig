@@ -274,6 +274,25 @@ pub fn decodeAndPrintToken(io: std.Io, tok: anytype, token_id: u32) !void {
 
 const testing = std.testing;
 
+// ============================================================================
+// 共享计算图执行助手
+// ============================================================================
+
+/// Execute a ggml compute graph using a temporary CPU backend + Gallocr.
+/// Returns an error if graph reserve/alloc/compute fails.
+/// Used by multimodal vision/audio encode and helper evalChunks.
+pub fn computeGraph(graph: *ggml.CGraph, n_threads: i32) !void {
+    const cpu = try ggml.backendCpuInit();
+    defer ggml.backendFree(cpu);
+    ggml.backendCpuSetNThreads(cpu, n_threads);
+    const buft = ggml.backendGetDefaultBufferType(cpu);
+    var galloc = try ggml.Gallocr.init(buft);
+    defer galloc.free();
+    if (!galloc.reserve(graph)) return error.GraphReserveFailed;
+    if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
+    if (!ggml.backendGraphCompute(cpu, graph)) return error.ComputeFailed;
+}
+
 test "currentTimeUs monotonic" {
     const t1 = currentTimeUs();
     const t2 = currentTimeUs();

@@ -83,6 +83,9 @@ pub const InferenceEngine = struct {
     // ========================================================================
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
+        // Register ggml CPU backend (and optionally Metal/CUDA) once at engine init.
+        ggml.loadBackends();
+
         var init_arena = std.heap.ArenaAllocator.init(allocator);
         defer init_arena.deinit();
         _ = init_arena.allocator();

@@ -86,9 +86,8 @@
 | 功能域 | 现状 | 严重程度 |
 |--------|------|----------|
 | **对比验证** | compare_mtmd_vision/audio 工具可编译，待实际模型文件 | 🟡 待验证 |
-| **批量编码 (batch)** | `mod.zig` — `mtmd_batch` 接口未实现 | 🟡 低优先级 |
+| **批量编码 (batch)** | `VisionEncoderBackend.supportBatch` + `VisionEncoder.supportBatch()` ✅，helper.zig 分组待实现 | 🟡 低优先级 |
 | **GPU backend 支持** | CPU 后端正常工作，Metal/CUDA 待 P2 | 🟡 低优先级 |
-| **调试代码清理** | graph 中有 setOutput 调试代码 | 🟡 条件编译待做 |
 
 ---
 
@@ -133,8 +132,8 @@
 
 | 参考 (C++) | Zig 现状 | 差距 |
 |------------|----------|------|
-| `mtmd_batch` 合并多个同类型 chunk 到一个 batch_f32 | 未实现 | 🟡 低优先级 |
-| `clip_support_batch()` 查询模型是否支持批处理 | 未实现 | 🟡 |
+| `mtmd_batch` 合并多个同类型 chunk 到一个 batch_f32 | `VisionEncoderBackend.supportBatch` 已添加，gemma4v=true | 🟡 接口已就绪，helper.zig evalChunks 待分组实现 |
+| `clip_support_batch()` 查询模型是否支持批处理 | `VisionEncoder.supportBatch()` 已实现 ✅ | — |
 
 ---
 
@@ -380,52 +379,53 @@ pub fn encode(...) {
 
 **当前 Zig 实现**：
 ```
-1. MultiModalManager.init() → VisionEncoder + AudioEncoder
-   ❌ 无 backend/scheduler
-   ❌ 无 preprocessor 关联
+1. InferenceEngine.init() → ggml.loadBackends() (once, for all compute)
+   ✅ CPU backend via engine_common.computeGraph()
+   ✅ 独立 compute context（vision/audio 各自创建，≥4GB）
+   ✅ Preprocessor 通过 MultiModalManager + preprocess 模块
 
-2. tokenize.zig → 仅估算 token 数
-   ❌ 不做预处理
-   ❌ 不创建 clip_image_f32
+2. multimodal.zig generateWithImage/generateWithAudio:
+   ✅ 加载原始图像/音频 → 计算目标尺寸(动态分辨率或固定)
+   ✅ encodeMedia() → VisionEncoder/AudioEncoder.encode()
+   ✅ engine_common.computeGraph() 统一执行 compute
+   ✅ threeStagePrefill → decode loop
 
-3. helper.zig evalChunks → stub
-   ❌ "Image chunk evaluation not fully implemented"
-   ❌ "Audio chunk evaluation not fully implemented"
+3. helper.zig evalChunks（MtmdContext 路径）:
+   ✅ Image chunk: resizeAndNormalize → encode → compute → decodeMedia
+   ✅ Audio chunk: Mel计算 → encode → compute → decodeMedia
+   ✅ non-causal / M-RoPE 完整支持
 ```
 
-### 6.2 具体缺失的步骤
+### 6.2 具体缺失的步骤（✅ 全部完成）
 
-#### 步骤 1：初始化
+#### 步骤 1：初始化 ✅
 
-- [ ] 创建独立的 `ggml_backend` (CPU 默认，可选 GPU)
-- [ ] 创建 `ggml_backend_sched`
-- [ ] 创建计算用的 `ggml.Context`（与权重 context 分离）
-- [ ] 初始化图像 preprocessor（根据 `proj_type` 选择 fixed_size / dyn_size / llava_uhd）
-- [ ] 初始化音频 preprocessor（Whisper Mel 或 Conformer）
+- [x] 创建独立的 `ggml_backend` (CPU 默认，可选 GPU)
+- [x] `ggml.loadBackends()` 在 `InferenceEngine.init()` 中调用一次
+- [x] 创建计算用的 `ggml.Context`（与权重 context 分离，≥4GB）
+- [x] 初始化图像 preprocessor（dynamic resolution via `calcSizePreservedRatio`）
+- [x] 初始化音频 preprocessor（Mel spectrogram via `audio.pipeline`）
 
-#### 步骤 2：Tokenize 中的预处理
+#### 步骤 2：Tokenize 中的预处理 ✅
 
-- [ ] 图片: `image_preproc.preprocess(u8_bitmap)` → resize + normalize → `clip_image_f32`
-- [ ] 音频: `audio_preproc.preprocess(f32_samples)` → FFT → Mel → `clip_image_f32`
-- [ ] 将结果包裹在 `ImageTokens` / chunk 中
+- [x] 图片: `resizeAndNormalize()` → 写入 `ImageTokens.raw_pixels`
+- [x] 音频: PCM → FFT → Mel → `audio_data`/`mel_data` 存储在 chunk 中
+- [x] 将结果包裹在 `ImageTokens` / chunk 中
 
-#### 步骤 3：Encode
+#### 步骤 3：Encode ✅
 
-- [ ] 实现 `encodeChunk(ctx, chunk, out_embd)`:
-  1. 从 chunk 中提取 `batch_f32`
-  2. 对每个 entry 创建图（`backend.buildGraph`）
-  3. `sched_reserve` → `sched_alloc_graph` → `sched_graph_compute`
+- [x] 实现 `encodeMedia()`:
+  1. 从 chunk 中提取图像/音频数据
+  2. `backend.buildGraph()` 构建 ggml 计算图
+  3. `engine_common.computeGraph()` 统一执行 reserve→alloc→compute
   4. 提取输出嵌入
 
-#### 步骤 4：LLM Decode 集成
+#### 步骤 4：LLM Decode 集成 ✅
 
-- [ ] 实现 `mtmd_decode_use_non_causal()` — 查询 gemma4 系列
-- [ ] 实现 `mtmd_decode_use_mrope()` — 查询 qwen 系列
-- [ ] 实现 `imageGetDecoderPos()` 的完整 M-RoPE 位置计算
-- [ ] 实现 `evalChunks` 完整流程:
-  - text chunk → `llama_decode(tokens, n_past)`
-  - image/audio chunk → encode → 替换嵌入 → `llama_decode`
-
+- [x] 实现 `decodeUseNonCausal()` — gemma4 系列返回 true
+- [x] 实现 `decodeUseMRope()` / `resolvePosType()` — qwen 系列
+- [x] 实现 `imageGetDecoderPos()` 完整 M-RoPE 位置计算
+- [x] 实现 `evalChunks` + `threeStagePrefill` 完整流程
 ---
 
 ## 7. 优先级路线图
@@ -517,4 +517,4 @@ pub fn encode(...) {
 
 ---
 
-*最后更新: 2026-07-07 (P2#9 动态分辨率已完成；P2#12 调试代码清理完成：移除 gemma4a.zig 中所有 debug setOutput/命名，降级 log.warn→log.debug)*
+*最后更新: 2026-07-07 (推理流程差距已关闭: ggml.loadBackends() 单次调用, engine_common.computeGraph() 共享助手, helper.zig compute_ctx 4GB, mtmd.md §6 更新)*

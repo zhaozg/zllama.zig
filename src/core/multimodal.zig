@@ -183,16 +183,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     }, 4);
 
     // Compute the vision graph (encoder only builds, caller computes)
-    ggml.loadBackends();
-    const v_cpu = try ggml.backendCpuInit();
-    defer ggml.backendFree(v_cpu);
-    ggml.backendCpuSetNThreads(v_cpu, ectx.n_threads);
-    const v_buft = ggml.backendGetDefaultBufferType(v_cpu);
-    var v_galloc = try ggml.Gallocr.init(v_buft);
-    defer v_galloc.free();
-    if (!v_galloc.reserve(vision_graph)) return error.GraphReserveFailed;
-    if (!v_galloc.allocGraph(vision_graph)) return error.GraphAllocFailed;
-    if (!ggml.backendGraphCompute(v_cpu, vision_graph)) return error.ComputeFailed;
+    try engine_common.computeGraph(vision_graph, ectx.n_threads);
 
     vision_ctx.setNoAlloc(true);
 
@@ -281,16 +272,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     }, 4);
 
     // Compute the audio graph (encoder only builds, caller computes)
-    ggml.loadBackends();
-    const a_cpu = try ggml.backendCpuInit();
-    defer ggml.backendFree(a_cpu);
-    ggml.backendCpuSetNThreads(a_cpu, ectx.n_threads);
-    const a_buft = ggml.backendGetDefaultBufferType(a_cpu);
-    var a_galloc = try ggml.Gallocr.init(a_buft);
-    defer a_galloc.free();
-    if (!a_galloc.reserve(audio_graph)) return error.GraphReserveFailed;
-    if (!a_galloc.allocGraph(audio_graph)) return error.GraphAllocFailed;
-    if (!ggml.backendGraphCompute(a_cpu, audio_graph)) return error.ComputeFailed;
+    try engine_common.computeGraph(audio_graph, ectx.n_threads);
 
     ectx.ctx_graph.setNoAlloc(true);
 
