@@ -116,8 +116,10 @@
 |------------|----------|------|
 | `clip_image_batch_encode(ctx, threads, batch_f32, out_embd)` | `MultiModalManager.encodeMedia()` + vision/audio `encode()` 实现完整 pipeline ✅ | — |
 | 内部: create `clip_graph` → `build()` → `sched_alloc_graph` → `sched_graph_compute` | 图构建 + compute 完成 ✅ | — |
-| 结果写入 `out_embd` vector | 通过 `ggml_graph_get_tensor` + `dataF32()` 提取 | 🟡 每次创建独立 backend |
+| 结果写入 `out_embd` vector | 通过 `ggml_graph_get_tensor` + `dataF32()` 提取 | 🟡 gallocr + backend 需保持存活直到数据读取完毕 |
 | `build_mm()` 虚函数 hook | `buildMMWithClamp` 手动传 clamp_map | 🟡 API 略繁琐 |
+
+**关键修复 (2025-07)**: `engine_common.computeGraph()` 中的 `defer galloc.free()` 会在 compute 后释放 gallocr 分配的 tensor 数据缓冲区（`ggml_vbuffer_free` → `ggml_backend_buffer_free`），导致 tensor->data 悬空指针。修复方案：保持 gallocr 存活（不调用 `gallocr.free()`），与 backend 一同泄露到进程退出。
 
 ### 3.4 D. 解码器集成
 
@@ -127,6 +129,8 @@
 | `mtmd_decode_use_mrope(ctx)` | `decodeUseMRope()` 实现 ✅，`resolvePosType` 按模型自动设置 | — |
 | `mtmd_image_tokens_get_decoder_pos` | `imageGetDecoderPos` 完整实现 ✅ | — |
 | `evalChunks` 遍历 chunks→text→decode, image→encode→decode, audio→encode→decode | `helper.zig evalChunks` 完整实现 ✅ | — |
+
+**重构 (2025-07)**: `ModelVTable` 新增 `buildMM` 虚函数，替代原先的 `MediaForwardFn` 函数指针模式。`threeStagePrefill` 不再需要 `model_ptr` + `mediaForwardFn` 参数，直接通过 `model_instance.buildMM()` 调用，消除了 `@ptrCast(@alignCast)` 类型转换。`multimodalPrefill` 和 `multimodalPrefillQwen3VL` 合并为 `multimodalPrefillUnified`。
 
 ### 3.5 E. 批量编码
 
@@ -381,14 +385,16 @@ pub fn encode(...) {
 ```
 1. InferenceEngine.init() → ggml.loadBackends() (once, for all compute)
    ✅ CPU backend via engine_common.computeGraph()
+      (gallocr pre-allocate + backend compute, both leaked for tensor data survival)
    ✅ 独立 compute context（vision/audio 各自创建，≥4GB）
    ✅ Preprocessor 通过 MultiModalManager + preprocess 模块
 
 2. multimodal.zig generateWithImage/generateWithAudio:
    ✅ 加载原始图像/音频 → 计算目标尺寸(动态分辨率或固定)
    ✅ encodeMedia() → VisionEncoder/AudioEncoder.encode()
-   ✅ engine_common.computeGraph() 统一执行 compute
-   ✅ threeStagePrefill → decode loop
+   ✅ engine_common.computeGraph() 统一执行 gallocr.allocGraph + backend compute
+   ✅ multimodalPrefillUnified() → threeStagePrefill (via ModelVTable.buildMM)
+   ✅ decode loop
 
 3. helper.zig evalChunks（MtmdContext 路径）:
    ✅ Image chunk: resizeAndNormalize → encode → compute → decodeMedia
@@ -417,7 +423,8 @@ pub fn encode(...) {
 - [x] 实现 `encodeMedia()`:
   1. 从 chunk 中提取图像/音频数据
   2. `backend.buildGraph()` 构建 ggml 计算图
-  3. `engine_common.computeGraph()` 统一执行 reserve→alloc→compute
+  3. `engine_common.computeGraph()` 统一执行 gallocr.allocGraph + backend compute
+     (gallocr + backend 故意泄露，确保 tensor 数据在返回后仍有效)
   4. 提取输出嵌入
 
 #### 步骤 4：LLM Decode 集成 ✅

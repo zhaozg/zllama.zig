@@ -237,6 +237,10 @@ pub const DebugTensorRegistry = struct {
 ///   - file: 已打开的文件
 ///   - data: 浮点数据
 pub fn writeJsonArray(io: std.Io, file: std.Io.File, data: []const f32) !void {
+    if (data.len == 0) {
+        try file.writeStreamingAll(io, "[]\n");
+        return;
+    }
     try file.writeStreamingAll(io, "[\n");
 
     for (data[0 .. data.len - 1]) |val| {

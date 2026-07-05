@@ -278,14 +278,26 @@ const testing = std.testing;
 // 共享计算图执行助手
 // ============================================================================
 
-/// Execute a ggml compute graph using a temporary CPU backend + Gallocr.
-/// Returns an error if graph reserve/alloc/compute fails.
-/// Used by multimodal vision/audio encode and helper evalChunks.
+/// Execute a ggml compute graph on CPU, keeping tensor data valid after return.
+/// Uses gallocr pre-allocation from the global CPU buffer type, then computes
+/// via ggml_backend_graph_compute. The gallocr and backend are intentionally not
+/// freed within this function — they must outlive the tensor data access.
+/// Called at most once per multimodal encode (leaked until process exit).
 pub fn computeGraph(graph: *ggml.CGraph, n_threads: i32) !void {
+    // Pre-allocate tensor data from global CPU buffer type (never freed)
+    const buft = ggml.backendCpuBufferType();
+    var galloc = try ggml.Gallocr.init(buft);
+    // NOTE: gallocr intentionally not freed — ggml_gallocr_free calls
+    // ggml_backend_buffer_free on each chunk, which would destroy tensor data.
+    _ = &galloc; // suppress unused var warning, keep alive via leak
+    if (!galloc.reserve(graph)) return error.GraphReserveFailed;
+    if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
+
+    // Create a temporary backend just for computation (also leaked)
     const cpu = try ggml.backendCpuInit();
-    defer ggml.backendFree(cpu);
+    _ = &cpu;
     ggml.backendCpuSetNThreads(cpu, n_threads);
-    try computeGraphOnBackend(graph, cpu);
+    if (!ggml.backendGraphCompute(cpu, graph)) return error.ComputeFailed;
 }
 
 /// Execute a ggml compute graph on a specific backend.
