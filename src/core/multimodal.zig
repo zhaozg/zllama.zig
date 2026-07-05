@@ -47,6 +47,7 @@ pub const EngineContext = struct {
     system_prompt: []const u8,
     no_chat_template: bool,
     no_jinja: bool,
+    image_max_pixels: u32 = 0,
 };
 
 pub const ImageGenResult = struct {};
@@ -62,7 +63,9 @@ fn computeTargetSize(
     const p = &enc.params;
 
     // 如果设置了 min_pixels 和 max_pixels，使用动态分辨率
-    if (p.image_min_pixels > 0 and p.image_max_pixels > 0) {
+    // 优先使用用户指定的 max_pixels（用于内存控制）
+    const effective_max_pixels = if (p.user_max_pixels > 0) p.user_max_pixels else p.image_max_pixels;
+    if (p.image_min_pixels > 0 and effective_max_pixels > 0) {
         const align_size = p.patch_size * p.n_merge;
         if (align_size > 0) {
             const result = preprocess.calcSizePreservedRatio(
@@ -70,11 +73,11 @@ fn computeTargetSize(
                 src_height,
                 align_size,
                 p.image_min_pixels,
-                p.image_max_pixels,
+                effective_max_pixels,
             );
             logger.info("Dynamic resize: {d}x{d} -> {d}x{d} (align={d}, min_px={d}, max_px={d})", .{
                 src_width,  src_height,         result.width,       result.height,
-                align_size, p.image_min_pixels, p.image_max_pixels,
+                align_size, p.image_min_pixels, effective_max_pixels,
             });
             return result;
         }
@@ -145,6 +148,12 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     defer raw_img.deinit();
 
     // 步骤 2: 计算目标尺寸（动态分辨率或固定正方形）
+    // 如果用户指定了 image_max_pixels，覆盖 GGUF 默认值
+    if (ectx.image_max_pixels > 0) {
+        if (mm_mgr.vision_encoder) |*enc| {
+            enc.setUserMaxPixels(ectx.image_max_pixels);
+        }
+    }
     const enc = mm_mgr.vision_encoder.?;
     const target = computeTargetSize(&enc, raw_img.width, raw_img.height);
 

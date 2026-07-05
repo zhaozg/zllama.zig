@@ -25,6 +25,7 @@ pub const CliArgs = struct {
     mmproj_path: [:0]const u8 = "",
     image_path: [:0]const u8 = "",
     audio_path: [:0]const u8 = "",
+    image_max_pixels: u32 = 0,
     // Chat template
     chat_template_name: []const u8 = "",
     system_prompt: []const u8 = "",
@@ -64,6 +65,8 @@ pub const CliArgs = struct {
                 result.image_path = args_it.next() orelse return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--audio")) {
                 result.audio_path = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--image-max-pixels")) {
+                result.image_max_pixels = std.fmt.parseUnsigned(u32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--embed")) {
                 result.embed = true;
             } else if (std.mem.eql(u8, arg, "--pooling")) {
@@ -121,6 +124,8 @@ pub const CliArgs = struct {
             \\  --mmproj <路径>       多模态投影器文件 (GGUF格式, mmproj)
             \\  --image <路径>        输入图像文件 (PPM/JPEG/PNG/BMP/GIF)
             \\  --audio <路径>        输入音频文件 (WAV 16-bit PCM)
+            \\  --image-max-pixels <N> 限制图像最大像素数 (默认: 4194304)
+            \\                  降低此值可减少视觉 token 数和内存使用
         , .{});
     }
 };

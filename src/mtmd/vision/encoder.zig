@@ -165,6 +165,15 @@ pub const VisionEncoder = struct {
         return self.weights.patch_embeddings_0 != null;
     }
 
+    /// 设置用户指定的最大像素数（覆盖 GGUF 默认值）
+    /// 用于控制内存使用，0 表示使用 GGUF 默认值
+    pub fn setUserMaxPixels(self: *VisionEncoder, max_pixels: u32) void {
+        self.params.user_max_pixels = max_pixels;
+        if (max_pixels > 0) {
+            log.info("  user_max_pixels={d} (overriding GGUF default={d})", .{ max_pixels, self.params.image_max_pixels });
+        }
+    }
+
     /// 编码 RGB 图像数据，返回视觉嵌入 tokens
     ///
     /// @param ctx ggml 计算上下文

@@ -33,6 +33,7 @@ const loadMMProj = @import("loader.zig").loadMMProj;
 
 const logger = std.log.scoped(.engine);
 
+const MEM_SIZE_ESTIMATE = 12;
 // ============================================================================
 // Prefill result
 // ============================================================================
@@ -75,6 +76,7 @@ pub const InferenceEngine = struct {
     system_prompt: []const u8 = "",
     no_chat_template: bool = false,
     no_jinja: bool = false,
+    image_max_pixels: u32 = 0,
 
     // ========================================================================
     // init / deinit
@@ -115,7 +117,7 @@ pub const InferenceEngine = struct {
         logger.info("Tokenizer: {d} tokens", .{tok.vocabSize()});
 
         const n_threads = if (cli_args.n_threads > 0) cli_args.n_threads else ggml.recommendedThreads();
-        const mem_size_estimate = 2 * 1024 * 1024 * 1024;
+        const mem_size_estimate = MEM_SIZE_ESTIMATE * 1024 * 1024 * 1024;
         logger.info("Estimated memory: {d} MB", .{mem_size_estimate / (1024 * 1024)});
         const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
         errdefer ctx_weights.deinit();
@@ -201,6 +203,7 @@ pub const InferenceEngine = struct {
             .system_prompt = system_prompt,
             .no_chat_template = cli_args.no_chat_template,
             .no_jinja = cli_args.no_jinja,
+            .image_max_pixels = cli_args.image_max_pixels,
         };
     }
 
@@ -550,6 +553,7 @@ pub const InferenceEngine = struct {
             .system_prompt = self.system_prompt,
             .no_chat_template = self.no_chat_template,
             .no_jinja = self.no_jinja,
+            .image_max_pixels = self.image_max_pixels,
         };
     }
 };

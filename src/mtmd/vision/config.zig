@@ -86,4 +86,8 @@ pub const VisionEncoderParams = struct {
     /// 来自 GGUF: clip.vision.image_max_pixels
     /// 参考: llama.cpp mtmd-image.cpp calc_size_preserved_ratio()
     image_max_pixels: u32 = 0,
+
+    /// 用户指定的最大像素数（覆盖 GGUF 默认值）
+    /// 用于控制内存使用，0 表示使用 GGUF 默认值
+    user_max_pixels: u32 = 0,
 };

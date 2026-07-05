@@ -57,9 +57,10 @@ pub fn applyRope(
 
 /// 构建位置张量 [start_pos, start_pos+1, ..., start_pos+n_tokens-1]
 pub fn buildPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i32) *ggml.Tensor {
+    const was_no_alloc = ctx.getNoAlloc();
     ctx.setNoAlloc(false);
     const pos_tensor = ctx.newTensor1d(.i32, n_tokens) catch unreachable;
-    ctx.setNoAlloc(true);
+    ctx.setNoAlloc(was_no_alloc);
     const data = pos_tensor.dataBytes();
     const pos_slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_tokens))];
     for (0..@as(usize, @intCast(n_tokens))) |i| {
@@ -71,9 +72,10 @@ pub fn buildPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i32) *g
 /// 返回 [n_tokens * 4] 形状，每 token 4 个位置值 [pos, pos, pos, pos]
 pub fn buildMultiPositionTensor(ctx: *ggml.Context, n_tokens: i32, start_pos: i32) *ggml.Tensor {
     const n_total: i32 = n_tokens * 4;
+    const was_no_alloc = ctx.getNoAlloc();
     ctx.setNoAlloc(false);
     const pos_tensor = ctx.newTensor1d(.i32, n_total) catch unreachable;
-    ctx.setNoAlloc(true);
+    ctx.setNoAlloc(was_no_alloc);
     const data = pos_tensor.dataBytes();
     const pos_slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_total))];
     // MRoPE/IMRoPE 位置张量布局: [t0, t1, ..., h0, h1, ..., w0, w1, ..., e0, e1, ...]

@@ -61,9 +61,9 @@ pub const CGraph = opaque {
 
         c.ggml_backend_cpu_set_n_threads(cpu_backend, n_threads);
 
-        log.info("Starting graph compute ({d} nodes, {d} threads)...", .{ c.ggml_graph_n_nodes(@ptrCast(self)), n_threads });
+        log.debug("Starting graph compute ({d} nodes, {d} threads)...", .{ c.ggml_graph_n_nodes(@ptrCast(self)), n_threads });
         if (c.ggml_backend_graph_compute(cpu_backend, @ptrCast(self)) == 0) {
-            log.info("Graph compute succeeded", .{});
+            log.debug("Graph compute succeeded", .{});
             return;
         }
         log.warn("ggml_backend_graph_compute failed, falling back to GPU", .{});
