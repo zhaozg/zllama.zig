@@ -28,8 +28,7 @@ pub const BackendBufferType = c.struct_ggml_backend_buffer_type;
 
 /// 初始化 CPU backend
 pub fn backendCpuInit() !*Backend {
-    const backend = c.ggml_backend_cpu_init();
-    if (backend == null) return error.GgmlBackendInitFailed;
+    const backend = c.ggml_backend_cpu_init() orelse return error.GgmlBackendInitFailed;
     return backend;
 }
 
@@ -41,6 +40,32 @@ pub fn backendCpuBufferType() *BackendBufferType {
 /// 获取 backend 的默认 buffer type
 pub fn backendGetDefaultBufferType(backend: *Backend) *BackendBufferType {
     return c.ggml_backend_get_default_buffer_type(backend).?;
+}
+
+/// 按类型初始化 backend (CPU/GPU)
+pub fn backendInitByType(device_type: c_uint, device_id: ?[]const u8) ?*Backend {
+    const id_ptr = if (device_id) |id| id.ptr else null;
+    return c.ggml_backend_init_by_type(@intCast(device_type), id_ptr);
+}
+
+/// 初始化最佳可用 backend
+pub fn backendInitBest() ?*Backend {
+    return c.ggml_backend_init_best();
+}
+
+/// 设置 CPU backend 线程数
+pub fn backendCpuSetNThreads(backend: *Backend, n_threads: i32) void {
+    c.ggml_backend_cpu_set_n_threads(backend, n_threads);
+}
+
+/// 在指定 backend 上执行计算图
+pub fn backendGraphCompute(backend: *Backend, graph: *CGraph) bool {
+    return c.ggml_backend_graph_compute(backend, @ptrCast(graph)) == 1;
+}
+
+/// 将数据从 tensor 拷贝到 host 内存
+pub fn backendTensorGet(tensor: *Tensor, data: []u8, offset: usize) void {
+    c.ggml_backend_tensor_get(@ptrCast(@alignCast(tensor)), data.ptr, offset, data.len);
 }
 
 /// 检查 buffer type 是否为 host 内存（CPU 可访问）
@@ -85,6 +110,23 @@ pub fn loadBackends() void {
     backends_loaded = true;
     log.info("Backends loaded", .{});
 }
+
+// ============================================================================
+// Backend Scheduler 封装
+// ============================================================================
+
+/// ggml_backend_sched 不透明句柄
+pub const Scheduler = opaque {
+    pub fn init(backends: []const *Backend, bufts: []const *BackendBufferType, graph_size: usize, parallel: bool) !*Scheduler {
+        const sched = c.ggml_backend_sched_new(@constCast(backends.ptr), @constCast(bufts.ptr), @intCast(backends.len), @intCast(graph_size), parallel, true);
+        if (sched == null) return error.SchedulerInitFailed;
+        return @as(*Scheduler, @ptrCast(sched));
+    }
+    pub fn free(self: *Scheduler) void { c.ggml_backend_sched_free(@ptrCast(self)); }
+    pub fn allocGraph(self: *Scheduler, graph: *CGraph) bool { return c.ggml_backend_sched_alloc_graph(@ptrCast(self), @ptrCast(graph)); }
+    pub fn reserve(self: *Scheduler, graph: *CGraph) bool { return c.ggml_backend_sched_reserve(@ptrCast(self), @ptrCast(graph)); }
+    pub fn graphCompute(self: *Scheduler, graph: *CGraph) bool { return c.ggml_backend_sched_graph_compute(@ptrCast(self), @ptrCast(graph)) == 1; }
+};
 
 // ============================================================================
 // Graph Allocator (gallocr) 封装

@@ -213,7 +213,7 @@ pub const MtmdAudioComparator = struct {
             .mel_bins = mel.n_mel_bins,
             .mel_frames = mel.n_frames,
             .audio_length_sec = @as(f32, @floatFromInt(wav_info.num_samples)) / @as(f32, @floatFromInt(wav_info.sample_rate)),
-        });
+        }, 4);
         graph_ctx.setNoAlloc(true);
 
         const buft = ggml.backendCpuBufferType();

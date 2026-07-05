@@ -1,7 +1,7 @@
 //! mtmd helper functions
 //!
 //! Utility functions for evaluating chunks, loading media from files,
-//! getting decoder positions for M-RoPE, and video input.
+//! getting decoder positions for M-RoPE.
 //!
 //! Reference: deps/llama.cpp/tools/mtmd/mtmd-helper.h
 
@@ -14,69 +14,98 @@ const stb_image = @import("stb_image");
 const log = std.log.scoped(.mtmd_helper);
 
 // ============================================================================
-// Chunk evaluation helpers
+// Chunk evaluation
 // ============================================================================
 
-/// Evaluate all chunks in sequence:
-/// - Text chunks: call user-provided decode callback
-/// - Image/audio chunks: encode with mtmd, then decode
-///
-/// Caller provides a `decodeFn` that takes tokens and returns new n_past.
-/// Returns the updated n_past, or an error.
+/// Evaluate all chunks in sequence.
+/// - Text: call decodeTextFn(tokens, n_past) → new n_past
+/// - Image/audio: encode via encoder → extract embeddings →
+///   call decodeMediaFn(embeddings, n_embd, n_tokens, n_past, non_causal) → new n_past
 pub fn evalChunks(
     ctx: *mtmd.MtmdContext,
-    ggctx: *ggml.Context,
-    graph: *ggml.CGraph,
+    io: std.Io,
+    allocator: std.mem.Allocator,
     chunks: mtmd.InputChunks,
     n_past: u32,
-    decodeFn: anytype, // fn(tokens: []const i32, n_past: u32) !u32
+    n_threads: i32,
+    decodeTextFn: anytype,
+    decodeMediaFn: anytype,
 ) !u32 {
-    _ = ggctx;
-    _ = graph;
     var cur_n_past = n_past;
 
     for (chunks.entries.items) |*chunk| {
         switch (chunk.chunk_type) {
             .text => {
                 if (chunk.tokens_text) |tokens| {
-                    if (tokens.len > 0) {
-                        cur_n_past = try decodeFn(tokens, cur_n_past);
-                    }
+                    if (tokens.len > 0) cur_n_past = try decodeTextFn(tokens, cur_n_past);
                 }
             },
             .image => {
                 if (ctx.mm_manager.vision_encoder) |*enc| {
-                    _ = enc;
-                    log.warn("Image chunk evaluation not fully implemented", .{});
-                }
+                    if (!enc.isAvailable()) return error.VisionEncoderNotAvailable;
+                    const img = &(chunk.tokens_image orelse return error.MissingImageTokens);
+                    const raw_pixels = img.getRawPixels() orelse return error.NoImageData;
+
+                    const compute_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
+                    defer compute_ctx.deinit();
+                    const cgraph = try ggml.CGraph.initReserved(compute_ctx, 4096);
+
+                    const out_tensor = try enc.encode(io, compute_ctx, cgraph, raw_pixels, img.nx, img.ny, n_threads);
+                    const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
+                    const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);
+                    const embd_size = n_embd_out * n_tokens_out;
+                    const embd_f32 = try allocator.alloc(f32, embd_size);
+                    defer allocator.free(embd_f32);
+                    @memcpy(embd_f32, out_tensor.dataF32()[0..embd_size]);
+
+                    if (ctx.output_embd) |old| allocator.free(old);
+                    ctx.output_embd = try allocator.dupe(f32, embd_f32);
+
+                    const non_causal = ctx.decodeUseNonCausal(chunk);
+                    cur_n_past = try decodeMediaFn(embd_f32, @intCast(n_embd_out), @intCast(n_tokens_out), cur_n_past, non_causal);
+                } else return error.VisionEncoderNotAvailable;
             },
             .audio => {
                 if (ctx.mm_manager.audio_encoder) |*enc| {
-                    _ = enc;
-                    log.warn("Audio chunk evaluation not fully implemented", .{});
-                }
+                    if (!enc.isAvailable()) return error.AudioEncoderNotAvailable;
+                    const mel = chunk.getMelData() orelse return error.NoAudioData;
+                    const mb = chunk.getMelBins() orelse return error.NoAudioData;
+                    const mf = chunk.getMelFrames() orelse return error.NoAudioData;
+
+                    const compute_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
+                    defer compute_ctx.deinit();
+                    const cgraph = try ggml.CGraph.initReserved(compute_ctx, 4096);
+
+                    const out_tensor = try enc.encodeRaw(io, compute_ctx, cgraph, mel, mb, mf, n_threads);
+                    const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
+                    const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);
+                    const embd_size = n_embd_out * n_tokens_out;
+                    const embd_f32 = try allocator.alloc(f32, embd_size);
+                    defer allocator.free(embd_f32);
+                    @memcpy(embd_f32, out_tensor.dataF32()[0..embd_size]);
+
+                    if (ctx.output_embd) |old| allocator.free(old);
+                    ctx.output_embd = try allocator.dupe(f32, embd_f32);
+
+                    const non_causal = ctx.decodeUseNonCausal(chunk);
+                    cur_n_past = try decodeMediaFn(embd_f32, @intCast(n_embd_out), @intCast(n_tokens_out), cur_n_past, non_causal);
+                } else return error.AudioEncoderNotAvailable;
             },
         }
     }
-
     return cur_n_past;
 }
 
-/// Get decoder positions for all tokens in an image chunk.
-/// Used by M-RoPE models to determine (t, x, y) positions.
-pub fn imageGetDecoderPos(
-    image: mtmd.ImageTokens,
-    pos_0: u32,
-    out_pos: []mtmd.DecoderPos,
-) void {
+// ============================================================================
+// Decoder positions for M-RoPE
+// ============================================================================
+
+pub fn imageGetDecoderPos(image: mtmd.ImageTokens, pos_0: u32, out_pos: []mtmd.DecoderPos) void {
     const n_tokens = image.nTokens();
     std.debug.assert(out_pos.len >= n_tokens);
-
     switch (image.pos) {
         .normal => {
-            for (0..n_tokens) |i| {
-                out_pos[i] = .{ .t = pos_0 + @as(u32, @intCast(i)), .x = 0, .y = 0 };
-            }
+            for (0..n_tokens) |i| out_pos[i] = .{ .t = pos_0 + @as(u32, @intCast(i)), .x = 0, .y = 0 };
         },
         .mrope => {
             for (0..@as(usize, @intCast(n_tokens))) |i| {
@@ -87,15 +116,12 @@ pub fn imageGetDecoderPos(
         },
         .hunyuanvl => {
             var idx: u32 = 0;
-            out_pos[idx] = .{ .t = pos_0, .x = 0, .y = 0 };
-            idx += 1;
+            out_pos[idx] = .{ .t = pos_0, .x = 0, .y = 0 }; idx += 1;
             for (0..image.ny) |row| {
                 for (0..image.nx) |col| {
-                    out_pos[idx] = .{ .t = pos_0, .x = @as(u32, @intCast(col)), .y = @as(u32, @intCast(row)) };
-                    idx += 1;
+                    out_pos[idx] = .{ .t = pos_0, .x = @as(u32, @intCast(col)), .y = @as(u32, @intCast(row)) }; idx += 1;
                 }
-                out_pos[idx] = .{ .t = pos_0, .x = image.nx, .y = @as(u32, @intCast(row)) };
-                idx += 1;
+                out_pos[idx] = .{ .t = pos_0, .x = image.nx, .y = @as(u32, @intCast(row)) }; idx += 1;
             }
             out_pos[idx] = .{ .t = pos_0, .x = 0, .y = image.ny };
         },
@@ -103,205 +129,60 @@ pub fn imageGetDecoderPos(
 }
 
 // ============================================================================
-// File loading helpers
+// File loading
 // ============================================================================
 
 pub const BitmapWrapper = struct {
     bitmap: mtmd.Bitmap,
     allocator: std.mem.Allocator,
-    video_ctx: ?*anyopaque = null,
-
-    pub fn deinit(self: *BitmapWrapper) void {
-        self.bitmap.deinit();
-    }
+    pub fn deinit(self: *BitmapWrapper) void { self.bitmap.deinit(); }
 };
 
-/// Load a bitmap from a file (auto-detects image/audio).
-pub fn bitmapInitFromFile(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    filepath: []const u8,
-    placeholder: bool,
-) !BitmapWrapper {
+pub fn bitmapInitFromFile(allocator: std.mem.Allocator, io: std.Io, filepath: []const u8, placeholder: bool) !BitmapWrapper {
+    if (placeholder) return BitmapWrapper{ .bitmap = mtmd.Bitmap.initPlaceholderImage(224, 224), .allocator = allocator };
     const cwd = std.Io.Dir.cwd();
-
-    const file = cwd.openFile(io, filepath, .{ .mode = .read_only }) catch |err| {
-        log.err("Failed to open file '{s}': {}", .{ filepath, err });
-        return err;
-    };
-
-    const stat = file.stat(io) catch |err| {
-        log.err("Failed to stat file '{s}': {}", .{ filepath, err });
-        return err;
-    };
-
+    const file = try cwd.openFile(io, filepath, .{ .mode = .read_only });
+    defer file.close(io);
+    const stat = try file.stat(io);
     const raw = try allocator.alloc(u8, @intCast(stat.size));
     errdefer allocator.free(raw);
-
-    const total_read = try file.readPositionalAll(io, raw, 0);
-    if (total_read != raw.len) {
-        allocator.free(raw);
-        return error.FileReadError;
-    }
-    file.close(io);
-
-    return bitmapInitFromBuf(allocator, raw, placeholder);
+    _ = try file.readPositionalAll(io, raw, 0);
+    return bitmapInitFromBuf(allocator, raw, false);
 }
 
-/// Load a bitmap from a buffer (auto-detects image/audio).
-pub fn bitmapInitFromBuf(
-    allocator: std.mem.Allocator,
-    buf: []const u8,
-    placeholder: bool,
-) !BitmapWrapper {
-    if (placeholder) {
-        return BitmapWrapper{
-            .bitmap = mtmd.Bitmap.initPlaceholderImage(224, 224),
-            .allocator = allocator,
-        };
-    }
-
-    if (buf.len >= 4) {
-        const magic = buf[0..4];
-
-        if (magic[0] == 0xFF and magic[1] == 0xD8 and magic[2] == 0xFF) {
-            return loadImageFromBuf(allocator, buf);
-        }
-
-        if (magic[0] == 0x89 and std.mem.eql(u8, magic[1..4], "PNG")) {
-            return loadImageFromBuf(allocator, buf);
-        }
-
-        if (magic[0] == 'G' and magic[1] == 'I' and magic[2] == 'F') {
-            return loadImageFromBuf(allocator, buf);
-        }
-
-        if (magic[0] == 'B' and magic[1] == 'M') {
-            return loadImageFromBuf(allocator, buf);
-        }
-
-        if (magic[0] == 'R' and magic[1] == 'I' and magic[2] == 'F' and magic[3] == 'F') {
-            return loadAudioFromBuf(allocator, buf);
-        }
-    }
-
-    return loadImageFromBuf(allocator, buf);
+pub fn bitmapInitFromBuf(allocator: std.mem.Allocator, buf: []const u8, placeholder: bool) !BitmapWrapper {
+    if (placeholder) return BitmapWrapper{ .bitmap = mtmd.Bitmap.initPlaceholderImage(224, 224), .allocator = allocator };
+    // JPEG
+    if (buf.len >= 3 and buf[0] == 0xFF and buf[1] == 0xD8 and buf[2] == 0xFF) return loadImage(allocator, buf);
+    // PNG
+    if (buf.len >= 4 and std.mem.eql(u8, buf[0..4], &.{ 0x89, 0x50, 0x4E, 0x47 })) return loadImage(allocator, buf);
+    // GIF
+    if (buf.len >= 4 and buf[0] == 'G' and buf[1] == 'I' and buf[2] == 'F') return loadImage(allocator, buf);
+    // BMP
+    if (buf.len >= 2 and buf[0] == 'B' and buf[1] == 'M') return loadImage(allocator, buf);
+    // WAV audio
+    if (buf.len >= 4 and std.mem.eql(u8, buf[0..4], "RIFF")) return loadAudio(allocator, buf);
+    return loadImage(allocator, buf);
 }
 
-/// Load image from buffer using stb_image
-fn loadImageFromBuf(allocator: std.mem.Allocator, buf: []const u8) !BitmapWrapper {
-    var width: c_int = 0;
-    var height: c_int = 0;
-    var channels: c_int = 0;
-
-    const data = stb_image.stbi_load_from_memory(
-        buf.ptr,
-        @intCast(buf.len),
-        &width,
-        &height,
-        &channels,
-        3,
-    );
-
-    if (data == null) {
-        log.err("stb_image failed to decode: {s}", .{stb_image.stbi_failure_reason()});
-        return error.ImageDecodeFailed;
-    }
-
-    const w: u32 = @intCast(width);
-    const h: u32 = @intCast(height);
-    const size: usize = w * h * 3;
-
+fn loadImage(allocator: std.mem.Allocator, buf: []const u8) !BitmapWrapper {
+    var width: c_int = 0; var height: c_int = 0; var channels: c_int = 0;
+    const data = stb_image.stbi_load_from_memory(buf.ptr, @intCast(buf.len), &width, &height, &channels, 3);
+    if (data == null) return error.ImageDecodeFailed;
+    defer stb_image.stbi_image_free(data);
+    const w: u32 = @intCast(width); const h: u32 = @intCast(height); const size: usize = w * h * 3;
     const owned = try allocator.alloc(u8, size);
     @memcpy(owned, data[0..size]);
-
-    stb_image.stbi_image_free(data);
-
-    return BitmapWrapper{
-        .bitmap = .{
-            .nx = w,
-            .ny = h,
-            .data = owned,
-            .allocator = allocator,
-        },
-        .allocator = allocator,
-    };
+    return BitmapWrapper{ .bitmap = .{ .nx = w, .ny = h, .data = owned, .allocator = allocator }, .allocator = allocator };
 }
 
-/// Load audio from buffer (WAV 16-bit PCM)
-fn loadAudioFromBuf(allocator: std.mem.Allocator, buf: []const u8) !BitmapWrapper {
+fn loadAudio(allocator: std.mem.Allocator, buf: []const u8) !BitmapWrapper {
     if (buf.len < 44) return error.InvalidWavFormat;
-
-    if (!std.mem.eql(u8, buf[0..4], "RIFF")) return error.InvalidWavFormat;
-    if (!std.mem.eql(u8, buf[8..12], "WAVE")) return error.InvalidWavFormat;
-    if (!std.mem.eql(u8, buf[12..16], "fmt ")) return error.InvalidWavFormat;
-
-    const audio_format = std.mem.readInt(u16, buf[20..22], .little);
-    const num_channels = std.mem.readInt(u16, buf[22..24], .little);
-    _ = std.mem.readInt(u32, buf[24..28], .little); // sample_rate
-    const bits_per_sample = std.mem.readInt(u16, buf[34..36], .little);
-
-    if (audio_format != 1) return error.UnsupportedWavFormat;
-    if (bits_per_sample != 16) return error.UnsupportedBitDepth;
-
-    var offset: usize = 36;
-    while (offset + 8 <= buf.len) {
-        if (std.mem.eql(u8, buf[offset..][0..4], "data")) {
-            const data_size = std.mem.readInt(u32, buf[offset + 4 ..][0..4], .little);
-            const data_start = offset + 8;
-            const data_end = @min(data_start + @as(usize, @intCast(data_size)), buf.len);
-
-            const sample_count = (data_end - data_start) / 2;
-            if (num_channels > 1) {
-                const mono_count = sample_count / @as(usize, @intCast(num_channels));
-                const owned = try allocator.alloc(u8, mono_count * @sizeOf(f32));
-                const dst = @as([*]f32, @ptrCast(@alignCast(owned.ptr)))[0..mono_count];
-                const src = @as([*]const i16, @ptrCast(@alignCast(buf[data_start..].ptr)))[0..sample_count];
-
-                for (0..mono_count) |i| {
-                    var sum: f32 = 0;
-                    for (0..@as(usize, @intCast(num_channels))) |c| {
-                        sum += @as(f32, @floatFromInt(src[i * @as(usize, @intCast(num_channels)) + c]));
-                    }
-                    dst[i] = (sum / @as(f32, @floatFromInt(num_channels))) / 32768.0;
-                }
-
-                return BitmapWrapper{
-                    .bitmap = mtmd.Bitmap{
-                        .nx = @intCast(mono_count),
-                        .ny = 1,
-                        .is_audio = true,
-                        .data = owned,
-                        .allocator = allocator,
-                    },
-                    .allocator = allocator,
-                };
-            } else {
-                const owned = try allocator.alloc(u8, sample_count * @sizeOf(f32));
-                const dst = @as([*]f32, @ptrCast(@alignCast(owned.ptr)))[0..sample_count];
-                const src = @as([*]const i16, @ptrCast(@alignCast(buf[data_start..].ptr)))[0..sample_count];
-
-                for (0..sample_count) |i| {
-                    dst[i] = @as(f32, @floatFromInt(src[i])) / 32768.0;
-                }
-
-                return BitmapWrapper{
-                    .bitmap = mtmd.Bitmap{
-                        .nx = @intCast(sample_count),
-                        .ny = 1,
-                        .is_audio = true,
-                        .data = owned,
-                        .allocator = allocator,
-                    },
-                    .allocator = allocator,
-                };
-            }
-        }
-        offset += 8 + std.mem.readInt(u32, buf[offset + 4 ..][0..4], .little);
-    }
-
-    return error.DataChunkNotFound;
+    const data_offset: usize = 44;
+    const sample_count = (buf.len - data_offset) / 2;
+    const owned = try allocator.alloc(u8, sample_count * @sizeOf(f32));
+    const dst = @as([*]f32, @ptrCast(@alignCast(owned.ptr)))[0..sample_count];
+    const src = @as([*]const i16, @ptrCast(@alignCast(buf[data_offset..].ptr)))[0..sample_count];
+    for (0..sample_count) |i| dst[i] = @as(f32, @floatFromInt(src[i])) / 32768.0;
+    return BitmapWrapper{ .bitmap = mtmd.Bitmap{ .nx = @intCast(sample_count), .ny = 1, .is_audio = true, .data = owned, .allocator = allocator }, .allocator = allocator };
 }
-
-// 调试相关功能已迁移至 src/debug.zig
-// 请使用 @import("debug") 中的 saveData, saveTensorFromGraph, writeJsonArray 等函数。

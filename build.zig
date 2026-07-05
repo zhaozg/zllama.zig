@@ -534,6 +534,7 @@ pub fn build(b: *std.Build) void {
         tokenize_mod.addImport("gguf", gguf_mod);
         tokenize_mod.addImport("tokenizer", tokenizer_mod);
         tokenize_mod.addImport("mm", mm_manager_mod);
+        tokenize_mod.addImport("preprocess", mm_preprocess_mod);
         mm_manager_mod.addImport("tokenize", tokenize_mod);
     }
 

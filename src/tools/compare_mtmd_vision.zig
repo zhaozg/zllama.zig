@@ -190,7 +190,7 @@ pub const MtmdVisionComparator = struct {
             .image_data = img.data,
             .image_width = img.width,
             .image_height = img.height,
-        });
+        }, 4);
         graph_ctx.setNoAlloc(true);
 
         const buft = ggml.backendCpuBufferType();

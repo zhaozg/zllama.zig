@@ -180,7 +180,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
         .image_data = img.data,
         .image_width = img.width,
         .image_height = img.height,
-    });
+    }, 4);
     vision_ctx.setNoAlloc(true);
     logger.info("Vision graph built, allocating compute buffers...", .{});
     const buft = ggml.backendCpuBufferType();
@@ -275,7 +275,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
         .mel_bins = mel.n_mel_bins,
         .mel_frames = mel.n_frames,
         .audio_length_sec = @as(f32, @floatFromInt(wav_result.info.num_samples)) / @as(f32, @floatFromInt(wav_result.info.sample_rate)),
-    });
+    }, 4);
     ectx.ctx_graph.setNoAlloc(true);
     const buft = ggml.backendCpuBufferType();
     var a_galloc = try ggml.Gallocr.init(buft);
