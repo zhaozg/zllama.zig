@@ -114,6 +114,7 @@ pub const VisionEncoder = struct {
         n_threads: i32,
     ) !*ggml.Tensor {
         _ = io;
+        _ = n_threads;
         const p = self.params;
         const expected_len: usize = @as(usize, @intCast(img_width)) * @as(usize, @intCast(img_height)) * 3;
         if (image_data.len < expected_len) return error.InvalidImageData;
@@ -130,17 +131,7 @@ pub const VisionEncoder = struct {
         };
         _ = try self.backend.buildGraph(ctx, cgraph, &self.weights, &hparams, inp);
 
-        ggml.loadBackends();
-        const cpu = try ggml.backendCpuInit();
-        defer ggml.backendFree(cpu);
-        ggml.backendCpuSetNThreads(cpu, n_threads);
-        const buft = ggml.backendGetDefaultBufferType(cpu);
-        var gallocr = try ggml.Gallocr.init(buft);
-        defer gallocr.free();
-        _ = gallocr.reserve(cgraph);
-        _ = gallocr.allocGraph(cgraph);
-        if (!ggml.backendGraphCompute(cpu, cgraph)) return error.ComputeFailed;
-
+        // Return the output tensor by name; caller must compute before reading data.
         const ggml_c = @import("ggml").c;
         var name_buf: [64]u8 = undefined;
         const out_name = "mm_output";

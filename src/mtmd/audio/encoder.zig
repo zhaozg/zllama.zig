@@ -54,7 +54,7 @@ pub const AudioEncoder = struct {
         return self.weights.sscp_conv_w[0] != null;
     }
 
-    /// Encode Mel spectrogram tensor with compute execution.
+    /// Encode Mel spectrogram tensor — builds graph only; caller handles compute.
     pub fn encode(
         self: *const AudioEncoder,
         io: std.Io,
@@ -64,6 +64,7 @@ pub const AudioEncoder = struct {
         n_threads: i32,
     ) !*ggml.Tensor {
         _ = io;
+        _ = n_threads;
         var vparams = graph.VisionHParams{
             .n_embd = self.params.n_embd,
             .n_head = self.params.n_head,
@@ -73,17 +74,7 @@ pub const AudioEncoder = struct {
         };
         _ = try self.backend.buildGraph(ctx, cgraph, &self.weights, &vparams, mel_tensor, &self.weights.clamp_info_map);
 
-        ggml.loadBackends();
-        const cpu = try ggml.backendCpuInit();
-        defer ggml.backendFree(cpu);
-        ggml.backendCpuSetNThreads(cpu, n_threads);
-        const buft = ggml.backendGetDefaultBufferType(cpu);
-        var gallocr = try ggml.Gallocr.init(buft);
-        defer gallocr.free();
-        _ = gallocr.reserve(cgraph);
-        _ = gallocr.allocGraph(cgraph);
-        if (!ggml.backendGraphCompute(cpu, cgraph)) return error.ComputeFailed;
-
+        // Return the output tensor by name; caller must compute before reading data.
         const ggml_c = @import("ggml").c;
         var name_buf: [64]u8 = undefined;
         const out_name = "debug_audio_multimodal_embedder_output";

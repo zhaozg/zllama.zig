@@ -51,6 +51,20 @@ pub fn evalChunks(
                     const cgraph = try ggml.CGraph.initReserved(compute_ctx, 4096);
 
                     const out_tensor = try enc.encode(io, compute_ctx, cgraph, raw_pixels, img.nx, img.ny, n_threads);
+
+                    // Compute the vision graph
+                    compute_ctx.setNoAlloc(false);
+                    ggml.loadBackends();
+                    const v_cpu = try ggml.backendCpuInit();
+                    defer ggml.backendFree(v_cpu);
+                    ggml.backendCpuSetNThreads(v_cpu, n_threads);
+                    const v_buft = ggml.backendGetDefaultBufferType(v_cpu);
+                    var v_galloc = try ggml.Gallocr.init(v_buft);
+                    defer v_galloc.free();
+                    if (!v_galloc.reserve(cgraph)) return error.GraphReserveFailed;
+                    if (!v_galloc.allocGraph(cgraph)) return error.GraphAllocFailed;
+                    if (!ggml.backendGraphCompute(v_cpu, cgraph)) return error.ComputeFailed;
+
                     const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
                     const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);
                     const embd_size = n_embd_out * n_tokens_out;
@@ -97,6 +111,20 @@ pub fn evalChunks(
                     const cgraph = try ggml.CGraph.initReserved(compute_ctx, 4096);
 
                     const out_tensor = try enc.encodeRaw(io, compute_ctx, cgraph, mel_f32.?, mel_bins, mel_frames, n_threads);
+
+                    // Compute the audio graph
+                    compute_ctx.setNoAlloc(false);
+                    ggml.loadBackends();
+                    const a_cpu = try ggml.backendCpuInit();
+                    defer ggml.backendFree(a_cpu);
+                    ggml.backendCpuSetNThreads(a_cpu, n_threads);
+                    const a_buft = ggml.backendGetDefaultBufferType(a_cpu);
+                    var a_galloc = try ggml.Gallocr.init(a_buft);
+                    defer a_galloc.free();
+                    if (!a_galloc.reserve(cgraph)) return error.GraphReserveFailed;
+                    if (!a_galloc.allocGraph(cgraph)) return error.GraphAllocFailed;
+                    if (!ggml.backendGraphCompute(a_cpu, cgraph)) return error.ComputeFailed;
+
                     const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
                     const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);
                     const embd_size = n_embd_out * n_tokens_out;

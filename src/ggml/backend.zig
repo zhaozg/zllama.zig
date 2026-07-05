@@ -59,8 +59,9 @@ pub fn backendCpuSetNThreads(backend: *Backend, n_threads: i32) void {
 }
 
 /// 在指定 backend 上执行计算图
+/// ggml_backend_graph_compute 返回 ggml_status: GGML_STATUS_SUCCESS = 0
 pub fn backendGraphCompute(backend: *Backend, graph: *CGraph) bool {
-    return c.ggml_backend_graph_compute(backend, @ptrCast(graph)) == 1;
+    return c.ggml_backend_graph_compute(backend, @ptrCast(graph)) == 0;
 }
 
 /// 将数据从 tensor 拷贝到 host 内存

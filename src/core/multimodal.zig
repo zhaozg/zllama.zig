@@ -174,24 +174,27 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     defer vision_ctx.deinit();
 
     vision_ctx.setNoAlloc(false);
-    var vision_graph = try ggml.CGraph.initReserved(vision_ctx, 32768);
+    const vision_graph = try ggml.CGraph.initReserved(vision_ctx, 32768);
     const vision_embeddings = try mm_mgr.encodeMedia(io, vision_ctx, vision_graph, .{
         .media_type = .image,
         .image_data = img.data,
         .image_width = img.width,
         .image_height = img.height,
     }, 4);
-    vision_ctx.setNoAlloc(true);
-    logger.info("Vision graph built, allocating compute buffers...", .{});
-    const buft = ggml.backendCpuBufferType();
-    var v_galloc = try ggml.Gallocr.init(buft);
+
+    // Compute the vision graph (encoder only builds, caller computes)
+    ggml.loadBackends();
+    const v_cpu = try ggml.backendCpuInit();
+    defer ggml.backendFree(v_cpu);
+    ggml.backendCpuSetNThreads(v_cpu, ectx.n_threads);
+    const v_buft = ggml.backendGetDefaultBufferType(v_cpu);
+    var v_galloc = try ggml.Gallocr.init(v_buft);
     defer v_galloc.free();
-    if (!v_galloc.allocGraph(vision_graph)) {
-        logger.err("GraphAllocFailed for vision graph", .{});
-        return error.GraphAllocFailed;
-    }
-    try vision_graph.compute(ectx.n_threads);
-    logger.info("Vision graph computed successfully", .{});
+    if (!v_galloc.reserve(vision_graph)) return error.GraphReserveFailed;
+    if (!v_galloc.allocGraph(vision_graph)) return error.GraphAllocFailed;
+    if (!ggml.backendGraphCompute(v_cpu, vision_graph)) return error.ComputeFailed;
+
+    vision_ctx.setNoAlloc(true);
 
     const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
     const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
@@ -263,7 +266,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     };
 
     ectx.ctx_graph.setNoAlloc(false);
-    var audio_graph = try ggml.CGraph.initReserved(ectx.ctx_graph, 32768);
+    const audio_graph = try ggml.CGraph.initReserved(ectx.ctx_graph, 32768);
 
     const mel_tensor = try audio_mod.melToTensor(ectx.ctx_graph, mel.data, mel.n_frames, mel.n_mel_bins);
     mel_tensor.setName("mel_input");
@@ -276,12 +279,20 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
         .mel_frames = mel.n_frames,
         .audio_length_sec = @as(f32, @floatFromInt(wav_result.info.num_samples)) / @as(f32, @floatFromInt(wav_result.info.sample_rate)),
     }, 4);
-    ectx.ctx_graph.setNoAlloc(true);
-    const buft = ggml.backendCpuBufferType();
-    var a_galloc = try ggml.Gallocr.init(buft);
+
+    // Compute the audio graph (encoder only builds, caller computes)
+    ggml.loadBackends();
+    const a_cpu = try ggml.backendCpuInit();
+    defer ggml.backendFree(a_cpu);
+    ggml.backendCpuSetNThreads(a_cpu, ectx.n_threads);
+    const a_buft = ggml.backendGetDefaultBufferType(a_cpu);
+    var a_galloc = try ggml.Gallocr.init(a_buft);
     defer a_galloc.free();
+    if (!a_galloc.reserve(audio_graph)) return error.GraphReserveFailed;
     if (!a_galloc.allocGraph(audio_graph)) return error.GraphAllocFailed;
-    try audio_graph.compute(ectx.n_threads);
+    if (!ggml.backendGraphCompute(a_cpu, audio_graph)) return error.ComputeFailed;
+
+    ectx.ctx_graph.setNoAlloc(true);
 
     debug.saveTensorFromGraph(io, "debug_audio", "zllama_audio_encoder_input.json", "debug_audio_encoder_input", audio_graph) catch |err| {
         logger.info("Save audio debug_audio_encoder_input data fail: {}", .{err});
@@ -289,7 +300,6 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     if (mm_mgr.audio_encoder) |enc| {
         enc.saveDebugData(io, audio_graph);
     }
-
     const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
     const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
 
