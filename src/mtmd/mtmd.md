@@ -445,17 +445,17 @@ pub fn encode(...) {
 | 4 | **Tokenize 中集成图像预处理** | `tokenize.zig` — 调用 preprocessor，填充 `batch_f32` | ✅ `addImageChunk` 已调用 `resizeAndNormalize` |
 | 5 | **Tokenize 中集成音频预处理** | `tokenize.zig` + `audio/pipeline.zig` | ✅ tokenize 存储 raw audio data；helper 中计算 Mel |
 | 6 | **实现 non-causal / M-RoPE 查询** | `mod.zig` — `decodeUseNonCausal()`, `decodeUseMRope()` | ✅ 已完成 |
-| 7 | **M-RoPE 解码器位置计算** | `helper.zig` — 完善 `imageGetDecoderPos` + pos_type 自动检测 | ✅ 已完成（`resolvePosType` 按模型自动设置） |
-| 8 | **对比验证 (compare_logits)** | `tools/` — 与 llama.cpp 输出对比，NMSE < 1e-5 | ⬜ 待模型文件 |
+| | 7 | **M-RoPE 解码器位置计算** | `helper.zig` — 完善 `imageGetDecoderPos` + pos_type 自动检测 | ✅ 已完成（`resolvePosType` 按模型自动设置） |
+| | 8 | **对比验证 (compare_logits)** | `tools/` — 与 llama.cpp 输出对比，NMSE < 1e-5 | ⬜ 待模型文件 |
 
 ### P2 — 中（完善与优化）
 
-| # | 任务 | 涉及文件 |
-|---|------|----------|
-| 9 | **动态分辨率预处理** | `preprocess.zig` — 完善 `calcSizePreservedRatio` 调用链 |
-| 10 | **批量编码 (batch)** | `mod.zig` — `mtmd_batch` 接口 |
-| 11 | **GPU backend 支持** | 基于 P0#1，添加 Metal/CUDA 初始化 |
-| 12 | **调试代码清理** | 移除 graph 中的 `setOutput` 调试代码（条件编译） |
+| # | 任务 | 涉及文件 | 状态 |
+|---|------|----------|------|
+| 9 | **动态分辨率预处理** | `preprocess.zig` — 完善 `calcSizePreservedRatio` 调用链 | ✅ 已完成 |
+| 10 | **批量编码 (batch)** | `mod.zig` — `mtmd_batch` 接口 | ⬜ |
+| 11 | **GPU backend 支持** | 基于 P0#1，添加 Metal/CUDA 初始化 | ⬜ |
+| 12 | **调试代码清理** | 移除 graph 中的 `setOutput` 调试代码 | ✅ 已完成 |
 
 ### P3 — 低（长期改进）
 
@@ -517,4 +517,4 @@ pub fn encode(...) {
 
 ---
 
-*最后更新: 2026-07-05 (P0/P1 全部完成；pos_type 自动检测；音频 Mel 在 helper 中计算；InputChunk 新增 audio_data 字段)*
+*最后更新: 2026-07-07 (P2#9 动态分辨率已完成；P2#12 调试代码清理完成：移除 gemma4a.zig 中所有 debug setOutput/命名，降级 log.warn→log.debug)*

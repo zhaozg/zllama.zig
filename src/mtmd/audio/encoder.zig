@@ -77,7 +77,7 @@ pub const AudioEncoder = struct {
         // Return the output tensor by name; caller must compute before reading data.
         const ggml_c = @import("ggml").c;
         var name_buf: [64]u8 = undefined;
-        const out_name = "debug_audio_multimodal_embedder_output";
+        const out_name = "mm_proj";
         @memcpy(name_buf[0..out_name.len], out_name);
         name_buf[out_name.len] = 0;
         const result = ggml_c.ggml_graph_get_tensor(@ptrCast(cgraph), &name_buf) orelse return error.TensorNotFound;
@@ -128,6 +128,6 @@ pub const AudioEncoder = struct {
         _ = self;
         const debug = @import("debug");
         const subdir = "debug_audio";
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_multimodal_embedder_output.json", "debug_audio_multimodal_embedder_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_multimodal_embedder_output.json", "mm_proj", cgraph) catch {};
     }
 };

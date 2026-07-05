@@ -122,7 +122,6 @@ pub fn buildGraphEx(
     // Transpose to frame-major layout [n_mel, n_frames, 1, 1]
     cur = ggml.transpose(ctx, cur);
     cur = ggml.cont(ctx, cur);
-    cur.setName("debug_audio_encoder_input");
     ggml.setInput(cur);
 
     // 2. Subsampling Conv2D (2 layers, stride=2, padding=1)
@@ -143,43 +142,22 @@ pub fn buildGraphEx(
             }
 
             cur = cur.relu(ctx);
-
-            // === DEBUG: set name + setOutput to preserve intermediate tensor ===
-            if (i == 0) {
-                cur.setName("debug_audio_conv2d_0_output");
-                ggml.setOutput(cur);
-            }
-            if (i == 1) {
-                cur.setName("debug_audio_conv2d_1_output");
-                ggml.setOutput(cur);
-            }
         }
     }
 
     // 3. Flatten: [freq, time, ch, 1] -> [ch*freq, time]
     cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
-    cur.setName("debug_audio_after_cont");
-    ggml.setOutput(cur);
 
     const flat_dim0 = cur.ne()[0] * cur.ne()[1];
     cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
-    cur.setName("debug_audio_flatten_output");
-    ggml.setOutput(cur);
 
     // 4. Input projection to Conformer embedding dim
     if (w.sscp_inp_proj_w) |proj_w| {
-        log.warn("w.sscp_inp_proj_w is NOT NULL", .{});
         cur = buildMMWithClamp(ctx, proj_w, cur, clamp_map);
         if (w.sscp_inp_proj_b) |proj_b| {
             cur = cur.add(ctx, proj_b);
-        } else {
-            log.warn("w.sscp_inp_proj_b is NULL", .{});
         }
-    } else {
-        log.warn("w.sscp_inp_proj_w is NULL", .{});
     }
-    cur.setName("debug_audio_input_proj_output");
-    ggml.setOutput(cur);
 
     const n_pos = cur.ne()[1];
 
@@ -192,7 +170,7 @@ pub fn buildGraphEx(
     const Np: i64 = B * C; // padded sequence length
     const pad_seq: i64 = Np - n_pos;
 
-    log.info("  chunked attn: C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad={d}", .{ C, P, S, R, B, Np, pad_seq });
+    log.debug("  chunked attn: C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad={d}", .{ C, P, S, R, B, Np, pad_seq });
 
     // Create RPE and mask tensors
     ctx.setNoAlloc(false);
@@ -205,7 +183,7 @@ pub fn buildGraphEx(
 
     // 6. Conformer Blocks
     for (w.layers, 0..) |*layer, il| {
-        // _ = il;
+        _ = il;
 
         var residual = cur;
 
@@ -217,10 +195,6 @@ pub fn buildGraphEx(
                 cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, "blk");
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
-        }
-        if (il == 0) {
-            residual.setName("debug_audio_half_step_1_output");
-            ggml.setOutput(residual);
         }
 
         // Chunked local self-attention with RPE
@@ -324,10 +298,6 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, x);
         }
-        if (il == 0) {
-            residual.setName("debug_audio_self_attention_with_RPE_output");
-            ggml.setOutput(residual);
-        }
 
         // Convolution Module (GLU + depthwise conv)
         // conv_pw1: [n_embd, n_pos] -> [intermediate, n_pos] (intermediate=2*n_embd for GLU)
@@ -381,10 +351,6 @@ pub fn buildGraphEx(
 
             residual = residual.add(ctx, x_conv);
         }
-        if (il == 0) {
-            residual.setName("debug_audio_convolution_output");
-            ggml.setOutput(residual);
-        }
 
         // FFN 2 (half-step) — with clamp, matching C++ clip_graph_gemma4a::build_mm
         if (layer.ff_norm_1_w != null and layer.ff_up_1_w != null and layer.ff_down_1_w != null) {
@@ -395,26 +361,13 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
         }
-        if (il == 0) {
-            residual.setName("debug_audio_half_step_2_output");
-            ggml.setOutput(residual);
-        }
 
         // Layer output norm
         cur = if (layer.ln_2_w) |ln2|
             try graph.buildNorm(ctx, residual, ln2, null, .rms_norm, norm_eps, "blk")
         else
             residual;
-
-        if (il == 0) {
-            cur.setName("debug_audio_layer_0_norm_output");
-            ggml.setOutput(cur);
-        }
     }
-
-    // === DEBUG: set name + setOutput for conformer blocks output ===
-    cur.setName("debug_audio_conformer_blocks_output");
-    ggml.setOutput(cur);
 
     // 7. Output projection
     if (w.audio_out_proj_w) |out_w| {
@@ -436,9 +389,6 @@ pub fn buildGraphEx(
         cur.setName("mm_proj");
     }
 
-    cur.setName("debug_audio_multimodal_embedder_output");
-    ggml.setOutput(cur);
-
     gf.buildForwardExpand(cur);
 
     log.info("Gemma4A graph built successfully", .{});
@@ -448,14 +398,6 @@ pub fn buildGraphEx(
 // ============================================================================
 // 辅助函数
 // ============================================================================
-fn logTensorMeta(t: *ggml.Tensor, prefix: []const u8) void {
-    const ne = t.ne(); // Ensure tensor shape is computed
-    const nb = t.nb();
-    log.debug("{s}: type={any}, ne=[{},{},{}], nb=[{},{},{}], op={s}", .{ prefix, t.dataType(), ne[0], ne[1], ne[2], nb[0], nb[1], nb[2], t.getOpName() });
-    // 如需打印 src 指针：
-    const c_t: *ggml.c.ggml_tensor = @ptrCast(@alignCast(t));
-    log.debug("{s}: src[0]={*}, src[1]={*}", .{ prefix, c_t.src[0], c_t.src[1] });
-}
 
 /// 带 clamp 的矩阵乘法
 fn buildMMWithClamp(
@@ -472,7 +414,7 @@ fn buildMMWithClamp(
         out = out.clamp(ctx, ci.out_min, ci.out_max);
         return out;
     } else {
-        log.warn("[gemma4a] not found ClampInfo of '{s}'", .{name});
+        log.debug("[gemma4a] no clamp info for '{s}'", .{name});
         return w.mulMat(ctx, x);
     }
 }
@@ -713,29 +655,19 @@ pub fn loadWeights(
     for (0..2) |i| {
         if (w.sscp_conv_w[i]) |t| {
             log.info("  conv1d.{d}.weight: shape=[{d},{d},{d}], name={s}", .{ i, t.ne()[0], t.ne()[1], t.ne()[2], t.getName() });
-        } else {
-            log.warn("  conv1d.{d}.weight: NOT FOUND", .{i});
         }
     }
     if (w.sscp_inp_proj_w) |t| {
         log.info("  input_projection: shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
-    } else {
-        log.warn("  input_projection: NOT FOUND (a.input_projection.weight)", .{});
     }
     if (w.audio_out_proj_w) |t| {
         log.info("  audio_out_proj:  shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
-    } else {
-        log.warn("  audio_out_proj:  NOT FOUND (a.pre_encode.out.weight)", .{});
     }
     if (w.mm_soft_emb_norm_w) |t| {
         log.info("  mm_soft_emb_norm: shape=[{d}], name={s}", .{ t.ne()[0], t.getName() });
-    } else {
-        log.warn("  mm_soft_emb_norm: NOT FOUND (mm.a.soft_emb_norm.weight)", .{});
     }
     if (w.mm_input_proj_w) |t| {
         log.info("  mm_input_proj:   shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
-    } else {
-        log.warn("  mm_input_proj:   NOT FOUND (mm.a.input_projection.weight)", .{});
     }
 }
 
