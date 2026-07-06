@@ -11,6 +11,7 @@
 //! - graph.zig:   ggml_cgraph 封装
 //! - backend.zig: Backend 与 Gallocr 封装
 //! - ops.zig:     计算图操作函数
+//! - quantize.zig: 量化操作函数（quantize_chunk, quantize_init 等）
 //! - utils.zig:   工具函数（版本、CPU 特性等）
 
 const std = @import("std");
@@ -105,6 +106,18 @@ pub const ssmConv = @import("ops.zig").ssmConv;
 pub const ssmScan = @import("ops.zig").ssmScan;
 pub const sumRows = @import("ops.zig").sumRows;
 pub const setOutput = @import("ops.zig").setOutput;
+
+// ============================================================================
+// 量化 API
+// ============================================================================
+
+pub const quantize = @import("quantize.zig");
+pub const quantizeInit = quantize.quantizeInit;
+pub const quantizeFree = quantize.quantizeFree;
+pub const quantizeRequiresImatrix = quantize.quantizeRequiresImatrix;
+pub const quantizeChunk = quantize.quantizeChunk;
+pub const quantizeTensor = quantize.quantizeTensor;
+pub const quantizedSize = quantize.quantizedSize;
 
 pub const version = @import("utils.zig").version;
 pub const cpuNThreads = @import("utils.zig").cpuNThreads;
