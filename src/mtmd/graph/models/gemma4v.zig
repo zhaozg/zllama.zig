@@ -319,7 +319,8 @@ pub fn buildGraph(
     inp_raw.setName("inp_raw");
     ggml.setInput(inp_raw);
 
-    // 在 no_alloc 模式下，需要手动为输入张量分配数据
+    // 在 no_alloc 模式下，setInput 标记的张量不会被 Gallocr 分配，
+    // 所以需要手动分配数据。Gallocr 只为非输入张量分配内存。
     if (ctx.getNoAlloc()) {
         const data_size = @as(usize, @intCast(inp_raw.nBytes()));
         const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
@@ -327,7 +328,7 @@ pub fn buildGraph(
         inp_raw.setDataPtr(buf);
     }
 
-    // 填充输入数据（由调用者负责）
+    // 填充输入数据
     // 这里假设 img.buf 包含 RGBRGBRGB... 格式的 f32 数据
     {
         const dst = inp_raw.dataF32();

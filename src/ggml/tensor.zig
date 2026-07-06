@@ -43,15 +43,39 @@ pub const Tensor = opaque {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
         return @as([*]u8, @ptrCast(t.data))[0..@as(usize, @intCast(c.ggml_nbytes(t)))];
     }
+    /// 获取张量数据为 f32 切片。
+    /// 注意：此函数仅适用于类型为 f32 的张量。
+    /// 对于 F16/BF16 张量，请使用 dataF16() 或 dataBF16()。
+    /// 如果张量不是 f32 类型，此函数会 panic（通过断言）。
     pub fn dataF32(self: *Tensor) []f32 {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        const typ: Type = @enumFromInt(t.type);
+        std.debug.assert(typ == .f32);
         const total_size = c.ggml_nbytes(t);
         return @as([*]f32, @ptrCast(@alignCast(t.data)))[0 .. total_size / @sizeOf(f32)];
     }
     pub fn dataI32(self: *Tensor) []i32 {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        const typ: Type = @enumFromInt(t.type);
+        std.debug.assert(typ == .i32);
         const total_size = c.ggml_nbytes(t);
         return @as([*]i32, @ptrCast(@alignCast(t.data)))[0 .. total_size / @sizeOf(i32)];
+    }
+    /// 获取张量数据为 f16 切片（仅适用于 F16 类型张量）
+    pub fn dataF16(self: *Tensor) []u16 {
+        const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        const typ: Type = @enumFromInt(t.type);
+        std.debug.assert(typ == .f16);
+        const total_size = c.ggml_nbytes(t);
+        return @as([*]u16, @ptrCast(@alignCast(t.data)))[0 .. total_size / @sizeOf(u16)];
+    }
+    /// 获取张量数据为 bf16 切片（仅适用于 BF16 类型张量）
+    pub fn dataBF16(self: *Tensor) []u16 {
+        const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        const typ: Type = @enumFromInt(t.type);
+        std.debug.assert(typ == .bf16);
+        const total_size = c.ggml_nbytes(t);
+        return @as([*]u16, @ptrCast(@alignCast(t.data)))[0 .. total_size / @sizeOf(u16)];
     }
     pub fn setDataPtr(self: *Tensor, data: []u8) void {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));

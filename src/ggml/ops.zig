@@ -218,6 +218,27 @@ pub fn gatedDeltaNet(ctx: *Context, q: *Tensor, k: *Tensor, v: *Tensor, g: *Tens
 }
 
 // ============================================================================
+// Flash Attention
+// ============================================================================
+
+/// Flash attention with optional mask, scaling, ALiBi, and logit softcap.
+/// Q, K, V should be permuted to [d_head, n_patches, n_head, n_batch].
+/// Result shape: [d_head, n_patches, n_head, n_batch].
+pub fn flashAttnExt(ctx: *Context, q: *Tensor, k: *Tensor, v: *Tensor, mask: ?*Tensor, kq_scale: f32, max_bias: f32, logit_softcap: f32) *Tensor {
+    const mask_ptr = if (mask) |m| @as(?*c.struct_ggml_tensor, @ptrCast(@alignCast(m))) else null;
+    return @as(*Tensor, @ptrCast(c.ggml_flash_attn_ext(
+        @ptrCast(ctx),
+        @ptrCast(@alignCast(q)),
+        @ptrCast(@alignCast(k)),
+        @ptrCast(@alignCast(v)),
+        mask_ptr,
+        kq_scale,
+        max_bias,
+        logit_softcap,
+    )));
+}
+
+// ============================================================================
 // 输出设置
 // ============================================================================
 

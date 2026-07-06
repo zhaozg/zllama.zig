@@ -74,6 +74,7 @@ pub const ropeMulti = @import("ops.zig").ropeMulti;
 pub const scale = @import("ops.zig").scale;
 pub const softMax = @import("ops.zig").softMax;
 pub const softMaxExt = @import("ops.zig").softMaxExt;
+pub const flashAttnExt = @import("ops.zig").flashAttnExt;
 pub const diagMaskInf = @import("ops.zig").diagMaskInf;
 pub const silu = @import("ops.zig").silu;
 pub const gelu = @import("ops.zig").gelu;

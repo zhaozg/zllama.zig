@@ -42,7 +42,6 @@ pub fn buildAttn(
     const d_head = q_cur.ne()[0];
     const n_patches = q_cur.ne()[2];
     const n_batch = q_cur.ne()[3];
-    _ = n_batch;
     _ = name;
 
     // 形状断言
@@ -54,123 +53,50 @@ pub fn buildAttn(
     std.debug.assert(v_cur.ne()[1] == n_head);
     std.debug.assert(v_cur.ne()[2] == n_patches);
 
-    // 展平 head 和 batch 维度以便计算
-    // Q: [d_head, n_head, n_patches, n_batch] → [d_head, n_head * n_batch, n_patches]
-    // 但 ggml 的 mul_mat 在 ne[0] 维度收缩，所以我们需要 permute
-    // 标准做法: permute Q/K 到 [n_patches, d_head, n_head, n_batch] 然后 mul_mat
-
-    // QK^T: [n_patches, d_head] @ [d_head, n_patches] → [n_patches, n_patches]
-    // 对每个 head 和 batch 分别计算
-
-    // 方法: 使用 ggml_flash_attn_ext 或手动计算
-    // 这里使用手动计算以保持兼容性
-
-    // 1. 将 Q, K, V 重塑为 [d_head, n_patches, n_head * n_batch]
-    //    通过 permute(2, 0, 1, 3) + cont + reshape
-    const q_flat = q_cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
-    const k_flat = k_cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
-    const v_flat = v_cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
-
-    // 现在形状: [n_patches, d_head, n_head * n_batch]
-    // 对每个 head*batch 计算注意力
-
-    // 2. Q @ K^T: 对每个 head*batch
-    //    Q: [n_patches, d_head], K: [n_patches, d_head]
-    //    scores = Q @ K^T = mul_mat(K^T, Q^T)^T
-    //    更简单: 使用 ggml_mul_mat
-
-    // 将 Q 转置为 [d_head, n_patches] 用于 mul_mat
-    const q_t = q_flat.permute(ctx, 1, 0, 2, 3).cont(ctx);
-    const k_t = k_flat.permute(ctx, 1, 0, 2, 3).cont(ctx);
-
-    // scores = Q^T @ K = [n_patches, d_head]^T @ [n_patches, d_head] → [d_head, d_head]? 不对
-    // ggml_mul_mat(A, B) = A^T @ B
-    // 所以 mul_mat(Q_t, k_t) = Q_t^T @ k_t = [n_patches, d_head] @ [d_head, n_patches] = [n_patches, n_patches]
-    // 但 Q_t 是 [d_head, n_patches], k_t 是 [d_head, n_patches]
-    // mul_mat(Q_t, k_t) = Q_t^T @ k_t = [n_patches, d_head] @ [d_head, n_patches] = [n_patches, n_patches]
-    // 正确!
-
-    var scores = q_t.mulMat(ctx, k_t);
-
-    // 3. Scale
-    scores = scores.scale(ctx, kq_scale);
-
-    // 4. Mask (optional)
-    if (kq_mask) |mask| {
-        scores = scores.add(ctx, mask);
-    }
-
-    // 5. Softmax
-    scores = scores.softMax(ctx);
-
-    // 6. scores @ V
-    // V: [d_head, n_patches] (per head*batch)
-    // scores: [n_patches, n_patches]
-    // result = V @ scores^T = (scores @ V^T)^T
-    // mul_mat(V_t, scores) = V_t^T @ scores = [n_patches, d_head] @ [n_patches, n_patches] = [n_patches, d_head]? 不对
+    // 使用 ggml_flash_attn_ext（参考 llama.cpp clip.cpp build_attn 的 flash attention 路径）
     //
-    // 正确: scores @ V = [n_patches, n_patches] @ [n_patches, d_head] = [n_patches, d_head]
-    // mul_mat(V^T, scores^T) = V @ scores^T = (scores @ V^T)^T
-    // 所以: mul_mat(scores, V_t^T) = scores^T @ V_t = [n_patches, n_patches] @ [d_head, n_patches] = [n_patches, d_head]? 不对
+    // Q, K, V: [d_head, n_head, n_patches, n_batch]
+    // Q, K: permute(0, 2, 1, 3) -> [d_head, n_patches, n_head, n_batch]
+    // V:    permute(0, 2, 1, 3) -> [d_head, n_patches, n_head, n_batch]
+    // flash_attn_ext(Q, K, V, mask, scale, 0, 0)
+    // 结果: [d_head, n_patches, n_head, n_batch]
+    // reshape_2d: [d_head * n_patches, n_head * n_batch] — 不对
     //
-    // V is already in [n_patches, d_head, ...] shape from v_flat
-    // Use v_flat directly for scores @ V computation
-    const v_for_attn = v_flat;
+    // 实际上 flash_attn_ext 的结果形状是 [v->ne[0], q->ne[2], q->ne[1], q->ne[3]]
+    // = [d_head, n_patches, n_head, n_batch]
+    // 然后 reshape_2d: [d_head * n_patches, n_head * n_batch] — 不对
+    //
+    // 我们需要 [n_embd, n_patches * n_batch]
+    // 所以需要 permute 结果: [d_head, n_patches, n_head, n_batch] -> [n_head, d_head, n_patches, n_batch]
+    // 然后 cont_2d: [n_embd, n_patches * n_batch]
 
-    // scores @ V: [n_patches, n_patches] @ [n_patches, d_head] = [n_patches, d_head]
-    // mul_mat(V_t, scores) = V_t^T @ scores = [n_patches, d_head] @ [n_patches, n_patches] = [n_patches, d_head]? 不对
-    // mul_mat(scores, V_t) = scores^T @ V_t = [n_patches, n_patches] @ [d_head, n_patches] = [n_patches, d_head]? 不对
-    //
-    // 使用 ggml_mul_mat: mul_mat(A, B) = A^T @ B
-    // 我们需要 scores @ V = (V^T @ scores^T)^T
-    // mul_mat(V_t, scores) = V_t^T @ scores = [n_patches, d_head] @ [n_patches, n_patches] = [n_patches, d_head]
-    // 不对，维度不匹配
-    //
-    // 正确: scores [n_patches, n_patches], V [d_head, n_patches]
-    // scores @ V^T = [n_patches, n_patches] @ [n_patches, d_head] = [n_patches, d_head]
-    // 所以: mul_mat(V, scores^T) = V^T @ scores^T = [n_patches, d_head] @ [n_patches, n_patches] = [n_patches, d_head]? 不对
-    //
-    // 最简单: scores @ V
-    // scores [n_patches, n_patches], V [d_head, n_patches]
-    // 结果 [n_patches, d_head]
-    // 使用 ggml_mul_mat: mul_mat(V, scores) = V^T @ scores = [n_patches, d_head] @ [n_patches, n_patches]
-    // 维度: V^T [n_patches, d_head], scores [n_patches, n_patches] → 不匹配!
-    //
-    // 正确方式: scores @ V = (V^T @ scores^T)^T
-    // scores^T [n_patches, n_patches], V^T [n_patches, d_head]
-    // mul_mat(V, scores^T) = V^T @ scores^T = [n_patches, d_head] @ [n_patches, n_patches] = [n_patches, d_head]
-    // 不对，[n_patches, d_head] @ [n_patches, n_patches] 维度不匹配
-    //
-    // 重新思考: scores [n_patches, n_patches], V [d_head, n_patches]
-    // scores @ V = [n_patches, n_patches] @ [d_head, n_patches] → 维度不匹配!
-    // V 需要是 [n_patches, d_head]
-    //
-    // 所以: V_t [n_patches, d_head], scores [n_patches, n_patches]
-    // scores^T @ V_t = [n_patches, n_patches] @ [n_patches, d_head] = [n_patches, d_head]
-    // mul_mat(V_t, scores) = V_t^T @ scores = [d_head, n_patches] @ [n_patches, n_patches] = [d_head, n_patches]
-    // 然后转置回 [n_patches, d_head]
-
-    var attn_out = scores.mulMat(ctx, v_for_attn);
-
-    // attn_out: [d_head, n_patches] (per head*batch)
-    // 转置回 [n_patches, d_head]
-    attn_out = attn_out.permute(ctx, 1, 0, 2, 3).cont(ctx);
-
-    // 7. 重塑回 [d_head * n_head, n_patches] = [n_embd, n_patches]
     const n_embd = d_head * n_head;
-    attn_out = attn_out.reshape2d(ctx, n_embd, n_patches);
 
-    // 8. 输出投影
-    var result = wo.mulMat(ctx, attn_out);
+    // Q, K, V: permute(0, 2, 1, 3) -> [d_head, n_patches, n_head, n_batch]
+    const q = q_cur.permute(ctx, 0, 2, 1, 3).cont(ctx);
+    const k = k_cur.permute(ctx, 0, 2, 1, 3).cont(ctx);
+    const v = v_cur.permute(ctx, 0, 2, 1, 3).cont(ctx);
+
+    // flash_attn_ext(Q, K, V, mask, scale, max_bias, logit_softcap)
+    // 结果: [d_head, n_patches, n_head, n_batch]
+    var cur = ggml.flashAttnExt(ctx, q, k, v, kq_mask, kq_scale, 0.0, 0.0);
+
+    // permute 到 [n_head, d_head, n_patches, n_batch]
+    cur = cur.permute(ctx, 2, 0, 1, 3).cont(ctx);
+
+    // 展平 head 和 d_head 维度: [n_embd, n_patches, n_batch]
+    cur = ggml.cont2d(ctx, cur, n_embd, n_patches * n_batch);
+
+    // 输出投影
+    var result = wo.mulMat(ctx, cur);
 
     if (wo_b) |b| {
         result = result.add(ctx, b);
     }
 
-    // 9. Attention sinks (optional)
+    // Attention sinks (optional)
     if (sinks) |s| {
         _ = s;
-        // TODO: implement attention sinks
         log.warn("Attention sinks not yet implemented", .{});
     }
 

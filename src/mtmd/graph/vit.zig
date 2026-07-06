@@ -227,15 +227,16 @@ pub fn buildVit(
     return inpL;
 }
 
-/// 调整位置嵌入大小（通过插值）
+/// 调整位置嵌入大小（通过双线性插值）
 ///
 /// 使用双线性插值将位置嵌入调整到目标大小。
+/// 注意：ggml_repeat 是沿维度重复（不是插值），所以这里使用手动插值。
 ///
 /// 参数:
 ///   - ctx: ggml 上下文
 ///   - pos_embd: 原始位置嵌入 [n_embd, src_size]
 ///   - target_size: 目标大小
-///   - interpolation_mode: 插值模式（默认双线性）
+///   - interpolation_mode: 插值模式（0=双线性，其他保留）
 ///
 /// 返回: 调整后的位置嵌入 [n_embd, target_size]
 ///
@@ -256,36 +257,50 @@ pub fn resizePositionEmbeddings(
         return pos_embd;
     }
 
-    // Reshape to 4D: [n_embd, 1, src_size, 1]
-    var cur = pos_embd.reshape4d(ctx, n_embd, 1, src_size, 1);
-    cur.setName("pos_embd_4d");
+    // 如果 target_size 是 src_size 的整数倍，使用 ggml_repeat（沿 dim 2 重复）
+    // 否则使用双线性插值（通过 CPU 端手动计算）
+    if (@rem(target_size, src_size) == 0) {
+        // 整数倍缩放：使用 repeat
+        var cur = pos_embd.reshape4d(ctx, n_embd, 1, src_size, 1);
+        cur.setName("pos_embd_4d");
 
-    // Use repeat to interpolate along dim 2 (src_size -> target_size)
-    const scale_factor: i32 = @intCast(@divTrunc(target_size, src_size));
-    if (scale_factor > 1) {
-        // Create a target tensor with the desired shape and repeat
         const repeated = try ctx.newTensor4d(ggml.Type.f32, n_embd, 1, target_size, 1);
         cur = ggml.repeat(ctx, cur, repeated);
         cur.setName("pos_embd_upscaled");
+
+        cur = cur.reshape2d(ctx, n_embd, target_size);
+        cur.setName("pos_embd_resized");
+        return cur;
     }
 
-    // If target_size is not a multiple of src_size, pad or slice
-    const cur_size = cur.ne()[2];
-    if (cur_size > target_size) {
-        cur = cur.view3d(ctx, n_embd, 1, target_size, cur.nb()[1], cur.nb()[2], 0);
-        cur = cur.cont(ctx);
-        cur.setName("pos_embd_sliced");
-    } else if (cur_size < target_size) {
-        const pad_size = target_size - cur_size;
-        cur = cur.pad(ctx, 0, 0, @as(i32, @intCast(pad_size)), 0);
-        cur.setName("pos_embd_padded");
+    // 非整数倍缩放：使用双线性插值
+    // 在 CPU 端手动计算插值，因为 ggml 没有内置的双线性插值算子
+    // 创建目标张量
+    const result = try ctx.newTensor2d(ggml.Type.f32, n_embd, target_size);
+    result.setName("pos_embd_resized");
+
+    // 获取源数据和目标数据
+    const src_data = pos_embd.dataF32();
+    const dst_data = result.dataF32();
+
+    const scale = @as(f64, @floatFromInt(src_size)) / @as(f64, @floatFromInt(target_size));
+
+    for (0..@as(usize, @intCast(target_size))) |dst_idx| {
+        const src_f: f64 = (@as(f64, @floatFromInt(dst_idx)) + 0.5) * scale - 0.5;
+        const src0_i: i64 = @intFromFloat(@floor(src_f));
+        const src1_i: i64 = @min(src0_i + 1, src_size - 1);
+        const src0: usize = @intCast(@max(src0_i, 0));
+        const src1: usize = @intCast(src1_i);
+        const frac: f64 = src_f - @floor(src_f);
+
+        for (0..@as(usize, @intCast(n_embd))) |e| {
+            const v0 = src_data[src0 * @as(usize, @intCast(n_embd)) + e];
+            const v1 = src_data[src1 * @as(usize, @intCast(n_embd)) + e];
+            dst_data[dst_idx * @as(usize, @intCast(n_embd)) + e] = @as(f32, @floatCast(@as(f64, v0) * (1.0 - frac) + @as(f64, v1) * frac));
+        }
     }
 
-    // Reshape back to 2D: [n_embd, target_size]
-    cur = cur.reshape2d(ctx, n_embd, target_size);
-    cur.setName("pos_embd_resized");
-
-    return cur;
+    return result;
 }
 
 test "buildVit: basic ViT forward" {
