@@ -451,9 +451,17 @@ pub const Gemma4Graph = struct {
                 // Non-causal (media) pass: shared KV layers cannot read from cache
                 // because the KV layer's K/V was not cached. Use a zero attention output
                 // as a placeholder (the shared layers don't contribute to media encoding).
-                log.warn("Shared KV layer {d} in non-causal pass: using zero attention", .{il});
+                log.debug("Shared KV layer {d} in non-causal pass: using zero attention", .{il});
                 attn_out = try ctx.newTensor2d(.f32, n_head * head_dim, n_tokens_i64);
-                @memset(attn_out.dataF32(), 0);
+                // In no_alloc mode, manually allocate data for the zero tensor
+                if (ctx.getNoAlloc()) {
+                    const data_size = @as(usize, @intCast(attn_out.nBytes()));
+                    const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+                    @memset(buf, 0);
+                    attn_out.setDataPtr(buf);
+                } else {
+                    @memset(attn_out.dataF32(), 0);
+                }
             }
         }
 

@@ -41,9 +41,19 @@ pub fn normalizeToTensor(
     const H: usize = @intCast(img_height);
     const wh: usize = W * H;
 
-    log.err("normalizeToTensor: image_data.ptr={*} len={d} W={d} H={d} ctx_no_alloc={}", .{ image_data.ptr, image_data.len, img_width, img_height, ctx.getNoAlloc() });
     var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(img_width), @intCast(img_height), 3);
     inp.setName("vision_input");
+
+    // In no_alloc mode, the tensor data pointer is NULL.
+    // We need to allocate the data manually so we can write to it.
+    const no_alloc = ctx.getNoAlloc();
+    if (no_alloc) {
+        // Allocate data buffer for the input tensor using C malloc
+        const data_size = @as(usize, @intCast(inp.nBytes()));
+        const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+        @memset(buf, 0);
+        inp.setDataPtr(buf);
+    }
 
     const dst = inp.dataF32();
     log.err("normalizeToTensor: dst.ptr={*} len={d}", .{ dst.ptr, dst.len });

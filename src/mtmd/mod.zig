@@ -42,8 +42,12 @@ pub const ContextParams = struct {
     image_max_tokens: i32 = -1,
 };
 
-pub fn defaultMarker() []const u8 { return "<__media__>"; }
-pub fn contextParamsDefault() ContextParams { return .{}; }
+pub fn defaultMarker() []const u8 {
+    return "<__media__>";
+}
+pub fn contextParamsDefault() ContextParams {
+    return .{};
+}
 pub const Caps = struct { inp_vision: bool = false, inp_audio: bool = false };
 
 pub const Bitmap = struct {
@@ -138,9 +142,15 @@ pub const InputChunk = struct {
             .audio => self.tokens_audio_n,
         };
     }
-    pub fn getMelData(self: InputChunk) ?[]const f32 { return self.mel_data; }
-    pub fn getMelBins(self: InputChunk) ?u32 { return if (self.mel_data != null) self.mel_bins else null; }
-    pub fn getMelFrames(self: InputChunk) ?u32 { return if (self.mel_data != null) self.mel_frames else null; }
+    pub fn getMelData(self: InputChunk) ?[]const f32 {
+        return self.mel_data;
+    }
+    pub fn getMelBins(self: InputChunk) ?u32 {
+        return if (self.mel_data != null) self.mel_bins else null;
+    }
+    pub fn getMelFrames(self: InputChunk) ?u32 {
+        return if (self.mel_data != null) self.mel_frames else null;
+    }
 };
 
 pub const InputChunks = struct {
@@ -157,8 +167,12 @@ pub const InputChunks = struct {
         }
         self.entries.clearAndFree(self.allocator);
     }
-    pub fn size(self: InputChunks) usize { return self.entries.items.len; }
-    pub fn get(self: InputChunks, idx: usize) *const InputChunk { return &self.entries.items[idx]; }
+    pub fn size(self: InputChunks) usize {
+        return self.entries.items.len;
+    }
+    pub fn get(self: InputChunks, idx: usize) *const InputChunk {
+        return &self.entries.items[idx];
+    }
     pub fn append(self: *InputChunks, chunk: InputChunk) !void {
         try self.entries.append(self.allocator, chunk);
     }
@@ -213,14 +227,30 @@ pub const MultiModalManager = struct {
             gf.findTensor("mm.soft_emb_norm.weight") != null)
         {
             caps.has_vision = true;
+            // 区分视觉编码器类型（按特异性从高到低匹配）：
+            // - gemma4uv: 使用 v.patch_norm.1.weight 或 patch_norm_1.weight
+            // - qwen2vl:  使用 v.patch_embd_1.weight（双 patch embedding，qwen2vl 特有）
+            // - qwen3vl:  使用 v.blk.0.attn_qkv.weight（fused QKV）
+            // - gemma4v:  使用 v.blk.0.attn_q.weight + v.std_bias（分离 Q/K/V + 标准化参数）
+            //             注意：gemma4v 和 qwen2vl 都使用 v.blk.{d}.attn_q.weight 命名，
+            //             但 qwen2vl 有 v.patch_embd_1.weight，gemma4v 有 v.std_bias/v.std_scale
             if (gf.findTensor("v.patch_norm.1.weight") != null or
                 gf.findTensor("patch_norm_1.weight") != null)
             {
                 caps.vision_encoder_type = "gemma4uv";
+            } else if (gf.findTensor("v.patch_embd_1.weight") != null) {
+                // qwen2vl 有第二个 patch embedding 层（双卷积），gemma4v 没有
+                caps.vision_encoder_type = "qwen2vl";
             } else if (gf.findTensor("v.blk.0.attn_qkv.weight") != null) {
                 caps.vision_encoder_type = "qwen3vl";
+            } else if (gf.findTensor("v.std_bias") != null or
+                gf.findTensor("v.std_scale") != null)
+            {
+                // gemma4v 有标准化参数（std_bias/std_scale），qwen2vl 没有
+                caps.vision_encoder_type = "gemma4v";
             } else if (gf.findTensor("v.blk.0.attn_q.weight") != null) {
-                caps.vision_encoder_type = "qwen2vl";
+                // 分离 Q/K/V 权重，无 std_bias — 默认为 gemma4v
+                caps.vision_encoder_type = "gemma4v";
             } else {
                 caps.vision_encoder_type = "gemma4v";
             }
@@ -451,9 +481,15 @@ pub const MtmdContext = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn supportVision(self: *const MtmdContext) bool { return self.caps.has_vision; }
-    pub fn supportAudio(self: *const MtmdContext) bool { return self.caps.has_audio; }
-    pub fn getAudioSampleRate(self: *const MtmdContext) i32 { return self.caps.audio_sample_rate; }
+    pub fn supportVision(self: *const MtmdContext) bool {
+        return self.caps.has_vision;
+    }
+    pub fn supportAudio(self: *const MtmdContext) bool {
+        return self.caps.has_audio;
+    }
+    pub fn getAudioSampleRate(self: *const MtmdContext) i32 {
+        return self.caps.audio_sample_rate;
+    }
 
     pub fn decodeUseNonCausal(self: *const MtmdContext, chunk: ?*const InputChunk) bool {
         if (self.caps.vision_encoder_type.len > 0 and std.mem.startsWith(u8, self.caps.vision_encoder_type, "gemma")) {
@@ -465,8 +501,12 @@ pub const MtmdContext = struct {
     pub fn decodeUseMRope(self: *const MtmdContext) bool {
         return self.pos_type == .mrope or self.pos_type == .hunyuanvl;
     }
-    pub fn getMarker(self: *const MtmdContext) []const u8 { return self.media_marker; }
-    pub fn getOutputEmbd(self: *MtmdContext) ?[]f32 { return self.output_embd; }
+    pub fn getMarker(self: *const MtmdContext) []const u8 {
+        return self.media_marker;
+    }
+    pub fn getOutputEmbd(self: *MtmdContext) ?[]f32 {
+        return self.output_embd;
+    }
 };
 
 pub fn getCapFromFile(allocator: std.mem.Allocator, mmproj_path: []const u8, io: std.Io) !Caps {

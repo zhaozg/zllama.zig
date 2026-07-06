@@ -313,11 +313,19 @@ pub fn buildGraph(
     // ========================================================================
     // 1. 创建输入张量
     // ========================================================================
-    // 输入图像: [3, height, width] f32, 值范围 [0, 1]
+    // 创建输入张量
     // 参考: gemma4v.cpp build_inp_raw()
     const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3, n_batch);
     inp_raw.setName("inp_raw");
     ggml.setInput(inp_raw);
+
+    // 在 no_alloc 模式下，需要手动为输入张量分配数据
+    if (ctx.getNoAlloc()) {
+        const data_size = @as(usize, @intCast(inp_raw.nBytes()));
+        const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+        @memset(buf, 0);
+        inp_raw.setDataPtr(buf);
+    }
 
     // 填充输入数据（由调用者负责）
     // 这里假设 img.buf 包含 RGBRGBRGB... 格式的 f32 数据
@@ -346,6 +354,11 @@ pub fn buildGraph(
     cur.setName("inp_scaled");
     {
         const bias_t = try ctx.newTensor1d(ggml.Type.f32, 1);
+        // 在 no_alloc 模式下，需要手动为 bias_t 分配数据
+        if (ctx.getNoAlloc()) {
+            const buf = @as([*]u8, @ptrCast(std.c.malloc(@sizeOf(f32)) orelse return error.OutOfMemory))[0..@sizeOf(f32)];
+            bias_t.setDataPtr(buf);
+        }
         bias_t.dataF32()[0] = -1.0;
         bias_t.setName("inp_bias");
         cur = cur.add(ctx, bias_t);
@@ -381,6 +394,15 @@ pub fn buildGraph(
     const pos_y = try ctx.newTensor1d(ggml.Type.i32, n_patches);
     pos_y.setName("pos_y");
     ggml.setInput(pos_y);
+
+    // 在 no_alloc 模式下，需要手动为位置索引张量分配数据
+    if (ctx.getNoAlloc()) {
+        const px_size = @as(usize, @intCast(pos_x.nBytes()));
+        const buf_x = @as([*]u8, @ptrCast(std.c.malloc(px_size) orelse return error.OutOfMemory))[0..px_size];
+        pos_x.setDataPtr(buf_x);
+        const buf_y = @as([*]u8, @ptrCast(std.c.malloc(px_size) orelse return error.OutOfMemory))[0..px_size];
+        pos_y.setDataPtr(buf_y);
+    }
 
     // 填充位置索引
     {
@@ -507,7 +529,7 @@ pub fn buildGraph(
         // 使用带 clamp 的矩阵乘法（匹配 C++ build_mm）
         if (w.mm_input_proj_w) |proj| {
             cur = buildMMWithClamp(ctx, proj, cur, &w.clamp_info_map);
-            cur.setName("projected");
+            cur.setName("mm_output");
         }
     }
 

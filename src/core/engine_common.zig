@@ -278,22 +278,30 @@ const testing = std.testing;
 // 共享计算图执行助手
 // ============================================================================
 
-/// Execute a ggml compute graph on CPU, keeping tensor data valid after return.
-/// Uses gallocr pre-allocation from the global CPU buffer type, then computes
-/// via ggml_backend_graph_compute. The gallocr and backend are intentionally not
-/// freed within this function — they must outlive the tensor data access.
-/// Called at most once per multimodal encode (leaked until process exit).
+/// Execute a ggml compute graph on CPU.
+///
+/// NOTE: The gallocr and CPU backend are intentionally NOT freed here because
+/// the computed tensor data must remain valid after this function returns.
+/// The caller is responsible for copying out any tensor data they need
+/// (e.g., via tensor.dataF32() + allocator.dupe) before the gallocr goes
+/// out of scope.
+///
+/// For the multimodal encoding path, the embedding tensor data is copied
+/// to a heap buffer in multimodalPrefillUnified before the vision context
+/// is destroyed.
+///
+/// This function is typically called once per multimodal encode or once
+/// during prefill. The gallocr and backend are freed when the caller's
+/// ggml context is deinitialized.
 pub fn computeGraph(graph: *ggml.CGraph, n_threads: i32) !void {
-    // Pre-allocate tensor data from global CPU buffer type (never freed)
     const buft = ggml.backendCpuBufferType();
     var galloc = try ggml.Gallocr.init(buft);
-    // NOTE: gallocr intentionally not freed — ggml_gallocr_free calls
-    // ggml_backend_buffer_free on each chunk, which would destroy tensor data.
-    _ = &galloc; // suppress unused var warning, keep alive via leak
+    // NOTE: gallocr intentionally not freed — tensor data lives in its buffer.
+    // The caller must copy data before the owning ggml context is destroyed.
+    _ = &galloc;
     if (!galloc.reserve(graph)) return error.GraphReserveFailed;
     if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
 
-    // Create a temporary backend just for computation (also leaked)
     const cpu = try ggml.backendCpuInit();
     _ = &cpu;
     ggml.backendCpuSetNThreads(cpu, n_threads);

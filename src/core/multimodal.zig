@@ -168,11 +168,12 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
 
     if (img.width == 0 or img.height == 0) return error.EmptyImage;
 
-    // 使用更大的上下文内存，支持 896x896 等大尺寸图像
-    var vision_ctx = try ggml.Context.initNoAlloc(12 * 1024 * 1024 * 1024);
+    // 使用 no_alloc = true 模式创建视觉编码器上下文。
+    // 张量数据由 gallocr 在 computeGraph 中分配，context 仅存储元数据。
+    // 输入张量的数据由 normalizeToTensor 在 no_alloc 模式下手动分配。
+    var vision_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
     defer vision_ctx.deinit();
 
-    vision_ctx.setNoAlloc(false);
     const vision_graph = try ggml.CGraph.initReserved(vision_ctx, 32768);
     const vision_embeddings = try mm_mgr.encodeMedia(io, vision_ctx, vision_graph, .{
         .media_type = .image,

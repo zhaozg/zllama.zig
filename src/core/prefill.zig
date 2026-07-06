@@ -98,6 +98,12 @@ pub fn threeStagePrefill(
     const createMediaTensor = struct {
         fn create(ctx: *ggml.Context, data: []const f32, n_embd: i64, n_tokens: i32) !*ggml.Tensor {
             const t = try ctx.newTensor2d(.f32, n_embd, n_tokens);
+            // In no_alloc mode, manually allocate data for the tensor
+            if (ctx.getNoAlloc()) {
+                const data_size = @as(usize, @intCast(t.nBytes()));
+                const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+                t.setDataPtr(buf);
+            }
             const t_data = t.dataBytes();
             const src_bytes = data.len * @sizeOf(f32);
             @memcpy(t_data[0..src_bytes], @as([*]const u8, @ptrCast(data.ptr))[0..src_bytes]);
@@ -112,11 +118,15 @@ pub fn threeStagePrefill(
     // ===================================================================
     if (prefix_len > 0) {
         graph_ctx.reset();
-        graph_ctx.setNoAlloc(false);
+        // Use no_alloc = true — input tensor data is manually allocated below
+        graph_ctx.setNoAlloc(true);
         const p1_input = try graph_ctx.newTensor1d(.i32, prefix_len);
         {
-            const data = p1_input.dataBytes();
-            const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(prefix_len))];
+            // In no_alloc mode, manually allocate data for the input tensor
+            const data_size = @as(usize, @intCast(p1_input.nBytes()));
+            const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+            p1_input.setDataPtr(buf);
+            const slice = @as([*]i32, @ptrCast(@alignCast(buf.ptr)))[0..@as(usize, @intCast(prefix_len))];
             for (prefix_tokens, 0..) |t, j| {
                 slice[j] = @as(i32, @intCast(t));
             }
@@ -158,14 +168,19 @@ pub fn threeStagePrefill(
             const chunk_embd_data = media_embeddings_data[embd_offset..][0..embd_len];
 
             graph_ctx.reset();
-            graph_ctx.setNoAlloc(false);
+            // Use no_alloc = true mode — tensor data is allocated by gallocr.
+            // Input tensors (media embeddings, token IDs) are manually allocated below.
+            graph_ctx.setNoAlloc(true);
 
             const p2_embd = try createMediaTensor(graph_ctx, chunk_embd_data, n_embd_val, chunk_size);
 
             const p2_input = try graph_ctx.newTensor1d(.i32, chunk_size);
+            // In no_alloc mode, manually allocate data for the input tensor
             {
-                const data = p2_input.dataBytes();
-                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(chunk_size))];
+                const data_size = @as(usize, @intCast(p2_input.nBytes()));
+                const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+                p2_input.setDataPtr(buf);
+                const slice = @as([*]i32, @ptrCast(@alignCast(buf.ptr)))[0..@as(usize, @intCast(chunk_size))];
                 @memset(slice, @as(i32, @intCast(media_token_id)));
             }
 
@@ -208,11 +223,15 @@ pub fn threeStagePrefill(
     // ===================================================================
     const sfx_n: i32 = if (suffix_len > 0) suffix_len else 1;
     graph_ctx.reset();
-    graph_ctx.setNoAlloc(false);
+    // Use no_alloc = true — input tensor data is manually allocated below
+    graph_ctx.setNoAlloc(true);
     const p3_input = try graph_ctx.newTensor1d(.i32, sfx_n);
     {
-        const data = p3_input.dataBytes();
-        const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(sfx_n))];
+        // In no_alloc mode, manually allocate data for the input tensor
+        const data_size = @as(usize, @intCast(p3_input.nBytes()));
+        const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+        p3_input.setDataPtr(buf);
+        const slice = @as([*]i32, @ptrCast(@alignCast(buf.ptr)))[0..@as(usize, @intCast(sfx_n))];
         if (suffix_len > 0) {
             for (suffix_tokens, 0..) |t, j| {
                 slice[j] = @as(i32, @intCast(t));

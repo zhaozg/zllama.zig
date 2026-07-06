@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
+const cc = @import("ggml").c.c;
 const stb_image = @import("stb_image");
 
 const log = std.log.scoped(.mm_preprocess);
@@ -46,6 +47,7 @@ pub fn calcSizePreservedRatio(src_width: u32, src_height: u32, align_size: u32, 
 pub const NormalizeMode = enum { standard, siglip, passthrough };
 
 /// 将 RGB u8 图像数据归一化并填充到 ggml 张量 [width, height, 3] f32。
+/// 支持 no_alloc 模式：如果 context 为 no_alloc，则手动分配张量数据。
 pub fn normalizeToTensor(
     ctx: *ggml.Context,
     image_data: []const u8,
@@ -60,6 +62,20 @@ pub fn normalizeToTensor(
     const wh: usize = W * H;
     var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(img_width), @intCast(img_height), 3);
     inp.setName("vision_input");
+
+    // In no_alloc mode, the tensor data pointer is NULL.
+    // We need to allocate the data manually so we can write to it.
+    const no_alloc = ctx.getNoAlloc();
+    if (no_alloc) {
+        // Allocate data buffer for the input tensor using C malloc
+        const data_size = @as(usize, @intCast(inp.nBytes()));
+        const buf = std.c.malloc(data_size) orelse return error.OutOfMemory;
+        @memset(@as([*]u8, @ptrCast(buf))[0..data_size], 0);
+        // Directly set the tensor data pointer via the C struct
+        const t = @as(*cc.struct_ggml_tensor, @ptrCast(@alignCast(inp)));
+        t.data = buf;
+    }
+
     const dst = inp.dataF32();
     switch (mode) {
         .standard => {

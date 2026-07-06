@@ -33,7 +33,37 @@ const loadMMProj = @import("loader.zig").loadMMProj;
 
 const logger = std.log.scoped(.engine);
 
-const MEM_SIZE_ESTIMATE = 12;
+// ============================================================================
+// Memory size estimation helpers
+// ============================================================================
+
+/// Estimate the ggml context size needed for KV cache metadata + tensor data.
+/// KV cache: 2 (K/V) × n_layer × n_kv_head × head_dim × max_seq_len × sizeof(f32)
+/// Plus 50% overhead for ggml metadata and alignment.
+fn estimateKVCacheSize(params: *const model_if.ModelParams) usize {
+    const kv_per_token: usize = 2 * // K and V
+        @as(usize, @intCast(params.n_layer)) *
+        @as(usize, @intCast(params.n_kv_head)) *
+        @as(usize, @intCast(params.n_head_dim)) *
+        @sizeOf(f32);
+    const kv_total = kv_per_token * @as(usize, @intCast(params.max_seq_len));
+    // Add overhead for ggml metadata (tensor descriptors, alignment)
+    const overhead = @as(usize, @intCast(params.n_layer)) * 1024; // ~1KB per layer for metadata
+    const total = kv_total + kv_total / 2 + overhead + 64 * 1024 * 1024; // +50% + 64MB safety
+    return total;
+}
+
+/// Estimate the ggml context size needed for graph building (metadata only, no_alloc).
+/// Graph context stores tensor descriptors and graph nodes, not tensor data.
+/// For multimodal models with large vision graphs, up to ~512 MB may be needed.
+fn estimateGraphSize(params: *const model_if.ModelParams) usize {
+    _ = params;
+    // Graph context only stores metadata (no_alloc mode).
+    // For large multimodal prefill (794+ tokens, 35 layers), we need ~2 GB of metadata.
+    // Each tensor descriptor is ~416 bytes, and a full prefill graph can have 2M+ nodes.
+    return 2 * 1024 * 1024 * 1024;
+}
+
 // ============================================================================
 // Prefill result
 // ============================================================================
@@ -61,7 +91,6 @@ const ChatTokenCollector = struct {
 
 pub const InferenceEngine = struct {
     allocator: std.mem.Allocator,
-    ctx_weights: *ggml.Context,
     ctx_graph: *ggml.Context,
     ctx_kv_cache: *ggml.Context,
     arch: model_if.Architecture,
@@ -157,18 +186,26 @@ pub const InferenceEngine = struct {
         logger.info("Tokenizer: {d} tokens", .{tok.vocabSize()});
 
         const n_threads = if (cli_args.n_threads > 0) cli_args.n_threads else ggml.recommendedThreads();
-        const mem_size_estimate = MEM_SIZE_ESTIMATE * 1024 * 1024 * 1024;
-        logger.info("Estimated memory: {d} MB", .{mem_size_estimate / (1024 * 1024)});
-        const ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
-        errdefer ctx_weights.deinit();
-        const ctx_kv_cache = try ggml.Context.init(mem_size_estimate);
+
+        // --- Dynamic memory sizing ---
+        // ctx_weights is owned by the model itself (created in model.init),
+        // so we don't need a separate one here.
         const max_seq_len = params.max_seq_len;
         const hdim_kv = params.n_head_dim;
         const hdim_k = @max(params.n_head_dim, params.n_head_dim_k);
         const hdim_v = if (params.n_head_dim_v > 0) @max(params.n_head_dim, params.n_head_dim_v) else hdim_kv;
+
+        // KV cache context: sized based on actual KV cache requirements
+        const kv_cache_size = estimateKVCacheSize(&params);
+        logger.info("KV cache context: {d:.1} MB (max_seq_len={d})", .{
+            @as(f64, @floatFromInt(kv_cache_size)) / (1024.0 * 1024.0),
+            max_seq_len,
+        });
+        const ctx_kv_cache = try ggml.Context.init(kv_cache_size);
+        errdefer ctx_kv_cache.deinit();
+
         var kv_cache_mgr: kv_cache.KVCache = undefined;
         {
-            // 检查模型是否支持每层不同的 max_seq_len（ISWA 模式）
             const per_layer_lens = model.getPerLayerMaxSeqLen(allocator);
             if (per_layer_lens) |lens| {
                 defer allocator.free(lens);
@@ -179,8 +216,17 @@ pub const InferenceEngine = struct {
         }
         errdefer kv_cache_mgr.deinit(allocator);
         model.setKVCacheContext(ctx_kv_cache);
-        const ctx_graph = try ggml.Context.initNoAlloc(mem_size_estimate);
-        const inc_ctx_size = 512 * 1024 * 1024;
+
+        // Graph context: only stores tensor metadata (no_alloc), sized for large vision graphs
+        const graph_size = estimateGraphSize(&params);
+        logger.info("Graph context: {d:.1} MB", .{
+            @as(f64, @floatFromInt(graph_size)) / (1024.0 * 1024.0),
+        });
+        const ctx_graph = try ggml.Context.initNoAlloc(graph_size);
+        errdefer ctx_graph.deinit();
+
+        // Incremental decode context: sized for single-token decode graphs
+        const inc_ctx_size = 256 * 1024 * 1024; // 256 MB is sufficient for single-token decode
         const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
 
         var mm_manager: ?mtmd.MultiModalManager = null;
@@ -230,7 +276,6 @@ pub const InferenceEngine = struct {
 
         return InferenceEngine{
             .allocator = allocator,
-            .ctx_weights = ctx_weights,
             .ctx_graph = ctx_graph,
             .ctx_kv_cache = ctx_kv_cache,
             .arch = arch,
@@ -541,10 +586,17 @@ pub const InferenceEngine = struct {
             var cb_ctx = ChatTokenCollector{ .tokens = &output_tokens, .allocator = self.allocator };
 
             const dr = try decode_mod.runDecodeLoop(
-                self.allocator, io, self.model, &self.params, &self.tok,
-                &self.kv_cache_mgr, &self.inc_ctx, self.n_threads,
+                self.allocator,
+                io,
+                self.model,
+                &self.params,
+                &self.tok,
+                &self.kv_cache_mgr,
+                &self.inc_ctx,
+                self.n_threads,
                 sampler.Sampler.sampleGreedyFromLogits(prefill.logits),
-                prefill.pos, 512,
+                prefill.pos,
+                512,
                 .{
                     .sample = struct {
                         fn f(_: *anyopaque, l: *ggml.Tensor) i32 {

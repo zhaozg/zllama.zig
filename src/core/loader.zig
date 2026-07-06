@@ -212,7 +212,16 @@ pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]con
     });
     log.info("MMProj capabilities: audio={}, vision={}", .{ capabilities.has_audio, capabilities.has_vision });
 
-    const mem_size = 2 * 1024 * 1024 * 1024;
+    // Size the mmproj context based on actual tensor data + overhead
+    const raw_data_size = gguf_file.totalTensorDataSize();
+    const n_tensors = gguf_file.tensors.items.len;
+    const overhead: usize = n_tensors * 384; // ggml metadata per tensor
+    const mem_size = raw_data_size + overhead + raw_data_size / 3 + 64 * 1024 * 1024; // +33% + 64MB safety
+    log.info("MMProj context: {d:.1} MB (raw: {d:.1} MB, {d} tensors)", .{
+        @as(f64, @floatFromInt(mem_size)) / (1024.0 * 1024.0),
+        @as(f64, @floatFromInt(raw_data_size)) / (1024.0 * 1024.0),
+        n_tensors,
+    });
     const ctx = try ggml.Context.initNoAlloc(mem_size);
     errdefer ctx.deinit();
 
