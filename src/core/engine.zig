@@ -45,6 +45,17 @@ const PrefillResult = struct {
 };
 
 // ============================================================================
+// ChatTokenCollector — context for chatLoop's afterToken callback
+// ============================================================================
+
+/// Collects output token IDs during the chat decode loop so the assistant
+/// turn can be reconstructed into a ChatMessage after generation completes.
+const ChatTokenCollector = struct {
+    tokens: *std.ArrayListUnmanaged(u32),
+    allocator: std.mem.Allocator,
+};
+
+// ============================================================================
 // InferenceEngine
 // ============================================================================
 
@@ -419,7 +430,6 @@ pub const InferenceEngine = struct {
             prefill.pos,
             max_tokens,
             .{
-                .buildStep = undefined,
                 .sample = struct {
                     fn f(_: *anyopaque, l: *ggml.Tensor) i32 {
                         return sampler.Sampler.sampleGreedy(l);
@@ -523,33 +533,45 @@ pub const InferenceEngine = struct {
             const prefill = try self.textPrefill(input_tokens.items);
             defer self.allocator.free(prefill.logits);
 
-            var current_token = sampler.Sampler.sampleGreedyFromLogits(prefill.logits);
-            var pos: i32 = prefill.pos;
-            var gen_count: u32 = 0;
-            var output_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
-            defer output_tokens.deinit(self.allocator);
-
             try decode_mod.reserveDecodeGallocr(self.allocator, &self.kv_cache_mgr, &self.inc_ctx, self.model, &self.params);
 
-            while (gen_count < 512) {
-                if (self.tok.isEog(@intCast(current_token))) break;
-                var buf: [128]u8 = undefined;
-                const n = try self.tok.decodeSingle(@intCast(current_token), &buf);
-                if (n > 0) try stdout.writeStreamingAll(io, buf[0..n]);
-                try output_tokens.append(self.allocator, @intCast(current_token));
+            // Collect output tokens via afterToken callback for building assistant message.
+            var output_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
+            defer output_tokens.deinit(self.allocator);
+            var cb_ctx = ChatTokenCollector{ .tokens = &output_tokens, .allocator = self.allocator };
 
-                const step = try self.inc_ctx.beginStep();
-                step.setToken(current_token);
-                var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, &self.params, self.allocator);
-                const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(&self.kv_cache_mgr), pos);
-                if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-                try step.graph.compute(self.n_threads);
-                current_token = sampler.Sampler.sampleGreedy(inc_logits);
-                pos += 1;
-                gen_count += 1;
-            }
+            const dr = try decode_mod.runDecodeLoop(
+                self.allocator, io, self.model, &self.params, &self.tok,
+                &self.kv_cache_mgr, &self.inc_ctx, self.n_threads,
+                sampler.Sampler.sampleGreedyFromLogits(prefill.logits),
+                prefill.pos, 512,
+                .{
+                    .sample = struct {
+                        fn f(_: *anyopaque, l: *ggml.Tensor) i32 {
+                            return sampler.Sampler.sampleGreedy(l);
+                        }
+                    }.f,
+                    .skipToken = struct {
+                        fn f(c: *anyopaque, t: i32) bool {
+                            return (@as(*InferenceEngine, @ptrCast(@alignCast(c)))).tok.isSkipToken(@intCast(t));
+                        }
+                    }.f,
+                    .afterToken = struct {
+                        fn f(c: *anyopaque, token: i32, decoded: []const u8) anyerror!bool {
+                            const col = @as(*ChatTokenCollector, @ptrCast(@alignCast(c)));
+                            try col.tokens.append(col.allocator, @intCast(token));
+                            _ = decoded;
+                            return true;
+                        }
+                    }.f,
+                },
+                @ptrCast(&cb_ctx),
+                false,
+            );
+
             try stdout.writeStreamingAll(io, "\n");
 
+            // Reconstruct assistant message from collected tokens.
             if (output_tokens.items.len > 0) {
                 var response_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
                 defer response_buf.deinit(self.allocator);
@@ -560,6 +582,7 @@ pub const InferenceEngine = struct {
                 }
                 try chat_history.append(self.allocator, chat_template.ChatMessage.init("assistant", response_buf.items));
             }
+            _ = dr;
         }
     }
 

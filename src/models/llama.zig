@@ -67,33 +67,33 @@ pub const LlamaWeights = struct {
 
 // ============================================================================
 pub const LlamaModel = struct {
-    llm_params: LlamaParams,
-    llm_weights: LlamaWeights,
+    params: LlamaParams,
+    weights: LlamaWeights,
     ctx_weights: *ggml.Context,
 
     pub fn init(self: *LlamaModel, allocator: std.mem.Allocator, gguf_file: *gguf.GGUFFile, io: std.Io) !void {
         _ = io;
-        self.llm_params = try parseParams(gguf_file, allocator);
+        self.params = try parseParams(gguf_file, allocator);
 
         // 根据模型参数动态估计所需内存
         // 对于 Q4_K_M 量化，每个参数约 0.5 字节，加上元数据开销
         const mem_size_estimate = estimateMemSize(gguf_file);
         self.ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
 
-        self.llm_weights = try loadWeights(gguf_file, self.ctx_weights, &self.llm_params, allocator);
+        self.weights = try loadWeights(gguf_file, self.ctx_weights, &self.params, allocator);
     }
 
     pub fn deinit(self: *LlamaModel, allocator: std.mem.Allocator) void {
-        self.llm_weights.deinit(allocator);
+        self.weights.deinit(allocator);
         self.ctx_weights.deinit();
     }
 
     pub fn getParams(self: *const LlamaModel) *const model.ModelParams {
-        return &self.llm_params.base;
+        return &self.params.base;
     }
 
     pub fn getWeights(self: *const LlamaModel) *const model.ModelWeights {
-        return &self.llm_weights.base;
+        return &self.weights.base;
     }
 
     pub fn forward(
@@ -105,8 +105,8 @@ pub const LlamaModel = struct {
         kv_cache_mgr: ?*kv_cache.KVCache,
         start_pos: i32,
     ) !*ggml.Tensor {
-        const p = &self.llm_params;
-        const w = &self.llm_weights;
+        const p = &self.params;
+        const w = &self.weights;
         const n_head: i64 = @intCast(p.base.n_head);
         const n_kv_head: i64 = @intCast(p.base.n_kv_head);
         const head_dim: i64 = @intCast(p.base.n_head_dim);
@@ -242,7 +242,7 @@ pub const LlamaModel = struct {
     fn deinitAdapter(data: *anyopaque, allocator: std.mem.Allocator) void {
         const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
         // 释放 weights 中的分配内存
-        self.llm_weights.deinit(allocator);
+        self.weights.deinit(allocator);
         // 释放 ctx_weights（ggml 上下文）
         self.ctx_weights.deinit();
         // 释放 LlamaModel 结构体本身

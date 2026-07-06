@@ -21,7 +21,6 @@ const logger = std.log.scoped(.decode);
 // ============================================================================
 
 pub const DecodeCallbacks = struct {
-    buildStep: *const fn (ctx: *anyopaque, token: i32, pos: i32) anyerror!*ggml.Tensor,
     sample: *const fn (ctx: *anyopaque, logits: *ggml.Tensor) i32,
     skipToken: *const fn (ctx: *anyopaque, token: i32) bool,
     afterToken: ?*const fn (ctx: *anyopaque, token: i32, decoded: []const u8) anyerror!bool = null,
