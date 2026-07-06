@@ -10,6 +10,11 @@ const ggml = @import("ggml");
 const mtmd = @import("mm");
 const preprocess = @import("preprocess");
 const stb_image = @import("stb_image");
+// NOTE: helper.zig (L5) imports engine_common (L6). This is an intentional exception
+// to the L5→L6 constraint: computeGraph is the fundamental ggml graph execution
+// primitive, and encoder graphs must be computed in the L4/L5 layer before the
+// caller at L6/L7 can read the output tensors. Without this, every caller would
+// need to inline the Gallocr+compute logic.
 const engine_common = @import("engine_common");
 
 const log = std.log.scoped(.mtmd_helper);
@@ -51,7 +56,8 @@ pub fn evalChunks(
                     // Count consecutive image chunks for batching
                     var batch_end = idx;
                     while (batch_end < chunks.entries.items.len and
-                        chunks.entries.items[batch_end].chunk_type == .image) : (batch_end += 1) {}
+                        chunks.entries.items[batch_end].chunk_type == .image) : (batch_end += 1)
+                    {}
                     const batch_size: u32 = @intCast(batch_end - idx);
                     const can_batch = enc.supportBatch() and batch_size > 1;
 
@@ -169,12 +175,15 @@ pub fn imageGetDecoderPos(image: mtmd.ImageTokens, pos_0: u32, out_pos: []mtmd.D
         },
         .hunyuanvl => {
             var idx: u32 = 0;
-            out_pos[idx] = .{ .t = pos_0, .x = 0, .y = 0 }; idx += 1;
+            out_pos[idx] = .{ .t = pos_0, .x = 0, .y = 0 };
+            idx += 1;
             for (0..image.ny) |row| {
                 for (0..image.nx) |col| {
-                    out_pos[idx] = .{ .t = pos_0, .x = @as(u32, @intCast(col)), .y = @as(u32, @intCast(row)) }; idx += 1;
+                    out_pos[idx] = .{ .t = pos_0, .x = @as(u32, @intCast(col)), .y = @as(u32, @intCast(row)) };
+                    idx += 1;
                 }
-                out_pos[idx] = .{ .t = pos_0, .x = image.nx, .y = @as(u32, @intCast(row)) }; idx += 1;
+                out_pos[idx] = .{ .t = pos_0, .x = image.nx, .y = @as(u32, @intCast(row)) };
+                idx += 1;
             }
             out_pos[idx] = .{ .t = pos_0, .x = 0, .y = image.ny };
         },
@@ -188,7 +197,9 @@ pub fn imageGetDecoderPos(image: mtmd.ImageTokens, pos_0: u32, out_pos: []mtmd.D
 pub const BitmapWrapper = struct {
     bitmap: mtmd.Bitmap,
     allocator: std.mem.Allocator,
-    pub fn deinit(self: *BitmapWrapper) void { self.bitmap.deinit(); }
+    pub fn deinit(self: *BitmapWrapper) void {
+        self.bitmap.deinit();
+    }
 };
 
 pub fn bitmapInitFromFile(allocator: std.mem.Allocator, io: std.Io, filepath: []const u8, placeholder: bool) !BitmapWrapper {
@@ -219,11 +230,15 @@ pub fn bitmapInitFromBuf(allocator: std.mem.Allocator, buf: []const u8, placehol
 }
 
 fn loadImage(allocator: std.mem.Allocator, buf: []const u8) !BitmapWrapper {
-    var width: c_int = 0; var height: c_int = 0; var channels: c_int = 0;
+    var width: c_int = 0;
+    var height: c_int = 0;
+    var channels: c_int = 0;
     const data = stb_image.stbi_load_from_memory(buf.ptr, @intCast(buf.len), &width, &height, &channels, 3);
     if (data == null) return error.ImageDecodeFailed;
     defer stb_image.stbi_image_free(data);
-    const w: u32 = @intCast(width); const h: u32 = @intCast(height); const size: usize = w * h * 3;
+    const w: u32 = @intCast(width);
+    const h: u32 = @intCast(height);
+    const size: usize = w * h * 3;
     const owned = try allocator.alloc(u8, size);
     @memcpy(owned, data[0..size]);
     return BitmapWrapper{ .bitmap = .{ .nx = w, .ny = h, .data = owned, .allocator = allocator }, .allocator = allocator };

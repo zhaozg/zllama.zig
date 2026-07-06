@@ -129,21 +129,21 @@ pub const VisionEncoder = struct {
         ggml.setInput(inp);
 
         var hparams = graph.VisionHParams{
-            .image_size = img_width, .patch_size = p.patch_size,
-            .n_embd = p.n_embd, .n_head = p.n_head, .n_layer = p.n_layer,
-            .n_ff = p.n_ff, .projection_dim = p.n_output_embd,
-            .n_merge = p.n_merge, .eps = p.norm_eps, .rope_theta = p.rope_theta,
+            .image_size = img_width,
+            .patch_size = p.patch_size,
+            .n_embd = p.n_embd,
+            .n_head = p.n_head,
+            .n_layer = p.n_layer,
+            .n_ff = p.n_ff,
+            .projection_dim = p.n_output_embd,
+            .n_merge = p.n_merge,
+            .eps = p.norm_eps,
+            .rope_theta = p.rope_theta,
         };
         _ = try self.backend.buildGraph(ctx, cgraph, &self.weights, &hparams, inp);
 
         // Return the output tensor by name; caller must compute before reading data.
-        const ggml_c = @import("ggml").c;
-        var name_buf: [64]u8 = undefined;
-        const out_name = "mm_output";
-        @memcpy(name_buf[0..out_name.len], out_name);
-        name_buf[out_name.len] = 0;
-        const result = ggml_c.ggml_graph_get_tensor(@ptrCast(cgraph), &name_buf) orelse return error.TensorNotFound;
-        return @as(*ggml.Tensor, @ptrCast(result));
+        return cgraph.getTensor("mm_output") orelse return error.TensorNotFound;
     }
 
     pub fn estimateOutputTokens(self: *const VisionEncoder, img_width: u32, img_height: u32) u32 {

@@ -75,13 +75,7 @@ pub const AudioEncoder = struct {
         _ = try self.backend.buildGraph(ctx, cgraph, &self.weights, &vparams, mel_tensor, &self.weights.clamp_info_map);
 
         // Return the output tensor by name; caller must compute before reading data.
-        const ggml_c = @import("ggml").c;
-        var name_buf: [64]u8 = undefined;
-        const out_name = "mm_proj";
-        @memcpy(name_buf[0..out_name.len], out_name);
-        name_buf[out_name.len] = 0;
-        const result = ggml_c.ggml_graph_get_tensor(@ptrCast(cgraph), &name_buf) orelse return error.TensorNotFound;
-        return @as(*ggml.Tensor, @ptrCast(result));
+        return cgraph.getTensor("mm_proj") orelse return error.TensorNotFound;
     }
 
     /// Encode raw Mel data by creating a tensor first.

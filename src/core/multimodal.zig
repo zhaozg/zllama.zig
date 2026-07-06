@@ -9,7 +9,6 @@
 const std = @import("std");
 const ggml = @import("ggml");
 const model_if = @import("model");
-const graph_builder = @import("graph_builder");
 const kv_cache = @import("kv_cache");
 const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
@@ -388,62 +387,42 @@ fn multimodalPrefillUnified(
     ectx.allocator.free(pr.logits);
 
     try decode_mod.reserveDecodeGallocr(ectx.allocator, ectx.kv_cache_mgr, ectx.inc_ctx, ectx.model, &ectx.params);
-    var eog_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
-    defer eog_buf.deinit(ectx.allocator);
-    const t_tg_start = engine_common.currentTimeMs();
 
-    var current_token: i32 = best_idx;
-    var pos: i32 = pr.pos;
-    var gen_count: u32 = 0;
-
-    while (gen_count < max_tokens) {
-        if (ectx.tok.isEog(@intCast(current_token))) break;
-        if (ectx.tok.isSkipToken(@intCast(current_token))) {
-            const step = try ectx.inc_ctx.beginStep();
-            step.setToken(current_token);
-            var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &ectx.params, ectx.allocator);
-            const il = try ectx.model.buildGraph(&ib, step.input_token, 1, @ptrCast(ectx.kv_cache_mgr), pos);
-            if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-            try step.graph.compute(ectx.n_threads);
-            current_token = sampler.Sampler.sampleGreedy(il);
-            pos += 1;
-            gen_count += 1;
-            continue;
-        }
-        var buf: [128]u8 = undefined;
-        const n = try ectx.tok.decodeSingle(@intCast(current_token), &buf);
-        const decoded = buf[0..n];
-        if (n > 0) {
-            try eog_buf.appendSlice(ectx.allocator, decoded);
-            if (ectx.tok.isEogText(eog_buf.items)) {
-                if (!ectx.benchmark) {
-                    const sf = std.Io.File.stdout();
-                    try sf.writeStreamingAll(io, decoded);
+    const dr = try decode_mod.runDecodeLoop(
+        ectx.allocator,
+        io,
+        ectx.model,
+        &ectx.params,
+        &ectx.tok,
+        ectx.kv_cache_mgr,
+        ectx.inc_ctx,
+        ectx.n_threads,
+        best_idx,
+        pr.pos,
+        max_tokens,
+        .{
+            .sample = struct {
+                fn f(_: *anyopaque, l: *ggml.Tensor) i32 {
+                    return sampler.Sampler.sampleGreedy(l);
                 }
-                break;
-            }
-        }
-        if (!ectx.benchmark and n > 0) {
-            const sf = std.Io.File.stdout();
-            try sf.writeStreamingAll(io, decoded);
-        }
-        const step = try ectx.inc_ctx.beginStep();
-        step.setToken(current_token);
-        var ib = graph_builder.GraphBuilder.init(step.ctx, step.graph, &ectx.params, ectx.allocator);
-        const il = try ectx.model.buildGraph(&ib, step.input_token, 1, @ptrCast(ectx.kv_cache_mgr), pos);
-        if (!step.galloc.allocGraph(step.graph)) return error.GraphAllocFailed;
-        try step.graph.compute(ectx.n_threads);
-        current_token = sampler.Sampler.sampleGreedy(il);
-        pos += 1;
-        gen_count += 1;
-    }
+            }.f,
+            .skipToken = struct {
+                fn f(c: *anyopaque, t: i32) bool {
+                    const eng: *EngineContext = @ptrCast(@alignCast(c));
+                    return eng.tok.isSkipToken(@intCast(t));
+                }
+            }.f,
+        },
+        @ptrCast(ectx),
+        ectx.benchmark,
+    );
 
-    const tg_time_s = @as(f64, @floatFromInt(engine_common.currentTimeMs() - t_tg_start)) / 1000.0;
     if (!ectx.benchmark) {
         const sf = std.Io.File.stdout();
         try sf.writeStreamingAll(io, "\n");
     }
-    if (gen_count > 0) logger.info("{s} Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ label, gen_count, pr.pp_time_s + tg_time_s, @as(f64, @floatFromInt(gen_count)) / (pr.pp_time_s + tg_time_s) });
+    const total_time_s = pr.pp_time_s + dr.tg_time_s;
+    if (dr.gen_count > 0) logger.info("{s} Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ label, dr.gen_count, total_time_s, @as(f64, @floatFromInt(dr.gen_count)) / total_time_s });
 }
 
 // ============================================================================
