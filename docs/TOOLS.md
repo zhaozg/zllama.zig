@@ -1,20 +1,10 @@
-# 工具使用说明
+---
+title: 工具使用说明
+...
 
 本文档描述 `zllama.zig` 项目提供的所有命令行工具及其用法。
 
----
-
-## 目录
-
-1. [zllama — 主推理引擎](#1-zllama--主推理引擎)
-2. [zllama-simple — LLM 交互式对话](#2-zllama-simple--llm-交互式对话)
-3. [zllama-tokenize — 分词器工具](#3-zllama-tokenize--分词器工具)
-4. [zllama-dump-graph — 计算图导出](#4-zllama-dump-graph--计算图导出)
-5. [zllama-gen-ref — 参考 logits 生成](#5-zllama-gen-ref--参考-logits-生成)
-6. [zllama-compare-logits — Logits 对比](#6-zllama-compare-logits--logits-对比)
-7. [zllama-compare-llamacpp — llama.cpp 对齐验证](#7-zllama-compare-llamacpp--llamacpp-对齐验证)
-8. [zllama-compare-mtmd-vision — 多模态视觉验证](#8-zllama-compare-mtmd-vision--多模态视觉验证)
-9. [工作流示例](#9-工作流示例)
+${TOC}
 
 ---
 
@@ -75,7 +65,7 @@ LLM 引擎，支持：
 ### 用法
 
 ```bash
-zllama-simple --model <model.gguf> [options]
+zllama --model <model.gguf> [options]
 ```
 
 ### 参数
@@ -103,13 +93,13 @@ zllama-simple --model <model.gguf> [options]
 
 ```bash
 # 文本对话
-zllama-simple -m ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -p "Hello" -n 100
+zllama -m ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -p "Hello" -n 100
 
 # 图像多模态推理
-zllama-simple -m model.gguf --mmproj mmproj.gguf --image photo.jpg -p "Describe this image"
+zllama -m model.gguf --mmproj mmproj.gguf --image photo.jpg -p "Describe this image"
 
 # 交互式对话（REPL 模式）
-zllama-simple -m ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf --chat-template llama3
+zllama -m ~/.cache/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf --chat-template llama3
 ```
 
 ---

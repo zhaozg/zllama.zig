@@ -215,7 +215,7 @@ if (os == .linux) {
   incr_ptr_aligned(&p, sizeof(struct ggml_cgraph), 1);
   // ...
   return (size_t) p;
-  
+
   // 修复后
   uintptr_t nbytes = 0;
   nbytes = GGML_PAD(nbytes, 1);
@@ -249,11 +249,11 @@ zig build -Dbundle-ggml test
 
 # 4. 三模型推理验证（两种模式各一遍）
 for model in tinyllama Llama-3.2 Qwen3.5; do
-    zig-out/bin/zllama-simple -n 5 --model ~/.cache/models/${model}*.gguf 你好
+    zig-out/bin/zllama -n 5 --model ~/.cache/models/${model}*.gguf 你好
 done
 
 # 5. Benchmark 模式
-zig-out/bin/zllama-simple --benchmark -n 20 --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
+zig-out/bin/zllama --benchmark -n 20 --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
 ```
 
 ---
