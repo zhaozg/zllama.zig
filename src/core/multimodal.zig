@@ -237,11 +237,15 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     defer ectx.allocator.free(wav_result.samples);
     if (wav_result.samples.len == 0) return error.EmptyAudio;
 
+    debug.saveData(io, "debug_audio", "zllama_audio_01_samples.json", "audio_mel", wav_result.samples) catch |err| {
+        logger.info("Save audio mel data fail: {}", .{err});
+    };
+
     const preprocess_params = audio_mod.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else audio_mod.AUDIO_N_MEL_BINS);
     var mel = try audio_mod.computeMelSpectrogram(io, ectx.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
     defer mel.deinit();
 
-    debug.saveData(io, "debug_audio", "zllama_audio_mel.json", "audio_mel", mel.data) catch |err| {
+    debug.saveData(io, "debug_audio", "zllama_audio_02_mel_conformer.json", "audio_mel", mel.data) catch |err| {
         logger.info("Save audio mel data fail: {}", .{err});
     };
 
@@ -249,7 +253,6 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     const audio_graph = try ggml.CGraph.initReserved(ectx.ctx_graph, 32768);
 
     const mel_tensor = try audio_mod.melToTensor(ectx.ctx_graph, mel.data, mel.n_frames, mel.n_mel_bins);
-    mel_tensor.setName("mel_input");
 
     const audio_embeddings = try mm_mgr.encodeMedia(io, ectx.ctx_graph, audio_graph, .{
         .media_type = .audio,

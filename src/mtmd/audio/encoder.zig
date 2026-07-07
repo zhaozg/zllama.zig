@@ -89,7 +89,7 @@ pub const AudioEncoder = struct {
         mel_frames: u32,
         n_threads: i32,
     ) !*ggml.Tensor {
-        const mel_tensor = try ctx.newTensor2d(ggml.Type.f32, @as(i64, @intCast(mel_frames)), @as(i64, @intCast(mel_bins)));
+        const mel_tensor = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(mel_frames)), @as(i64, @intCast(mel_bins)), 1, 1);
         @memcpy(mel_tensor.dataF32(), mel_data);
         ggml.setInput(mel_tensor);
         return self.encode(io, ctx, cgraph, mel_tensor, n_threads);
@@ -122,6 +122,24 @@ pub const AudioEncoder = struct {
         _ = self;
         const debug = @import("debug");
         const subdir = "debug_audio";
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_multimodal_embedder_output.json", "mm_proj", cgraph) catch {};
+
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_04_mel_input.json", "debug_audio_04_encoder_input", cgraph) catch {};
+
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_05_conv2d_0_output.json", "debug_audio_conv2d_0_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_06_conv2d_1_output.json", "debug_audio_conv2d_1_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_07_after_cont.json", "debug_audio_after_cont", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_08_flatten_output.json", "debug_audio_flatten_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_09_input_proj_output.json", "debug_audio_input_proj_output", cgraph) catch {};
+
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_10_layer0_half_step_1_output.json", "debug_audio_half_step_1_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_11_layer0_self_attention_with_RPE_output.json", "debug_audio_self_attention_with_RPE_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_12_layer0_convolution_output.json", "debug_audio_convolution_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_13_layer0_half_step_2_output.json", "debug_audio_half_step_2_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_14_layer0_norm_output.json", "debug_audio_layer_0_norm_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_19_conformer_blocks_output.json", "debug_audio_conformer_blocks_output", cgraph) catch {};
+
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_90_mm_norm.json", "mm_norm", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_91_mm_norm_scaled.json", "mm_norm_scaled", cgraph) catch {};
+        debug.saveTensorFromGraph(io, subdir, "zllama_audio_92_mm_proj.json", "mm_proj", cgraph) catch {};
     }
 };

@@ -116,13 +116,15 @@ pub fn buildGraphEx(
 
     log.info("Gemma4A graph: frames={d}, mel_bins={d}, embd={d}, heads={d}, layers={d}", .{ n_frames, n_mel_bins, p.n_embd, p.n_head, p.n_layer });
 
-    // 1. Reshape mel tensor to 4D [n_frames, n_mel_bins, 1, 1]
-    var cur = mel_tensor.reshape4d(ctx, n_frames, n_mel_bins, 1, 1);
+    // 1. 输入张量已是 4D [n_frames, n_mel_bins, 1, 1]（由 melToTensor 创建）
+    //    参考: clip.cpp build_inp_raw() → ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, nx, ny, C, B)
+    var cur = mel_tensor;
 
     // Transpose to frame-major layout [n_mel, n_frames, 1, 1]
     cur = ggml.transpose(ctx, cur);
     cur = ggml.cont(ctx, cur);
-    ggml.setInput(cur);
+    cur.setName("debug_audio_04_encoder_input");
+    ggml.setOutput(cur);
 
     // 2. Subsampling Conv2D (2 layers, stride=2, padding=1)
     for (0..2) |i| {
@@ -142,15 +144,30 @@ pub fn buildGraphEx(
             }
 
             cur = cur.relu(ctx);
+
+            // Debug output for each conv layer (matching C++)
+            if (i == 0) {
+                cur.setName("debug_audio_conv2d_0_output");
+                ggml.setOutput(cur);
+            } else {
+                cur.setName("debug_audio_conv2d_1_output");
+                ggml.setOutput(cur);
+            }
         }
     }
 
     // 3. Flatten: [freq, time, ch, 1] -> [ch*freq, time]
     cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
+    cur.setName("debug_audio_after_cont");
+    ggml.setOutput(cur);
 
     const flat_dim0 = cur.ne()[0] * cur.ne()[1];
     cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
+    cur.setName("debug_audio_flatten_output");
+    ggml.setOutput(cur);
 
+    log.debug("sscp_inp_proj_w={any}, sscp_inp_proj_b={any}",
+               .{ w.sscp_inp_proj_w, w.sscp_inp_proj_b });
     // 4. Input projection to Conformer embedding dim
     if (w.sscp_inp_proj_w) |proj_w| {
         cur = buildMMWithClamp(ctx, proj_w, cur, clamp_map);
@@ -158,6 +175,8 @@ pub fn buildGraphEx(
             cur = cur.add(ctx, proj_b);
         }
     }
+    cur.setName("debug_audio_input_proj_output");
+    ggml.setOutput(cur);
 
     const n_pos = cur.ne()[1];
 
@@ -173,18 +192,20 @@ pub fn buildGraphEx(
     log.debug("  chunked attn: C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad={d}", .{ C, P, S, R, B, Np, pad_seq });
 
     // Create RPE and mask tensors
+    // C++: ggml_set_input(pos_emb) and ggml_set_input(kq_mask) — caller fills them.
+    // Zig: We fill them inline during graph construction for simplicity.
     ctx.setNoAlloc(false);
     const pos_emb = try ctx.newTensor2d(ggml.Type.f32, p.n_embd, R);
+    pos_emb.setName("pos_emb");
     fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.n_embd), @intCast(P));
 
-    const kq_mask = try ctx.newTensor4d(ggml.Type.f32, S, C, B, 1);
+    const kq_mask = try ctx.newTensor3d(ggml.Type.f32, S, C, B);
+    kq_mask.setName("kq_mask");
     fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos));
     ctx.setNoAlloc(true);
 
     // 6. Conformer Blocks
     for (w.layers, 0..) |*layer, il| {
-        _ = il;
-
         var residual = cur;
 
         // FFN 1 (half-step) — with clamp, matching C++ clip_graph_gemma4a::build_mm
@@ -195,6 +216,10 @@ pub fn buildGraphEx(
                 cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, "blk");
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
+        }
+        if (il == 0) {
+            residual.setName("debug_audio_half_step_1_output");
+            ggml.setOutput(residual);
         }
 
         // Chunked local self-attention with RPE
@@ -274,8 +299,8 @@ pub fn buildGraphEx(
             scores = scores.scale(ctx, softcap);
 
             // Mask
-            const kq_mask_4d = ggml.repeat(ctx, kq_mask, scores);
-            scores = scores.add(ctx, kq_mask_4d);
+            // C++: scores = ggml_add(ctx0, scores, kq_mask) — 3D [S,C,B] broadcasts over H
+            scores = scores.add(ctx, kq_mask);
 
             const attn = scores.softMax(ctx);
 
@@ -297,6 +322,10 @@ pub fn buildGraphEx(
                 x = try graph.buildNorm(ctx, x, post_norm, null, .rms_norm, norm_eps, "blk");
             }
             residual = residual.add(ctx, x);
+        }
+        if (il == 0) {
+            residual.setName("debug_audio_self_attention_with_RPE_output");
+            ggml.setOutput(residual);
         }
 
         // Convolution Module (GLU + depthwise conv)
@@ -351,6 +380,10 @@ pub fn buildGraphEx(
 
             residual = residual.add(ctx, x_conv);
         }
+        if (il == 0) {
+            residual.setName("debug_audio_convolution_output");
+            ggml.setOutput(residual);
+        }
 
         // FFN 2 (half-step) — with clamp, matching C++ clip_graph_gemma4a::build_mm
         if (layer.ff_norm_1_w != null and layer.ff_up_1_w != null and layer.ff_down_1_w != null) {
@@ -361,13 +394,26 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
         }
+        if (il == 0) {
+            residual.setName("debug_audio_half_step_2_output");
+            ggml.setOutput(residual);
+        }
 
         // Layer output norm
         cur = if (layer.ln_2_w) |ln2|
             try graph.buildNorm(ctx, residual, ln2, null, .rms_norm, norm_eps, "blk")
         else
             residual;
+
+        if (il == 0 and layer.ln_2_w != null) {
+            cur.setName("debug_audio_layer_0_norm_output");
+            ggml.setOutput(cur);
+        }
     }
+
+    // Always name and mark conformer blocks output (matching C++)
+    cur.setName("debug_audio_conformer_blocks_output");
+    ggml.setOutput(cur);
 
     // 7. Output projection
     if (w.audio_out_proj_w) |out_w| {
@@ -380,13 +426,16 @@ pub fn buildGraphEx(
     // 8. Multimodal embedder
     cur = cur.rmsNorm(ctx, norm_eps);
     cur.setName("mm_norm");
+    ggml.setOutput(cur);
     if (w.mm_soft_emb_norm_w) |sn_w| {
         cur = cur.mul(ctx, sn_w);
         cur.setName("mm_norm_scaled");
+        ggml.setOutput(cur);
     }
     if (w.mm_input_proj_w) |proj_w| {
         cur = buildMMWithClamp(ctx, proj_w, cur, clamp_map);
         cur.setName("mm_proj");
+        ggml.setOutput(cur);
     }
 
     gf.buildForwardExpand(cur);

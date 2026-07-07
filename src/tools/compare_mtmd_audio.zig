@@ -201,10 +201,9 @@ pub const MtmdAudioComparator = struct {
         graph_ctx.setNoAlloc(false);
         var audio_graph = try ggml.CGraph.initReserved(graph_ctx, 32768);
 
-        // [4] melToTensor: 将 Mel 数据包装为 ggml F32 张量 [n_frames, n_mel_bins]
+        // [4] melToTensor: 将 Mel 数据包装为 ggml F32 4D 张量 [n_frames, n_mel_bins, 1, 1]
         // 匹配设计文档 MTMD_ARCHITECTURE.md 第5节音频处理流水线
         const mel_tensor = try audio_mod.melToTensor(graph_ctx, mel.data, mel.n_frames, mel.n_mel_bins);
-        mel_tensor.setName("mel_input");
 
         const audio_embeddings = try mm_mgr.encodeMedia(io, graph_ctx, audio_graph, .{
             .media_type = .audio,

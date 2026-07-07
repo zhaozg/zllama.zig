@@ -23,22 +23,30 @@ pub fn applySoftcap(ctx: *ggml.Context, scores: *ggml.Tensor, cap: f32) *ggml.Te
         .scale(ctx, cap);
 }
 
-/// 将 Mel 频谱数据转换为 F32 张量 [n_frames, n_mel_bins]
+/// 将 Mel 频谱数据转换为 F32 4D 张量 [n_frames, n_mel_bins, 1, 1]
+///
+/// 使用 4D 张量与 clip.cpp build_inp_raw() 的约定一致（后者创建 [W, H, C, B] 4D 张量）。
+/// 音频编码器（如 Gemma4A）直接使用此 4D 张量，无需额外 reshape。
+///
+/// 参考: clip.cpp clip_graph::build_inp_raw() → ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, nx, ny, C, B)
 pub fn melToTensor(
     ctx: *ggml.Context,
     mel_data: []const f32,
     n_frames: u32,
     n_mel_bins: u32,
 ) !*ggml.Tensor {
-    const tensor = try ctx.newTensor2d(
+    const tensor = try ctx.newTensor4d(
         ggml.Type.f32,
         @intCast(n_frames),
         @intCast(n_mel_bins),
+        1,
+        1,
     );
     tensor.setName("mel_input");
+    ggml.setInput(tensor);
 
-    const data = tensor.dataBytes();
-    @memcpy(data[0 .. mel_data.len * @sizeOf(f32)], @as([*]const u8, @ptrCast(mel_data.ptr))[0 .. mel_data.len * @sizeOf(f32)]);
+    const data = tensor.dataF32();
+    @memcpy(data[0 .. mel_data.len], mel_data);
 
     return tensor;
 }

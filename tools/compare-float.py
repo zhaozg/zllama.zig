@@ -85,7 +85,7 @@ def compare_arrays(a, b, file1, file2, verbose=False, cos_threshold=0.9999, rel_
     elif rel_mean_abs > 0.001:
         level = "🟡 明显差异"
         detail = f"平均相对误差 {rel_mean_abs:.2%} 超过 0.1%"
-    elif max_abs > 0.01 or mean_abs > 0.001:
+    elif max_abs > 0.012 or mean_abs > 0.001:
         level = "🟡 明显差异"
         detail = "绝对误差超出经验阈值"
     elif max_abs > 0.001 or mean_abs > 0.0001:

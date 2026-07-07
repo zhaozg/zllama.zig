@@ -38,7 +38,7 @@ const log = std.log.scoped(.audio_pipeline);
 /// @param params 预处理参数
 /// @returns ProcessedAudio（调用者负责 deinit）
 pub fn processPcmSamples(
-    io: std.Io,
+    _: std.Io,
     allocator: std.mem.Allocator,
     audio_data: []const f32,
     sample_rate: u32,
@@ -115,9 +115,6 @@ pub fn processPcmSamples(
         var padded_samples = try tmp_alloc.alloc(f32, n_padded);
         @memset(padded_samples, 0.0);
         @memcpy(padded_samples[pad_left..][0..samples.len], samples);
-        debug.saveData(io, "debug_audio", "zllama_audio_samples_input.json", "audio_samples_input", padded_samples) catch |err| {
-            log.debug("Failed to save padded audio samples debug data: {}", .{err});
-        };
     }
 
     // 分配 Mel 输出缓冲区 [n_mel_bins, n_frames] (mel-major 布局，匹配 llama.cpp)
@@ -206,7 +203,7 @@ pub fn processPcmSamples(
     };
 }
 
-/// 将 Mel 频谱数据转换为 F32 张量 [n_frames, n_mel_bins]
+/// 将 Mel 频谱数据转换为 F32 4D 张量 [n_frames, n_mel_bins, 1, 1]
 pub fn melToTensor(
     ctx: *ggml.Context,
     mel_data: []const f32,
