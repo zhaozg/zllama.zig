@@ -71,64 +71,23 @@ pub fn loadClampInfoFromWeightNames(
 /// 从 GGUF 文件中读取一个标量张量的值，返回 f32。
 ///
 /// 在 GGUF 文件中，某些标量值（如 clamp 的 input_max/min、output_max/min）
-/// 被存储为张量（而非元数据 KV 对），类型可能是 f32、f16 或 bf16。
-/// 此函数通过 findTensor 查找张量描述符，然后根据实际类型读取并转换为 f32。
+/// 被存储为张量（而非元数据 KV 对）。
 ///
-/// 参考: llama.cpp llama-clip.cpp loadClampInfo() — 使用 ggml_fp16_to_fp32 处理 F16
+/// 注意：与 llama.cpp 的 get_scalar() 行为保持一致——总是按 f32（4 字节）
+/// 从文件偏移量读取，不检查张量的实际数据类型。llama.cpp 的 get_scalar()
+/// 直接从 GGUF 文件读取 sizeof(float) 字节，不关心张量类型。
+///
+/// 参考: llama.cpp tools/mtmd/clip.cpp get_scalar()
 fn readTensorF32(gguf_file: *const gguf.GGUFFile, name: []const u8) ?f32 {
     const info = gguf_file.findTensor(name) orelse return null;
     const data = gguf_file.getTensorData(info);
-    const ggml_type = info.data_type;
 
-    switch (ggml_type) {
-        .f32 => {
-            if (data.len < 4) return null;
-            const bits = std.mem.readInt(u32, data[0..4], .little);
-            return @as(f32, @bitCast(bits));
-        },
-        .f16 => {
-            if (data.len < 2) return null;
-            const bits = std.mem.readInt(u16, data[0..2], .little);
-            // ggml_fp16_to_fp32 将 IEEE 754 half-precision 转换为 f32
-            return ggml_fp16_to_fp32(bits);
-        },
-        .bf16 => {
-            if (data.len < 2) return null;
-            const bits = std.mem.readInt(u16, data[0..2], .little);
-            // BF16: 直接左移 16 位得到 f32（BF16 是 f32 的截断版本）
-            return @as(f32, @bitCast(@as(u32, bits) << 16));
-        },
-        else => {
-            // 对于其他类型（如量化类型），尝试按 f32 读取
-            if (data.len < 4) return null;
-            const bits = std.mem.readInt(u32, data[0..4], .little);
-            return @as(f32, @bitCast(bits));
-        },
-    }
-}
-
-/// 将 IEEE 754 half-precision (F16) 转换为 f32
-/// 参考: ggml_fp16_to_fp32 实现
-fn ggml_fp16_to_fp32(h: u16) f32 {
-    const sign: u32 = @as(u32, h >> 15) << 31;
-    const exp: u32 = @as(u32, h >> 10) & 0x1f;
-    const mant: u32 = @as(u32, h) & 0x3ff;
-
-    if (exp == 0) {
-        // 次正规数或零
-        if (mant == 0) return @as(f32, @bitCast(sign));
-        // 次正规数: exp = 0, mant != 0
-        const result = @as(u32, sign) | (127 - 15 - 10) << 23 | mant << 13;
-        return @as(f32, @bitCast(result));
-    } else if (exp == 31) {
-        // 无穷大或 NaN
-        const result = @as(u32, sign) | 0x7f800000 | mant << 13;
-        return @as(f32, @bitCast(result));
-    }
-
-    // 正规数
-    const result = @as(u32, sign) | ((exp + (127 - 15)) << 23) | mant << 13;
-    return @as(f32, @bitCast(result));
+    // 与 llama.cpp 的 get_scalar() 一致：总是按 f32（4 字节）读取，
+    // 不检查张量的实际数据类型。llama.cpp 直接从文件偏移量读取
+    // sizeof(float) 字节，不关心张量类型是 f32、f16 还是 bf16。
+    if (data.len < 4) return null;
+    const bits = std.mem.readInt(u32, data[0..4], .little);
+    return @as(f32, @bitCast(bits));
 }
 
 test "loadClampInfoFromWeightNames basic" {

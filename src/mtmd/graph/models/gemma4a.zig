@@ -78,7 +78,6 @@ pub fn paramsFromVision(p: *const VisionHParams) AudioParams {
 }
 
 /// 构建 Gemma4A 完整计算图（GraphBuilder 版本）
-/// 委托给 buildGraphEx
 pub fn buildGraph(
     builder: *GraphBuilder,
     mel_tensor: *ggml.Tensor,
@@ -338,6 +337,8 @@ pub fn buildGraphEx(
         //   conv_pw1.weight: [1024, 2048]  (n_embd=1024, intermediate=2048)
         //   conv_dw.weight:  [5, 1024]      (kernel_size=5, channels=1024)
         //   conv_pw2.weight: [1024, 1024]   (back to n_embd)
+        //
+        // Reference: llama.cpp gemma4a.cpp build() — conv block (lines 264-296)
         if (layer.norm_conv_w != null and layer.conv_pw1_w != null and
             layer.conv_dw_w != null and layer.conv_pw2_w != null)
         {
@@ -346,19 +347,38 @@ pub fn buildGraphEx(
             // x_conv shape: [intermediate=2048, n_pos]
 
             // GLU gate: split intermediate dim in half
-            const d_gate = @divExact(x_conv.ne()[0], 2);
-            // gate = sigmoid(upper half), act = lower half
-            const gate = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], @as(usize, @intCast(@sizeOf(f32) * d_gate))).cont(ctx).sigmoid(ctx);
-            const act = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], 0);
-            x_conv = act.mul(ctx, gate);
-            // x_conv shape: [d_gate=1024, n_pos]
+            // GLU
+            // {
+            //     int64_t d = x->ne[0] / 2;
+            //     ggml_tensor * gate = ggml_sigmoid(ctx0,
+            //         ggml_cont(ctx0, ggml_view_2d(ctx0, x, d, x->ne[1], x->nb[1], d * x->nb[0])));
+            //     x = ggml_mul(ctx0,
+            //         ggml_view_2d(ctx0, x, d, x->ne[1], x->nb[1], 0), gate);
+            //     x = ggml_cont(ctx0, ggml_transpose(ctx0, x));
+            // }
+            {
+                const d_gate = @divExact(x_conv.ne()[0], 2);
+                var gate = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1],
+                    x_conv.nb()[0] * @as(usize, @intCast(d_gate)));
+                gate = gate.cont(ctx).sigmoid(ctx);
+                const act = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], 0);
+                x_conv = act.mul(ctx, gate);
+                // x_conv shape: [d_gate=1024, n_pos]
+                // Transpose to [n_pos, d_gate] for causal depthwise conv1d along time axis
+                // C++: x = ggml_cont(ctx0, ggml_transpose(ctx0, x));
+                x_conv = ggml.cont(ctx, ggml.transpose(ctx, x_conv));
+                // x_conv shape: [n_pos, 1024]
+            }
 
-            // Transpose to [n_pos, d_gate] for causal depthwise conv1d along time axis
-            x_conv = ggml.cont(ctx, ggml.transpose(ctx, x_conv));
-            // x_conv shape: [n_pos, 1024]
 
-            // Causal depthwise conv1d: pad left by (kernel_size-1)/2 = 2, then roll by 2
-            // conv_dw.weight shape: [5, 1024] (kernel_size=5, channels=1024)
+            // Causal depthwise Conv1D via ggml_ssm_conv (pad+roll for left-only padding).
+            // C++ (gemma4a.cpp:278-283):
+            //   x = ggml_pad(ctx0, x, 4, 0, 0, 0);
+            //   x = ggml_roll(ctx0, x, 4, 0, 0, 0);
+            //   x = ggml_ssm_conv(ctx0, x, layer.conv_dw_w);
+            // NOTE: gemma4a.cpp uses only ONE pad(4) before ssm_conv (unlike conformer.cpp
+            // which uses two pads). With kernel_size=5 and input padded to n_pos+4,
+            // ssm_conv output has n_pos+4-5+1 = n_pos time steps, matching the residual.
             x_conv = x_conv.pad(ctx, 4, 0, 0, 0);
             x_conv = x_conv.roll(ctx, 4, 0, 0, 0);
             x_conv = x_conv.ssmConv(ctx, layer.conv_dw_w.?);
@@ -366,6 +386,12 @@ pub fn buildGraphEx(
                 x_conv = x_conv.add(ctx, dw_b);
             }
 
+            // C++ (gemma4a.cpp:286-288):
+            //   if (layer.conv_norm_w) {
+            //       x = ggml_rms_norm(ctx0, x, norm_eps);
+            //       x = ggml_mul(ctx0, x, layer.conv_norm_w);
+            //   }
+            // NOTE: gemma4a.cpp uses RMSNorm (not affine transform like conformer.cpp)
             if (layer.conv_norm_w) |cn_w| {
                 x_conv = x_conv.rmsNorm(ctx, norm_eps);
                 x_conv = x_conv.mul(ctx, cn_w);
@@ -375,6 +401,8 @@ pub fn buildGraphEx(
             // This is already in [d_gate, n_pos] layout, no need to transpose back
 
             // conv_pw2: project back to n_embd (1024 -> 1024)
+            // C++ (gemma4a.cpp:291): x = build_mm(layer.conv_pw2_w, x);
+            // NOTE: gemma4a.cpp does NOT add conv_pw2_b here (unlike conformer.cpp)
             x_conv = buildMMWithClamp(ctx, layer.conv_pw2_w.?, x_conv, clamp_map);
             // x_conv shape: [1024, n_pos] = [n_embd, n_pos] — matches residual
 
@@ -509,8 +537,12 @@ fn buildFFNWithClamp(
             .gelu_erf => x.gegluErfSplit(ctx, tmp),
             .gelu_quick => x.gegluQuickSplit(ctx, tmp),
             .relu_sqr => blk2: {
-                const relu_gate = x.relu(ctx);
-                break :blk2 relu_gate.mul(ctx, tmp);
+                // llama.cpp: cur = ggml_relu(ctx0, cur); cur = ggml_sqr(ctx0, cur);
+                // 其中 cur 是 gate 分支的输出（如果 gate 存在）或 up 分支的输出
+                // 注意：与 llama.cpp 一致，relu_sqr 总是 relu(x) * relu(x)，
+                // 无论 gate 是否存在（即对 gate 分支或 up 分支的输出做 relu 平方）
+                const relu = x.relu(ctx);
+                break :blk2 relu.mul(ctx, relu);
             },
         };
     } else blk: {
@@ -812,7 +844,7 @@ fn loadConformerLayer(
     layer.attn_k_rel_w = findLayerWeight(ctx, gguf_file, prefix, "attn_k_rel.weight") catch null;
     layer.ff_post_norm_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_post_norm.weight") catch null;
 
-    // Convolution module
+    // Convolution module — matching gemma4a.cpp (not conformer.cpp)
     layer.norm_conv_w = findLayerWeight(ctx, gguf_file, prefix, "norm_conv.weight") catch null;
     layer.conv_pw1_w = findLayerWeight(ctx, gguf_file, prefix, "conv_pw1.weight") catch null;
     layer.conv_dw_w = findLayerWeight(ctx, gguf_file, prefix, "conv_dw.weight") catch null;
