@@ -22,6 +22,7 @@ const std = @import("std");
 
 pub const c = @import("c.zig").c;
 pub const Type = @import("c.zig").Type;
+pub const Prec = @import("c.zig").Prec;
 pub const GgufValueType = @import("c.zig").GgufValueType;
 pub const GgufValue = @import("c.zig").GgufValue;
 
@@ -62,6 +63,8 @@ pub const ThreadPool = @import("threadpool.zig").ThreadPool;
 pub const gguf = @import("gguf.zig");
 
 pub const mulMat = @import("ops.zig").mulMat;
+pub const mulMatSetPrec = @import("ops.zig").mulMatSetPrec;
+pub const flashAttnExtSetPrec = @import("ops.zig").flashAttnExtSetPrec;
 pub const mul = @import("ops.zig").mul;
 pub const add = @import("ops.zig").add;
 pub const neg = @import("ops.zig").neg;
@@ -101,6 +104,7 @@ pub const repeat4d = @import("ops.zig").repeat4d;
 pub const transpose = @import("ops.zig").transpose;
 pub const concat = @import("ops.zig").concat;
 pub const getRows = @import("ops.zig").getRows;
+pub const dupTensor = @import("ops.zig").dupTensor;
 pub const conv1d = @import("ops.zig").conv1d;
 pub const ssmConv = @import("ops.zig").ssmConv;
 pub const ssmScan = @import("ops.zig").ssmScan;

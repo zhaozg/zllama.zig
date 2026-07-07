@@ -17,6 +17,10 @@ pub fn mulMat(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_mul_mat(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
 }
 
+pub fn mulMatSetPrec(a: *Tensor, prec: cmod.Prec) void {
+    c.ggml_mul_mat_set_prec(@ptrCast(@alignCast(a)), @intFromEnum(prec));
+}
+
 pub fn mul(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_mul(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
 }
@@ -197,6 +201,12 @@ pub fn getRows(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_get_rows(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
 }
 
+/// 创建一个与 src 具有相同形状和数据类型的张量（不复制数据）。
+/// 等价于 ggml_dup_tensor。
+pub fn dupTensor(ctx: *Context, src: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_dup_tensor(@ptrCast(ctx), @ptrCast(@alignCast(src)))));
+}
+
 // ============================================================================
 // 卷积与 SSM 操作
 // ============================================================================
@@ -236,6 +246,10 @@ pub fn flashAttnExt(ctx: *Context, q: *Tensor, k: *Tensor, v: *Tensor, mask: ?*T
         max_bias,
         logit_softcap,
     )));
+}
+
+pub fn flashAttnExtSetPrec(a: *Tensor, prec: cmod.Prec) void {
+    c.ggml_flash_attn_ext_set_prec(@ptrCast(@alignCast(a)), @intFromEnum(prec));
 }
 
 // ============================================================================

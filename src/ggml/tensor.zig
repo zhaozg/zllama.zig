@@ -101,6 +101,9 @@ pub const Tensor = opaque {
     pub fn mulMat(self: *Tensor, ctx: *anyopaque, b: *Tensor) *Tensor {
         return wrap(c.ggml_mul_mat(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(b))));
     }
+    pub fn mulMatSetPrec(self: *Tensor, prec: cmod.Prec) void {
+        c.ggml_mul_mat_set_prec(@ptrCast(@alignCast(self)), @intFromEnum(prec));
+    }
     pub fn mul(self: *Tensor, ctx: *anyopaque, b: *Tensor) *Tensor {
         return wrap(c.ggml_mul(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(b))));
     }
@@ -219,6 +222,12 @@ pub const Tensor = opaque {
     pub fn concat(self: *Tensor, ctx: *anyopaque, b: *Tensor, dim: i32) *Tensor {
         return wrap(c.ggml_concat(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(b)), dim));
     }
+    /// 创建一个与 self 具有相同形状和数据类型的张量（不复制数据）。
+    /// 等价于 ggml_dup_tensor。
+    pub fn dupTensor(self: *Tensor, ctx: *anyopaque) *Tensor {
+        return wrap(c.ggml_dup_tensor(@ptrCast(ctx), @ptrCast(@alignCast(self))));
+    }
+
     pub fn ropeExt(self: *Tensor, ctx: *anyopaque, pos: *Tensor, freq_factors: ?*Tensor, n_dims: i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
         const fp: [*c]c.struct_ggml_tensor = if (freq_factors) |f| @ptrCast(@alignCast(f)) else null;
         return wrap(c.ggml_rope_ext(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(pos)), fp, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow));
