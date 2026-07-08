@@ -1083,6 +1083,28 @@ pub fn build(b: *std.Build) void {
         _ = b.step("compare-mtmd-audio", "Run zllama-compare-mtmd-audio tool");
     }
 
+
+    {
+        // zllama-align-cmp: vector alignment comparison tool
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tools/align_cmp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+
+        const exe_tool = b.addExecutable(.{
+            .name = "zllama-align-cmp",
+            .root_module = mod,
+        });
+        b.installArtifact(exe_tool);
+
+        const run_cmd = b.addRunArtifact(exe_tool);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        _ = b.step("align-cmp", "Run zllama-align-cmp tool (vector alignment comparison)");
+    }
+
     // ======================================================================
     // 安装与运行
     // ======================================================================
