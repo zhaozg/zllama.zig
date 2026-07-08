@@ -272,6 +272,121 @@ pub fn sumRows(ctx: *Context, a: *Tensor) *Tensor {
     )));
 }
 
+// ============================================================================
+// 张量生成与填充
+// ============================================================================
+
+/// 创建等差数列张量：start, start+step, ..., stop (exclusive)
+pub fn arange(ctx: *Context, start: f32, stop: f32, step: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_arange(@ptrCast(ctx), start, stop, step)));
+}
+
+/// 用常量值填充张量
+pub fn fill(ctx: *Context, a: *Tensor, val: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_fill(@ptrCast(ctx), @ptrCast(@alignCast(a)), val)));
+}
+
+// ============================================================================
+// 插值与缩放
+// ============================================================================
+
+/// 插值缩放张量到指定尺寸
+pub fn interpolate(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, ne2: i64, ne3: i64, mode: u32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_interpolate(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, ne2, ne3, mode)));
+}
+
+// ============================================================================
+// 填充操作
+// ============================================================================
+
+/// 反射填充 1D（沿第 0 维左右填充）
+pub fn padReflect1d(ctx: *Context, a: *Tensor, p0: i32, p1: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_pad_reflect_1d(@ptrCast(ctx), @ptrCast(@alignCast(a)), p0, p1)));
+}
+
+// ============================================================================
+// 滚动操作
+// ============================================================================
+
+/// 沿各维度滚动张量元素（超出边界的元素循环到开头）
+pub fn roll(ctx: *Context, a: *Tensor, shift0: i32, shift1: i32, shift2: i32, shift3: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_roll(@ptrCast(ctx), @ptrCast(@alignCast(a)), shift0, shift1, shift2, shift3)));
+}
+
+// ============================================================================
+// 时间步嵌入
+// ============================================================================
+
+/// 时间步嵌入（用于扩散模型）
+pub fn timestepEmbedding(ctx: *Context, timesteps: *Tensor, dim: i32, max_period: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_timestep_embedding(@ptrCast(ctx), @ptrCast(@alignCast(timesteps)), dim, max_period)));
+}
+
+// ============================================================================
+// 池化操作
+// ============================================================================
+
+/// 1D 池化
+pub fn pool1d(ctx: *Context, a: *Tensor, op: c_uint, k0: i32, s0: i32, p0: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_pool_1d(@ptrCast(ctx), @ptrCast(@alignCast(a)), @intCast(op), k0, s0, p0)));
+}
+
+// ============================================================================
+// 相对位置编码
+// ============================================================================
+
+/// 获取相对位置编码
+pub fn getRelPos(ctx: *Context, a: *Tensor, qh: i32, kh: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_get_rel_pos(@ptrCast(ctx), @ptrCast(@alignCast(a)), qh, kh)));
+}
+
+/// 添加相对位置编码
+pub fn addRelPos(ctx: *Context, a: *Tensor, pw: *Tensor, ph: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_add_rel_pos(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pw)), @ptrCast(@alignCast(ph)))));
+}
+
+/// 添加相对位置编码（原地）
+pub fn addRelPosInplace(ctx: *Context, a: *Tensor, pw: *Tensor, ph: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_add_rel_pos_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pw)), @ptrCast(@alignCast(ph)))));
+}
+
+// ============================================================================
+// 自定义算子
+// ============================================================================
+
+/// 自定义一元算子
+pub fn mapCustom1(ctx: *Context, a: *Tensor, fun: c.ggml_custom1_op_t, n_tasks: i32, userdata: ?*anyopaque) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_map_custom1(@ptrCast(ctx), @ptrCast(@alignCast(a)), fun, n_tasks, if (userdata) |ud| @ptrCast(ud) else null)));
+}
+
+/// 自定义二元算子
+pub fn mapCustom2(ctx: *Context, a: *Tensor, b: *Tensor, fun: c.ggml_custom2_op_t, n_tasks: i32, userdata: ?*anyopaque) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_map_custom2(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), fun, n_tasks, if (userdata) |ud| @ptrCast(ud) else null)));
+}
+
+/// 自定义三元算子
+pub fn mapCustom3(ctx: *Context, a: *Tensor, b: *Tensor, c2: *Tensor, fun: c.ggml_custom3_op_t, n_tasks: i32, userdata: ?*anyopaque) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_map_custom3(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), @ptrCast(@alignCast(c2)), fun, n_tasks, if (userdata) |ud| @ptrCast(ud) else null)));
+}
+
+/// 自定义 4D 算子（多输入）
+pub fn custom4d(ctx: *Context, typ: Type, ne0: i64, ne1: i64, ne2: i64, ne3: i64, args: []const *Tensor, fun: c.ggml_custom_op_t, n_tasks: i32, userdata: ?*anyopaque) *Tensor {
+    var c_args: [16][*c]c.struct_ggml_tensor = undefined;
+    for (args, 0..) |arg, i| {
+        c_args[i] = @ptrCast(@alignCast(arg));
+    }
+    return @as(*Tensor, @ptrCast(c.ggml_custom_4d(
+        @ptrCast(ctx),
+        @intFromEnum(typ),
+        ne0, ne1, ne2, ne3,
+        @ptrCast(&c_args),
+        @intCast(args.len),
+        fun,
+        n_tasks,
+        if (userdata) |ud| @ptrCast(ud) else null,
+    )));
+}
+
 const testing = std.testing;
 
 test "ops basic" {

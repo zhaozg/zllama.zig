@@ -180,7 +180,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
         .image_data = img.data,
         .image_width = img.width,
         .image_height = img.height,
-    }, 4);
+    }, ectx.n_threads);
 
     // Compute the vision graph (encoder only builds, caller computes)
     try engine_common.computeGraph(vision_graph, ectx.n_threads);
@@ -261,7 +261,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
         .mel_bins = mel.n_mel_bins,
         .mel_frames = mel.n_frames,
         .audio_length_sec = @as(f32, @floatFromInt(wav_result.info.num_samples)) / @as(f32, @floatFromInt(wav_result.info.sample_rate)),
-    }, 4);
+    }, ectx.n_threads);
 
     // Compute the audio graph (encoder only builds, caller computes)
     try engine_common.computeGraph(audio_graph, ectx.n_threads);
@@ -440,6 +440,10 @@ fn applyChatTemplateWithMedia(ectx: *EngineContext, user_prompt: []const u8, med
     var tmpl = try chat_template.resolve(ectx.allocator, source, ectx.arch, model_name, !ectx.no_jinja);
     defer tmpl.deinit(ectx.allocator);
 
+    // Prepend the media placeholder to the content so it's available for
+    // both Jinja template rendering (where media info is not passed separately)
+    // and preset template rendering (where appendMediaContent will skip adding
+    // the marker if it's already present, avoiding double placeholders).
     const effective_prompt = try chat_template.ensurePlaceholderInContent(user_prompt, media.type, ectx.allocator);
     const needs_free = effective_prompt.ptr != user_prompt.ptr;
     defer if (needs_free) ectx.allocator.free(effective_prompt);

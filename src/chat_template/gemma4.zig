@@ -152,7 +152,13 @@ fn appendMediaContent(
         .none => "",
     };
 
-    if (marker.len > 0) {
+    // Only add the marker if it's not already present in the content.
+    // The content may already have the marker prepended by
+    // ensurePlaceholderInContent (called in applyChatTemplateWithMedia),
+    // which is needed for Jinja template rendering where the media info
+    // is not passed separately. Adding it again would result in double
+    // placeholders.
+    if (marker.len > 0 and !std.mem.containsAtLeast(u8, text_content, 1, marker)) {
         // Inline marker: <|audio|>Transcribe the audio
         try buf.appendSlice(allocator, marker);
     }

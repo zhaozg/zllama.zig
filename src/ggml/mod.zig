@@ -25,6 +25,10 @@ pub const Type = @import("c.zig").Type;
 pub const Prec = @import("c.zig").Prec;
 pub const GgufValueType = @import("c.zig").GgufValueType;
 pub const GgufValue = @import("c.zig").GgufValue;
+pub const PoolOp = @import("c.zig").PoolOp;
+pub const ScaleMode = @import("c.zig").ScaleMode;
+pub const ScaleFlag = @import("c.zig").ScaleFlag;
+pub const n_tasks_max = @import("c.zig").n_tasks_max;
 
 pub const Context = @import("context.zig").Context;
 pub const Tensor = @import("tensor.zig").Tensor;
@@ -110,6 +114,21 @@ pub const ssmConv = @import("ops.zig").ssmConv;
 pub const ssmScan = @import("ops.zig").ssmScan;
 pub const sumRows = @import("ops.zig").sumRows;
 pub const setOutput = @import("ops.zig").setOutput;
+
+pub const arange = @import("ops.zig").arange;
+pub const fill = @import("ops.zig").fill;
+pub const interpolate = @import("ops.zig").interpolate;
+pub const padReflect1d = @import("ops.zig").padReflect1d;
+pub const roll = @import("ops.zig").roll;
+pub const timestepEmbedding = @import("ops.zig").timestepEmbedding;
+pub const pool1d = @import("ops.zig").pool1d;
+pub const getRelPos = @import("ops.zig").getRelPos;
+pub const addRelPos = @import("ops.zig").addRelPos;
+pub const addRelPosInplace = @import("ops.zig").addRelPosInplace;
+pub const mapCustom1 = @import("ops.zig").mapCustom1;
+pub const mapCustom2 = @import("ops.zig").mapCustom2;
+pub const mapCustom3 = @import("ops.zig").mapCustom3;
+pub const custom4d = @import("ops.zig").custom4d;
 
 // ============================================================================
 // 量化 API

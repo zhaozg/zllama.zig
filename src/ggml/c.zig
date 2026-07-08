@@ -110,6 +110,38 @@ pub const Prec = enum(c_uint) {
 };
 
 // ============================================================================
+// 池化操作类型枚举
+// ============================================================================
+
+/// ggml 池化操作类型
+pub const PoolOp = enum(c_uint) {
+    max = c.GGML_OP_POOL_MAX,
+    avg = c.GGML_OP_POOL_AVG,
+    count = c.GGML_OP_POOL_COUNT,
+};
+
+// ============================================================================
+// 缩放模式枚举
+// ============================================================================
+
+/// ggml 缩放模式
+pub const ScaleMode = enum(c_uint) {
+    nearest = c.GGML_SCALE_MODE_NEAREST,
+    bilinear = c.GGML_SCALE_MODE_BILINEAR,
+    bicubic = c.GGML_SCALE_MODE_BICUBIC,
+    count = c.GGML_SCALE_MODE_COUNT,
+};
+
+/// ggml 缩放标志
+pub const ScaleFlag = enum(c_uint) {
+    align_corners = c.GGML_SCALE_FLAG_ALIGN_CORNERS,
+    antialias = c.GGML_SCALE_FLAG_ANTIALIAS,
+};
+
+/// 最大任务数（-1 表示使用最大可用任务数）
+pub const n_tasks_max: i32 = -1;
+
+// ============================================================================
 // GGUF 值联合体
 // ============================================================================
 

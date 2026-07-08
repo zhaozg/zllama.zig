@@ -102,14 +102,14 @@ pub const CliArgs = struct {
             \\
             \\选项:
             \\  -h, --help            显示此帮助信息
-            \\  -m, --model <路径>     模型文件路径 (GGUF格式)
-            \\  -p, --prompt <文本>    输入提示词
+            \\  -m, --model <路径>    模型文件路径 (GGUF格式)
+            \\  -p, --prompt <文本>   输入提示词
             \\  -n, --max-tokens <N>  最大生成token数 (默认: 256)
             \\  -v, --verbose         详细日志输出 (info 级别)
             \\  --verbose-prompt      打印详细的 prompt token 序列和 logits 预览
             \\  -d, --debug           调试日志输出 (debug 级别)
             \\  --benchmark           benchmark 模式
-            \\\\  --gpu                 启用 GPU 加速 (Metal/CUDA, 需编译时支持)
+            \\  --gpu                 启用 GPU 加速 (Metal/CUDA, 需编译时支持)
             \\  -c, --chat            交互式聊天模式
             \\
             \\对话模板选项:

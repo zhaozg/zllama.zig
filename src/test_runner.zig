@@ -42,4 +42,14 @@ comptime {
     _ = @import("tests/test_audio.zig");
     _ = @import("tests/test_vision.zig");
     _ = @import("tests/test_permute.zig");
+    _ = @import("tests/test_ggml_arange.zig");
+    _ = @import("tests/test_ggml_cont.zig");
+    _ = @import("tests/test_ggml_dup.zig");
+    _ = @import("tests/test_ggml_rel_pos.zig");
+    _ = @import("tests/test_ggml_roll.zig");
+    _ = @import("tests/test_ggml_pool.zig");
+    _ = @import("tests/test_ggml_customop.zig");
+    _ = @import("tests/test_ggml_interpolate.zig");
+    _ = @import("tests/test_ggml_timestep_embedding.zig");
+    _ = @import("tests/test_ggml_pad_reflect_1d.zig");
 }

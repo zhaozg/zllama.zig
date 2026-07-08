@@ -353,6 +353,10 @@ pub const InferenceEngine = struct {
         var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
         defer tmpl.deinit(self.allocator);
 
+        // Prepend the media placeholder to the content so it's available for
+        // both Jinja template rendering (where media info is not passed separately)
+        // and preset template rendering (where appendMediaContent will skip adding
+        // the marker if it's already present, avoiding double placeholders).
         const effective_prompt = if (media) |m| blk: {
             break :blk try chat_template.ensurePlaceholderInContent(user_prompt, m.type, self.allocator);
         } else user_prompt;
