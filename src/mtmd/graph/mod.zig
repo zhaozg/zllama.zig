@@ -63,22 +63,22 @@ pub const DebugTensorRegistry = debug.DebugTensorRegistry;
 pub const VisionEncoderBackend = struct {
     name: []const u8,
     supportBatch: bool = false,
-    loadParams: *const fn (gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
-    loadWeights: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
-    loadClampInfo: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
-    buildGraph: *const fn (ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, image_tensor: *ggml.Tensor) anyerror!*ggml.CGraph,
-    estimateOutputTokens: *const fn (img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32,
+    loadParams: *const fn (io: std.Io, gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
+    loadWeights: *const fn (io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
+    loadClampInfo: *const fn (io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
+    buildGraph: *const fn (io: std.Io, ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, image_tensor: *ggml.Tensor) anyerror!*ggml.CGraph,
+    estimateOutputTokens: *const fn (io: std.Io, img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32,
 };
 
 /// 音频编码器后端接口
 /// 每个音频模型实现此接口，提供模型特定的操作
 pub const AudioEncoderBackend = struct {
     name: []const u8,
-    loadParams: *const fn (gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
-    loadWeights: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
-    loadClampInfo: *const fn (allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
-    buildGraph: *const fn (ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, mel_tensor: *ggml.Tensor, clamp_map: *const std.StringHashMap(ClampInfo)) anyerror!*ggml.CGraph,
-    estimateOutputTokens: *const fn (n_frames: u32) u32,
+    loadParams: *const fn (io: std.Io, gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
+    loadWeights: *const fn (io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
+    loadClampInfo: *const fn (io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
+    buildGraph: *const fn (io: std.Io, ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, mel_tensor: *ggml.Tensor, clamp_map: *const std.StringHashMap(ClampInfo)) anyerror!*ggml.CGraph,
+    estimateOutputTokens: *const fn (io: std.Io, n_frames: u32) u32,
 };
 
 // 重新导出构建函数

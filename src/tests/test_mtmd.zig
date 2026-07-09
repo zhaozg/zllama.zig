@@ -48,7 +48,7 @@ test "tokenize: text only" {
     var tc = try createTestContext(testing.allocator);
     defer tc.deinit();
     const input = mtmd.InputText{ .text = "Hello", .add_special = false };
-    var chunks = try mtmd.tokenize.tokenize(tc.ctx, testing.allocator, input, &.{});
+    var chunks = try mtmd.tokenize.tokenize(tc.ctx, undefined, testing.allocator, input, &.{});
     defer chunks.deinit();
     try testing.expectEqual(@as(usize, 1), chunks.size());
 }
@@ -57,14 +57,14 @@ test "tokenize: marker mismatch" {
     var tc = try createTestContext(testing.allocator);
     defer tc.deinit();
     const input = mtmd.InputText{ .text = "<__media__>", .add_special = false };
-    try testing.expectError(error.MarkerBitmapMismatch, mtmd.tokenize.tokenize(tc.ctx, testing.allocator, input, &.{}));
+    try testing.expectError(error.MarkerBitmapMismatch, mtmd.tokenize.tokenize(tc.ctx, undefined, testing.allocator, input, &.{}));
 }
 
 test "tokenize: image marker" {
     var tc = try createTestContext(testing.allocator);
     defer tc.deinit();
     const input = mtmd.InputText{ .text = "Look: <__media__>", .add_special = false };
-    var chunks = try mtmd.tokenize.tokenize(tc.ctx, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderImage(224, 224)});
+    var chunks = try mtmd.tokenize.tokenize(tc.ctx, undefined, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderImage(224, 224)});
     defer chunks.deinit();
     try testing.expect(chunks.size() >= 2);
 }
@@ -73,7 +73,7 @@ test "tokenize: audio marker" {
     var tc = try createTestContextAudio(testing.allocator);
     defer tc.deinit();
     const input = mtmd.InputText{ .text = "Listen: <__media__>", .add_special = false };
-    var chunks = try mtmd.tokenize.tokenize(tc.ctx, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderAudio(16000)});
+    var chunks = try mtmd.tokenize.tokenize(tc.ctx, undefined, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderAudio(16000)});
     defer chunks.deinit();
     try testing.expect(chunks.size() >= 2);
 }

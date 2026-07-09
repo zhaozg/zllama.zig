@@ -6,7 +6,7 @@ const mtmd = @import("mm");
 const preprocess = @import("preprocess");
 const log = std.log.scoped(.mtmd_tokenize);
 
-pub fn tokenize(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, text: mtmd.InputText, bitmaps: []const mtmd.Bitmap) !mtmd.InputChunks {
+pub fn tokenize(ctx: *mtmd.MtmdContext, io: std.Io, allocator: std.mem.Allocator, text: mtmd.InputText, bitmaps: []const mtmd.Bitmap) !mtmd.InputChunks {
     var chunks = mtmd.InputChunks.init(allocator);
     errdefer chunks.deinit();
     const marker = ctx.media_marker;
@@ -19,7 +19,7 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, text: mtmd
             if (i_bm >= bitmaps.len) return error.MarkerBitmapMismatch;
             const bm = bitmaps[i_bm];
             i_bm += 1;
-            if (bm.is_audio) try addAudioChunk(ctx, allocator, &chunks, bm) else try addImageChunk(ctx, allocator, &chunks, bm, &n_images_added);
+            if (bm.is_audio) try addAudioChunk(ctx, io, allocator, &chunks, bm) else try addImageChunk(ctx, io, allocator, &chunks, bm, &n_images_added);
             remaining = remaining[idx + marker.len ..];
         } else {
             if (remaining.len > 0) try addTextChunk(ctx, allocator, &chunks, remaining, text.parse_special);
@@ -54,7 +54,7 @@ fn addTextChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.Inp
     }
 }
 
-fn addImageChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.InputChunks, bm: mtmd.Bitmap, nia: *u32) !void {
+fn addImageChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chunks: *mtmd.InputChunks, bm: mtmd.Bitmap, nia: *u32) !void {
     if (!ctx.supportVision()) return error.VisionNotSupported;
     if (ctx.img_beg.len > 0) try addTextChunk(ctx, al, chunks, ctx.img_beg, true);
     var pw: u32 = bm.nx;
@@ -78,7 +78,7 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.In
     var nx: u32 = 0;
     var ny: u32 = 0;
     if (ctx.mm_manager.vision_encoder) |*enc| {
-        nt = enc.estimateOutputTokens(pw, ph);
+        nt = enc.estimateOutputTokens(io, pw, ph);
         nx = nt;
         ny = 1;
     }
@@ -87,13 +87,13 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.In
     nia.* += 1;
 }
 
-fn addAudioChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.InputChunks, bm: mtmd.Bitmap) !void {
+fn addAudioChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chunks: *mtmd.InputChunks, bm: mtmd.Bitmap) !void {
     if (!ctx.supportAudio()) return error.AudioNotSupported;
     if (ctx.aud_beg.len > 0) try addTextChunk(ctx, al, chunks, ctx.aud_beg, true);
     // Store raw audio data; Mel computation happens in evalChunks.
     var n_tokens: u32 = 0;
     if (ctx.mm_manager.audio_encoder) |*enc| {
-        n_tokens = enc.estimateOutputTokens(@as(f32, @floatFromInt(@max(bm.nx, 1))) / @as(f32, @floatFromInt(@max(@as(u32, @intCast(ctx.caps.audio_sample_rate)), 1))));
+        n_tokens = enc.estimateOutputTokens(io, @as(f32, @floatFromInt(@max(bm.nx, 1))) / @as(f32, @floatFromInt(@max(@as(u32, @intCast(ctx.caps.audio_sample_rate)), 1))));
     }
     try chunks.append(.{ .chunk_type = .audio, .tokens_audio_n = n_tokens, .id = bm.id, .audio_data = bm.data });
     if (ctx.aud_end.len > 0) try addTextChunk(ctx, al, chunks, ctx.aud_end, true);

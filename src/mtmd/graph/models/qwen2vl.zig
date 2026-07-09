@@ -36,7 +36,8 @@ pub const backend = graph.VisionEncoderBackend{
 };
 
 /// 从 GGUF 元数据读取视觉编码器超参数
-pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
+pub fn loadParams(io: std.Io, gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
+    _ = io;
     _ = gguf_file;
     _ = params;
     // Qwen2VL 参数已由 encoder.zig 从 clip.vision.* 前缀加载
@@ -44,21 +45,25 @@ pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams)
 
 /// 从 GGUF 加载 clamp 信息（Qwen2VL 不使用 clamp）
 pub fn loadClampInfo(
+    io: std.Io,
     allocator: std.mem.Allocator,
     gguf_file: *const gguf.GGUFFile,
     w: *VisionEncoderWeights,
 ) !void {
+    _ = io;
     _ = gguf_file;
     w.clamp_info_map = std.StringHashMap(graph.ClampInfo).init(allocator);
 }
 
 /// 从 GGUF 加载 Qwen2VL 视觉编码器所有权重到 VisionEncoderWeights
 pub fn loadWeights(
+    io: std.Io,
     allocator: std.mem.Allocator,
     gguf_file: *const gguf.GGUFFile,
     ctx: *ggml.Context,
     w: *VisionEncoderWeights,
 ) !void {
+    _ = io;
     // Patch embedding (v.patch_embd.*)
     w.patch_embeddings_0 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;
     w.patch_embeddings_1 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd_1.weight") catch null;
@@ -109,12 +114,14 @@ pub fn loadWeights(
 
 /// 从 VisionEncoderWeights 构建计算图的包装函数
 fn buildGraphFromWeights(
+    io: std.Io,
     ctx: *ggml.Context,
     gf: *ggml.CGraph,
     w: *const VisionEncoderWeights,
     p: *const graph.VisionHParams,
     image_tensor: *ggml.Tensor,
 ) !*ggml.CGraph {
+    _ = io;
     const img = ImageF32{
         .buf = image_tensor.dataF32(),
         .nx = p.image_size,
@@ -150,7 +157,8 @@ fn buildGraphFromWeights(
 }
 
 /// 估算输出 token 数量
-pub fn estimateOutputTokens(img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32 {
+pub fn estimateOutputTokens(io: std.Io, img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32 {
+    _ = io;
     const patches_x = (img_width + patch_size - 1) / patch_size;
     const patches_y = (img_height + patch_size - 1) / patch_size;
     const n_patches = patches_x * patches_y;

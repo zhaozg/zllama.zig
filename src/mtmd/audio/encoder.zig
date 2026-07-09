@@ -24,9 +24,8 @@ pub const AudioEncoder = struct {
         allocator: std.mem.Allocator,
         backend: *const AudioEncoderBackend,
     ) !AudioEncoder {
-        _ = io;
         var vparams = graph.VisionHParams{};
-        backend.loadParams(gguf_file, &vparams);
+        backend.loadParams(io, gguf_file, &vparams);
 
         const params = config_mod.AudioEncoderParams{
             .n_mel_bins = vparams.n_mel_bins,
@@ -39,8 +38,8 @@ pub const AudioEncoder = struct {
         };
 
         var weights = graph.VisionEncoderWeights{};
-        try backend.loadWeights(allocator, gguf_file, ctx, &weights);
-        try backend.loadClampInfo(allocator, gguf_file, &weights);
+        try backend.loadWeights(io, allocator, gguf_file, ctx, &weights);
+        try backend.loadClampInfo(io, allocator, gguf_file, &weights);
 
         return AudioEncoder{
             .params = params,
@@ -63,7 +62,6 @@ pub const AudioEncoder = struct {
         mel_tensor: *ggml.Tensor,
         n_threads: i32,
     ) !*ggml.Tensor {
-        _ = io;
         _ = n_threads;
         var vparams = graph.VisionHParams{
             .n_embd = self.params.n_embd,
@@ -72,7 +70,7 @@ pub const AudioEncoder = struct {
             .n_mel_bins = self.params.n_mel_bins,
             .eps = self.params.norm_eps,
         };
-        _ = try self.backend.buildGraph(ctx, cgraph, &self.weights, &vparams, mel_tensor, &self.weights.clamp_info_map);
+        _ = try self.backend.buildGraph(io, ctx, cgraph, &self.weights, &vparams, mel_tensor, &self.weights.clamp_info_map);
 
         // Return the output tensor by name; caller must compute before reading data.
         return cgraph.getTensor("mm_proj") orelse return error.TensorNotFound;
@@ -95,7 +93,7 @@ pub const AudioEncoder = struct {
         return self.encode(io, ctx, cgraph, mel_tensor, n_threads);
     }
 
-    pub fn estimateOutputTokens(self: *const AudioEncoder, audio_length_sec: f32) u32 {
+    pub fn estimateOutputTokens(self: *const AudioEncoder, io: std.Io, audio_length_sec: f32) u32 {
         const n_samples: u32 = @intFromFloat(@as(f32, @floatFromInt(self.params.sample_rate)) * audio_length_sec);
         const framing = @import("framing.zig");
         const fc = framing.computeFrameCount(n_samples, .{
@@ -110,7 +108,7 @@ pub const AudioEncoder = struct {
         else
             0;
         const actual_frames = @min(fc.n_frames, pt_frames);
-        return self.backend.estimateOutputTokens(actual_frames);
+        return self.backend.estimateOutputTokens(io, actual_frames);
     }
 
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {

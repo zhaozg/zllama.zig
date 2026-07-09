@@ -97,6 +97,8 @@ pub const permute = @import("ops.zig").permute;
 pub const cont = @import("ops.zig").cont;
 pub const gatedDeltaNet = @import("ops.zig").gatedDeltaNet;
 pub const clamp = @import("ops.zig").clamp;
+pub const dequantizeRow = @import("ops.zig").dequantizeRow;
+pub const dequantizeTensor = @import("ops.zig").dequantizeTensor;
 
 pub const cont2d = @import("ops.zig").cont2d;
 pub const cont4d = @import("ops.zig").cont4d;

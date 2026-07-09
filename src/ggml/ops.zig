@@ -9,6 +9,29 @@ const Type = cmod.Type;
 const Context = @import("context.zig").Context;
 const Tensor = @import("tensor.zig").Tensor;
 
+/// 反量化一行数据：将量化数据的一行（ne0 个元素）反量化为 f32。
+/// 使用 ggml 的类型特征表（type_traits）中的 to_float 回调。
+/// 如果该类型不支持反量化，返回 error.DequantizeNotSupported。
+pub fn dequantizeRow(typ: Type, quant_data: *const anyopaque, f32_data: []f32, ne0: i64) !void {
+    const traits = c.ggml_get_type_traits(@intFromEnum(typ));
+    const to_float = traits.*.to_float orelse return error.DequantizeNotSupported;
+    to_float(quant_data, f32_data.ptr, ne0);
+}
+
+/// 反量化整个张量：将量化数据按行反量化为 f32 目标缓冲区。
+/// f32_dst 的长度必须 >= n_rows * ne0。
+pub fn dequantizeTensor(typ: Type, quant_src: []const u8, f32_dst: []f32, ne0: i64, n_rows: i64) !void {
+    const traits = c.ggml_get_type_traits(@intFromEnum(typ));
+    const to_float = traits.*.to_float orelse return error.DequantizeNotSupported;
+    var offset: usize = 0;
+    var row: i64 = 0;
+    while (row < n_rows) : (row += 1) {
+        const row_quant = quant_src[offset..];
+        to_float(row_quant.ptr, &f32_dst[@as(usize, @intCast(row * ne0))], ne0);
+        offset += Type.rowSize(typ, ne0);
+    }
+}
+
 // ============================================================================
 // 矩阵运算
 // ============================================================================

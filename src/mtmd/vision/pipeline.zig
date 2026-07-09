@@ -26,11 +26,13 @@ pub const VisionPipeline = struct {
 
     /// 初始化视觉处理流水线
     pub fn init(
+        io: std.Io,
         gguf_file: *const gguf.GGUFFile,
         ctx: *ggml.Context,
         allocator: std.mem.Allocator,
+        backend: *const encoder.VisionEncoderBackend,
     ) !VisionPipeline {
-        const enc = try VisionEncoder.init(gguf_file, ctx, allocator);
+        const enc = try VisionEncoder.init(io, gguf_file, ctx, allocator, backend);
         return VisionPipeline{ .encoder = enc };
     }
 
@@ -44,13 +46,14 @@ pub const VisionPipeline = struct {
     /// @returns 视觉嵌入 [n_output_embd, n_tokens]
     pub fn process(
         self: *const VisionPipeline,
+        io: std.Io,
         ctx: *ggml.Context,
         cgraph: *ggml.CGraph,
         image_data: []const u8,
         img_width: u32,
         img_height: u32,
     ) !*ggml.Tensor {
-        return self.encoder.encode(ctx, cgraph, image_data, img_width, img_height);
+        return self.encoder.encode(io, ctx, cgraph, image_data, img_width, img_height, 4);
     }
 
     /// 返回视觉编码器是否可用
@@ -59,8 +62,8 @@ pub const VisionPipeline = struct {
     }
 
     /// 估算给定分辨率图像的 token 数量
-    pub fn estimateOutputTokens(self: *const VisionPipeline, img_width: u32, img_height: u32) u32 {
-        return self.encoder.estimateOutputTokens(img_width, img_height);
+    pub fn estimateOutputTokens(self: *const VisionPipeline, io: std.Io, img_width: u32, img_height: u32) u32 {
+        return self.encoder.estimateOutputTokens(io, img_width, img_height);
     }
 
     /// 计算视觉 token 预算下的最佳图像分辨率

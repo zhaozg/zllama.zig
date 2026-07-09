@@ -292,7 +292,7 @@ pub const MultiModalManager = struct {
                 log.err("Unknown vision encoder type: '{s}'", .{caps.vision_encoder_type});
                 return error.UnknownVisionEncoder;
             };
-            vision_enc = try vision.VisionEncoder.init(gguf_file, ctx, allocator, backend);
+            vision_enc = try vision.VisionEncoder.init(io, gguf_file, ctx, allocator, backend);
             log.info("Vision encoder initialized: backend={s}", .{backend.name});
         }
 
@@ -343,15 +343,15 @@ pub const MultiModalManager = struct {
         };
     }
 
-    pub fn estimateTokenCount(self: *const MultiModalManager, input: MediaInput) u32 {
+    pub fn estimateTokenCount(self: *const MultiModalManager, io: std.Io, input: MediaInput) u32 {
         return switch (input.media_type) {
             .text => 0,
             .image => {
-                if (self.vision_encoder) |*enc| return enc.estimateOutputTokens(input.image_width, input.image_height);
+                if (self.vision_encoder) |*enc| return enc.estimateOutputTokens(io, input.image_width, input.image_height);
                 return 0;
             },
             .audio => {
-                if (self.audio_encoder) |*enc| return enc.estimateOutputTokens(input.audio_length_sec);
+                if (self.audio_encoder) |*enc| return enc.estimateOutputTokens(io, input.audio_length_sec);
                 return 0;
             },
         };

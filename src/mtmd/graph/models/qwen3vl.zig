@@ -40,28 +40,33 @@ pub const backend = graph.VisionEncoderBackend{
     .estimateOutputTokens = estimateOutputTokens,
 };
 
-pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
+pub fn loadParams(io: std.Io, gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
+    _ = io;
     _ = gguf_file;
     _ = params;
     // Qwen3VL 参数已由 encoder.zig 从 clip.vision.* 前缀加载
 }
 
 pub fn loadClampInfo(
+    io: std.Io,
     allocator: std.mem.Allocator,
     gguf_file: *const gguf.GGUFFile,
     w: *VisionEncoderWeights,
 ) !void {
+    _ = io;
     _ = gguf_file;
     w.clamp_info_map = std.StringHashMap(graph.ClampInfo).init(allocator);
 }
 
 /// 从 GGUF 加载 Qwen3VL 视觉编码器所有权重到 VisionEncoderWeights
 pub fn loadWeights(
+    io: std.Io,
     allocator: std.mem.Allocator,
     gguf_file: *const gguf.GGUFFile,
     ctx: *ggml.Context,
     w: *VisionEncoderWeights,
 ) !void {
+    _ = io;
     // Patch embedding (v.patch_embd.*)
     w.patch_embeddings_0 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;
     w.patch_embeddings_1 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight.1") catch null;
@@ -131,12 +136,14 @@ pub fn loadWeights(
 
 /// 从 VisionEncoderWeights 构建计算图的包装函数
 fn buildGraphFromWeights(
+    io: std.Io,
     ctx: *ggml.Context,
     gf: *ggml.CGraph,
     w: *const VisionEncoderWeights,
     p: *const graph.VisionHParams,
     image_tensor: *ggml.Tensor,
 ) !*ggml.CGraph {
+    _ = io;
     const img = ImageF32{
         .buf = image_tensor.dataF32(),
         .nx = p.image_size,
@@ -170,7 +177,8 @@ fn buildGraphFromWeights(
 }
 
 /// 估算输出 token 数量
-pub fn estimateOutputTokens(img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32 {
+pub fn estimateOutputTokens(io: std.Io, img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32 {
+    _ = io;
     const patches_x = (img_width + patch_size - 1) / patch_size;
     const patches_y = (img_height + patch_size - 1) / patch_size;
     const n_patches = patches_x * patches_y;

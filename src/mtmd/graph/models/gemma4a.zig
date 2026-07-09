@@ -18,6 +18,9 @@ const gguf = @import("gguf");
 const graph = @import("../mod.zig");
 const weight_loader = @import("weight_loader");
 
+
+const debug_mod = @import("debug");
+
 const GraphBuilder = graph.GraphBuilder;
 const NormType = graph.NormType;
 const FFNOpType = graph.FFNOpType;
@@ -187,7 +190,7 @@ pub fn buildGraphEx(
     const Np: i64 = B * C; // padded sequence length
     const pad_seq: i64 = Np - n_pos;
 
-    log.debug("  chunked attn: C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad={d}", .{ C, P, S, R, B, Np, pad_seq });
+    log.debug("  chunked attn: n_pos={d} C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad={d}", .{n_pos, C, P, S, R, B, Np, pad_seq });
 
     // Create RPE and mask tensors
     // C++: ggml_set_input(pos_emb) and ggml_set_input(kq_mask) — caller fills them.
@@ -326,6 +329,7 @@ pub fn buildGraphEx(
         if (il == 0) {
             residual.setName("debug_audio_self_attention_with_RPE_output");
             ggml.setOutput(residual);
+
         }
 
         // Convolution Module (GLU + depthwise conv)
@@ -348,8 +352,8 @@ pub fn buildGraphEx(
             // x_conv shape: [intermediate=2048, n_pos]
 
             if (il == 0) {
-                cur.setName("debug_audio_conv_build_normal_output");
-                ggml.setOutput(cur);
+                x_conv.setName("debug_audio_conv_build_normal_output");
+                ggml.setOutput(x_conv);
             }
             // GLU gate: split intermediate dim in half
             // GLU
@@ -621,6 +625,8 @@ fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_p
             data[p * n_embd + i + num_timescales] = @cos(scaled);
         }
     }
+    std.debug.print("pos_emb: loop={d}, n_embd={d}, max_past={d}\n[0-4]=[{d}, {d}, {d}, {d}]\n",
+    .{ n_pos, n_embd, max_past, data[0], data[1], data[2], data[3] });
 }
 
 /// Fill chunked attention mask
@@ -671,6 +677,7 @@ pub const backend = graph.AudioEncoderBackend{
 
 /// 从 VisionEncoderWeights 构建计算图的包装函数
 fn buildGraphFromWeights(
+    io: std.Io,
     ctx: *ggml.Context,
     gf: *ggml.CGraph,
     w: *const VisionEncoderWeights,
@@ -678,6 +685,7 @@ fn buildGraphFromWeights(
     mel_tensor: *ggml.Tensor,
     clamp_map: *const std.StringHashMap(ClampInfo),
 ) !*ggml.CGraph {
+    _ = io;
     const audio_w = weightsFromVision(w);
     const audio_p = paramsFromVision(p);
     return buildGraphEx(ctx, gf, &audio_w, &audio_p, mel_tensor, clamp_map);
@@ -688,7 +696,8 @@ fn buildGraphFromWeights(
 // ============================================================================
 
 /// 从 GGUF 元数据读取音频编码器超参数
-pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void {
+pub fn loadParams(io: std.Io, gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void {
+    _ = io;
     if (gguf_file.getU32("clip.audio.embedding_length")) |v| params.n_embd = v;
     if (gguf_file.getU32("clip.audio.attention.head_count")) |v| params.n_head = v;
     if (gguf_file.getU32("clip.audio.block_count")) |v| params.n_layer = v;
@@ -699,11 +708,13 @@ pub fn loadParams(gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void 
 
 /// 从 GGUF 加载 Gemma4A 音频编码器所有权重到 VisionEncoderWeights
 pub fn loadWeights(
+    io: std.Io,
     allocator: std.mem.Allocator,
     gguf_file: *const gguf.GGUFFile,
     ctx: *ggml.Context,
     w: *VisionEncoderWeights,
 ) !void {
+
     // 加载子采样卷积权重
     for (0..2) |i| {
         var buf: [64]u8 = undefined;
@@ -744,7 +755,7 @@ pub fn loadWeights(
     for (0..n_layer) |il| {
         const prefix = try std.fmt.allocPrint(allocator, "a.blk.{d}", .{il});
         defer allocator.free(prefix);
-        w.layers[il] = loadConformerLayer(ctx, gguf_file, prefix) catch |err| {
+        w.layers[il] = loadConformerLayer(io, ctx, gguf_file, prefix) catch |err| {
             log.err("Failed to load conformer layer {d}: {}", .{ il, err });
             return err;
         };
@@ -772,10 +783,12 @@ pub fn loadWeights(
 
 /// 加载 Clamp 信息到 VisionEncoderWeights.clamp_info_map
 pub fn loadClampInfo(
+    io: std.Io,
     allocator: std.mem.Allocator,
     gguf_file: *const gguf.GGUFFile,
     w: *VisionEncoderWeights,
 ) !void {
+    _ = io;
     var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| return err;
     defer weight_names.deinit(allocator);
 
@@ -807,7 +820,8 @@ pub fn loadClampInfo(
 
 /// 估算 Gemma4A 编码后的 token 数量
 /// Gemma4A 使用 2 层步长为 2 的子采样，每 4 帧 mel 特征产生 1 个输出 token
-pub fn estimateOutputTokens(n_frames: u32) u32 {
+pub fn estimateOutputTokens(io: std.Io, n_frames: u32) u32 {
+    _ = io;
     return n_frames / 4;
 }
 
@@ -834,12 +848,13 @@ fn findTensorInGGUFWithRequired(ctx: *ggml.Context, gguf_file: *const gguf.GGUFF
         return err;
     };
 }
-
 fn loadConformerLayer(
+    io: std.Io,
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
     prefix: []const u8,
 ) !ViTLayerWeights {
+
     var layer = ViTLayerWeights{};
 
     layer.q_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_q.weight");
@@ -869,6 +884,27 @@ fn loadConformerLayer(
     layer.conv_dw_b = findLayerWeight(ctx, gguf_file, prefix, "conv_dw.bias") catch null;
     layer.conv_norm_w = findLayerWeight(ctx, gguf_file, prefix, "conv_norm.weight") catch null;
     layer.conv_pw2_w = findLayerWeight(ctx, gguf_file, prefix, "conv_pw2.weight") catch null;
+
+    if(layer.norm_conv_w) |t| {
+        if (t.dataType() == .f32) {
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_norm_conv_w.json", "norm_conv_w", t.dataF32()) catch {};
+        }
+    }
+    if(layer.conv_pw1_w) |t| {
+        if (t.dataType() == .f32) {
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw1_w.json", "conv_pw1_w", t.dataF32()) catch {};
+        }
+    }
+    if(layer.conv_dw_w) | t | {
+        if (t.dataType() == .f32) {
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_dw_w.json", "conv_dw_w", t.dataF32()) catch {};
+        }
+    }
+    if(layer.conv_pw2_w) | t | {
+        if (t.dataType() == .f32) {
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw2_w.json", "conv_pw2_w", t.dataF32()) catch {};
+        }
+    }
 
     // FFN 2
     layer.ff_norm_1_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_norm_1.weight") catch null;

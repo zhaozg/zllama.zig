@@ -366,18 +366,39 @@ pub fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, n
 }
 
 pub fn estimateMemSize(gguf_file: *const gguf.GGUFFile) usize {
-    const raw_data_size = gguf_file.totalTensorDataSize();
+    _ = gguf_file.totalTensorDataSize(); // 保留供调试
     const n_tensors = gguf_file.tensors.items.len;
-    // ggml 内部每个张量需要: ggml_tensor (~256B) + ggml_object (~64B) + 对齐
-    // 使用 384 字节/tensor 以确保覆盖
-    const overhead: usize = n_tensors * 384;
-    const with_overhead = raw_data_size + overhead;
-    // 33% 安全余量 + 64MB 固定缓冲
-    const total = with_overhead + with_overhead / 3 + 64 * 1024 * 1024;
 
-    log.info("Estimated Gemma 4 weights memory: {d} MB (raw: {d} MB, {d} tensors)", .{
-        total / (1024 * 1024),
-        raw_data_size / (1024 * 1024),
+    // 计算反量化后的内存需求：量化张量需要 f32 空间（4x）
+    // 注意：raw_data_size 是 GGUF 中压缩后的数据大小。
+    // 对于量化张量，我们需要 f32 的完整大小，而不是压缩后的大小。
+    var total_data_size: usize = 0;
+    for (gguf_file.tensors.items) |tensor_info| {
+        const typ: ggml.Type = @enumFromInt(@intFromEnum(tensor_info.data_type));
+        if (typ.isQuantized()) {
+            // 量化张量：计算 f32 大小
+            var n_elems: u64 = 1;
+            for (tensor_info.dims[0..tensor_info.n_dims]) |d| {
+                n_elems *= d;
+            }
+            total_data_size += @as(usize, n_elems) * @sizeOf(f32);
+        } else {
+            // 非量化张量：使用 GGUF 中的压缩大小
+            total_data_size += tensor_info.sizeBytes();
+        }
+    }
+
+    // ggml 内部每个张量需要: ggml_tensor (~256B) + ggml_object (~64B) + 对齐
+    // 使用 512 字节/tensor 以确保覆盖（含对齐填充）
+    const overhead: usize = n_tensors * 512;
+    const with_overhead = total_data_size + overhead;
+    // 50% 安全余量 + 128MB 固定缓冲（反量化后内存需求更大）
+    const total = with_overhead + with_overhead / 2 + 128 * 1024 * 1024;
+
+    log.info("Estimated Gemma 4 weights memory: {d} MB (data: {d} MB, overhead: {d} MB, {d} tensors)", .{
+        @divTrunc(total, 1024 * 1024),
+        @divTrunc(total_data_size, 1024 * 1024),
+        @divTrunc(overhead, 1024 * 1024),
         n_tensors,
     });
     return total;

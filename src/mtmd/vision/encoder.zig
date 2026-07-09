@@ -26,6 +26,7 @@ pub const VisionEncoder = struct {
     image_std: [3]f32 = .{ 1.0, 1.0, 1.0 },
 
     pub fn init(
+        io: std.Io,
         gguf_file: *const gguf.GGUFFile,
         ctx: *ggml.Context,
         allocator: std.mem.Allocator,
@@ -73,11 +74,11 @@ pub const VisionEncoder = struct {
             .eps = params.norm_eps,
             .rope_theta = params.rope_theta,
         };
-        backend.loadParams(gguf_file, &hparams);
+        backend.loadParams(io, gguf_file, &hparams);
 
         var weights = VisionEncoderWeights{};
-        try backend.loadWeights(allocator, gguf_file, ctx, &weights);
-        try backend.loadClampInfo(allocator, gguf_file, &weights);
+        try backend.loadWeights(io, allocator, gguf_file, ctx, &weights);
+        try backend.loadClampInfo(io, allocator, gguf_file, &weights);
 
         return VisionEncoder{
             .params = params,
@@ -118,7 +119,6 @@ pub const VisionEncoder = struct {
         img_height: u32,
         n_threads: i32,
     ) !*ggml.Tensor {
-        _ = io;
         _ = n_threads;
         const p = self.params;
         const expected_len: usize = @as(usize, @intCast(img_width)) * @as(usize, @intCast(img_height)) * 3;
@@ -140,14 +140,14 @@ pub const VisionEncoder = struct {
             .eps = p.norm_eps,
             .rope_theta = p.rope_theta,
         };
-        _ = try self.backend.buildGraph(ctx, cgraph, &self.weights, &hparams, inp);
+        _ = try self.backend.buildGraph(io, ctx, cgraph, &self.weights, &hparams, inp);
 
         // Return the output tensor by name; caller must compute before reading data.
         return cgraph.getTensor("mm_output") orelse return error.TensorNotFound;
     }
 
-    pub fn estimateOutputTokens(self: *const VisionEncoder, img_width: u32, img_height: u32) u32 {
-        return self.backend.estimateOutputTokens(img_width, img_height, self.params.patch_size, self.params.n_merge);
+    pub fn estimateOutputTokens(self: *const VisionEncoder, io: std.Io, img_width: u32, img_height: u32) u32 {
+        return self.backend.estimateOutputTokens(io, img_width, img_height, self.params.patch_size, self.params.n_merge);
     }
 
     pub fn deinit(self: *VisionEncoder, allocator: std.mem.Allocator) void {
