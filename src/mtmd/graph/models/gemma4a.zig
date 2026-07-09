@@ -196,10 +196,12 @@ pub fn buildGraphEx(
     ctx.setNoAlloc(false);
     const pos_emb = try ctx.newTensor2d(ggml.Type.f32, p.n_embd, R);
     pos_emb.setName("pos_emb");
+    ggml.setInput(pos_emb);
     fillSinusoidalPosEmb(pos_emb, @intCast(R), @intCast(p.n_embd), @intCast(P));
 
     const kq_mask = try ctx.newTensor3d(ggml.Type.f32, S, C, B);
     kq_mask.setName("kq_mask");
+    ggml.setInput(kq_mask);
     fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos));
     ctx.setNoAlloc(true);
 
@@ -346,6 +348,10 @@ pub fn buildGraphEx(
             var x_conv = buildMMWithClamp(ctx, layer.conv_pw1_w.?, cur, clamp_map);
             // x_conv shape: [intermediate=2048, n_pos]
 
+            if (il == 0) {
+            cur.setName("debug_audio_conv_build_normal_output");
+            ggml.setOutput(cur);
+            }
             // GLU gate: split intermediate dim in half
             // GLU
             // {
@@ -370,6 +376,11 @@ pub fn buildGraphEx(
                 // x_conv shape: [n_pos, 1024]
             }
 
+        if (il == 0) {
+            x_conv.setName("debug_audio_conv_glu_output");
+            ggml.setOutput(x_conv);
+            }
+
 
             // Causal depthwise Conv1D via ggml_ssm_conv (pad+roll for left-only padding).
             // C++ (gemma4a.cpp:278-283):
@@ -386,6 +397,11 @@ pub fn buildGraphEx(
                 x_conv = x_conv.add(ctx, dw_b);
             }
 
+        if (il == 0) {
+            x_conv.setName("debug_audio_conv_dw_output");
+            ggml.setOutput(x_conv);
+            }
+
             // C++ (gemma4a.cpp:286-288):
             //   if (layer.conv_norm_w) {
             //       x = ggml_rms_norm(ctx0, x, norm_eps);
@@ -399,6 +415,11 @@ pub fn buildGraphEx(
             x_conv = x_conv.silu(ctx);
             // x_conv shape after ssmConv: [d_inner=1024, n_t=n_pos, 1] = [1024, n_pos]
             // This is already in [d_gate, n_pos] layout, no need to transpose back
+
+        if (il == 0) {
+            x_conv.setName("debug_audio_conv_dw_norm_silu_output");
+            ggml.setOutput(x_conv);
+            }
 
             // conv_pw2: project back to n_embd (1024 -> 1024)
             // C++ (gemma4a.cpp:291): x = build_mm(layer.conv_pw2_w, x);
