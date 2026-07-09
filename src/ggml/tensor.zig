@@ -49,10 +49,9 @@ pub const Tensor = opaque {
     /// 如果张量不是 f32 类型，此函数会 panic（通过断言）。
     pub fn dataF32(self: *Tensor) []f32 {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
-        const typ: Type = @enumFromInt(t.type);
-        std.debug.assert(typ == .f32);
+        const data = c.ggml_get_data_f32(t);
         const total_size = c.ggml_nbytes(t);
-        return @as([*]f32, @ptrCast(@alignCast(t.data)))[0 .. total_size / @sizeOf(f32)];
+        return @as([*]f32, @ptrCast(@alignCast(data)))[0 .. total_size / @sizeOf(f32)];
     }
     pub fn dataI32(self: *Tensor) []i32 {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));

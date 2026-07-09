@@ -50,7 +50,7 @@ pub fn findOrCreateTensorWithBuft(
 
     const n_dims = info.n_dims;
     const dims = info.dims;
-    const storage_type: ggml.Type = @enumFromInt(@intFromEnum(info.data_type));
+    const storage_type: ggml.Type = info.data_type;
     const is_quant = storage_type.isQuantized();
 
     // 量化张量创建 f32 张量用于反量化；非量化张量保持原类型
@@ -75,6 +75,21 @@ pub fn findOrCreateTensorWithBuft(
     } else {
         try loadPlainData(tensor, storage_type, tensor_data, name, buft);
     }
+
+    // 输出详细日志，格式参考: n_dims = 1, name = a.blk.0.conv_norm.weight, tensor_size=4096, offset=39887616, shape:[1024, 1, 1, 1], type = f32
+    log.debug(
+        \\n_dims = {d}, name = {s}, tensor_size={d}, offset={d}, shape:[{d}, {d}, {d}, {d}], type = {s}
+    , .{
+        n_dims,
+        name,
+        info.sizeBytes(),
+        info.offset,
+        if (n_dims >= 1) dims[0] else 1,
+        if (n_dims >= 2) dims[1] else 1,
+        if (n_dims >= 3) dims[2] else 1,
+        if (n_dims >= 4) dims[3] else 1,
+        @tagName(storage_type),
+    });
 
     return tensor;
 }

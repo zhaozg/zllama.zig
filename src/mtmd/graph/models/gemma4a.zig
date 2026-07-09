@@ -18,7 +18,6 @@ const gguf = @import("gguf");
 const graph = @import("../mod.zig");
 const weight_loader = @import("weight_loader");
 
-
 const debug_mod = @import("debug");
 
 const GraphBuilder = graph.GraphBuilder;
@@ -190,7 +189,7 @@ pub fn buildGraphEx(
     const Np: i64 = B * C; // padded sequence length
     const pad_seq: i64 = Np - n_pos;
 
-    log.debug("  chunked attn: n_pos={d} C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad={d}", .{n_pos, C, P, S, R, B, Np, pad_seq });
+    log.debug("  chunked attn: n_pos={d} C={d}, P={d}, S={d}, R={d}, B={d}, Np={d}, pad={d}", .{ n_pos, C, P, S, R, B, Np, pad_seq });
 
     // Create RPE and mask tensors
     // C++: ggml_set_input(pos_emb) and ggml_set_input(kq_mask) — caller fills them.
@@ -329,7 +328,6 @@ pub fn buildGraphEx(
         if (il == 0) {
             residual.setName("debug_audio_self_attention_with_RPE_output");
             ggml.setOutput(residual);
-
         }
 
         // Convolution Module (GLU + depthwise conv)
@@ -352,8 +350,8 @@ pub fn buildGraphEx(
             // x_conv shape: [intermediate=2048, n_pos]
 
             if (il == 0) {
-                x_conv.setName("debug_audio_conv_build_normal_output");
-                ggml.setOutput(x_conv);
+                cur.setName("debug_audio_conv_build_normal_output");
+                ggml.setOutput(cur);
             }
             // GLU gate: split intermediate dim in half
             // GLU
@@ -625,8 +623,7 @@ fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_p
             data[p * n_embd + i + num_timescales] = @cos(scaled);
         }
     }
-    std.debug.print("pos_emb: loop={d}, n_embd={d}, max_past={d}\n[0-4]=[{d}, {d}, {d}, {d}]\n",
-    .{ n_pos, n_embd, max_past, data[0], data[1], data[2], data[3] });
+    std.debug.print("pos_emb: loop={d}, n_embd={d}, max_past={d}\n[0-4]=[{d}, {d}, {d}, {d}]\n", .{ n_pos, n_embd, max_past, data[0], data[1], data[2], data[3] });
 }
 
 /// Fill chunked attention mask
@@ -715,30 +712,71 @@ pub fn loadWeights(
     w: *VisionEncoderWeights,
 ) !void {
 
+    log.info("Loading Gemma4A audio encoder weights...", .{});
+
     // 加载子采样卷积权重
     for (0..2) |i| {
         var buf: [64]u8 = undefined;
         const conv_name = try std.fmt.bufPrint(&buf, "a.conv1d.{d}.weight", .{i});
         // conv1d.weight 是必需张量（参考 clip.cpp get_tensor 默认 required=true）
         w.sscp_conv_w[i] = (try findTensorInGGUFWithRequired(ctx, gguf_file, conv_name, true)) orelse return error.TensorNotFound;
+        log.info("  conv1d.{d}.weight: shape=[{d},{d},{d}], name={s}", .{ i, w.sscp_conv_w[i].?.ne()[0], w.sscp_conv_w[i].?.ne()[1], w.sscp_conv_w[i].?.ne()[2], w.sscp_conv_w[i].?.getName() });
 
         const bias_name = try std.fmt.bufPrint(&buf, "a.conv1d.{d}.bias", .{i});
         w.sscp_conv_b[i] = findTensorInGGUF(ctx, gguf_file, bias_name) catch null;
+        if (w.sscp_conv_b[i]) |t| {
+            log.info("  conv1d.{d}.bias: shape=[{d}], name={s}", .{ i, t.ne()[0], t.getName() });
+        } else {
+            log.debug("  conv1d.{d}.bias: not found (optional)", .{i});
+        }
 
         const norm_name = try std.fmt.bufPrint(&buf, "a.conv1d.{d}.norm.weight", .{i});
         w.sscp_norm_w[i] = findTensorInGGUF(ctx, gguf_file, norm_name) catch null;
+        if (w.sscp_norm_w[i]) |t| {
+            log.info("  conv1d.{d}.norm.weight: shape=[{d}], name={s}", .{ i, t.ne()[0], t.getName() });
+        } else {
+            log.debug("  conv1d.{d}.norm.weight: not found (optional)", .{i});
+        }
     }
 
     // 子采样输入投影
     // a.input_projection.weight 是必需张量（参考 clip.cpp get_tensor 默认 required=true）
     w.sscp_inp_proj_w = (try findTensorInGGUFWithRequired(ctx, gguf_file, "a.input_projection.weight", true)) orelse return error.TensorNotFound;
+    log.info("  input_projection.weight: shape=[{d},{d}], name={s}", .{ w.sscp_inp_proj_w.?.ne()[0], w.sscp_inp_proj_w.?.ne()[1], w.sscp_inp_proj_w.?.getName() });
     w.sscp_inp_proj_b = findTensorInGGUF(ctx, gguf_file, "a.input_projection.bias") catch null;
+    if (w.sscp_inp_proj_b) |t| {
+        log.info("  input_projection.bias: shape=[{d}], name={s}", .{ t.ne()[0], t.getName() });
+    } else {
+        log.debug("  input_projection.bias: not found (optional)", .{});
+    }
 
     // 输出投影
     w.audio_out_proj_w = findTensorInGGUF(ctx, gguf_file, "a.pre_encode.out.weight") catch null;
+    if (w.audio_out_proj_w) |t| {
+        log.info("  audio_out_proj.weight: shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
+    } else {
+        log.debug("  audio_out_proj.weight: not found (optional)", .{});
+    }
     w.audio_out_proj_b = findTensorInGGUF(ctx, gguf_file, "a.pre_encode.out.bias") catch null;
+    if (w.audio_out_proj_b) |t| {
+        log.info("  audio_out_proj.bias: shape=[{d}], name={s}", .{ t.ne()[0], t.getName() });
+    } else {
+        log.debug("  audio_out_proj.bias: not found (optional)", .{});
+    }
+
+    // 多模态嵌入器
     w.mm_soft_emb_norm_w = findTensorInGGUF(ctx, gguf_file, "mm.a.soft_emb_norm.weight") catch null;
+    if (w.mm_soft_emb_norm_w) |t| {
+        log.info("  mm_soft_emb_norm.weight: shape=[{d}], name={s}", .{ t.ne()[0], t.getName() });
+    } else {
+        log.debug("  mm_soft_emb_norm.weight: not found (optional)", .{});
+    }
     w.mm_input_proj_w = findTensorInGGUF(ctx, gguf_file, "mm.a.input_projection.weight") catch null;
+    if (w.mm_input_proj_w) |t| {
+        log.info("  mm_input_proj.weight: shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
+    } else {
+        log.debug("  mm_input_proj.weight: not found (optional)", .{});
+    }
 
     // 检测实际层数
     var actual_n_layer: u32 = 0;
@@ -750,34 +788,19 @@ pub fn loadWeights(
     }
     // n_layer 由调用者从 VisionHParams 设置，这里使用检测值覆盖
     const n_layer: usize = @intCast(actual_n_layer);
+    log.info("  detected {d} conformer layers", .{n_layer});
     w.layers = try allocator.alloc(ViTLayerWeights, n_layer);
 
     for (0..n_layer) |il| {
         const prefix = try std.fmt.allocPrint(allocator, "a.blk.{d}", .{il});
         defer allocator.free(prefix);
-        w.layers[il] = loadConformerLayer(io, ctx, gguf_file, prefix) catch |err| {
+        log.debug("loadWeights: loading layer {d}, prefix='{s}'", .{ il, prefix });
+        w.layers[il] = loadConformerLayer(io, ctx, gguf_file, prefix, il) catch |err| {
             log.err("Failed to load conformer layer {d}: {}", .{ il, err });
             return err;
         };
-    }
-
-    // 日志
-    for (0..2) |i| {
-        if (w.sscp_conv_w[i]) |t| {
-            log.info("  conv1d.{d}.weight: shape=[{d},{d},{d}], name={s}", .{ i, t.ne()[0], t.ne()[1], t.ne()[2], t.getName() });
-        }
-    }
-    if (w.sscp_inp_proj_w) |t| {
-        log.info("  input_projection: shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
-    }
-    if (w.audio_out_proj_w) |t| {
-        log.info("  audio_out_proj:  shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
-    }
-    if (w.mm_soft_emb_norm_w) |t| {
-        log.info("  mm_soft_emb_norm: shape=[{d}], name={s}", .{ t.ne()[0], t.getName() });
-    }
-    if (w.mm_input_proj_w) |t| {
-        log.info("  mm_input_proj:   shape=[{d},{d}], name={s}", .{ t.ne()[0], t.ne()[1], t.getName() });
+        log.debug("loadWeights: freeing prefix '{s}' (ptr=0x{x}, len={d})", .{ prefix, @intFromPtr(prefix.ptr), prefix.len });
+        log.debug("loadWeights: layer {d} done", .{il});
     }
 }
 
@@ -853,8 +876,8 @@ fn loadConformerLayer(
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
     prefix: []const u8,
+    il: usize
 ) !ViTLayerWeights {
-
     var layer = ViTLayerWeights{};
 
     layer.q_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_q.weight");
@@ -864,12 +887,12 @@ fn loadConformerLayer(
     layer.o_b = findLayerWeight(ctx, gguf_file, prefix, "attn_out.bias") catch null;
     layer.ln_1_w = findLayerWeight(ctx, gguf_file, prefix, "ln1.weight") catch null;
 
-    // FFN 1
-    layer.ff_norm_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight") catch null;
+    // FFN 1 (required — matching C++ get_tensor without false)
+    layer.ff_norm_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_norm.weight");
     layer.ff_up_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight");
     layer.ff_down_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_down.weight");
 
-    // Conformer-specific
+    // Conformer-specific (all optional — matching C++ get_tensor with false)
     layer.attn_pre_norm_w = findLayerWeight(ctx, gguf_file, prefix, "attn_pre_norm.weight") catch null;
     layer.attn_post_norm_w = findLayerWeight(ctx, gguf_file, prefix, "attn_post_norm.weight") catch null;
     layer.per_dim_scale_w = findLayerWeight(ctx, gguf_file, prefix, "per_dim_scale.weight") catch null;
@@ -877,43 +900,52 @@ fn loadConformerLayer(
     layer.attn_k_rel_w = findLayerWeight(ctx, gguf_file, prefix, "attn_k_rel.weight") catch null;
     layer.ff_post_norm_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_post_norm.weight") catch null;
 
-    // Convolution module — matching gemma4a.cpp (not conformer.cpp)
-    layer.norm_conv_w = findLayerWeight(ctx, gguf_file, prefix, "norm_conv.weight") catch null;
-    layer.conv_pw1_w = findLayerWeight(ctx, gguf_file, prefix, "conv_pw1.weight") catch null;
-    layer.conv_dw_w = findLayerWeight(ctx, gguf_file, prefix, "conv_dw.weight") catch null;
+    // Convolution module — matching clip.cpp PROJECTOR_TYPE_GEMMA4A (lines 2577-2586)
+    //
+    // NOTE: The tensor names are SWAPPED relative to the logical meaning due to
+    // upstream tensor_mapping.py. From clip.cpp comment:
+    //   "conv_norm / norm_conv are swapped in GGUF due to
+    //    upstream tensor_mapping.py, so we load them in reverse order"
+    //
+    // TN_CONV_NORM = "%s.blk.%d.conv_norm.%s"  →  layer.norm_conv_w (logical norm before conv)
+    // TN_NORM_CONV = "%s.blk.%d.norm_conv.%s"  →  layer.conv_norm_w  (logical norm after conv)
+    layer.norm_conv_w = findLayerWeight(ctx, gguf_file, prefix, "conv_norm.weight") catch null;
+    layer.norm_conv_b = findLayerWeight(ctx, gguf_file, prefix, "conv_norm.bias") catch null;
+    layer.conv_pw1_w = try findLayerWeight(ctx, gguf_file, prefix, "conv_pw1.weight");
+    layer.conv_pw1_b = findLayerWeight(ctx, gguf_file, prefix, "conv_pw1.bias") catch null;
+    layer.conv_dw_w = try findLayerWeight(ctx, gguf_file, prefix, "conv_dw.weight");
     layer.conv_dw_b = findLayerWeight(ctx, gguf_file, prefix, "conv_dw.bias") catch null;
-    layer.conv_norm_w = findLayerWeight(ctx, gguf_file, prefix, "conv_norm.weight") catch null;
-    layer.conv_pw2_w = findLayerWeight(ctx, gguf_file, prefix, "conv_pw2.weight") catch null;
+    layer.conv_norm_w = findLayerWeight(ctx, gguf_file, prefix, "norm_conv.weight") catch null;
+    layer.conv_norm_b = findLayerWeight(ctx, gguf_file, prefix, "norm_conv.bias") catch null;
+    layer.conv_pw2_w = try findLayerWeight(ctx, gguf_file, prefix, "conv_pw2.weight");
+    layer.conv_pw2_b = findLayerWeight(ctx, gguf_file, prefix, "conv_pw2.bias") catch null;
 
-    if(layer.norm_conv_w) |t| {
-        if (t.dataType() == .f32) {
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_norm_conv_w.json", "norm_conv_w", t.dataF32()) catch {};
-        }
-    }
-    if(layer.conv_pw1_w) |t| {
-        if (t.dataType() == .f32) {
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw1_w.json", "conv_pw1_w", t.dataF32()) catch {};
-        }
-    }
-    if(layer.conv_dw_w) | t | {
-        if (t.dataType() == .f32) {
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_dw_w.json", "conv_dw_w", t.dataF32()) catch {};
-        }
-    }
-    if(layer.conv_pw2_w) | t | {
-        if (t.dataType() == .f32) {
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw2_w.json", "conv_pw2_w", t.dataF32()) catch {};
-        }
-    }
-
-    // FFN 2
-    layer.ff_norm_1_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_norm_1.weight") catch null;
+    // FFN 2 (ff_norm_1_w, ff_up_1_w, ff_down_1_w required — matching C++ get_tensor without false)
+    layer.ff_norm_1_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_norm_1.weight");
     layer.ff_up_1_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_up_1.weight");
+    layer.ff_up_1_b = findLayerWeight(ctx, gguf_file, prefix, "ffn_up_1.bias") catch null;
     layer.ff_down_1_w = try findLayerWeight(ctx, gguf_file, prefix, "ffn_down_1.weight");
+    layer.ff_down_1_b = findLayerWeight(ctx, gguf_file, prefix, "ffn_down_1.bias") catch null;
     layer.ff_post_norm_1_w = findLayerWeight(ctx, gguf_file, prefix, "ffn_post_norm_1.weight") catch null;
 
     // Layer output
     layer.ln_2_w = findLayerWeight(ctx, gguf_file, prefix, "ln2.weight") catch null;
+
+    if (il == 0) {
+        // Debug save — only for f32 tensors; quantized tensors (Q4_K_M etc.) are skipped
+        if (layer.norm_conv_w) |t| {
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_norm_conv_w.json", "norm_conv_w", t.dataF32()) catch {};
+        }
+        if (layer.conv_pw1_w) |t| {
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw1_w.json", "conv_pw1_w", t.dataF32()) catch {};
+        }
+        if (layer.conv_dw_w) |t| {
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_dw_w.json", "conv_dw_w", t.dataF32()) catch {};
+        }
+        if (layer.conv_pw2_w) |t| {
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw2_w.json", "conv_pw2_w", t.dataF32()) catch {};
+        }
+    }
 
     return layer;
 }

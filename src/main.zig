@@ -51,6 +51,7 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
     .{ .scope = .vision_encoder, .level = .info },
     .{ .scope = .vision_pipeline, .level = .info },
 
+    .{ .scope = .weight_loader, .level = .info },
     .{ .scope = .gemma4a, .level = .debug },
 } };
 
