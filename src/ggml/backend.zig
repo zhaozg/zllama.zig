@@ -225,10 +225,18 @@ pub const Scheduler = opaque {
         if (sched == null) return error.SchedulerInitFailed;
         return @as(*Scheduler, @ptrCast(sched));
     }
-    pub fn free(self: *Scheduler) void { c.ggml_backend_sched_free(@ptrCast(self)); }
-    pub fn allocGraph(self: *Scheduler, graph: *CGraph) bool { return c.ggml_backend_sched_alloc_graph(@ptrCast(self), @ptrCast(graph)); }
-    pub fn reserve(self: *Scheduler, graph: *CGraph) bool { return c.ggml_backend_sched_reserve(@ptrCast(self), @ptrCast(graph)); }
-    pub fn graphCompute(self: *Scheduler, graph: *CGraph) bool { return c.ggml_backend_sched_graph_compute(@ptrCast(self), @ptrCast(graph)) == 1; }
+    pub fn free(self: *Scheduler) void {
+        c.ggml_backend_sched_free(@ptrCast(self));
+    }
+    pub fn allocGraph(self: *Scheduler, graph: *CGraph) bool {
+        return c.ggml_backend_sched_alloc_graph(@ptrCast(self), @ptrCast(graph));
+    }
+    pub fn reserve(self: *Scheduler, graph: *CGraph) bool {
+        return c.ggml_backend_sched_reserve(@ptrCast(self), @ptrCast(graph));
+    }
+    pub fn graphCompute(self: *Scheduler, graph: *CGraph) bool {
+        return c.ggml_backend_sched_graph_compute(@ptrCast(self), @ptrCast(graph)) == 1;
+    }
 };
 
 // ============================================================================

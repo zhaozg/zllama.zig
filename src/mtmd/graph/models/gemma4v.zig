@@ -48,7 +48,10 @@ pub const AddPosContext = struct {
         // first half: use pos_x
         var first = cur_tensor.view4d(
             ctx_ptr,
-            n_dim_half, n_head_val, n_pos_val, self.n_batch_val,
+            n_dim_half,
+            n_head_val,
+            n_pos_val,
+            self.n_batch_val,
             cur_tensor.nb()[1],
             cur_tensor.nb()[2],
             cur_tensor.nb()[3],
@@ -62,14 +65,21 @@ pub const AddPosContext = struct {
             2, // GGML_ROPE_TYPE_NEOX
             0,
             self.rope_theta_val,
-            1.0, 0.0, 1.0, 0.0, 0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
         );
 
         // second half: use pos_y
         const offset: usize = @intCast(n_dim_half * @sizeOf(f32));
         var second = cur_tensor.view4d(
             ctx_ptr,
-            n_dim_half, n_head_val, n_pos_val, self.n_batch_val,
+            n_dim_half,
+            n_head_val,
+            n_pos_val,
+            self.n_batch_val,
             cur_tensor.nb()[1],
             cur_tensor.nb()[2],
             cur_tensor.nb()[3],
@@ -83,7 +93,11 @@ pub const AddPosContext = struct {
             2, // GGML_ROPE_TYPE_NEOX
             0,
             self.rope_theta_val,
-            1.0, 0.0, 1.0, 0.0, 0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
         );
 
         const result = first.concat(ctx_ptr, second, 0);

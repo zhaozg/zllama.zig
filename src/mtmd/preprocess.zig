@@ -15,9 +15,15 @@ const log = std.log.scoped(.mm_preprocess);
 
 pub const Size2D = struct { width: u32, height: u32 };
 
-fn fnRoundByFactor(x: f64, factor: f64) f64 { return std.math.round(x / factor) * factor; }
-fn fnCeilByFactor(x: f64, factor: f64) f64 { return std.math.ceil(x / factor) * factor; }
-fn fnFloorByFactor(x: f64, factor: f64) f64 { return std.math.floor(x / factor) * factor; }
+fn fnRoundByFactor(x: f64, factor: f64) f64 {
+    return std.math.round(x / factor) * factor;
+}
+fn fnCeilByFactor(x: f64, factor: f64) f64 {
+    return std.math.ceil(x / factor) * factor;
+}
+fn fnFloorByFactor(x: f64, factor: f64) f64 {
+    return std.math.floor(x / factor) * factor;
+}
 
 /// 计算保持宽高比的缩放尺寸，使宽高均为 align_size 的倍数。
 pub fn calcSizePreservedRatio(src_width: u32, src_height: u32, align_size: u32, min_pixels: u32, max_pixels: u32) Size2D {
@@ -79,8 +85,12 @@ pub fn normalizeToTensor(
     const dst = inp.dataF32();
     switch (mode) {
         .standard => {
-            const mr = mean[0]; const mg = mean[1]; const mb = mean[2];
-            const sr = std_val[0]; const sg = std_val[1]; const sb = std_val[2];
+            const mr = mean[0];
+            const mg = mean[1];
+            const mb = mean[2];
+            const sr = std_val[0];
+            const sg = std_val[1];
+            const sb = std_val[2];
             for (0..H) |y| {
                 for (0..W) |x| {
                     const si = (y * W + x) * 3;
@@ -189,7 +199,9 @@ pub const ProcessedImage = struct {
     width: u32,
     height: u32,
     allocator: std.mem.Allocator,
-    pub fn deinit(self: *ProcessedImage) void { self.allocator.free(self.data); }
+    pub fn deinit(self: *ProcessedImage) void {
+        self.allocator.free(self.data);
+    }
 };
 
 // ============================================================================
@@ -205,11 +217,14 @@ pub fn loadImage(allocator: std.mem.Allocator, io: std.Io, filepath: []const u8,
     const raw = try allocator.alloc(u8, @intCast(stat.size));
     defer allocator.free(raw);
     _ = try file.readPositionalAll(io, raw, 0);
-    var w: c_int = 0; var h: c_int = 0; var comp: c_int = 0;
+    var w: c_int = 0;
+    var h: c_int = 0;
+    var comp: c_int = 0;
     const pixels = stb_image.loadFromMemory(raw.ptr, @intCast(raw.len), &w, &h, &comp, 3);
     if (pixels == null) return error.ImageDecodeFailed;
     defer stb_image.free(pixels);
-    const sw: u32 = @intCast(w); const sh: u32 = @intCast(h);
+    const sw: u32 = @intCast(w);
+    const sh: u32 = @intCast(h);
     const resized = try bilinearResizeRGB(allocator, pixels.?[0..@as(usize, @intCast(sw * sh * 3))], sw, sh, target_size, target_size);
     return .{ .data = resized, .width = target_size, .height = target_size, .allocator = allocator };
 }
@@ -230,7 +245,9 @@ pub const ImageNormalize = enum { div255, imagenet, siglip, none };
 
 /// Legacy: convert ProcessedImage to ggml f32 tensor.
 pub fn imageToTensor(ctx: *ggml.Context, image: *const ProcessedImage, normalize: ImageNormalize) !*ggml.Tensor {
-    const W: usize = @intCast(image.width); const H: usize = @intCast(image.height); const wh: usize = W * H;
+    const W: usize = @intCast(image.width);
+    const H: usize = @intCast(image.height);
+    const wh: usize = W * H;
     const tensor = try ctx.newTensor3d(ggml.Type.f32, @intCast(image.width), @intCast(image.height), 3);
     const data = tensor.dataF32();
     switch (normalize) {

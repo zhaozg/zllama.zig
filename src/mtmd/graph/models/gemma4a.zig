@@ -165,8 +165,7 @@ pub fn buildGraphEx(
     cur.setName("debug_audio_flatten_output");
     ggml.setOutput(cur);
 
-    log.debug("sscp_inp_proj_w={any}, sscp_inp_proj_b={any}",
-               .{ w.sscp_inp_proj_w, w.sscp_inp_proj_b });
+    log.debug("sscp_inp_proj_w={any}, sscp_inp_proj_b={any}", .{ w.sscp_inp_proj_w, w.sscp_inp_proj_b });
     // 4. Input projection to Conformer embedding dim
     if (w.sscp_inp_proj_w) |proj_w| {
         cur = buildMMWithClamp(ctx, proj_w, cur, clamp_map);
@@ -349,8 +348,8 @@ pub fn buildGraphEx(
             // x_conv shape: [intermediate=2048, n_pos]
 
             if (il == 0) {
-            cur.setName("debug_audio_conv_build_normal_output");
-            ggml.setOutput(cur);
+                cur.setName("debug_audio_conv_build_normal_output");
+                ggml.setOutput(cur);
             }
             // GLU gate: split intermediate dim in half
             // GLU
@@ -364,8 +363,7 @@ pub fn buildGraphEx(
             // }
             {
                 const d_gate = @divExact(x_conv.ne()[0], 2);
-                var gate = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1],
-                    x_conv.nb()[0] * @as(usize, @intCast(d_gate)));
+                var gate = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], x_conv.nb()[0] * @as(usize, @intCast(d_gate)));
                 gate = gate.cont(ctx).sigmoid(ctx);
                 const act = x_conv.view2d(ctx, d_gate, x_conv.ne()[1], x_conv.nb()[1], 0);
                 x_conv = act.mul(ctx, gate);
@@ -376,11 +374,10 @@ pub fn buildGraphEx(
                 // x_conv shape: [n_pos, 1024]
             }
 
-        if (il == 0) {
-            x_conv.setName("debug_audio_conv_glu_output");
-            ggml.setOutput(x_conv);
+            if (il == 0) {
+                x_conv.setName("debug_audio_conv_glu_output");
+                ggml.setOutput(x_conv);
             }
-
 
             // Causal depthwise Conv1D via ggml_ssm_conv (pad+roll for left-only padding).
             // C++ (gemma4a.cpp:278-283):
@@ -397,9 +394,9 @@ pub fn buildGraphEx(
                 x_conv = x_conv.add(ctx, dw_b);
             }
 
-        if (il == 0) {
-            x_conv.setName("debug_audio_conv_dw_output");
-            ggml.setOutput(x_conv);
+            if (il == 0) {
+                x_conv.setName("debug_audio_conv_dw_output");
+                ggml.setOutput(x_conv);
             }
 
             // C++ (gemma4a.cpp:286-288):
@@ -416,9 +413,9 @@ pub fn buildGraphEx(
             // x_conv shape after ssmConv: [d_inner=1024, n_t=n_pos, 1] = [1024, n_pos]
             // This is already in [d_gate, n_pos] layout, no need to transpose back
 
-        if (il == 0) {
-            x_conv.setName("debug_audio_conv_dw_norm_silu_output");
-            ggml.setOutput(x_conv);
+            if (il == 0) {
+                x_conv.setName("debug_audio_conv_dw_norm_silu_output");
+                ggml.setOutput(x_conv);
             }
 
             // conv_pw2: project back to n_embd (1024 -> 1024)

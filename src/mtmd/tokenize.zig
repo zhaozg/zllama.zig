@@ -17,7 +17,8 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, text: mtmd
         if (std.mem.indexOf(u8, remaining, marker)) |idx| {
             if (idx > 0) try addTextChunk(ctx, allocator, &chunks, remaining[0..idx], text.parse_special);
             if (i_bm >= bitmaps.len) return error.MarkerBitmapMismatch;
-            const bm = bitmaps[i_bm]; i_bm += 1;
+            const bm = bitmaps[i_bm];
+            i_bm += 1;
             if (bm.is_audio) try addAudioChunk(ctx, allocator, &chunks, bm) else try addImageChunk(ctx, allocator, &chunks, bm, &n_images_added);
             remaining = remaining[idx + marker.len ..];
         } else {
@@ -31,21 +32,34 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, allocator: std.mem.Allocator, text: mtmd
 
 fn addTextChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.InputChunks, txt: []const u8, ps: bool) !void {
     if (txt.len == 0) return;
-    var toks = std.ArrayList(i32).initCapacity(al, 0) catch @panic("OOM"); defer toks.deinit(al);
-    if (ctx.tok) |tok| { var e = try tok.encode(txt, false, ps); defer e.deinit(al); for (e.items) |t| try toks.append(al, @intCast(t)); } else for (txt) |c| try toks.append(al, @intCast(c));
+    var toks = std.ArrayList(i32).initCapacity(al, 0) catch @panic("OOM");
+    defer toks.deinit(al);
+    if (ctx.tok) |tok| {
+        var e = try tok.encode(txt, false, ps);
+        defer e.deinit(al);
+        for (e.items) |t| try toks.append(al, @intCast(t));
+    } else for (txt) |c| try toks.append(al, @intCast(c));
     if (toks.items.len == 0) return;
     if (chunks.entries.items.len > 0 and chunks.entries.items[chunks.entries.items.len - 1].chunk_type == .text) {
         const last = &chunks.entries.items[chunks.entries.items.len - 1];
         const old = last.tokens_text orelse &.{};
-        const m = try al.alloc(i32, old.len + toks.items.len); @memcpy(m[0..old.len], old); @memcpy(m[old.len..], toks.items);
-        if (last.tokens_text) |t| al.free(t); last.tokens_text = m;
-    } else { const o = try al.dupe(i32, toks.items); try chunks.append(.{ .chunk_type = .text, .tokens_text = o }); }
+        const m = try al.alloc(i32, old.len + toks.items.len);
+        @memcpy(m[0..old.len], old);
+        @memcpy(m[old.len..], toks.items);
+        if (last.tokens_text) |t| al.free(t);
+        last.tokens_text = m;
+    } else {
+        const o = try al.dupe(i32, toks.items);
+        try chunks.append(.{ .chunk_type = .text, .tokens_text = o });
+    }
 }
 
 fn addImageChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.InputChunks, bm: mtmd.Bitmap, nia: *u32) !void {
     if (!ctx.supportVision()) return error.VisionNotSupported;
     if (ctx.img_beg.len > 0) try addTextChunk(ctx, al, chunks, ctx.img_beg, true);
-    var pw: u32 = bm.nx; var ph: u32 = bm.ny; var pd: ?[]u8 = null;
+    var pw: u32 = bm.nx;
+    var ph: u32 = bm.ny;
+    var pd: ?[]u8 = null;
     if (!bm.isPlaceholder()) {
         const rd = bm.data orelse return error.NoImageData;
         const enc = ctx.mm_manager.vision_encoder orelse return error.VisionEncoderNotAvailable;
@@ -54,13 +68,20 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.In
             const as = p.patch_size * @max(p.n_merge, 1);
             const mx = if (p.user_max_pixels > 0) p.user_max_pixels else p.image_max_pixels;
             const ns = preprocess.calcSizePreservedRatio(bm.nx, bm.ny, as, p.image_min_pixels, mx);
-            pw = ns.width; ph = ns.height;
+            pw = ns.width;
+            ph = ns.height;
         }
         const res = try preprocess.resizeAndNormalize(al, rd, bm.nx, bm.ny, pw, ph, enc.image_mean, enc.image_std);
         pd = res.data;
     }
-    var nt: u32 = 0; var nx: u32 = 0; var ny: u32 = 0;
-    if (ctx.mm_manager.vision_encoder) |*enc| { nt = enc.estimateOutputTokens(pw, ph); nx = nt; ny = 1; }
+    var nt: u32 = 0;
+    var nx: u32 = 0;
+    var ny: u32 = 0;
+    if (ctx.mm_manager.vision_encoder) |*enc| {
+        nt = enc.estimateOutputTokens(pw, ph);
+        nx = nt;
+        ny = 1;
+    }
     try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = nx, .ny = ny, .pos = ctx.pos_type, .image_idx = nia.*, .id = bm.id, .raw_pixels = pd, .patch_count = 1 }, .id = bm.id });
     if (ctx.img_end.len > 0) try addTextChunk(ctx, al, chunks, ctx.img_end, true);
     nia.* += 1;

@@ -378,7 +378,10 @@ pub fn custom4d(ctx: *Context, typ: Type, ne0: i64, ne1: i64, ne2: i64, ne3: i64
     return @as(*Tensor, @ptrCast(c.ggml_custom_4d(
         @ptrCast(ctx),
         @intFromEnum(typ),
-        ne0, ne1, ne2, ne3,
+        ne0,
+        ne1,
+        ne2,
+        ne3,
         @ptrCast(&c_args),
         @intCast(args.len),
         fun,
