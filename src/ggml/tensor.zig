@@ -233,16 +233,92 @@ pub const Tensor = opaque {
         return wrap(c.ggml_rope_ext(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(pos)), fp, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow));
     }
 
-    /// Extend fetch f32 data
-    pub fn backendF32(self: *Tensor, allocator: std.mem.Allocator) ![]f32 {
-        const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
-        return tensorToFloatArray(allocator, t);
+    /// 通过 backend API 从张量读取数据到缓冲区。
+    /// 适用于 GPU 后端或任何非 host 内存的张量。
+    /// 等价于 ggml_backend_tensor_get(tensor, data, offset, size)。
+    /// data 缓冲区必须至少有 size 字节。
+    pub fn backendGet(self: *const Tensor, data: []u8, offset: usize) void {
+        const t = @as(*const c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        c.ggml_backend_tensor_get(t, data.ptr, offset, data.len);
     }
-    pub fn getF32(self: *Tensor) []f32 {
+
+    /// 通过 backend API 将缓冲区数据写入张量。
+    /// 等价于 ggml_backend_tensor_set(tensor, data, offset, size)。
+    /// 适用于 GPU 后端或任何非 host 内存的张量。
+    pub fn backendSet(self: *Tensor, data: []const u8, offset: usize) void {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
-        const data = c.ggml_get_data_f32(t);
-        const nelements = @as(usize, @intCast(c.ggml_nelements(t)));
-        return @as([*]f32, @ptrCast(@alignCast(data)))[0 .. nelements];
+        c.ggml_backend_tensor_set(t, data.ptr, offset, data.len);
+    }
+
+    /// 从张量读取数据并转换为指定类型的切片。
+    ///
+    /// 使用 comptime 参数 T 指定目标元素类型（如 f32、i32、f16 等）。
+    /// 自动处理类型转换：
+    ///   - 如果张量存储类型与 T 相同，直接 memcpy
+    ///   - 如果张量是 F16/BF16 而 T 是 f32，自动转换
+    ///   - 如果张量是量化类型，返回 error.UnsupportedTensorType
+    ///
+    /// 适用于 host 内存张量和 backend（GPU）张量。
+    /// 调用者负责使用 allocator 释放返回的切片。
+    pub fn dataGet(self: *const Tensor, comptime T: type, allocator: std.mem.Allocator) ![]T {
+        const t = @as(*const c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        const n_elements = @as(usize, @intCast(c.ggml_nelements(t)));
+        const nbytes = c.ggml_nbytes(t);
+
+        const result = try allocator.alloc(T, n_elements);
+        errdefer allocator.free(result);
+
+        // 尝试直接内存访问（host 内存张量）
+        const raw_data = c.ggml_get_data(@ptrCast(@constCast(t)));
+        if (raw_data != null) {
+            const raw = @as([*]u8, @ptrCast(@alignCast(raw_data)))[0..nbytes];
+            convertToType(T, result, raw, n_elements, @intCast(t.type)) catch |e| {
+                allocator.free(result);
+                return e;
+            };
+            return result;
+        }
+
+        // 回退：通过 backend API 读取
+        const raw = try allocator.alloc(u8, nbytes);
+        defer allocator.free(raw);
+        c.ggml_backend_tensor_get(t, raw.ptr, 0, nbytes);
+        convertToType(T, result, raw, n_elements, @intCast(t.type)) catch |e| {
+            allocator.free(result);
+            return e;
+        };
+        return result;
+    }
+
+    /// 将指定类型的数据写入张量。
+    ///
+    /// 使用 comptime 参数 T 指定源元素类型（如 f32、i32、f16 等）。
+    /// 自动处理类型转换：
+    ///   - 如果 T 与张量存储类型相同，直接 memcpy
+    ///   - 如果 T 是 f32 而张量是 F16，自动转换
+    ///   - 如果张量是量化类型，返回 error.UnsupportedTensorType
+    ///
+    /// 适用于 host 内存张量和 backend（GPU）张量。
+    pub fn dataSet(self: *Tensor, comptime T: type, data: []const T) !void {
+        const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        const n_elements = @as(usize, @intCast(c.ggml_nelements(t)));
+        const nbytes = c.ggml_nbytes(t);
+
+        if (data.len != n_elements) return error.TensorDataLengthMismatch;
+
+        // 尝试直接内存访问（host 内存张量）
+        const raw_data = c.ggml_get_data(t);
+        if (raw_data != null) {
+            const raw = @as([*]u8, @ptrCast(@alignCast(raw_data)))[0..nbytes];
+            convertFromType(T, raw, data, n_elements, @intCast(t.type)) catch |e| return e;
+            return;
+        }
+
+        // 回退：通过 backend API 写入
+        const buf = try std.heap.page_allocator.alloc(u8, nbytes);
+        defer std.heap.page_allocator.free(buf);
+        convertFromType(T, buf, data, n_elements, @intCast(t.type)) catch |e| return e;
+        c.ggml_backend_tensor_set(t, buf.ptr, 0, nbytes);
     }
 };
 
@@ -310,6 +386,143 @@ fn convertRawToF32(
     }
 
     return float_data;
+}
+
+/// 将原始字节数据转换为指定类型的切片。
+/// 泛型版本：T 可以是 f32、i32、u16（用于 F16/BF16）等。
+/// 如果 T 与张量存储类型匹配，直接 memcpy；否则尝试自动转换。
+fn convertToType(
+    comptime T: type,
+    result: []T,
+    raw: []u8,
+    n_elements: usize,
+    tensor_type: c_int,
+) !void {
+    const target_size = @sizeOf(T);
+    const raw_size = raw.len;
+
+    // 如果类型大小匹配且是简单类型，尝试直接 memcpy
+    if (target_size * n_elements == raw_size) {
+        switch (tensor_type) {
+            c.GGML_TYPE_F32 => {
+                if (T == f32) {
+                    @memcpy(@as([*]u8, @ptrCast(result.ptr))[0..raw_size], raw);
+                    return;
+                }
+            },
+            c.GGML_TYPE_I32 => {
+                if (T == i32) {
+                    @memcpy(@as([*]u8, @ptrCast(result.ptr))[0..raw_size], raw);
+                    return;
+                }
+            },
+            c.GGML_TYPE_F16 => {
+                if (T == u16) {
+                    @memcpy(@as([*]u8, @ptrCast(result.ptr))[0..raw_size], raw);
+                    return;
+                }
+            },
+            c.GGML_TYPE_BF16 => {
+                if (T == u16) {
+                    @memcpy(@as([*]u8, @ptrCast(result.ptr))[0..raw_size], raw);
+                    return;
+                }
+            },
+            else => {},
+        }
+    }
+
+    // 类型不匹配时尝试转换
+    if (T == f32) {
+        switch (tensor_type) {
+            c.GGML_TYPE_F16 => {
+                const src = @as([*]const u16, @ptrCast(@alignCast(raw.ptr)));
+                for (0..n_elements) |i| {
+                    result[i] = c.ggml_fp16_to_fp32(src[i]);
+                }
+                return;
+            },
+            c.GGML_TYPE_BF16 => {
+                const src = @as([*]const u16, @ptrCast(@alignCast(raw.ptr)));
+                for (0..n_elements) |i| {
+                    const bits = @as(u32, src[i]) << 16;
+                    result[i] = @as(f32, @bitCast(bits));
+                }
+                return;
+            },
+            else => {},
+        }
+    }
+
+    return error.UnsupportedTensorType;
+}
+
+/// 将指定类型的数据转换为原始字节并写入缓冲区。
+/// 泛型版本：T 可以是 f32、i32、u16（用于 F16/BF16）等。
+/// 如果 T 与张量存储类型匹配，直接 memcpy；否则尝试自动转换。
+fn convertFromType(
+    comptime T: type,
+    raw: []u8,
+    data: []const T,
+    n_elements: usize,
+    tensor_type: c_int,
+) !void {
+    const target_size = @sizeOf(T);
+    const raw_size = raw.len;
+
+    // 如果类型大小匹配且是简单类型，尝试直接 memcpy
+    if (target_size * n_elements == raw_size) {
+        switch (tensor_type) {
+            c.GGML_TYPE_F32 => {
+                if (T == f32) {
+                    @memcpy(raw, @as([*]const u8, @ptrCast(data.ptr))[0..raw_size]);
+                    return;
+                }
+            },
+            c.GGML_TYPE_I32 => {
+                if (T == i32) {
+                    @memcpy(raw, @as([*]const u8, @ptrCast(data.ptr))[0..raw_size]);
+                    return;
+                }
+            },
+            c.GGML_TYPE_F16 => {
+                if (T == u16) {
+                    @memcpy(raw, @as([*]const u8, @ptrCast(data.ptr))[0..raw_size]);
+                    return;
+                }
+            },
+            c.GGML_TYPE_BF16 => {
+                if (T == u16) {
+                    @memcpy(raw, @as([*]const u8, @ptrCast(data.ptr))[0..raw_size]);
+                    return;
+                }
+            },
+            else => {},
+        }
+    }
+
+    // 类型不匹配时尝试转换
+    if (T == f32) {
+        switch (tensor_type) {
+            c.GGML_TYPE_F16 => {
+                const dst = @as([*]u16, @ptrCast(@alignCast(raw.ptr)));
+                for (0..n_elements) |i| {
+                    dst[i] = c.ggml_fp32_to_fp16(data[i]);
+                }
+                return;
+            },
+            c.GGML_TYPE_BF16 => {
+                const dst = @as([*]u16, @ptrCast(@alignCast(raw.ptr)));
+                for (0..n_elements) |i| {
+                    dst[i] = @as(u16, @truncate(@as(u32, @bitCast(data[i])) >> 16));
+                }
+                return;
+            },
+            else => {},
+        }
+    }
+
+    return error.UnsupportedTensorType;
 }
 
 const testing = std.testing;
