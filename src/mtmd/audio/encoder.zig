@@ -87,6 +87,14 @@ pub const AudioEncoder = struct {
         mel_frames: u32,
     ) !*ggml.Tensor {
         const mel_tensor = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(mel_frames)), @as(i64, @intCast(mel_bins)), 1, 1);
+        // In no_alloc mode, allocate data buffer manually before dataSet.
+        const no_alloc = ctx.getNoAlloc();
+        if (no_alloc) {
+            const data_size = @as(usize, @intCast(mel_tensor.nBytes()));
+            const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+            @memset(buf, 0);
+            mel_tensor.setDataPtr(buf);
+        }
         try mel_tensor.dataSet(f32, mel_data);
         ggml.setInput(mel_tensor);
         return self.encode(io, ctx, cgraph, mel_tensor);

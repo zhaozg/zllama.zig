@@ -45,6 +45,17 @@ pub fn melToTensor(
     tensor.setName("mel_input");
     ggml.setInput(tensor);
 
+    // In no_alloc mode, the tensor data pointer is NULL.
+    // We need to allocate the data manually so we can write to it.
+    // This mirrors the approach used in vision/preprocess.zig:normalizeToTensor.
+    const no_alloc = ctx.getNoAlloc();
+    if (no_alloc) {
+        const data_size = @as(usize, @intCast(tensor.nBytes()));
+        const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+        @memset(buf, 0);
+        tensor.setDataPtr(buf);
+    }
+
     try tensor.dataSet(f32, mel_data);
 
     return tensor;
