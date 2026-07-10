@@ -116,36 +116,36 @@ pub const AudioEncoder = struct {
         allocator.free(self.weights.layers);
     }
 
-    pub fn saveDebugData(self: *const AudioEncoder, io: std.Io, cgraph: *ggml.CGraph) void {
+    pub fn saveDebugData(self: *const AudioEncoder, io: std.Io, allocator: std.mem.Allocator, cgraph: *ggml.CGraph) void {
         _ = self;
         const debug = @import("debug");
         const subdir = "debug_audio";
 
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_00_pos_emb.json", "pos_emb", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_00_kq_mask.json", "kq_mask", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_04_mel_input.json", "debug_audio_04_encoder_input", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_00_pos_emb.json", "pos_emb", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_00_kq_mask.json", "kq_mask", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_04_mel_input.json", "debug_audio_04_encoder_input", cgraph) catch {};
 
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_05_conv2d_0_output.json", "debug_audio_conv2d_0_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_06_conv2d_1_output.json", "debug_audio_conv2d_1_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_07_after_cont.json", "debug_audio_after_cont", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_08_flatten_output.json", "debug_audio_flatten_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_09_input_proj_output.json", "debug_audio_input_proj_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_05_conv2d_0_output.json", "debug_audio_conv2d_0_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_06_conv2d_1_output.json", "debug_audio_conv2d_1_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_07_after_cont.json", "debug_audio_after_cont", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_08_flatten_output.json", "debug_audio_flatten_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_09_input_proj_output.json", "debug_audio_input_proj_output", cgraph) catch {};
 
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_10_layer0_half_step_1_output.json", "debug_audio_half_step_1_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_11_layer0_self_attention_with_RPE_output.json", "debug_audio_self_attention_with_RPE_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_10_layer0_half_step_1_output.json", "debug_audio_half_step_1_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_11_layer0_self_attention_with_RPE_output.json", "debug_audio_self_attention_with_RPE_output", cgraph) catch {};
 
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_12_conv_build_normal_output.json", "debug_audio_conv_build_normal_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_13_conv_pw1_glu_output.json", "debug_audio_conv_glu_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_14_conv_dw_output.json", "debug_audio_conv_dw_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_15_conv_dw_norm_silu_output.json", "debug_audio_conv_dw_norm_silu_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_12_conv_build_normal_output.json", "debug_audio_conv_build_normal_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_13_conv_pw1_glu_output.json", "debug_audio_conv_glu_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_14_conv_dw_output.json", "debug_audio_conv_dw_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_15_conv_dw_norm_silu_output.json", "debug_audio_conv_dw_norm_silu_output", cgraph) catch {};
 
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_16_layer0_convolution_output.json", "debug_audio_convolution_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_17_layer0_half_step_2_output.json", "debug_audio_half_step_2_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_18_layer0_norm_output.json", "debug_audio_layer_0_norm_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_19_conformer_blocks_output.json", "debug_audio_conformer_blocks_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_16_layer0_convolution_output.json", "debug_audio_convolution_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_17_layer0_half_step_2_output.json", "debug_audio_half_step_2_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_18_layer0_norm_output.json", "debug_audio_layer_0_norm_output", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_19_conformer_blocks_output.json", "debug_audio_conformer_blocks_output", cgraph) catch {};
 
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_90_mm_norm.json", "mm_norm", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_91_mm_norm_scaled.json", "mm_norm_scaled", cgraph) catch {};
-        debug.saveTensorFromGraph(io, subdir, "zllama_audio_92_mm_proj.json", "mm_proj", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_90_mm_norm.json", "mm_norm", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_91_mm_norm_scaled.json", "mm_norm_scaled", cgraph) catch {};
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_92_mm_proj.json", "mm_proj", cgraph) catch {};
     }
 };

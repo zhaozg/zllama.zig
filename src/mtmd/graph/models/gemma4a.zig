@@ -795,7 +795,7 @@ pub fn loadWeights(
         const prefix = try std.fmt.allocPrint(allocator, "a.blk.{d}", .{il});
         defer allocator.free(prefix);
         log.debug("loadWeights: loading layer {d}, prefix='{s}'", .{ il, prefix });
-        w.layers[il] = loadConformerLayer(io, ctx, gguf_file, prefix, il) catch |err| {
+        w.layers[il] = loadConformerLayer(io, allocator, ctx, gguf_file, prefix, il) catch |err| {
             log.err("Failed to load conformer layer {d}: {}", .{ il, err });
             return err;
         };
@@ -873,6 +873,7 @@ fn findTensorInGGUFWithRequired(ctx: *ggml.Context, gguf_file: *const gguf.GGUFF
 }
 fn loadConformerLayer(
     io: std.Io,
+    allocator: std.mem.Allocator,
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
     prefix: []const u8,
@@ -934,16 +935,24 @@ fn loadConformerLayer(
     if (il == 0) {
         // Debug save — only for f32 tensors; quantized tensors (Q4_K_M etc.) are skipped
         if (layer.norm_conv_w) |t| {
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_norm_conv_w.json", "norm_conv_w", t.dataF32()) catch {};
+            const data = try t.backendF32(allocator);
+            defer allocator.free(data);
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_norm_conv_w.json", "norm_conv_w", data) catch {};
         }
         if (layer.conv_pw1_w) |t| {
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw1_w.json", "conv_pw1_w", t.dataF32()) catch {};
+            const data = try t.backendF32(allocator);
+            defer allocator.free(data);
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw1_w.json", "conv_pw1_w", data) catch {};
         }
         if (layer.conv_dw_w) |t| {
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_dw_w.json", "conv_dw_w", t.dataF32()) catch {};
+            const data = try t.backendF32(allocator);
+            defer allocator.free(data);
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_dw_w.json", "conv_dw_w", data) catch {};
         }
         if (layer.conv_pw2_w) |t| {
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw2_w.json", "conv_pw2_w", t.dataF32()) catch {};
+            const data = try t.backendF32(allocator);
+            defer allocator.free(data);
+            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw2_w.json", "conv_pw2_w", data) catch {};
         }
     }
 

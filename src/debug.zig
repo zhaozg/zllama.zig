@@ -320,7 +320,7 @@ pub fn saveData(io: std.Io, subdir: ?[]const u8, fname: []const u8, title: []con
 ///   - fname: 输出文件名
 ///   - title: 张量在计算图中的调试名称（用于 ggml_graph_get_tensor 查找）
 ///   - cgraph: 计算图指针
-pub fn saveTensorFromGraph(io: std.Io, subdir: ?[]const u8, fname: []const u8, title: []const u8, cgraph: *ggml.CGraph) !void {
+pub fn saveTensorFromGraph(io: std.Io, allocator: std.mem.Allocator, subdir: ?[]const u8, fname: []const u8, title: []const u8, cgraph: *ggml.CGraph) !void {
     const c = @import("ggml").c;
 
     // 通过名称从计算图中查找张量
@@ -338,31 +338,13 @@ pub fn saveTensorFromGraph(io: std.Io, subdir: ?[]const u8, fname: []const u8, t
         return;
     }
 
-    // 仅处理 F32 类型的张量
-    if (t.*.type != c.GGML_TYPE_F32) {
-        log.warn("saveTensorFromGraph: tensor '{s}' is not F32 (type={})", .{ title, t.*.type });
+    const tensor = @as(*ggml.Tensor, @ptrCast(t));
+    const data = tensor.backendF32(allocator) catch |err| {
+        log.warn("saveTensorFromGraph: failed to get data for tensor '{s}': {}", .{ title, err });
         return;
-    }
-
-    const n_elems = @as(usize, @intCast(c.ggml_nelements(t)));
-
-    // 使用 dataF32() 直接读取 CPU 内存中的数据。
-    // 注意：如果张量在 GPU 后端上，data 指针可能为 null。
-    // 此时回退到 ggml_backend_tensor_get（需要 backend buffer）。
-    const tensor_data = t.*.data;
-    if (tensor_data != null) {
-        const data = @as([*]f32, @ptrCast(@alignCast(tensor_data)))[0..n_elems];
-        try saveData(io, subdir, fname, title, data);
-    } else {
-        // 回退：通过 backend API 读取
-        const n_bytes = @as(usize, @intCast(c.ggml_nbytes(t)));
-        const allocator = std.heap.page_allocator;
-        const data = try allocator.alloc(f32, n_elems);
-        defer allocator.free(data);
-
-        c.ggml_backend_tensor_get(t, @ptrCast(data.ptr), 0, n_bytes);
-        try saveData(io, subdir, fname, title, data);
-    }
+    };
+    defer allocator.free(data);
+    try saveData(io, subdir, fname, title, data);
 }
 
 // ============================================================================

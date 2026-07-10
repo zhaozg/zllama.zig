@@ -268,11 +268,11 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
 
     ectx.ctx_graph.setNoAlloc(true);
 
-    debug.saveTensorFromGraph(io, "debug_audio", "zllama_audio_encoder_input.json", "debug_audio_encoder_input", audio_graph) catch |err| {
+    debug.saveTensorFromGraph(io, ectx.allocator, "debug_audio", "zllama_audio_encoder_input.json", "debug_audio_encoder_input", audio_graph) catch |err| {
         logger.info("Save audio debug_audio_encoder_input data fail: {}", .{err});
     };
     if (mm_mgr.audio_encoder) |enc| {
-        enc.saveDebugData(io, audio_graph);
+        enc.saveDebugData(io, ectx.allocator, audio_graph);
     }
     const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
     const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);

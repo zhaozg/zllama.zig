@@ -49,9 +49,10 @@ pub const Tensor = opaque {
     /// 如果张量不是 f32 类型，此函数会 panic（通过断言）。
     pub fn dataF32(self: *Tensor) []f32 {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
-        const data = c.ggml_get_data_f32(t);
+        const typ: Type = @enumFromInt(t.type);
+        std.debug.assert(typ == .f32);
         const total_size = c.ggml_nbytes(t);
-        return @as([*]f32, @ptrCast(@alignCast(data)))[0 .. total_size / @sizeOf(f32)];
+        return @as([*]f32, @ptrCast(@alignCast(t.data)))[0 .. total_size / @sizeOf(f32)];
     }
     pub fn dataI32(self: *Tensor) []i32 {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
@@ -231,7 +232,85 @@ pub const Tensor = opaque {
         const fp: [*c]c.struct_ggml_tensor = if (freq_factors) |f| @ptrCast(@alignCast(f)) else null;
         return wrap(c.ggml_rope_ext(@ptrCast(ctx), @ptrCast(@alignCast(self)), @ptrCast(@alignCast(pos)), fp, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow));
     }
+
+    /// Extend fetch f32 data
+    pub fn backendF32(self: *Tensor, allocator: std.mem.Allocator) ![]f32 {
+        const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        return tensorToFloatArray(allocator, t);
+    }
+    pub fn getF32(self: *Tensor) []f32 {
+        const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        const data = c.ggml_get_data_f32(t);
+        const nelements = @as(usize, @intCast(c.ggml_nelements(t)));
+        return @as([*]f32, @ptrCast(@alignCast(data)))[0 .. nelements];
+    }
 };
+
+
+/// 将任意类型的 ggml_tensor 转换为 f32 数组。
+/// 调用者负责使用 allocator 释放返回的切片。
+///
+/// 支持两种数据源：
+/// 1. 直接内存访问（host 内存张量，如通过 @memcpy 加载的权重）
+/// 2. backend 张量（通过 ggml_backend_tensor_get 读取）
+pub fn tensorToFloatArray(
+    allocator: std.mem.Allocator,
+    tensor: *c.struct_ggml_tensor,
+) ![]f32 {
+    const n_elements = @as(usize, @intCast(c.ggml_nelements(tensor)));
+    const nbytes = c.ggml_nbytes(tensor);
+
+    // 分配输出 float 数组
+    const float_data = try allocator.alloc(f32, n_elements);
+    errdefer allocator.free(float_data);
+
+    // 尝试直接内存访问（host 内存张量）
+    const raw_data = c.ggml_get_data(tensor);
+    if (raw_data != null) {
+        // 直接使用 tensor 的数据指针
+        const raw = @as([*]u8, @ptrCast(@alignCast(raw_data)))[0..nbytes];
+        return convertRawToF32(float_data, raw, n_elements, @intCast(tensor.type));
+    }
+
+    // 回退：通过 backend API 读取（GPU 后端等）
+    const raw = try allocator.alloc(u8, nbytes);
+    defer allocator.free(raw);
+    c.ggml_backend_tensor_get(tensor, raw.ptr, 0, nbytes);
+    return convertRawToF32(float_data, raw, n_elements, @intCast(tensor.type));
+}
+
+/// 将原始字节数据转换为 f32 数组
+fn convertRawToF32(
+    float_data: []f32,
+    raw: []u8,
+    n_elements: usize,
+    tensor_type: c_int,
+) ![]f32 {
+    switch (tensor_type) {
+        c.GGML_TYPE_F32 => {
+            // 直接内存拷贝
+            const dest = @as([*]u8, @ptrCast(float_data.ptr));
+            @memcpy(dest[0..raw.len], raw);
+        },
+        c.GGML_TYPE_F16 => {
+            const src = @as([*]const u16, @ptrCast(@alignCast(raw.ptr)));
+            for (0..n_elements) |i| {
+                float_data[i] = c.ggml_fp16_to_fp32(src[i]);
+            }
+        },
+        c.GGML_TYPE_BF16 => {
+            const src = @as([*]const u16, @ptrCast(@alignCast(raw.ptr)));
+            for (0..n_elements) |i| {
+                const bits = @as(u32, src[i]) << 16;
+                float_data[i] = @as(f32, @bitCast(bits));
+            }
+        },
+        // 若需要支持量化类型，可在此扩展
+        else => return error.UnsupportedTensorType,
+    }
+
+    return float_data;
+}
 
 const testing = std.testing;
 test "Tensor ne and nb" {
