@@ -107,10 +107,18 @@ test "buildFFN: SiLU activation" {
     const up_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_embd);
     const down_w = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_ff);
 
-    @memset(cur.dataF32(), 1.0);
-    @memset(up_w.dataF32(), 0.1);
-    @memset(down_w.dataF32(), 0.1);
-
+    {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(cur.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 1.0);
+        try cur.dataSet(f32, buf);
+    }
+    for ([_]*ggml.Tensor{ up_w, down_w }) |t| {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(t.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 0.1);
+        try t.dataSet(f32, buf);
+    }
     const result = try buildFFN(&ctx, cur, up_w, null, null, null, down_w, null, .silu, "test_ffn");
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);
     try testing.expectEqual(@as(i64, n_patches), result.ne()[1]);
@@ -132,10 +140,18 @@ test "buildFFN: GELU with gate" {
     const gate_w = try ctx.newTensor2d(ggml.Type.f32, n_ff, n_embd);
     const down_w = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_ff);
 
-    @memset(cur.dataF32(), 1.0);
-    @memset(up_w.dataF32(), 0.1);
-    @memset(gate_w.dataF32(), 0.1);
-    @memset(down_w.dataF32(), 0.1);
+    {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(cur.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 1.0);
+        try cur.dataSet(f32, buf);
+    }
+    for ([_]*ggml.Tensor{ up_w, gate_w, down_w }) |t| {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(t.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 0.1);
+        try t.dataSet(f32, buf);
+    }
 
     const result = try buildFFN(&ctx, cur, up_w, null, gate_w, null, down_w, null, .gelu, "test_ffn_gate");
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);

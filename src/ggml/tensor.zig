@@ -322,7 +322,6 @@ pub const Tensor = opaque {
     }
 };
 
-
 /// 将任意类型的 ggml_tensor 转换为 f32 数组。
 /// 调用者负责使用 allocator 释放返回的切片。
 ///

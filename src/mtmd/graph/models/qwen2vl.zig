@@ -122,8 +122,11 @@ fn buildGraphFromWeights(
     image_tensor: *ggml.Tensor,
 ) !*ggml.CGraph {
     _ = io;
+    const img_buf = try image_tensor.dataGet(f32, std.heap.page_allocator);
+    // Note: img_buf is intentionally leaked (leak-to-exit) since ImageF32
+    // is used during graph construction and the data must remain valid.
     const img = ImageF32{
-        .buf = image_tensor.dataF32(),
+        .buf = img_buf,
         .nx = p.image_size,
         .ny = p.image_size,
     };
@@ -259,7 +262,9 @@ pub fn buildGraph(
     const inp_raw = try ctx.newTensor3d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3);
     inp_raw.setName("inp_raw");
     {
-        const dst = inp_raw.dataF32();
+        const n_elems = @as(usize, @intCast(inp_raw.nElems()));
+        const dst = try std.heap.page_allocator.alloc(f32, n_elems);
+        defer std.heap.page_allocator.free(dst);
         const src = img.buf;
         const H: usize = @intCast(img_height);
         const W: usize = @intCast(img_width);
@@ -272,6 +277,7 @@ pub fn buildGraph(
                 dst[dst_base + 2 * H * W] = src[src_idx + 2];
             }
         }
+        try inp_raw.dataSet(f32, dst);
     }
 
     // 2. Temporal merge: two Conv2D added together

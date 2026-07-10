@@ -65,7 +65,12 @@ test "buildStack: basic stacking" {
     const stack_factor: u32 = 2;
 
     const cur = try ctx.newTensor2d(ggml.Type.f32, @as(i64, @intCast(n_embed)), n_frames);
-    @memset(cur.dataF32(), 1.0);
+    {
+        const buf = try std.testing.allocator.alloc(f32, @as(usize, @intCast(cur.nElems())));
+        defer std.testing.allocator.free(buf);
+        @memset(buf, 1.0);
+        try cur.dataSet(f32, buf);
+    }
 
     const result = try buildStack(&ctx, cur, stack_factor, n_embed);
     try testing.expectEqual(@as(i64, @intCast(n_embed * stack_factor)), result.ne()[0]);

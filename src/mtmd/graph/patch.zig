@@ -50,8 +50,7 @@ pub fn buildInp(
     }
     if (bias_val) |b| {
         const bias_t = try ctx.newTensor1d(ggml.Type.f32, 1);
-        bias_t.dataF32()[0] = b;
-        bias_t.setName("inp_bias");
+        try bias_t.dataSet(f32, &.{b});
         cur = cur.add(ctx, bias_t);
         cur.setName("inp_biased");
     }
@@ -119,8 +118,18 @@ test "buildInp: basic patch embedding" {
     const inp_raw = try ctx.newTensor3d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), channels);
     const patch_w = try ctx.newTensor4d(ggml.Type.f32, patch_size, patch_size, channels, n_embd);
 
-    @memset(inp_raw.dataF32(), 0.5);
-    @memset(patch_w.dataF32(), 0.1);
+    {
+        const buf_inp = try std.testing.allocator.alloc(f32, @as(usize, @intCast(inp_raw.nElems())));
+        defer std.testing.allocator.free(buf_inp);
+        @memset(buf_inp, 0.5);
+        try inp_raw.dataSet(f32, buf_inp);
+    }
+    {
+        const buf_w = try std.testing.allocator.alloc(f32, @as(usize, @intCast(patch_w.nElems())));
+        defer std.testing.allocator.free(buf_w);
+        @memset(buf_w, 0.1);
+        try patch_w.dataSet(f32, buf_w);
+    }
 
     const result = try buildInp(&ctx, inp_raw, patch_w, null, img_width, img_height, 2.0, -1.0);
     try testing.expectEqual(n_embd, result.ne()[0]);

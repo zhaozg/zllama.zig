@@ -133,7 +133,11 @@ fn buildAttentionMask(
     };
     ctx.setNoAlloc(true);
 
-    const data = mask.dataF32();
+    const n_elems = @as(usize, @intCast(mask.nElems()));
+    const data = std.heap.page_allocator.alloc(f32, n_elems) catch {
+        return mask;
+    };
+    defer std.heap.page_allocator.free(data);
     const inf: f32 = -std.math.inf(f32);
 
     for (0..@as(usize, @intCast(cache_len))) |ci| {
@@ -148,6 +152,7 @@ fn buildAttentionMask(
             }
         }
     }
+    mask.dataSet(f32, data) catch {};
 
     return mask;
 }

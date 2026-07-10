@@ -46,10 +46,13 @@ pub fn generateEmbedding(
     if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
     try graph.compute(n_threads);
 
-    const result_data = embedding_vector.dataF32();
     const n_embd = @as(usize, @intCast(params.n_embd));
     const result = try allocator.alloc(f32, n_embd);
-    @memcpy(result, result_data[0..n_embd]);
+    {
+        const result_data = try embedding_vector.dataGet(f32, allocator);
+        defer allocator.free(result_data);
+        @memcpy(result, result_data[0..n_embd]);
+    }
 
     const stdout_file = std.Io.File.stdout();
     var buf: [128]u8 = undefined;

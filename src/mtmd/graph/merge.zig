@@ -92,7 +92,12 @@ test "buildPatchMergePermute: basic merge" {
     const scale_factor: u32 = 2;
 
     const cur = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_patches);
-    @memset(cur.dataF32(), 1.0);
+    {
+        const buf = try std.testing.allocator.alloc(f32, @as(usize, @intCast(cur.nElems())));
+        defer std.testing.allocator.free(buf);
+        @memset(buf, 1.0);
+        try cur.dataSet(f32, buf);
+    }
 
     const result = try buildPatchMergePermute(&ctx, cur, scale_factor, n_patches_x, n_patches_y);
     const expected_embd = n_embd * @as(i64, @intCast(scale_factor * scale_factor));

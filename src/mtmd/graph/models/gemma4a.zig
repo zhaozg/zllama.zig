@@ -194,6 +194,8 @@ pub fn buildGraphEx(
     // Create RPE and mask tensors
     // C++: ggml_set_input(pos_emb) and ggml_set_input(kq_mask) — caller fills them.
     // Zig: We fill them inline during graph construction for simplicity.
+    // Save and restore caller's no_alloc state to avoid side effects.
+    const prev_no_alloc = ctx.getNoAlloc();
     ctx.setNoAlloc(false);
     const pos_emb = try ctx.newTensor2d(ggml.Type.f32, p.n_embd, R);
     pos_emb.setName("pos_emb");
@@ -204,7 +206,7 @@ pub fn buildGraphEx(
     kq_mask.setName("kq_mask");
     ggml.setInput(kq_mask);
     fillChunkedAttentionMask(kq_mask, @intCast(S), @intCast(C), @intCast(B), @intCast(P), @intCast(n_pos));
-    ctx.setNoAlloc(true);
+    ctx.setNoAlloc(prev_no_alloc);
 
     // 6. Conformer Blocks
     for (w.layers, 0..) |*layer, il| {
@@ -610,7 +612,9 @@ fn extractBlocks(
 
 /// Fill sinusoidal position embeddings (descending order)
 fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_past: usize) void {
-    const data = tensor.dataF32();
+    const n_elems = @as(usize, @intCast(tensor.nElems()));
+    const data = std.heap.page_allocator.alloc(f32, n_elems) catch return;
+    defer std.heap.page_allocator.free(data);
     const num_timescales = n_embd / 2;
     const log_timescale_increment = @log(10000.0) / @max(@as(f32, @floatFromInt(num_timescales -| 1)), 1.0);
 
@@ -624,6 +628,7 @@ fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_p
         }
     }
     std.debug.print("pos_emb: loop={d}, n_embd={d}, max_past={d}\n[0-4]=[{d}, {d}, {d}, {d}]\n", .{ n_pos, n_embd, max_past, data[0], data[1], data[2], data[3] });
+    tensor.dataSet(f32, data) catch {};
 }
 
 /// Fill chunked attention mask
@@ -635,7 +640,9 @@ fn fillChunkedAttentionMask(
     past: usize,
     n_pos: usize,
 ) void {
-    const data = tensor.dataF32();
+    const n_elems = @as(usize, @intCast(tensor.nElems()));
+    const data = std.heap.page_allocator.alloc(f32, n_elems) catch return;
+    defer std.heap.page_allocator.free(data);
     const neg_val: f32 = -1e9;
     const S = n_ctx;
     const C = chunk_size;
@@ -656,6 +663,7 @@ fn fillChunkedAttentionMask(
             }
         }
     }
+    tensor.dataSet(f32, data) catch {};
 }
 
 // ============================================================================
@@ -711,7 +719,6 @@ pub fn loadWeights(
     ctx: *ggml.Context,
     w: *VisionEncoderWeights,
 ) !void {
-
     log.info("Loading Gemma4A audio encoder weights...", .{});
 
     // 加载子采样卷积权重
@@ -871,14 +878,7 @@ fn findTensorInGGUFWithRequired(ctx: *ggml.Context, gguf_file: *const gguf.GGUFF
         return err;
     };
 }
-fn loadConformerLayer(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    ctx: *ggml.Context,
-    gguf_file: *const gguf.GGUFFile,
-    prefix: []const u8,
-    il: usize
-) !ViTLayerWeights {
+fn loadConformerLayer(io: std.Io, allocator: std.mem.Allocator, ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, prefix: []const u8, il: usize) !ViTLayerWeights {
     var layer = ViTLayerWeights{};
 
     layer.q_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_q.weight");
@@ -935,22 +935,22 @@ fn loadConformerLayer(
     if (il == 0) {
         // Debug save — only for f32 tensors; quantized tensors (Q4_K_M etc.) are skipped
         if (layer.norm_conv_w) |t| {
-            const data = try t.backendF32(allocator);
+            const data = try t.dataGet(f32, allocator);
             defer allocator.free(data);
             debug_mod.saveData(io, "debug_audio", "zllama_audio_00_norm_conv_w.json", "norm_conv_w", data) catch {};
         }
         if (layer.conv_pw1_w) |t| {
-            const data = try t.backendF32(allocator);
+            const data = try t.dataGet(f32, allocator);
             defer allocator.free(data);
             debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw1_w.json", "conv_pw1_w", data) catch {};
         }
         if (layer.conv_dw_w) |t| {
-            const data = try t.backendF32(allocator);
+            const data = try t.dataGet(f32, allocator);
             defer allocator.free(data);
             debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_dw_w.json", "conv_dw_w", data) catch {};
         }
         if (layer.conv_pw2_w) |t| {
-            const data = try t.backendF32(allocator);
+            const data = try t.dataGet(f32, allocator);
             defer allocator.free(data);
             debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw2_w.json", "conv_pw2_w", data) catch {};
         }

@@ -249,12 +249,20 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
         logger.info("Save audio mel data fail: {}", .{err});
     };
 
-    ectx.ctx_graph.setNoAlloc(false);
-    const audio_graph = try ggml.CGraph.initReserved(ectx.ctx_graph, 32768);
+    // 使用独立的 ggml context 构建音频编码器图，避免与主 LLM context 冲突。
+    // 视觉路径 (generateWithImage) 也使用独立 context，这是相同的模式。
+    // 张量数据由 gallocr 在 computeGraph 中分配，context 仅存储元数据。
+    var audio_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
+    defer audio_ctx.deinit();
 
-    const mel_tensor = try audio_mod.melToTensor(ectx.ctx_graph, mel.data, mel.n_frames, mel.n_mel_bins);
+    logger.debug("Audio encoder: created independent ggml context", .{});
 
-    const audio_embeddings = try mm_mgr.encodeMedia(io, ectx.ctx_graph, audio_graph, .{
+    const audio_graph = try ggml.CGraph.initReserved(audio_ctx, 32768);
+
+    const mel_tensor = try audio_mod.melToTensor(audio_ctx, mel.data, mel.n_frames, mel.n_mel_bins);
+    logger.debug("Audio encoder: mel tensor created, shape=[{d},{d}]", .{ mel_tensor.ne()[0], mel_tensor.ne()[1] });
+
+    const audio_embeddings = try mm_mgr.encodeMedia(io, audio_ctx, audio_graph, .{
         .media_type = .audio,
         .mel_tensor = mel_tensor,
         .mel_data = mel.data,
@@ -262,11 +270,14 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
         .mel_frames = mel.n_frames,
         .audio_length_sec = @as(f32, @floatFromInt(wav_result.info.num_samples)) / @as(f32, @floatFromInt(wav_result.info.sample_rate)),
     }, ectx.n_threads);
+    logger.debug("Audio encoder: graph built, embeddings tensor found", .{});
 
     // Compute the audio graph (encoder only builds, caller computes)
+    logger.debug("Audio encoder: computing graph...", .{});
     try engine_common.computeGraph(audio_graph, ectx.n_threads);
+    logger.debug("Audio encoder: graph computed successfully", .{});
 
-    ectx.ctx_graph.setNoAlloc(true);
+    audio_ctx.setNoAlloc(true);
 
     debug.saveTensorFromGraph(io, ectx.allocator, "debug_audio", "zllama_audio_encoder_input.json", "debug_audio_encoder_input", audio_graph) catch |err| {
         logger.info("Save audio debug_audio_encoder_input data fail: {}", .{err});
@@ -277,9 +288,13 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
     const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
 
-    debug.saveData(io, "debug_audio", "zllama_audio_embeddings.json", "audio_embeddings", audio_embeddings.dataF32()) catch |err| {
-        logger.info("Save audio embeddings data fail: {}", .{err});
-    };
+    {
+        const audio_data = try audio_embeddings.dataGet(f32, ectx.allocator);
+        defer ectx.allocator.free(audio_data);
+        debug.saveData(io, "debug_audio", "zllama_audio_embeddings.json", "audio_embeddings", audio_data) catch |err| {
+            logger.info("Save audio embeddings data fail: {}", .{err});
+        };
+    }
 
     logger.debug("Audio encoder output: shape=[{d}, {d}]", .{ n_embd_val, n_audio_tokens });
     if (n_embd_val != @as(usize, @intCast(ectx.params.n_embd))) {
@@ -332,7 +347,8 @@ fn multimodalPrefillUnified(
     logger.info("  prefix_tokens   = {d}", .{prefix_tokens.len});
     logger.info("  suffix_tokens   = {d}", .{suffix_tokens.len});
 
-    const embd_raw = media_embeddings.dataF32();
+    const embd_raw = try media_embeddings.dataGet(f32, ectx.allocator);
+    defer ectx.allocator.free(embd_raw);
     const embd_dim: u32 = @intCast(media_embeddings.ne()[0]);
     const embd_heap = try ectx.allocator.dupe(f32, embd_raw);
     defer ectx.allocator.free(embd_heap);

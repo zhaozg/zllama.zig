@@ -191,8 +191,15 @@ fn loadQuantizedData(
     const ne0 = tensor.ne()[0];
     const n_rows = @divExact(n_elems, ne0);
 
+    // 分配临时 f32 缓冲区，反量化后通过 dataSet 写入张量
+    const f32_buf = try std.heap.page_allocator.alloc(f32, @as(usize, @intCast(n_elems)));
+    defer std.heap.page_allocator.free(f32_buf);
+
     // 使用 ggml 的类型特征表进行反量化
-    try ggml.dequantizeTensor(storage_type, tensor_data, tensor.dataF32(), ne0, n_rows);
+    try ggml.dequantizeTensor(storage_type, tensor_data, f32_buf, ne0, n_rows);
+
+    // 通过 dataSet 安全写入张量（支持 host 和 backend 张量）
+    try tensor.dataSet(f32, f32_buf);
 
     log.debug("Dequantized tensor '{s}' from {s} to f32 ({d} elements, {d} rows)", .{
         name, storage_type.name(), n_elems, n_rows,

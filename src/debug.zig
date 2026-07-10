@@ -177,21 +177,21 @@ pub const DebugTensorRegistry = struct {
         if (storage_path.len > 0) {
             dir = try std.fs.cwd().makeOpenPath(storage_path, .{});
             defer dir.close();
+            const data = try tensor.dataGet(f32, std.heap.page_allocator);
+            defer std.heap.page_allocator.free(data);
+            const file = try dir.createFile(filename, .{});
+            defer file.close();
+
+            const writer = file.writer();
+            try writer.writeAll("[\n");
+            for (data, 0..) |val, i| {
+                if (i > 0) try writer.writeAll(",\n");
+                try writer.print("{d:.6}", .{val});
+            }
+            try writer.writeAll("\n]\n");
+
+            log.info("  saved {s}: {d} elements", .{ filename, data.len });
         }
-
-        const data = tensor.dataF32();
-        const file = try dir.createFile(filename, .{});
-        defer file.close();
-
-        const writer = file.writer();
-        try writer.writeAll("[\n");
-        for (data, 0..) |val, i| {
-            if (i > 0) try writer.writeAll(",\n");
-            try writer.print("{d:.6}", .{val});
-        }
-        try writer.writeAll("\n]\n");
-
-        log.info("  saved {s}: {d} elements", .{ filename, data.len });
     }
 
     /// 通过调试名称在图中查找张量并保存
@@ -339,7 +339,7 @@ pub fn saveTensorFromGraph(io: std.Io, allocator: std.mem.Allocator, subdir: ?[]
     }
 
     const tensor = @as(*ggml.Tensor, @ptrCast(t));
-    const data = tensor.backendF32(allocator) catch |err| {
+    const data = tensor.dataGet(f32, allocator) catch |err| {
         log.warn("saveTensorFromGraph: failed to get data for tensor '{s}': {}", .{ title, err });
         return;
     };

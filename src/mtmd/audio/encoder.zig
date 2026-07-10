@@ -54,15 +54,15 @@ pub const AudioEncoder = struct {
     }
 
     /// Encode Mel spectrogram tensor — builds graph only; caller handles compute.
+    /// n_threads is not needed here because this function only builds the graph;
+    /// the caller (encodeMedia / generateWithAudio) passes n_threads to computeGraph.
     pub fn encode(
         self: *const AudioEncoder,
         io: std.Io,
         ctx: *ggml.Context,
         cgraph: *ggml.CGraph,
         mel_tensor: *ggml.Tensor,
-        n_threads: i32,
     ) !*ggml.Tensor {
-        _ = n_threads;
         var vparams = graph.VisionHParams{
             .n_embd = self.params.n_embd,
             .n_head = self.params.n_head,
@@ -85,12 +85,11 @@ pub const AudioEncoder = struct {
         mel_data: []const f32,
         mel_bins: u32,
         mel_frames: u32,
-        n_threads: i32,
     ) !*ggml.Tensor {
         const mel_tensor = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(mel_frames)), @as(i64, @intCast(mel_bins)), 1, 1);
-        @memcpy(mel_tensor.dataF32(), mel_data);
+        try mel_tensor.dataSet(f32, mel_data);
         ggml.setInput(mel_tensor);
-        return self.encode(io, ctx, cgraph, mel_tensor, n_threads);
+        return self.encode(io, ctx, cgraph, mel_tensor);
     }
 
     pub fn estimateOutputTokens(self: *const AudioEncoder, io: std.Io, audio_length_sec: f32) u32 {

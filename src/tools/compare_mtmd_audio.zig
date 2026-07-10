@@ -319,7 +319,7 @@ pub const MtmdAudioComparator = struct {
         else
             0;
         const audio_embd_dim: u32 = @intCast(audio_embeddings.ne()[0]);
-        const audio_embd_data = audio_embeddings.dataF32();
+        const audio_embd_data = try audio_embeddings.dataGet(f32, self.allocator);
 
         const prefix_tokens = expanded.tokens.items[0..audio_embd_offset];
         const suffix_start = audio_embd_offset + expanded.offsets[0].token_count;

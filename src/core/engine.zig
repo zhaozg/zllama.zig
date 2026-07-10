@@ -415,10 +415,13 @@ pub const InferenceEngine = struct {
         const t_pp_end = engine_common.currentTimeMs();
         const pp_time_s = @as(f64, @floatFromInt(t_pp_end - t_pp_start)) / 1000.0;
 
-        const logits_data = logits.dataF32();
         const n_vocab = @as(usize, @intCast(self.params.n_vocab));
         const logits_heap = try self.allocator.alloc(f32, n_vocab);
-        @memcpy(logits_heap, logits_data[@as(usize, @intCast(n_prompt_tokens - 1)) * n_vocab ..][0..n_vocab]);
+        {
+            const logits_data = try logits.dataGet(f32, self.allocator);
+            defer self.allocator.free(logits_data);
+            @memcpy(logits_heap, logits_data[@as(usize, @intCast(n_prompt_tokens - 1)) * n_vocab ..][0..n_vocab]);
+        }
 
         return PrefillResult{ .logits = logits_heap, .pos = n_prompt_tokens, .pp_time_s = pp_time_s };
     }

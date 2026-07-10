@@ -217,8 +217,11 @@ fn buildGraphFromWeights(
 ) !*ggml.CGraph {
     _ = io;
     // 构建 ImageF32 用于 GraphBuilder
+    // 使用 dataGet 安全读取张量数据
+    const image_data = try image_tensor.dataGet(f32, std.heap.page_allocator);
+    defer std.heap.page_allocator.free(image_data);
     const img = ImageF32{
-        .buf = image_tensor.dataF32(),
+        .buf = image_data,
         .nx = p.image_size,
         .ny = p.image_size,
     };
@@ -293,6 +296,25 @@ fn loadViTLayer(
     return layer;
 }
 
+// 带 clamp 的矩阵乘法
+// 对应 C++ clip_graph_gemma4v::build_mm()
+fn buildMMWithClamp(
+    ctx: *ggml.Context,
+    w: *ggml.Tensor,
+    x: *ggml.Tensor,
+    clamp_map: *const std.StringHashMap(ClampInfo),
+) *ggml.Tensor {
+    const name = w.getName();
+    if (clamp_map.get(name)) |ci| {
+        const clamped = x.clamp(ctx, ci.inp_min, ci.inp_max);
+        var out = w.mulMat(ctx, clamped);
+        out = out.clamp(ctx, ci.out_min, ci.out_max);
+        return out;
+    } else {
+        return w.mulMat(ctx, x);
+    }
+}
+
 // ============================================================================
 // 原始 buildGraph 函数（保留向后兼容）
 // ============================================================================
@@ -353,19 +375,21 @@ pub fn buildGraph(
     // 填充输入数据
     // 这里假设 img.buf 包含 RGBRGBRGB... 格式的 f32 数据
     {
-        const dst = inp_raw.dataF32();
-        const src = img.buf;
         const H: usize = @intCast(img_height);
         const W: usize = @intCast(img_width);
+        const n_elements = H * W * 3;
+        var buf = try std.heap.page_allocator.alloc(f32, n_elements);
+        defer std.heap.page_allocator.free(buf);
         for (0..H) |y| {
             for (0..W) |x| {
                 const src_idx = (y * W + x) * 3;
                 const dst_base = y * W + x;
-                dst[dst_base] = src[src_idx]; // R
-                dst[dst_base + H * W] = src[src_idx + 1]; // G
-                dst[dst_base + 2 * H * W] = src[src_idx + 2]; // B
+                buf[dst_base] = img.buf[src_idx]; // R
+                buf[dst_base + H * W] = img.buf[src_idx + 1]; // G
+                buf[dst_base + 2 * H * W] = img.buf[src_idx + 2]; // B
             }
         }
+        try inp_raw.dataSet(f32, buf);
     }
 
     // ========================================================================
@@ -382,8 +406,7 @@ pub fn buildGraph(
             const buf = @as([*]u8, @ptrCast(std.c.malloc(@sizeOf(f32)) orelse return error.OutOfMemory))[0..@sizeOf(f32)];
             bias_t.setDataPtr(buf);
         }
-        bias_t.dataF32()[0] = -1.0;
-        bias_t.setName("inp_bias");
+        try bias_t.dataSet(f32, &.{-1.0});
         cur = cur.add(ctx, bias_t);
         cur.setName("inp_raw_scaled");
     }
@@ -561,27 +584,4 @@ pub fn buildGraph(
 
     log.info("Gemma4V graph built successfully", .{});
     return builder.gf;
-}
-
-// ============================================================================
-// 辅助函数
-// ============================================================================
-
-/// 带 clamp 的矩阵乘法
-/// 对应 C++ clip_graph_gemma4v::build_mm()
-fn buildMMWithClamp(
-    ctx: *ggml.Context,
-    w: *ggml.Tensor,
-    x: *ggml.Tensor,
-    clamp_map: *const std.StringHashMap(ClampInfo),
-) *ggml.Tensor {
-    const name = w.getName();
-    if (clamp_map.get(name)) |ci| {
-        const clamped = x.clamp(ctx, ci.inp_min, ci.inp_max);
-        var out = w.mulMat(ctx, clamped);
-        out = out.clamp(ctx, ci.out_min, ci.out_max);
-        return out;
-    } else {
-        return w.mulMat(ctx, x);
-    }
 }

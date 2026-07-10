@@ -45,8 +45,7 @@ pub fn melToTensor(
     tensor.setName("mel_input");
     ggml.setInput(tensor);
 
-    const data = tensor.dataF32();
-    @memcpy(data[0..mel_data.len], mel_data);
+    try tensor.dataSet(f32, mel_data);
 
     return tensor;
 }

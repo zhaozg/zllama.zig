@@ -331,9 +331,9 @@ pub const MultiModalManager = struct {
                 if (self.audio_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.AudioEncoderNotAvailable;
                     if (input.mel_tensor) |mt| {
-                        return enc.encode(io, ctx, cgraph, mt, n_threads);
+                        return enc.encode(io, ctx, cgraph, mt);
                     } else if (input.mel_data) |md| {
-                        return enc.encodeRaw(io, ctx, cgraph, md, input.mel_bins, input.mel_frames, n_threads);
+                        return enc.encodeRaw(io, ctx, cgraph, md, input.mel_bins, input.mel_frames);
                     } else {
                         return error.NoAudioData;
                     }

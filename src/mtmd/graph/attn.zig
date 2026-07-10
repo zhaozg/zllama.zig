@@ -121,11 +121,18 @@ test "buildAttn: basic self-attention" {
     const k = try ctx.newTensor4d(ggml.Type.f32, d_head, n_head, n_patches, n_batch);
     const v = try ctx.newTensor4d(ggml.Type.f32, d_head, n_head, n_patches, n_batch);
 
-    @memset(wo.dataF32(), 0.1);
-    @memset(q.dataF32(), 0.5);
-    @memset(k.dataF32(), 0.5);
-    @memset(v.dataF32(), 0.5);
-
+    {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(wo.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 0.1);
+        try wo.dataSet(f32, buf);
+    }
+    for ([_]*ggml.Tensor{ q, k, v }) |t| {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(t.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 0.5);
+        try t.dataSet(f32, buf);
+    }
     const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
 
     const result = try buildAttn(&ctx, wo, null, q, k, v, null, kq_scale, n_head, "test_attn", null);

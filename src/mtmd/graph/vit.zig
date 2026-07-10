@@ -279,9 +279,13 @@ pub fn resizePositionEmbeddings(
     const result = try ctx.newTensor2d(ggml.Type.f32, n_embd, target_size);
     result.setName("pos_embd_resized");
 
-    // 获取源数据和目标数据
-    const src_data = pos_embd.dataF32();
-    const dst_data = result.dataF32();
+    // 使用 dataGet 安全读取源张量数据
+    const src_data = try pos_embd.dataGet(f32, std.heap.page_allocator);
+    defer std.heap.page_allocator.free(src_data);
+
+    // 分配目标缓冲区
+    const dst_buf = try std.heap.page_allocator.alloc(f32, @as(usize, @intCast(n_embd * target_size)));
+    defer std.heap.page_allocator.free(dst_buf);
 
     const scale = @as(f64, @floatFromInt(src_size)) / @as(f64, @floatFromInt(target_size));
 
@@ -296,9 +300,12 @@ pub fn resizePositionEmbeddings(
         for (0..@as(usize, @intCast(n_embd))) |e| {
             const v0 = src_data[src0 * @as(usize, @intCast(n_embd)) + e];
             const v1 = src_data[src1 * @as(usize, @intCast(n_embd)) + e];
-            dst_data[dst_idx * @as(usize, @intCast(n_embd)) + e] = @as(f32, @floatCast(@as(f64, v0) * (1.0 - frac) + @as(f64, v1) * frac));
+            dst_buf[dst_idx * @as(usize, @intCast(n_embd)) + e] = @as(f32, @floatCast(@as(f64, v0) * (1.0 - frac) + @as(f64, v1) * frac));
         }
     }
+
+    // 通过 dataSet 安全写入结果张量
+    try result.dataSet(f32, dst_buf);
 
     return result;
 }
@@ -307,18 +314,23 @@ test "buildVit: basic ViT forward" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
+    const n_embd: i64 = 64;
+    const n_patches: i64 = 16;
+    const n_layer: usize = 2;
+    const n_ff: i64 = 256;
+    const n_head: i64 = 4;
+
     var ctx = try ggml.Context.init(allocator, .{ .mem_size = 4 * 1024 * 1024 });
     defer ctx.deinit();
 
-    const n_embd: i64 = 64;
-    const n_head: u32 = 4;
-    const n_layer: u32 = 2;
-    const n_patches: i64 = 16;
-    const n_ff: u32 = 256;
-
     // Create input
     const inp = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_patches);
-    @memset(inp.dataF32(), 0.5);
+    {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(n_embd * n_patches)));
+        defer allocator.free(buf);
+        @memset(buf, 0.5);
+        try inp.dataSet(f32, buf);
+    }
 
     // Create weights
     var layers = try allocator.alloc(ViTLayerWeights, n_layer);
@@ -335,10 +347,16 @@ test "buildVit: basic ViT forward" {
         };
         // Initialize weights
         for ([_]*ggml.Tensor{ layers[il].ln_1_w.?, layers[il].ln_2_w.? }) |t| {
-            @memset(t.dataF32(), 1.0);
+            const buf = try allocator.alloc(f32, @as(usize, @intCast(t.nElems())));
+            defer allocator.free(buf);
+            @memset(buf, 1.0);
+            try t.dataSet(f32, buf);
         }
         for ([_]*ggml.Tensor{ layers[il].q_w.?, layers[il].k_w.?, layers[il].v_w.?, layers[il].o_w.?, layers[il].ff_up_w.?, layers[il].ff_down_w.? }) |t| {
-            @memset(t.dataF32(), 0.1);
+            const buf = try allocator.alloc(f32, @as(usize, @intCast(t.nElems())));
+            defer allocator.free(buf);
+            @memset(buf, 0.1);
+            try t.dataSet(f32, buf);
         }
     }
 
@@ -348,7 +366,7 @@ test "buildVit: basic ViT forward" {
     var hparams = VisionHParams{
         .n_embd = @intCast(n_embd),
         .n_head = n_head,
-        .n_layer = n_layer,
+        .n_layer = @intCast(n_layer),
         .n_ff = n_ff,
         .eps = 1e-5,
     };

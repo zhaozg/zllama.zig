@@ -234,7 +234,8 @@ pub const Gemma4Model = struct {
     ) !*ggml.Tensor {
         // —— 音频嵌入诊断 ——
         {
-            const eo_data = embd_override.dataF32();
+            const eo_data = try embd_override.dataGet(f32, std.heap.page_allocator);
+            defer std.heap.page_allocator.free(eo_data);
             const n_total: usize = @as(usize, @intCast(embd_override.ne()[0] * embd_override.ne()[1]));
             const n_preview: usize = @min(n_total, 8);
             var all_zero = true;

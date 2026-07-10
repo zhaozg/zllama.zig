@@ -55,7 +55,9 @@ pub fn normalizeToTensor(
         inp.setDataPtr(buf);
     }
 
-    const dst = inp.dataF32();
+    const n_elems = @as(usize, @intCast(inp.nElems()));
+    const dst = try std.heap.page_allocator.alloc(f32, n_elems);
+    defer std.heap.page_allocator.free(dst);
     log.err("normalizeToTensor: dst.ptr={*} len={d}", .{ dst.ptr, dst.len });
 
     switch (mode) {
@@ -102,6 +104,7 @@ pub fn normalizeToTensor(
             }
         },
     }
+    try inp.dataSet(f32, dst);
 
     return inp;
 }

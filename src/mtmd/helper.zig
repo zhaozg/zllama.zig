@@ -86,7 +86,11 @@ pub fn evalChunks(
                         const embd_size = n_embd_out * n_tokens_out;
                         const embd_f32 = try allocator.alloc(f32, embd_size);
                         defer allocator.free(embd_f32);
-                        @memcpy(embd_f32, out_tensor.dataF32()[0..embd_size]);
+                        {
+                            const out_data = try out_tensor.dataGet(f32, allocator);
+                            defer allocator.free(out_data);
+                            @memcpy(embd_f32, out_data[0..embd_size]);
+                        }
 
                         if (ctx.output_embd) |old| allocator.free(old);
                         ctx.output_embd = try allocator.dupe(f32, embd_f32);
@@ -140,7 +144,11 @@ pub fn evalChunks(
                     const embd_size = n_embd_out * n_tokens_out;
                     const embd_f32 = try allocator.alloc(f32, embd_size);
                     defer allocator.free(embd_f32);
-                    @memcpy(embd_f32, out_tensor.dataF32()[0..embd_size]);
+                    {
+                        const out_data = try out_tensor.dataGet(f32, allocator);
+                        defer allocator.free(out_data);
+                        @memcpy(embd_f32, out_data[0..embd_size]);
+                    }
 
                     if (ctx.output_embd) |old| allocator.free(old);
                     ctx.output_embd = try allocator.dupe(f32, embd_f32);

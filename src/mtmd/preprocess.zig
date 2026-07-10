@@ -82,7 +82,9 @@ pub fn normalizeToTensor(
         t.data = buf;
     }
 
-    const dst = inp.dataF32();
+    const n_elems = @as(usize, @intCast(inp.nElems()));
+    const dst = try std.heap.page_allocator.alloc(f32, n_elems);
+    defer std.heap.page_allocator.free(dst);
     switch (mode) {
         .standard => {
             const mr = mean[0];
@@ -124,6 +126,7 @@ pub fn normalizeToTensor(
             }
         },
     }
+    try inp.dataSet(f32, dst);
     return inp;
 }
 
@@ -249,7 +252,9 @@ pub fn imageToTensor(ctx: *ggml.Context, image: *const ProcessedImage, normalize
     const H: usize = @intCast(image.height);
     const wh: usize = W * H;
     const tensor = try ctx.newTensor3d(ggml.Type.f32, @intCast(image.width), @intCast(image.height), 3);
-    const data = tensor.dataF32();
+    const n_elems = @as(usize, @intCast(tensor.nElems()));
+    const data = try std.heap.page_allocator.alloc(f32, n_elems);
+    defer std.heap.page_allocator.free(data);
     switch (normalize) {
         .siglip => for (0..wh) |i| {
             const idx = i * 3;
@@ -270,5 +275,6 @@ pub fn imageToTensor(ctx: *ggml.Context, image: *const ProcessedImage, normalize
             data[i + 2 * wh] = @as(f32, @floatFromInt(image.data[idx + 2])) / 255.0;
         },
     }
+    try tensor.dataSet(f32, data);
     return tensor;
 }

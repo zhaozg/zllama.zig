@@ -460,7 +460,11 @@ pub const Gemma4Graph = struct {
                     @memset(buf, 0);
                     attn_out.setDataPtr(buf);
                 } else {
-                    @memset(attn_out.dataF32(), 0);
+                    const n_elems = @as(usize, @intCast(attn_out.nElems()));
+                    const buf = try std.heap.page_allocator.alloc(f32, n_elems);
+                    defer std.heap.page_allocator.free(buf);
+                    @memset(buf, 0);
+                    try attn_out.dataSet(f32, buf);
                 }
             }
         }

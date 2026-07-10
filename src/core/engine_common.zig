@@ -283,27 +283,27 @@ const testing = std.testing;
 /// NOTE: The gallocr and CPU backend are intentionally NOT freed here because
 /// the computed tensor data must remain valid after this function returns.
 /// The caller is responsible for copying out any tensor data they need
-/// (e.g., via tensor.dataF32() + allocator.dupe) before the gallocr goes
-/// out of scope.
+/// (e.g., via tensor.dataF32() + allocator.dupe) before the owning ggml
+/// context is destroyed.
 ///
 /// For the multimodal encoding path, the embedding tensor data is copied
-/// to a heap buffer in multimodalPrefillUnified before the vision context
-/// is destroyed.
+/// to a heap buffer in multimodalPrefillUnified before the vision/audio
+/// context is destroyed.
 ///
 /// This function is typically called once per multimodal encode or once
-/// during prefill. The gallocr and backend are freed when the caller's
-/// ggml context is deinitialized.
+/// during prefill. The gallocr and backend are freed when the process exits
+/// (deliberate leak-to-exit strategy — see AGENTS.md §III.2).
 pub fn computeGraph(graph: *ggml.CGraph, n_threads: i32) !void {
     const buft = ggml.backendCpuBufferType();
     var galloc = try ggml.Gallocr.init(buft);
-    // NOTE: gallocr intentionally not freed — tensor data lives in its buffer.
-    // The caller must copy data before the owning ggml context is destroyed.
-    _ = &galloc;
+    // Deliberately leaked: tensor data lives in gallocr's buffer.
+    // ggml_gallocr_free is never called.
     if (!galloc.reserve(graph)) return error.GraphReserveFailed;
     if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
 
     const cpu = try ggml.backendCpuInit();
-    _ = &cpu;
+    // Deliberately leaked: cpu backend may be needed if tensor data is on device.
+    // ggml_backend_free is never called.
     ggml.backendCpuSetNThreads(cpu, n_threads);
     if (!ggml.backendGraphCompute(cpu, graph)) return error.ComputeFailed;
 }

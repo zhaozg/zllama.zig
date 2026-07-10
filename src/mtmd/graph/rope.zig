@@ -153,7 +153,12 @@ test "buildRope2D: basic 2D RoPE" {
     const n_batch: i64 = 1;
 
     const cur = try ctx.newTensor4d(ggml.Type.f32, d_head, n_head, n_patches, n_batch);
-    @memset(cur.dataF32(), 0.5);
+    {
+        const buf = try std.testing.allocator.alloc(f32, @as(usize, @intCast(cur.nElems())));
+        defer std.testing.allocator.free(buf);
+        @memset(buf, 0.5);
+        try cur.dataSet(f32, buf);
+    }
 
     const indices = try createPositionIndices(&ctx, n_patches, 4);
     const freq_base: f32 = 10000.0;

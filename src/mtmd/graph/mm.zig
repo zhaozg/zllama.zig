@@ -191,8 +191,18 @@ test "buildMM: basic matrix multiply" {
     const w = try ctx.newTensor2d(ggml.Type.f32, n_out, n_in);
     const x = try ctx.newTensor2d(ggml.Type.f32, n_in, n_tokens);
 
-    @memset(w.dataF32(), 0.1);
-    @memset(x.dataF32(), 0.5);
+    {
+        const buf_w = try std.testing.allocator.alloc(f32, @as(usize, @intCast(w.nElems())));
+        defer std.testing.allocator.free(buf_w);
+        @memset(buf_w, 0.1);
+        try w.dataSet(f32, buf_w);
+    }
+    {
+        const buf_x = try std.testing.allocator.alloc(f32, @as(usize, @intCast(x.nElems())));
+        defer std.testing.allocator.free(buf_x);
+        @memset(buf_x, 0.5);
+        try x.dataSet(f32, buf_x);
+    }
 
     const result = try buildMM(&ctx, w, x, null);
     try testing.expectEqual(n_out, result.ne()[0]);

@@ -250,12 +250,15 @@ pub fn threeStagePrefill(
 
     // Copy last token's logits to heap before galloc is freed
     // logits shape: [n_vocab, n_tokens] — we want the last token
-    const logits_data = logits.dataF32();
     const n_vocab = @as(usize, @intCast(params.n_vocab));
     const n_tok = @as(usize, @intCast(sfx_n));
     const last_offset = (n_tok - 1) * n_vocab;
     const logits_heap = try allocator.alloc(f32, n_vocab);
-    @memcpy(logits_heap, logits_data[last_offset .. last_offset + n_vocab]);
+    {
+        const logits_data = try logits.dataGet(f32, allocator);
+        defer allocator.free(logits_data);
+        @memcpy(logits_heap, logits_data[last_offset .. last_offset + n_vocab]);
+    }
 
     const pos: i32 = suffix_start_pos + (if (suffix_len > 0) suffix_len else 1);
 

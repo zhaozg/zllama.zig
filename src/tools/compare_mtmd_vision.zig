@@ -296,7 +296,7 @@ pub const MtmdVisionComparator = struct {
         else
             0;
         const vision_embd_dim: u32 = @intCast(vision_embeddings.ne()[0]);
-        const vision_embd_data = vision_embeddings.dataF32();
+        const vision_embd_data = try vision_embeddings.dataGet(f32, self.allocator);
 
         const prefix_tokens = expanded.tokens.items[0..vision_embd_offset];
         const suffix_start = vision_embd_offset + expanded.offsets[0].token_count;

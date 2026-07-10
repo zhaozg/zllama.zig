@@ -133,21 +133,25 @@ test "mean pool basic" {
     const hidden = try ctx.newTensor2d(.f32, n_embd, n_tokens);
     hidden.setName("test_hidden");
     {
-        const data = hidden.dataF32();
-        @memset(data, 1.0);
+        const buf = try std.testing.allocator.alloc(f32, @as(usize, @intCast(n_embd * n_tokens)));
+        defer std.testing.allocator.free(buf);
+        @memset(buf, 1.0);
+        try hidden.dataSet(f32, buf);
     }
 
     var graph = try ggml.CGraph.init(ctx);
     const pooled = meanPool(ctx, hidden);
     ggml.setOutput(pooled);
     graph.buildForwardExpand(pooled);
-
     try graph.compute(1);
 
     // 均值应为 1.0
-    const result_data = pooled.dataF32();
-    for (result_data[0..@as(usize, @intCast(n_embd))]) |v| {
-        try testing.expectApproxEqAbs(@as(f32, 1.0), v, 1e-5);
+    {
+        const result_data = try pooled.dataGet(f32, std.testing.allocator);
+        defer std.testing.allocator.free(result_data);
+        for (result_data[0..@as(usize, @intCast(n_embd))]) |v| {
+            try testing.expectApproxEqAbs(@as(f32, 1.0), v, 1e-5);
+        }
     }
 
     const shape = pooled.shape();
@@ -166,27 +170,71 @@ test "cls pool basic" {
     const hidden = try ctx.newTensor2d(.f32, n_embd, n_tokens);
     hidden.setName("test_hidden");
     {
-        const data = hidden.dataF32();
+        const buf = try std.testing.allocator.alloc(f32, @as(usize, @intCast(n_embd * n_tokens)));
+        defer std.testing.allocator.free(buf);
         // 填充可区分值: col0 = 1, col1 = 2, col2 = 3
         // 布局: [n_embd, n_tokens] 列优先
         for (0..@as(usize, @intCast(n_tokens))) |col| {
             for (0..@as(usize, @intCast(n_embd))) |row| {
-                data[col * @as(usize, @intCast(n_embd)) + row] = @as(f32, @floatFromInt(col + 1));
+                buf[col * @as(usize, @intCast(n_embd)) + row] = @as(f32, @floatFromInt(col + 1));
             }
         }
+        try hidden.dataSet(f32, buf);
     }
 
-    var graph = try ggml.CGraph.init(ctx);
     const pooled = clsPool(ctx, hidden);
+    pooled.setName("test_pooled");
     ggml.setOutput(pooled);
+    var graph = try ggml.CGraph.init(ctx);
     graph.buildForwardExpand(pooled);
-
     try graph.compute(1);
 
     // cls 取第一个 token，值应为 1.0
-    const result_data = pooled.dataF32();
-    for (result_data[0..@as(usize, @intCast(n_embd))]) |v| {
-        try testing.expectApproxEqAbs(@as(f32, 1.0), v, 1e-5);
+    {
+        const result_data = try pooled.dataGet(f32, std.testing.allocator);
+        defer std.testing.allocator.free(result_data);
+        for (result_data[0..@as(usize, @intCast(n_embd))]) |v| {
+            try testing.expectApproxEqAbs(@as(f32, 1.0), v, 1e-5);
+        }
+    }
+}
+
+test "L2 normalize basic" {
+    const n_embd: i64 = 4;
+    const n_tokens: i64 = 3;
+
+    const mem_size = 1024 * 1024;
+    var ctx = try ggml.Context.init(mem_size);
+    defer ctx.deinit();
+
+    const hidden = try ctx.newTensor2d(.f32, n_embd, n_tokens);
+    hidden.setName("test_hidden");
+    const vec = try ctx.newTensor2d(.f32, n_embd, 1);
+    vec.setName("test_vec");
+    {
+        const buf = try std.testing.allocator.alloc(f32, @as(usize, @intCast(n_embd)));
+        defer std.testing.allocator.free(buf);
+        buf[0] = 3.0;
+        buf[1] = 4.0;
+        buf[2] = 0.0;
+        buf[3] = 0.0;
+        try vec.dataSet(f32, buf);
+    }
+
+    var graph = try ggml.CGraph.init(ctx);
+    const norm = normalize(ctx, vec);
+    ggml.setOutput(norm);
+    graph.buildForwardExpand(norm);
+
+    try graph.compute(1);
+
+    // ||[3,4,0,0]|| = 5, 归一化: [0.6, 0.8, 0, 0]
+    {
+        const result_data = try norm.dataGet(f32, std.testing.allocator);
+        defer std.testing.allocator.free(result_data);
+        try testing.expectApproxEqAbs(@as(f32, 0.6), result_data[0], 1e-5);
+        try testing.expectApproxEqAbs(@as(f32, 0.8), result_data[1], 1e-5);
+        try testing.expectApproxEqAbs(@as(f32, 0.0), result_data[2], 1e-5);
     }
 }
 
@@ -200,11 +248,13 @@ test "L2 normalize unit vector" {
     const vec = try ctx.newTensor2d(.f32, n_embd, 1);
     vec.setName("test_vec");
     {
-        const data = vec.dataF32();
-        data[0] = 3.0;
-        data[1] = 4.0;
-        data[2] = 0.0;
-        data[3] = 0.0;
+        const buf = try std.testing.allocator.alloc(f32, @as(usize, @intCast(vec.nElems())));
+        defer std.testing.allocator.free(buf);
+        buf[0] = 3.0;
+        buf[1] = 4.0;
+        buf[2] = 0.0;
+        buf[3] = 0.0;
+        try vec.dataSet(f32, buf);
     }
 
     var graph = try ggml.CGraph.init(ctx);
@@ -215,8 +265,11 @@ test "L2 normalize unit vector" {
     try graph.compute(1);
 
     // ||[3,4,0,0]|| = 5, 归一化: [0.6, 0.8, 0, 0]
-    const result_data = norm.dataF32();
-    try testing.expectApproxEqAbs(@as(f32, 0.6), result_data[0], 1e-5);
-    try testing.expectApproxEqAbs(@as(f32, 0.8), result_data[1], 1e-5);
-    try testing.expectApproxEqAbs(@as(f32, 0.0), result_data[2], 1e-5);
+    {
+        const result_data = try norm.dataGet(f32, std.testing.allocator);
+        defer std.testing.allocator.free(result_data);
+        try testing.expectApproxEqAbs(@as(f32, 0.6), result_data[0], 1e-5);
+        try testing.expectApproxEqAbs(@as(f32, 0.8), result_data[1], 1e-5);
+        try testing.expectApproxEqAbs(@as(f32, 0.0), result_data[2], 1e-5);
+    }
 }

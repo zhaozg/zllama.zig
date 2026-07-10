@@ -80,10 +80,24 @@ test "buildNorm: LayerNorm basic" {
     const mb = try ctx.newTensor1d(ggml.Type.f32, n_embd);
 
     // Fill with simple values
-    @memset(cur.dataF32(), 1.0);
-    @memset(mw.dataF32(), 1.0);
-    @memset(mb.dataF32(), 0.0);
-
+    {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(cur.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 1.0);
+        try cur.dataSet(f32, buf);
+    }
+    {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(mw.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 1.0);
+        try mw.dataSet(f32, buf);
+    }
+    {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(mb.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 0.0);
+        try mb.dataSet(f32, buf);
+    }
     const result = try buildNorm(&ctx, cur, mw, mb, .layer_norm, 1e-5, "test_norm");
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);
     try testing.expectEqual(@as(i64, n_patches), result.ne()[1]);
@@ -102,8 +116,18 @@ test "buildNorm: RMSNorm basic" {
     const cur = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_patches);
     const mw = try ctx.newTensor1d(ggml.Type.f32, n_embd);
 
-    @memset(cur.dataF32(), 1.0);
-    @memset(mw.dataF32(), 1.0);
+    {
+        const buf_cur = try allocator.alloc(f32, @as(usize, @intCast(cur.nElems())));
+        defer allocator.free(buf_cur);
+        @memset(buf_cur, 1.0);
+        try cur.dataSet(f32, buf_cur);
+    }
+    {
+        const buf_mw = try allocator.alloc(f32, @as(usize, @intCast(mw.nElems())));
+        defer allocator.free(buf_mw);
+        @memset(buf_mw, 1.0);
+        try mw.dataSet(f32, buf_mw);
+    }
 
     const result = try buildNorm(&ctx, cur, mw, null, .rms_norm, 1e-5, "test_rms");
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);
