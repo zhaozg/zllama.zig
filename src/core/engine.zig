@@ -225,8 +225,10 @@ pub const InferenceEngine = struct {
         const ctx_graph = try ggml.Context.initNoAlloc(graph_size);
         errdefer ctx_graph.deinit();
 
-        // Incremental decode context: sized for single-token decode graphs
-        const inc_ctx_size = 256 * 1024 * 1024; // 256 MB is sufficient for single-token decode
+        // Incremental decode context: sized for single-token decode graphs.
+        // Gemma4 with per-layer embeddings needs more metadata space
+        // due to per-layer injection tensors (n_layer × n_embd_pl views+reshapes).
+        const inc_ctx_size = 512 * 1024 * 1024;
         const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
 
         var mm_manager: ?mtmd.MultiModalManager = null;

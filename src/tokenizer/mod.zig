@@ -394,6 +394,7 @@ pub const Tokenizer = struct {
     const skip_token_names = [_][]const u8{
         "<|channel|>",     "<|channel>",    "<channel|>",
         "<start_of_turn>", "<end_of_turn>",
+        "<|turn>", "<turn|>", // gemma4 turn markers
     };
 
     pub fn isSkipToken(self: *const Tokenizer, token_id: u32) bool {

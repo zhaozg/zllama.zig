@@ -11,12 +11,6 @@ const Context = @import("context.zig").Context;
 const log = std.log.scoped(.ggml);
 
 // ============================================================================
-// 全局状态
-// ============================================================================
-
-var backends_loaded: bool = false;
-
-// ============================================================================
 // ggml_cgraph 封装
 // ============================================================================
 
@@ -47,13 +41,6 @@ pub const CGraph = opaque {
 
     /// 执行计算图
     pub fn compute(self: *CGraph, n_threads: i32) !void {
-        // 加载所有可用的后端（动态库），只加载一次
-        if (!backends_loaded) {
-            c.ggml_backend_load_all();
-            backends_loaded = true;
-            log.info("Backends loaded", .{});
-        }
-
         // CPU backend with specified thread count
         const cpu_backend = c.ggml_backend_init_by_type(c.GGML_BACKEND_DEVICE_TYPE_CPU, null);
         if (cpu_backend == null) return error.BackendInitFailed;

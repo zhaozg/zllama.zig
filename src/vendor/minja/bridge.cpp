@@ -75,6 +75,9 @@ char *minja_chat_template_apply(
         inputs.messages = messages;
         inputs.tools = tools;
         inputs.add_generation_prompt = add_generation_prompt;
+        // Match llama.cpp default: enable_thinking=true for all models.
+        // Templates that don't use this variable simply ignore it.
+        inputs.extra_context = json::object({{"enable_thinking", true}});
 
         std::string result = tmpl->tmpl.apply(inputs);
 
