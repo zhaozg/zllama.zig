@@ -58,7 +58,6 @@ pub fn normalizeToTensor(
     const n_elems = @as(usize, @intCast(inp.nElems()));
     const dst = try std.heap.page_allocator.alloc(f32, n_elems);
     defer std.heap.page_allocator.free(dst);
-    log.err("normalizeToTensor: dst.ptr={*} len={d}", .{ dst.ptr, dst.len });
 
     switch (mode) {
         .standard => {

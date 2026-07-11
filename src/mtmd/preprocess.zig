@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
-const cc = @import("ggml").c.c;
 const stb_image = @import("stb_image");
 
 const log = std.log.scoped(.mm_preprocess);
@@ -45,91 +44,6 @@ pub fn calcSizePreservedRatio(src_width: u32, src_height: u32, align_size: u32, 
     }
     return .{ .width = @intFromFloat(w_bar), .height = @intFromFloat(h_bar) };
 }
-
-// ============================================================================
-// 图像归一化
-// ============================================================================
-
-pub const NormalizeMode = enum { standard, siglip, passthrough };
-
-/// 将 RGB u8 图像数据归一化并填充到 ggml 张量 [width, height, 3] f32。
-/// 支持 no_alloc 模式：如果 context 为 no_alloc，则手动分配张量数据。
-pub fn normalizeToTensor(
-    ctx: *ggml.Context,
-    image_data: []const u8,
-    img_width: u32,
-    img_height: u32,
-    mean: [3]f32,
-    std_val: [3]f32,
-    mode: NormalizeMode,
-) !*ggml.Tensor {
-    const W: usize = @intCast(img_width);
-    const H: usize = @intCast(img_height);
-    const wh: usize = W * H;
-    var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(img_width), @intCast(img_height), 3);
-    inp.setName("vision_input");
-
-    // In no_alloc mode, the tensor data pointer is NULL.
-    // We need to allocate the data manually so we can write to it.
-    const no_alloc = ctx.getNoAlloc();
-    if (no_alloc) {
-        // Allocate data buffer for the input tensor using C malloc
-        const data_size = @as(usize, @intCast(inp.nBytes()));
-        const buf = std.c.malloc(data_size) orelse return error.OutOfMemory;
-        @memset(@as([*]u8, @ptrCast(buf))[0..data_size], 0);
-        // Directly set the tensor data pointer via the C struct
-        const t = @as(*cc.struct_ggml_tensor, @ptrCast(@alignCast(inp)));
-        t.data = buf;
-    }
-
-    const n_elems = @as(usize, @intCast(inp.nElems()));
-    const dst = try std.heap.page_allocator.alloc(f32, n_elems);
-    defer std.heap.page_allocator.free(dst);
-    switch (mode) {
-        .standard => {
-            const mr = mean[0];
-            const mg = mean[1];
-            const mb = mean[2];
-            const sr = std_val[0];
-            const sg = std_val[1];
-            const sb = std_val[2];
-            for (0..H) |y| {
-                for (0..W) |x| {
-                    const si = (y * W + x) * 3;
-                    const db = y * W + x;
-                    dst[db] = (@as(f32, @floatFromInt(image_data[si + 0])) / 255.0 - mr) / sr;
-                    dst[db + wh] = (@as(f32, @floatFromInt(image_data[si + 1])) / 255.0 - mg) / sg;
-                    dst[db + 2 * wh] = (@as(f32, @floatFromInt(image_data[si + 2])) / 255.0 - mb) / sb;
-                }
-            }
-        },
-        .siglip => {
-            for (0..H) |y| {
-                for (0..W) |x| {
-                    const si = (y * W + x) * 3;
-                    const db = y * W + x;
-                    dst[db] = @as(f32, @floatFromInt(image_data[si + 0])) / 255.0 * 2.0 - 1.0;
-                    dst[db + wh] = @as(f32, @floatFromInt(image_data[si + 1])) / 255.0 * 2.0 - 1.0;
-                    dst[db + 2 * wh] = @as(f32, @floatFromInt(image_data[si + 2])) / 255.0 * 2.0 - 1.0;
-                }
-            }
-        },
-        .passthrough => {
-            for (0..H) |y| {
-                for (0..W) |x| {
-                    const si = (y * W + x) * 3;
-                    const db = y * W + x;
-                    dst[db] = @floatFromInt(image_data[si + 0]);
-                    dst[db + wh] = @floatFromInt(image_data[si + 1]);
-                    dst[db + 2 * wh] = @floatFromInt(image_data[si + 2]);
-                }
-            }
-        },
-    }
-    try inp.dataSet(f32, dst);
-    return inp;
-}
-
 // ============================================================================
 // 双线性插值
 // ============================================================================
@@ -230,10 +144,6 @@ pub fn loadImage(allocator: std.mem.Allocator, io: std.Io, filepath: []const u8,
     const sh: u32 = @intCast(h);
     const resized = try bilinearResizeRGB(allocator, pixels.?[0..@as(usize, @intCast(sw * sh * 3))], sw, sh, target_size, target_size);
     return .{ .data = resized, .width = target_size, .height = target_size, .allocator = allocator };
-}
-
-pub fn loadPPM(allocator: std.mem.Allocator, io: std.Io, filepath: []const u8, target_size: u32) !ProcessedImage {
-    return loadImage(allocator, io, filepath, target_size, null);
 }
 
 /// Legacy: create ProcessedImage from raw RGB with resize.
