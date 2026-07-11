@@ -103,20 +103,6 @@ pub fn processPcmSamples(
         offset += chunk_samples;
     }
 
-    // 构建填充后的 SAMPLES（半因果填充：左填充 pad_left 个零，右填充到匹配 PyTorch 帧数）
-    // 匹配 llama.cpp gemma4a preprocess() 的 semicausal padding 逻辑
-    {
-        const fc_full = framing.computeFrameCount(samples.len, .{
-            .frame_length = params.frame_length,
-            .hop_length = hop,
-            .n_fft = frame_size,
-        });
-        const n_padded = samples.len + fc_full.total_pad;
-        var padded_samples = try tmp_alloc.alloc(f32, n_padded);
-        @memset(padded_samples, 0.0);
-        @memcpy(padded_samples[pad_left..][0..samples.len], samples);
-    }
-
     // 分配 Mel 输出缓冲区 [n_mel_bins, n_frames] (mel-major 布局，匹配 llama.cpp)
     // llama.cpp: out.data[(size_t)j * out.n_len + i] = sum;  (j=mel_bin, i=frame_idx)
     const mel_out = try allocator.alloc(f32, @as(usize, params.n_mel_bins) * @as(usize, total_frames));
