@@ -215,7 +215,7 @@ AudioEncoderBackend {
 
 | 文件 | 核心函数/结构 | 说明 |
 |------|---------------|------|
-| `engine_common.zig` | `computeGraph()` / `WallTimer` / `mmapFile()` | CPU 图计算（Gallocr "leak-to-exit"）、时间测量、mmap 文件读取 |
+| `engine_common.zig` | `computeGraph()` / `WallTimer` / `mmapFile()` | CPU 图计算（Gallocr 所有权上移）、时间测量、mmap 文件读取 |
 | `graph_context.zig` | `IncContext` / `DecodeStep` | 增量解码上下文：ctx 复用、Gallocr 预分配、>80% 回收触发 reset |
 | `decode.zig` | `runDecodeLoop()` / `DecodeCallbacks` | 共享解码循环（文本/多模态通用），回调驱动 |
 | `prefill.zig` | `threeStagePrefill()` | 三阶段多模态 prefill：prefix → media → suffix |
@@ -250,7 +250,7 @@ main.zig
       → runDecodeLoop(...)               // 增量解码循环
           → IncContext.beginStep()       // 复用 ctx_inc，必要时 reset
           → model.buildGraph(...)        // 单 token 前向
-          → gallocr.allocGraph() → compute
+          → gallocr.allocGraph() → compute  (gallocr 由 InferenceEngine 管理)
           → sampler.sample() → output
 ```
 
@@ -283,16 +283,27 @@ main.zig
   Gallocr (prefill) ───── compute → ★故意泄漏★ ────────────────→ OS 回收
   Gallocr (decode) ────── IncContext 管理，复用 ────────────────→ free
 ```
+时间线:
+  init                    推理循环                              exit
+  
+  ctx_weights ──────────── 权重驻留（所有权永不转移）────────────→ free
+  ctx_kv_cache ─────────── KV Cache 驻留 ──────────────────────→ free
+  ctx_graph ─────┐        ctx 在 prefill 中 reset/复用 ────────→ free
+                 │
+  Gallocr ──────────────── InferenceEngine 持有，所有权上移 ────→ free (deinit)
+  IncContext.galloc ────── IncContext 管理，resetFull 时释放重建 ─→ free
+```
 
 关键策略：
 - **权重**：`VisionEncoder.init()` 加载后借出，永不转移所有权。
-- **computeGraph()**：内部 Gallocr + CPU backend **故意不释放**——否则 `tensor.data` 指针悬空。这些分配器一直泄漏到进程退出。
-- **IncContext**：增量解码的 `ctx_inc` 在占用率超过 80% 时自动 `reset()` 回收。
-- **三阶段 prefill**：每个 pass 之间调用 `graph_ctx.reset()` 释放上一 pass 的临时张量和图节点。
+- **Gallocr 所有权上移**：`computeGraph()` 不再内部创建并泄漏 Gallocr，而是由 `InferenceEngine` 在 `init()` 时创建，`deinit()` 时释放。`IncContext.resetFull()` 可触发 Gallocr 释放与重建，回收计算图内存。
+- **IncContext**：增量解码的 `ctx_inc` 在占用率超过 80% 时自动 `resetFull()` 回收（含 Gallocr 内存）。
+- **三阶段 prefill**：每个 pass 之间调用 `graph_ctx.reset()` 释放上一 pass 的临时张量和图节点；使用传入的 gallocr（非局部创建）。
 
 ---
 
 ## 🔌 扩展指南
+
 
 ### 新增文本 LLM 架构
 
