@@ -627,8 +627,7 @@ fn fillSinusoidalPosEmb(tensor: *ggml.Tensor, n_pos: usize, n_embd: usize, max_p
             data[p * n_embd + i + num_timescales] = @cos(scaled);
         }
     }
-    log.debug("pos_emb: loop={d}, n_embd={d}, max_past={d} [0-4]=[{d}, {d}, {d}, {d}]",
-        .{ n_pos, n_embd, max_past, data[0], data[1], data[2], data[3] });
+    log.debug("pos_emb: loop={d}, n_embd={d}, max_past={d} [0-4]=[{d}, {d}, {d}, {d}]", .{ n_pos, n_embd, max_past, data[0], data[1], data[2], data[3] });
     tensor.dataSet(f32, data) catch {};
 }
 

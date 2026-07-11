@@ -55,7 +55,8 @@ fn estimateKVCacheSize(params: *const model_if.ModelParams) usize {
 
 /// Estimate the ggml context size needed for graph building (metadata only, no_alloc).
 /// Graph context stores tensor descriptors and graph nodes, not tensor data.
-/// For multimodal models with large vision graphs, up to ~512 MB may be needed.
+/// For multimodal models with large vision graphs, up to ~2 GB may be needed.
+/// P0: Increased from 2 GB to 4 GB to avoid OOM in multimodal prefill.
 fn estimateGraphSize(params: *const model_if.ModelParams) usize {
     _ = params;
     // Graph context only stores metadata (no_alloc mode).

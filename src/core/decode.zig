@@ -86,13 +86,13 @@ pub fn runDecodeLoop(
     defer eog_detect_buf.deinit(allocator);
     const t_tg_start = engine_common.currentTimeMs();
 
-        // 内存压力检查：当上下文使用率超过 80% 时触发回收
-        // 注意：如果 gallocr 已预规划（galloc_reserved），resetFull 会破坏哈希表，
-        // 因此仅在非预规划状态下执行回收。
-        if (!inc_ctx.galloc_reserved and inc_ctx.memRatio() >= 0.80) {
-            logger.warn("Decode loop: context {d:.0}% full, triggering reset", .{inc_ctx.memRatio() * 100});
-            inc_ctx.resetFull();
-        }
+    // 内存压力检查：当上下文使用率超过 80% 时触发回收
+    // 注意：如果 gallocr 已预规划（galloc_reserved），resetFull 会破坏哈希表，
+    // 因此仅在非预规划状态下执行回收。
+    if (!inc_ctx.galloc_reserved and inc_ctx.memRatio() >= 0.80) {
+        logger.warn("Decode loop: context {d:.0}% full, triggering reset", .{inc_ctx.memRatio() * 100});
+        inc_ctx.resetFull();
+    }
     while (gen_count < max_tokens) {
         if (tok.isEog(@intCast(current_token))) break;
 

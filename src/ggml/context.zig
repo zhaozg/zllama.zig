@@ -139,6 +139,29 @@ pub const Context = opaque {
         )));
     }
 
+    /// 获取 context 的内存使用详情（docs/MEMMGT.md §4.2）
+    /// 返回已用内存和总内存的元组
+    pub fn usage(self: *Context) struct { used: usize, total: usize, ratio: f64 } {
+        const used = self.usedMem();
+        const total = self.totalMem();
+        const ratio = if (total > 0)
+            @as(f64, @floatFromInt(used)) / @as(f64, @floatFromInt(total))
+        else
+            0.0;
+        return .{ .used = used, .total = total, .ratio = ratio };
+    }
+
+    /// 打印 context 内存使用详情（调试用）
+    pub fn printUsage(self: *Context, label: []const u8) void {
+        const u = self.usage();
+        std.log.debug("{s}: used={d:.1} MB / total={d:.1} MB ({d:.1}%)", .{
+            label,
+            @as(f64, @floatFromInt(u.used)) / (1024.0 * 1024.0),
+            @as(f64, @floatFromInt(u.total)) / (1024.0 * 1024.0),
+            u.ratio * 100.0,
+        });
+    }
+
     /// 获取 context 使用的内存大小
     pub fn usedMem(self: *Context) usize {
         return c.ggml_used_mem(@ptrCast(self));

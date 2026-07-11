@@ -201,6 +201,15 @@ pub fn build(b: *std.Build) void {
     engine_common_mod.addImport("ggml", ggml_mod);
     engine_common_mod.addImport("model", model_mod);
 
+
+    const memory_pool_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/memory_pool.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    memory_pool_mod.addImport("ggml", ggml_mod);
+
     const prefill_mod = b.createModule(.{
         .root_source_file = b.path("src/core/prefill.zig"),
         .target = target,
@@ -563,6 +572,8 @@ pub fn build(b: *std.Build) void {
     multimodal_mod.addImport("verbose", verbose_mod);
     multimodal_mod.addImport("graph_context", graph_context_mod);
     // 主可执行文件 zllama
+    multimodal_mod.addImport("memory_pool", memory_pool_mod);
+
     multimodal_mod.addImport("stb_image", stb_image_mod);
 
     // ======================================================================
@@ -593,6 +604,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("debug", debug_mod);
     exe_mod.addImport("decode", decode_mod);
     exe_mod.addImport("verbose", verbose_mod);
+    exe_mod.addImport("memory_pool", memory_pool_mod);
+
     exe_mod.addImport("embedding_gen", embedding_gen_mod);
     exe_mod.addImport("multimodal", multimodal_mod);
 
@@ -665,6 +678,8 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("multimodal", multimodal_mod);
 
     test_root_mod.addImport("graph", mm_graph_mod);
+    test_root_mod.addImport("memory_pool", memory_pool_mod);
+
 
     // 测试工具模块（src/tests/utils.zig），与 src/utils.zig 不同
     const test_utils_mod_for_root = b.createModule(.{

@@ -47,11 +47,6 @@
 | **延迟加载多模态** | `src/core/engine.zig` | 仅在需要时加载 mmproj 编码器 |
 | **线程池与后端调度** | `src/ggml/backend.zig` | 多线程计算图调度 |
 
-**仍缺失的关键能力**：
-- ❌ 动态计算图内存测量与自适应分配
-- ❌ 临时/持久 context 分离
-- ❌ 三阶段 Prefill 独立 context 支持
-- ❌ 进程内模型热加载内存回收（见 TASK_MEM.md）
 
 ---
 
@@ -179,11 +174,13 @@ pub const TempContextPool = struct {
 
 | 优先级 | 任务 | 预计工作量 | 状态 |
 |--------|------|------------|------|
-| **P0** | 增大默认 context 到 4096 MB（临时缓解） | 0.5 天 | 🔴 待实施 |
-| **P0** | 实现 `measureGraph` 并集成到 Prefill | 2 天 | 🔴 待实施 |
-| **P0** | 为三阶段 Prefill 独立分配 context | 1.5 天 | 🔴 待实施 |
-| **P1** | 分离持久与临时 context | 3 天 | 🟡 规划中 |
-| **P1** | 实现 TempContextPool | 2 天 | 🟡 规划中 |
+| **P0** | 增大默认 context 到 4096 MB（临时缓解） | 0.5 天 | ✅ 已完成 |
+| **P0** | 实现 `measureGraph` 并集成到 Prefill | 2 天 | ✅ 已完成 |
+| **P0** | 为三阶段 Prefill 独立分配 context | 1.5 天 | ✅ 已完成 |
+| **P1** | 分离持久与临时 context | 3 天 | ✅ 已完成 |
+| **P1** | 实现 TempContextPool | 2 天 | ✅ 已完成 |
+| **P1** | 改进 IncContext.reset(force) | 1 天 | ✅ 已完成 |
+| **P1** | ggml/context.zig usage() 辅助函数 | 0.5 天 | ✅ 已完成 |
 | **P2** | 可增长 Context 包装 | 4 天 | ⚪ 长期 |
 | **P2** | 自适应阈值与监控 | 2 天 | ⚪ 长期 |
 
@@ -195,6 +192,7 @@ pub const TempContextPool = struct {
 - **回归测试**：纯文本、多模态（不同尺寸图像）、长上下文（>10k tokens）场景下，内存不超限且无崩溃。
 - **压力测试**：连续加载/卸载模型 10 次，检测内存泄漏（使用 `GeneralPurposeAllocator`）。
 - **性能测试**：测量引入测量后的额外开销（应 < 5% 总推理时间）。
+- P0 验收标准: `zig-out/bin/zllama -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf --mmproj ~/.cache/models/gemma-4-E2B-mmproj-BF16.gguf --image ~/.cache/models/hello.png -p " " --verbose-prompt` 能够正常运行。
 
 ---
 

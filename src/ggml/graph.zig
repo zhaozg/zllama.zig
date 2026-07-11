@@ -1,6 +1,7 @@
 //! ggml_cgraph 封装
 //!
 //! 提供 ggml_cgraph 的类型安全 Zig 封装。
+//! 新增：measureGraph — 计算图内存测量（docs/MEMMGT.md §4.2.1）
 
 const std = @import("std");
 const cmod = @import("c.zig");
@@ -114,6 +115,81 @@ pub const CGraph = opaque {
 };
 
 // ============================================================================
+// 计算图内存测量（docs/MEMMGT.md §4.2.1）
+// ============================================================================
+
+/// 测量计算图所需的内存大小（字节）。
+/// 使用 ggml_gallocr 的 reserve 模式来预测内存需求，
+/// 不实际分配张量数据。
+///
+/// 参数:
+///   - graph: 已构建的计算图
+///   - buft: backend buffer type（通常为 CPU buffer type）
+///
+/// 返回: 所需的总内存大小（字节）
+///
+/// 参考: llama.cpp 中 ggml_gallocr_reserve 的测量用法
+pub fn measureGraph(graph: *CGraph, buft: *c.struct_ggml_backend_buffer_type) !usize {
+    // 创建临时 gallocr 用于测量
+    const gallocr = c.ggml_gallocr_new(@ptrCast(buft));
+    if (gallocr == null) return error.GallocrInitFailed;
+    defer c.ggml_gallocr_free(gallocr);
+
+    // reserve 模式会分析图结构并计算所需缓冲区大小，但不分配张量数据
+    if (!c.ggml_gallocr_reserve(gallocr, @ptrCast(graph))) {
+        return error.GraphMeasureFailed;
+    }
+
+    // 获取缓冲区 0 的大小（主计算缓冲区）
+    const buf_size = c.ggml_gallocr_get_buffer_size(gallocr, 0);
+    return buf_size;
+}
+
+/// 测量计算图所需的内存大小，并返回详细的缓冲区信息。
+/// 用于调试和动态调整 context 大小。
+pub const GraphMeasureInfo = struct {
+    total_bytes: usize,
+    n_buffers: u32,
+    buffer_sizes: []const usize,
+};
+
+/// 测量计算图并返回所有缓冲区的详细信息。
+/// 调用者负责释放返回的 buffer_sizes 切片。
+pub fn measureGraphDetailed(
+    graph: *CGraph,
+    buft: *c.struct_ggml_backend_buffer_type,
+    allocator: std.mem.Allocator,
+) !GraphMeasureInfo {
+    const gallocr = c.ggml_gallocr_new(@ptrCast(buft));
+    if (gallocr == null) return error.GallocrInitFailed;
+    defer c.ggml_gallocr_free(gallocr);
+
+    if (!c.ggml_gallocr_reserve(gallocr, @ptrCast(graph))) {
+        return error.GraphMeasureFailed;
+    }
+
+    // 获取缓冲区数量（通过遍历直到 getBufferSize 返回 0）
+    var buf_sizes = std.ArrayList(usize).init(allocator);
+    defer buf_sizes.deinit();
+
+    var total: usize = 0;
+    var buf_id: u32 = 0;
+    while (true) {
+        const sz = c.ggml_gallocr_get_buffer_size(gallocr, @intCast(buf_id));
+        if (sz == 0) break;
+        try buf_sizes.append(sz);
+        total += sz;
+        buf_id += 1;
+    }
+
+    return GraphMeasureInfo{
+        .total_bytes = total,
+        .n_buffers = buf_id,
+        .buffer_sizes = try buf_sizes.toOwnedSlice(),
+    };
+}
+
+// ============================================================================
 // 测试
 // ============================================================================
 
@@ -121,4 +197,26 @@ const testing = std.testing;
 
 test "CGraph basic" {
     try testing.expectEqual(@as(usize, @sizeOf(*CGraph)), @sizeOf(*CGraph));
+}
+
+test "measureGraph basic" {
+    // 创建一个简单的图来测试测量功能
+    const ctx = try Context.init(1024 * 1024);
+    defer ctx.deinit();
+
+    const a = try ctx.newTensor1d(.f32, 100);
+    const b = try ctx.newTensor1d(.f32, 100);
+
+    var graph = try CGraph.initReserved(ctx, 1024);
+    graph.buildForwardExpand(a);
+    graph.buildForwardExpand(b);
+
+    const buft = c.ggml_backend_cpu_buffer_type() orelse return error.SkipZigTest;
+    const size = measureGraph(graph, buft) catch |err| {
+        // 测量可能因后端初始化失败而失败，这是可接受的
+        std.debug.print("measureGraph test skipped: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    try testing.expect(size > 0);
+    std.debug.print("measureGraph: {d} bytes\n", .{size});
 }

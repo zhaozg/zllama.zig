@@ -16,6 +16,10 @@
 
 const std = @import("std");
 
+pub const GraphMeasureInfo = @import("graph.zig").GraphMeasureInfo;
+pub const measureGraph = @import("graph.zig").measureGraph;
+pub const measureGraphDetailed = @import("graph.zig").measureGraphDetailed;
+
 // ============================================================================
 // 重新导出所有子模块
 // ============================================================================

@@ -47,15 +47,31 @@ pub fn scanPlaceholders(
     const SearchEntry = struct { str: []const u8, media_type: types.MediaType };
     var searches: [8]SearchEntry = undefined;
     var n_searches: usize = 0;
-    searches[n_searches] = .{ .str = types.IMAGE_PLACEHOLDER, .media_type = .image }; n_searches += 1;
-    searches[n_searches] = .{ .str = types.IMAGE_PLACEHOLDER_ALT, .media_type = .image }; n_searches += 1;
-    searches[n_searches] = .{ .str = types.AUDIO_PLACEHOLDER, .media_type = .audio }; n_searches += 1;
-    searches[n_searches] = .{ .str = types.AUDIO_PLACEHOLDER_ALT, .media_type = .audio }; n_searches += 1;
+    searches[n_searches] = .{ .str = types.IMAGE_PLACEHOLDER, .media_type = .image };
+    n_searches += 1;
+    searches[n_searches] = .{ .str = types.IMAGE_PLACEHOLDER_ALT, .media_type = .image };
+    n_searches += 1;
+    searches[n_searches] = .{ .str = types.AUDIO_PLACEHOLDER, .media_type = .audio };
+    n_searches += 1;
+    searches[n_searches] = .{ .str = types.AUDIO_PLACEHOLDER_ALT, .media_type = .audio };
+    n_searches += 1;
     if (custom_markers) |cm| {
-        if (cm.img_beg.len > 0) { searches[n_searches] = .{ .str = cm.img_beg, .media_type = .image }; n_searches += 1; }
-        if (cm.img_end.len > 0) { searches[n_searches] = .{ .str = cm.img_end, .media_type = .image }; n_searches += 1; }
-        if (cm.aud_beg.len > 0) { searches[n_searches] = .{ .str = cm.aud_beg, .media_type = .audio }; n_searches += 1; }
-        if (cm.aud_end.len > 0) { searches[n_searches] = .{ .str = cm.aud_end, .media_type = .audio }; n_searches += 1; }
+        if (cm.img_beg.len > 0) {
+            searches[n_searches] = .{ .str = cm.img_beg, .media_type = .image };
+            n_searches += 1;
+        }
+        if (cm.img_end.len > 0) {
+            searches[n_searches] = .{ .str = cm.img_end, .media_type = .image };
+            n_searches += 1;
+        }
+        if (cm.aud_beg.len > 0) {
+            searches[n_searches] = .{ .str = cm.aud_beg, .media_type = .audio };
+            n_searches += 1;
+        }
+        if (cm.aud_end.len > 0) {
+            searches[n_searches] = .{ .str = cm.aud_end, .media_type = .audio };
+            n_searches += 1;
+        }
     }
 
     var pos: usize = 0;
