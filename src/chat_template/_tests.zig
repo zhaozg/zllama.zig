@@ -577,9 +577,9 @@ test "resolve: GGUF Gemma4 template routes to Jinja rendering" {
     var tmpl = try resolve(testing.allocator, source, .gemma4, null, true);
     defer tmpl.deinit(testing.allocator);
 
-    // Should be .unknown with Jinja enabled (GGUF template renders via minja)
-    try testing.expectEqual(TemplateKind.unknown, tmpl.kind);
-    try testing.expect(tmpl.jinja_enabled);
+    // Should be .gemma4 with Jinja disabled (known templates use built-in preset)
+    try testing.expectEqual(TemplateKind.gemma4, tmpl.kind);
+    try testing.expect(!tmpl.jinja_enabled);
 
     // Apply the template and verify it renders correctly with image placeholder
     const media = Media{
@@ -600,6 +600,10 @@ test "resolve: GGUF Gemma4 template routes to Jinja rendering" {
     // And the Gemma4 turn markers
     try testing.expect(std.mem.indexOf(u8, result, "<|turn>user") != null);
     try testing.expect(std.mem.indexOf(u8, result, "<turn|>") != null);
+    // Generation prompt should be present
+    try testing.expect(std.mem.indexOf(u8, result, "<|turn>model") != null);
+    // No system turn (no system prompt)
+    try testing.expect(std.mem.indexOf(u8, result, "<|turn>system") == null);
 }
 
 test "resolve: unknown GGUF template uses Jinja fallback" {

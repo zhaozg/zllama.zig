@@ -290,8 +290,9 @@ pub fn kindForArchitecture(arch: model.Architecture, model_name: ?[]const u8) Te
 /// Priority chain: custom > GGUF built-in > preset > arch default > ChatML fallback
 ///
 /// When source is .gguf_builtin or .custom and jinja_enabled:
-///   1. Route to .unknown with jinja_enabled=true so apply() tries Jinja rendering
-///   2. Jinja failing → falls back to vtable (ChatML/raw within applyUnknown)
+///   - Known templates (detected by detectKind) use the built-in Zig preset
+///     which has been carefully aligned with llama.cpp behavior.
+///   - Unknown templates try Jinja rendering, falling back to vtable on failure.
 ///
 /// When jinja_enabled is false:
 ///   1. detectKind → known preset (uses built-in Zig implementation)
@@ -299,7 +300,7 @@ pub fn kindForArchitecture(arch: model.Architecture, model_name: ?[]const u8) Te
 ///   3. If arch default also unknown → ChatML fallback (inside apply())
 ///
 /// model_name is optional and used to detect TinyLlama (which reports as "llama" arch).
-/// jinja_enabled: when true, GGUF/custom template strings are routed to Jinja rendering.
+/// jinja_enabled: when true, unknown GGUF/custom template strings are routed to Jinja rendering.
 pub fn resolve(
     allocator: std.mem.Allocator,
     source: TemplateSource,
@@ -317,15 +318,22 @@ pub fn resolve(
             };
         },
         .gguf_builtin => |tmpl_str| {
-            // When Jinja is enabled, always try Jinja rendering first
-            // (the GGUF template is the canonical format; detectKind is only a hint)
+            // When Jinja is enabled, detect the template kind first.
+            // Known templates (gemma4, chatml, llama3, etc.) use the built-in
+            // Zig preset which has been precisely aligned with llama.cpp.
+            // Unknown templates try Jinja rendering, falling back to vtable.
             if (jinja_enabled) {
                 const hint = detectKind(tmpl_str);
                 if (hint != .unknown) {
-                    log.info("GGUF template ({d} bytes) hint={s}, will use Jinja rendering (preferred)", .{ tmpl_str.len, @tagName(hint) });
-                } else {
-                    log.info("GGUF chat template ({d} bytes), will try Jinja rendering", .{tmpl_str.len});
+                    log.info("GGUF template ({d} bytes) detected as {s}, using built-in preset", .{ tmpl_str.len, @tagName(hint) });
+                    return Template{
+                        .kind = hint,
+                        .source = source,
+                        .vtable = vtableForKind(hint),
+                        .jinja_enabled = false,
+                    };
                 }
+                log.info("GGUF chat template ({d} bytes), will try Jinja rendering", .{tmpl_str.len});
                 return Template{
                     .kind = .unknown,
                     .source = source,
