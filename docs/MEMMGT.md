@@ -1,408 +1,223 @@
-# zllama.zig 内存管理与启动优化指南
+# zllama.zig 内存管理与优化指南（修订版）
 
-## 🧱 当前内存使用热点
-
-从 `zllama.zig` 日志和代码结构看，主要内存消耗在：
-
-| 组件 | 规格 | 估算内存 |
-|------|------|----------|
-| **KV Cache** | 35 层 × 512 上下文 × 2（K/V） | ~2GB（取决于精度） |
-| **模型权重** | 4-bit 量化 | ~4GB |
-| **输入张量** | token 序列 + 图像/音频嵌入（如 784×1536） | 数十 MB 至数百 MB |
-| **中间激活** | 前向传播中的临时张量 | 波动较大 |
-| **分配开销** | 频繁的 `std.ArrayList` 扩展、临时缓冲区 | 碎片化导致额外开销 |
+> **目标**：构建可预测、可扩展、高效的内存体系，支撑多模态大模型推理。
+> **适用版本**：基于 Zig 0.16.0 + ggml v0.16，zllama.zig 当前主分支。
 
 ---
 
-## ✅ 已完成的优化
+## 1. 内存使用热点与瓶颈分析
 
-### ✅ mmap 内存映射加载模型（P0）
+### 1.1 典型工作负载内存构成
 
-**状态**：✅ 已完成（`src/core/engine_common.zig`）
+| 组件 | 典型规格（Gemma 4 E2B） | 估算大小 | 生命周期 |
+|------|--------------------------|----------|-----------|
+| **模型权重** | 4-bit 量化（Q4_K_M），约 6.7B 参数 | ~4.0 GB | 进程生命周期（只读） |
+| **KV Cache** | 35 层，max_seq_len=131072，head_dim=128，K/V 各 f16 | 35×131072×128×2×2字节 = ~2.3 GB（但实际根据上下文增长） | 会话生命周期（可扩展） |
+| **mmproj 多模态权重** | 视觉/音频编码器权重（f16） | ~0.5 GB | 进程生命周期（只读） |
+| **输入嵌入** | 文本 token + 媒体 token（如 784×1536 f32） | 784×1536×4 ≈ 4.8 MB | 临时（仅当前 Prefill） |
+| **中间激活** | 每层 Q/K/V、注意力分数、FFN 中间值等 | 高峰可达 **2–3 GB** | 临时（单次计算图执行） |
+| **ggml_context 元数据** | 张量描述、节点指针等 | 数十 MB | 随 context 生命周期 |
 
-使用 `std.Io.File.createMemoryMap`（Zig 0.16 原生 API）实现零拷贝模型加载：
+**关键结论**：**中间激活**是内存波动的最大来源，尤其在多模态长序列（如图像 token 数量大）和非因果注意力场景下，峰值可能超过模型权重或 KV Cache。
 
-- 模型文件（GGUF）通过 mmap 映射到虚拟地址空间，无需全量读入物理内存
-- 启动速度提升 2-3 倍（大文件场景尤为显著）
-- 自动回退：如果 mmap 失败（如文件系统不支持），自动降级为传统 `readFileToMemory`
-- 同时应用于主模型和 mmproj 多模态编码器加载
+### 1.2 当前面临的主要问题
 
-```zig
-// 使用示例
-var mapped_file = try engine_common.mmapFile(io, allocator, model_path);
-defer mapped_file.deinit(io);
-const gguf_data = mapped_file.data; // 零拷贝访问
+1. **ggml_context 固定尺寸**：当前 `Graph context` 硬编码为 2048 MB（见 `src/core/engine.zig`），在纯文本短序列时够用，但在多模态 Prefill 阶段（如 784 个图像 token + 35 层 transformer）所需临时张量超过 2.14 GB，导致 `ggml_new_object` 分配失败（如 Issue #XXX 所示）。
+
+2. **三阶段 Prefill 共用同一个 context**：Pass 1（文本前缀）的中间张量虽被重置，但底层内存池容量并未释放，导致 Pass 2 可用空间因碎片或残留占用而小于总容量。
+
+3. **缺乏峰值测量与动态调整**：未使用 `ggml_gallocr_alloc_graph` 的 `measure` 模式来准确预测所需内存，无法在运行时调整 context 大小。
+
+4. **持久与临时张量混用**：模型权重、位置编码等持久数据与每层的激活张量分配在同一 context 中，加剧了临时可用空间的不足。
+
+5. **`IncContext.reset()` 不彻底**：仅重置分配指针，不回收内存池，无法应对大临时张量场景。
+
+---
+
+## 2. 已完成的内存优化（现状评估）
+
+以下优化已实施，可继续保留：
+
+| 优化项 | 位置 | 说明 |
+|--------|------|------|
+| **mmap 加载模型** | `src/core/engine_common.zig` | 零拷贝加载 GGUF，减少内存占用和启动时间 |
+| **Arena 管理 init 阶段** | `src/core/engine.zig` | 使用 ArenaAllocator 管理临时分配，初始化后自动释放 |
+| **KV Cache 预分配** | `src/kv_cache.zig` | 按最大序列长度预先分配，避免动态扩容开销 |
+| **WallTimer** | `src/core/engine_common.zig` | 使用 Zig 0.16 的 `std.Io.Clock` 实现高性能计时 |
+| **延迟加载多模态** | `src/core/engine.zig` | 仅在需要时加载 mmproj 编码器 |
+| **线程池与后端调度** | `src/ggml/backend.zig` | 多线程计算图调度 |
+
+**仍缺失的关键能力**：
+- ❌ 动态计算图内存测量与自适应分配
+- ❌ 临时/持久 context 分离
+- ❌ 三阶段 Prefill 独立 context 支持
+- ❌ 进程内模型热加载内存回收（见 TASK_MEM.md）
+
+---
+
+## 3. 设计原则与目标
+
+### 3.1 核心设计原则
+
+- **可测量性**：任何计算图构建前必须能准确预测内存需求。
+- **弹性分配**：context 大小应随输入动态调整，而非硬编码。
+- **关注点分离**：持久数据（权重、KV）与临时数据（激活）使用独立的分配器。
+- **可回收性**：确保 `deinit` 能完全释放所有内存，支持进程内模型热切换。
+- **零欠载**：绝不因内存不足而崩溃（通过测量 + fallback 机制）。
+
+### 3.2 架构图（新增内存管理层）
+
 ```
-
-### ✅ WallTimer：基于 std.Io.Clock 的高性能计时器（P1）
-
-**状态**：✅ 已完成（`src/core/engine_common.zig`）
-
-替代已移除的 `std.time.Timer`，使用 Zig 0.16 的 `std.Io.Clock.now(.awake, io)`：
-
-```zig
-var timer = try engine_common.WallTimer.start(io);
-// ... 要计时的代码 ...
-const elapsed_ns = try timer.read(); // 纳秒
-const elapsed_ms = try timer.readMs(); // 毫秒
-```
-
-### ✅ Arena 管理 init 阶段分配（P0）
-
-**状态**：✅ 已完成（`src/core/engine.zig`）
-
-在 `InferenceEngine.init()` 中使用 `std.heap.ArenaAllocator` 管理临时分配：
-
-```zig
-var init_arena = std.heap.ArenaAllocator.init(allocator);
-defer init_arena.deinit();
-// 所有临时分配使用 arena_alloc，init 结束时一次性释放
+┌───────────────────────────────────────────────────────────────┐
+│                        InferenceEngine                        │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐  │
+│  │ 权重 Context  │  │  KV Cache     │  │  临时 Context池   │  │
+│  │ (只读, mmap)  │  │ (独立分配器)  │  │ (可重置/可扩容)   │  │
+│  └───────────────┘  └───────────────┘  └───────────────────┘  │
+│                                                               │
+│  每个 Prefill/Decode 阶段：                                   │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │  1. 构建计算图（无分配）                                │  │
+│  │  2. ggml_gallocr_measure() → 获得所需字节数             │  │
+│  │  3. 若 > 当前临时 context 容量 → 扩展或切换             │  │
+│  │  4. 分配并执行                                          │  │
+│  │  5. 释放临时 context（或 reset）                        │  │
+│  └─────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 📌 代码级优化建议（基于 Zig 0.16）
+## 4. 改进方案（分阶段实施）
 
-### 1. 用 Arena 管理请求生命周期（Zig 0.16 增强）
+### 4.1 短期修复（立即生效，解决崩溃）
 
-Zig 0.16 的 `std.heap.ArenaAllocator` 支持 `reset` 方法，可在同一 Arena 内复用内存，避免重复分配。
+| 措施 | 具体操作 | 预期效果 |
+|------|----------|----------|
+| **增大默认 Graph context** | 将 `src/core/engine.zig` 中 `graph_memory_mb` 从 2048 提升至 4096（或根据 `max_seq_len` 动态计算：`max_seq_len * n_embd * 4`） | 暂时避免多模态崩溃，但浪费内存 |
+| **Pass 前强制重置 context** | 在 `threeStagePrefill` 的每个 Pass 之前调用 `ggml_context_reset` 并重新创建必要持久张量 | 减少碎片，提高可用空间 |
+| **增加可用空间余量** | 在 `ggml_new_object` 失败前打印 context 使用详情（实现 `ggml_context_usage` 辅助函数） | 便于调试 |
 
-**实现**：
+> **注意**：这些是临时措施，长期需采用下列重构。
+
+### 4.2 中期重构（核心设计调整）
+
+#### 4.2.1 引入计算图内存测量
+
+- 在 `src/ggml/graph.zig` 中封装 `measureGraph(graph: *CGraph) !usize`，调用 `ggml_gallocr_alloc_graph` 的测量模式（通过设置 `ggml_allocr_is_measure`）。
+- 在 `src/core/prefill.zig` 和 `src/core/decode.zig` 中，在构建图后、分配前先测量，若需求超过当前 context 容量，则动态扩展或创建新 context。
+
+#### 4.2.2 为每个 Prefill 阶段分配独立 context
+
+- 在 `threeStagePrefill` 中，为 Pass 1、Pass 2、Pass 3 分别创建临时 `ggml_context`（通过 `ggml_context_init`），Pass 完成后立即 `ggml_context_free`。
+- 利用测量值精确分配所需大小（加少量余量），避免浪费。
+
+#### 4.2.3 分离持久与临时 context
+
+- **持久 Context**：存放模型权重、位置编码、固定嵌入等，生命周期与 `InferenceEngine` 一致，使用 `ggml_context` 或 `ggml_backend_buffer`。
+- **临时 Context 池**：管理一组可变大小 context，按需取用，支持 `reset` 和 `free`。
+
+#### 4.2.4 改进 `IncContext.reset()`
+
+- 增加 `reset(force: bool)` 参数：当 `force=true` 时，除了重置指针，还调用 `ggml_context_free` + `ggml_context_init` 重新创建，彻底回收内存（代价较高，仅在大序列重置时使用）。
+
+### 4.3 长期优化（系统级弹性）
+
+- **可增长 Context 包装**：实现 `GrowingContext`，当容量不足时自动创建更大的新 context，复制必要的持久数据（如 token 嵌入），然后释放旧 context。
+- **与 Zig Arena 结合**：使用 `std.heap.ArenaAllocator` 管理 `ggml_tensor` 元数据，而数据区由 ggml 管理，统一分配策略。
+- **自适应阈值**：根据当前序列长度和模型参数，动态计算所需内存，并提前调整预分配大小（例如在 `engine.generate` 入口处）。
+- **内存监控与告警**：集成 `ggml_backend_sched` 的内存使用统计，当使用率 >90% 时触发警告并尝试回收。
+
+---
+
+## 5. 代码修改清单
+
+### 5.1 新增/修改文件
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `src/ggml/graph.zig` | 新增 | `measureGraph`、`measureCGraph` |
+| `src/core/memory_pool.zig` | 新增 | 临时 context 池管理 |
+| `src/core/engine.zig` | 修改 | 分离权重、KV、临时 context，使用测量逻辑 |
+| `src/core/prefill.zig` | 修改 | 采用独立 context + 测量 |
+| `src/core/decode.zig` | 修改 | 采用独立 context + 测量 |
+| `src/core/graph_context.zig` | 修改 | `reset(force)` 增强 |
+| `src/ggml/context.zig` | 新增 | `usage()` 辅助函数，`reset()` 增强 |
+| `src/core/engine_common.zig` | 修改 | 移除固定 context 大小硬编码，改用动态 |
+
+### 5.2 关键接口设计（示例）
 
 ```zig
-pub fn generateWithImage(...) !void {
-    // 使用 page_allocator 作为后端，支持大内存分配
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    // 所有临时 ArrayList 用 alloc 分配
-    var tokens = std.ArrayList(u32).initCapacity(alloc, init_capacity);
-    var embeddings = try alloc.alloc(f32, n_embd * n_frames);
-
-    // 如果需要多次调用 reset 复用 Arena（如批量请求）
-    // arena.reset(.retain_capacity); // Zig 0.16 支持保留容量
+// src/ggml/graph.zig
+pub fn measureGraph(ctx: *Context, graph: *CGraph) !usize {
+    // 创建临时 gallocr 并设置为测量模式
+    var gallocr = try Gallocr.init(...);
+    defer gallocr.free();
+    gallocr.setMeasure(true);
+    _ = gallocr.allocGraph(graph);
+    return gallocr.getRequiredSize();
 }
-```
 
-**进阶用法**：将 Arena 拆分为**前端**（请求级）和**后端**（会话级），前者可频繁重置，后者管理长生命周期数据（如模型元数据）。
-
-**新增 Zig 0.16 API**：
-- `std.heap.ArenaAllocator.reset(.retain_capacity)`：保留已分配内存，加快后续分配
-- `std.heap.ArenaAllocator.release()`：释放所有内存但不释放 Arena 本身
-
----
-
-### 2. KV Cache：分块环形缓冲区（Zig 0.16 切片增强）
-
-**设计**：
-- 将 KV Cache 分成固定大小的块（如 64 tokens）
-- 使用 **环形缓冲区** 管理块索引
-- 块内使用 `std.mem.Allocator.alignedAlloc` 确保对齐
-
-**实现示例**（`src/core/kv_cache.zig`）：
-
-```zig
-const BlockSize = 64;
-const Alignment = 32; // AVX2 对齐
-
-pub const KVCache = struct {
-    blocks: []Block,
-    head: usize = 0,
-    tail: usize = 0,
-    count: usize = 0,
-    max_blocks: usize,
-
-    const Block = struct {
-        k: []align(Alignment) f32,
-        v: []align(Alignment) f32,
-        in_use: bool,
-    };
-
-    pub fn init(alloc: std.mem.Allocator, n_layers: usize, n_heads: usize, head_dim: usize, max_seq: usize) !KVCache {
-        const n_blocks = max_seq / BlockSize + 1;
-        const blocks = try alloc.alloc(Block, n_blocks);
-        for (blocks) |*b| {
-            // alignedAlloc 确保对齐
-            b.k = try alloc.alignedAlloc(f32, Alignment, n_layers * n_heads * head_dim * BlockSize);
-            b.v = try alloc.alignedAlloc(f32, Alignment, n_layers * n_heads * head_dim * BlockSize);
-            b.in_use = false;
-        }
-        return .{
-            .blocks = blocks,
-            .max_blocks = n_blocks,
-        };
+// src/core/memory_pool.zig
+pub const TempContextPool = struct {
+    allocator: std.mem.Allocator,
+    contexts: std.ArrayList(*Context),
+    // 按大小分级管理
+    pub fn acquire(self: *TempContextPool, min_size: usize) !*Context {
+        // 寻找大小 >= min_size 的空闲 context，若无则创建新
     }
-
-    pub fn push(self: *KVCache, k: []const f32, v: []const f32) !void {
-        const idx = self.head % self.max_blocks;
-        const block = &self.blocks[idx];
-        if (block.in_use) {
-            // 覆盖最旧的块（环形缓冲区）
-            self.tail += 1;
-        }
-        @memcpy(block.k[0..k.len], k);
-        @memcpy(block.v[0..v.len], v);
-        block.in_use = true;
-        self.head += 1;
-        self.count = @min(self.count + 1, self.max_blocks);
+    pub fn release(self: *TempContextPool, ctx: *Context) void {
+        ctx.reset(true); // 彻底重置
+        // 放回池中
     }
 };
 ```
 
-**Zig 0.16 特性**：
-- `@memcpy` 代替 `std.mem.copy`，更简洁
-- `std.mem.Allocator.alignedAlloc` 返回对齐内存
+---
+
+## 6. 实施优先级与路线图
+
+| 优先级 | 任务 | 预计工作量 | 状态 |
+|--------|------|------------|------|
+| **P0** | 增大默认 context 到 4096 MB（临时缓解） | 0.5 天 | 🔴 待实施 |
+| **P0** | 实现 `measureGraph` 并集成到 Prefill | 2 天 | 🔴 待实施 |
+| **P0** | 为三阶段 Prefill 独立分配 context | 1.5 天 | 🔴 待实施 |
+| **P1** | 分离持久与临时 context | 3 天 | 🟡 规划中 |
+| **P1** | 实现 TempContextPool | 2 天 | 🟡 规划中 |
+| **P2** | 可增长 Context 包装 | 4 天 | ⚪ 长期 |
+| **P2** | 自适应阈值与监控 | 2 天 | ⚪ 长期 |
 
 ---
 
-### 3. 利用 `comptime` 静态确定张量形状（Zig 0.16 增强）
+## 7. 验证与测试标准
 
-Zig 0.16 允许在 `comptime` 块中使用更复杂的表达式，适合生成预计算的滤波器系数或位置编码。
-
-**示例**（`src/audio/mel.zig`）：
-
-```zig
-const MEL_BINS = comptime 128;
-const N_FFT = comptime 512;
-
-// 在编译期生成梅尔滤波器组（利用 Zig 0.16 的 comptime 浮点运算增强）
-const FILTERBANK: [MEL_BINS][N_FFT / 2 + 1]f32 = comptime blk: {
-    var fb: [MEL_BINS][N_FFT / 2 + 1]f32 = undefined;
-    for (&fb, 0..) |*row, i| {
-        // 生成第 i 个梅尔滤波器的系数
-        for (row, 0..) |*coef, j| {
-            coef.* = computeMelCoeff(i, j);
-        }
-    }
-    break :blk fb;
-};
-```
-
-**在 Engine 中静态分配**：
-
-```zig
-// 利用 comptime 将模型参数转为编译期常量
-const MAX_SEQ = 2048;
-var hidden_buffer: [MAX_SEQ * n_embd]f32 align(64) = undefined;
-// 使用切片指向实际使用的部分
-const hidden_slice = hidden_buffer[0 .. actual_len];
-```
-
-**Zig 0.16 特性**：
-- `comptime` 块中支持更完整的浮点运算
-- `@as(*[N]T, @ptrCast(...))` 类型转换更安全
+- **单元测试**：新增 `test_measure_graph.zig`，验证测量值与实际分配一致。
+- **回归测试**：纯文本、多模态（不同尺寸图像）、长上下文（>10k tokens）场景下，内存不超限且无崩溃。
+- **压力测试**：连续加载/卸载模型 10 次，检测内存泄漏（使用 `GeneralPurposeAllocator`）。
+- **性能测试**：测量引入测量后的额外开销（应 < 5% 总推理时间）。
 
 ---
 
-### 4. 对齐与 SIMD 优化（Zig 0.16 增强）
+## 8. 常见问题与陷阱
 
-Zig 0.16 新增 `@alignOf` 和 `@alignCast` 的增强，以及 `std.mem.align` 辅助函数。
-
-**示例**（`src/mtmd/vision.zig`）：
-
-```zig
-const Alignment = 64; // AVX-512 对齐
-
-const aligned_embeddings = @as(*align(Alignment) [N]f32, @alignCast(embeddings));
-
-// 使用 std.mem.align 确保指针对齐
-const aligned_ptr = std.mem.align(Alignment, embeddings_ptr, @sizeOf(f32));
-```
-
-**GGML 集成**：
-
-```zig
-// 在 ggml 后端中指定对齐
-const buffer = try ggml_backend_buffer_type_alloc(
-    backend_type,
-    size,
-    Alignment, // 对齐参数
-);
-```
+- **ggml_context 与 backend 的交互**：测量模式可能不适用于所有后端，需在 CPU 后端上运行。
+- **`ggml_allocr` 的线程安全性**：测量和分配应在同一线程，避免竞争。
+- **与 KV Cache 的依赖**：KV Cache 的 context 独立于 graph context，需确保不干扰。
+- **多模态投影器权重**：mmproj 权重可放在权重 context 中，无需参与临时分配。
 
 ---
 
-### 5. 复用中间缓冲区（Zig 0.16 增强）
+## 9. 相关文档
 
-Zig 0.16 新增 `std.heap.MemoryPool`，适合管理固定大小对象的复用。
-
-**示例**（`src/ggml/graph.zig`）：
-
-```zig
-// 定义张量池
-const TensorPool = std.heap.MemoryPool(struct {
-    data: []f32,
-    shape: [4]usize,
-});
-
-var pool = TensorPool.init(alloc);
-defer pool.deinit();
-
-// 从池中获取张量，用完后放回
-const tensor = try pool.create();
-defer pool.destroy(tensor);
-```
-
-**通用内存池**：
-
-```zig
-const pool_size = 16 * 1024 * 1024; // 16MB
-var pool_buffer: [pool_size]u8 align(64) = undefined;
-var fba = std.heap.FixedBufferAllocator.init(&pool_buffer);
-const alloc = fba.allocator();
-// 将 alloc 作为临时分配器传递给 GGML 的 alloc 函数
-```
-
-**注意**：`ggml_allocr` 有自己的内存管理，需要适配。可以通过 `ggml_allocr_new` 传入自定义分配器。
+- `ARCHITECTURE.md` — 系统分层与数据流
+- `TASK_MEM.md` — 内存策略重构任务详细说明
+- `TECHNICAL_CHALLENGES.md` — 技术难重点
+- `GGML_BUILD.md` — ggml 构建集成
 
 ---
 
-### 6. 栈分配与 `std.heap.stackFallback`
+**修订历史**：
 
-Zig 0.16 新增 `std.heap.stackFallback`，优先使用栈上缓冲区，仅在不够时使用堆。
+- 2025-07-11：重写，基于多模态崩溃分析，增加动态测量与独立 context 策略。
+- 之前版本：初始创建（记录 mmap、Arena 等优化）。
 
-```zig
-var fallback = std.heap.stackFallback(1024 * 1024, std.heap.page_allocator); // 1MB 栈缓冲
-const alloc = fallback.get();
-
-// 使用 alloc 分配临时数据，优先使用栈
-const temp = try alloc.alloc(u8, 512); // 栈上分配
-// 如果超过 1MB，自动回退到堆
-```
-
----
-
-## ⚡ 启动性能优化
-
-### 1. 内存映射（mmap）加载 GGUF 文件 ✅
-
-**状态**：✅ 已完成
-
-使用 `std.Io.File.createMemoryMap`（Zig 0.16 原生 API）实现零拷贝模型加载。
-
-**实现**（`src/core/engine_common.zig`）：
-
-```zig
-pub fn mmapFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !MappedFile {
-    const cwd = std.Io.Dir.cwd();
-    const file = try cwd.openFile(io, path, .{ .mode = .read_only });
-    errdefer file.close(io);
-
-    const stat = try file.stat(io);
-    const file_size = @as(usize, @intCast(stat.size));
-
-    // 使用 std.Io.File.createMemoryMap 创建内存映射
-    const mmap = file.createMemoryMap(io, .{
-        .len = file_size,
-        .protection = .{ .read = true, .write = false },
-        .undefined_contents = false,
-        .populate = true,  // Linux: MAP_POPULATE 预读文件页
-    }) catch |err| {
-        // mmap 失败，回退到 read
-        const data = try readFileToMemory(io, allocator, path);
-        file.close(io);
-        return MappedFile{ .data = data, .is_mmap = false, ... };
-    };
-
-    return MappedFile{ .data = mmap.memory, .file = file, .mmap = mmap, .is_mmap = true, ... };
-}
-```
-
-**Zig 0.16 特性**：`std.Io.File.createMemoryMap` 是 Zig 0.16 新增的原生内存映射 API，跨平台支持（包括 Windows）。
-
-### 2. 延迟加载多模态编码器 ✅
-
-**状态**：✅ 已完成
-
-```zig
-// 使用 Zig 0.16 的选项类型
-var vision_encoder: ?*VisionEncoder = null;
-
-if (args.image_path) |path| {
-    vision_encoder = try engine.initVisionEncoder(path);
-}
-```
-
-### 3. 编译期预计算 Tokenizer 合并规则（延后）
-
-**构建脚本**（`build.zig`）：
-
-```zig
-// 在构建时解析 GGUF 的 tokenizer.ggml.merges
-const merges = try parseMergesFromGGUF("model.gguf");
-const embedded_merges = try generateZigHashTable(merges);
-// 写入到 src/tokenizer/merges.zig
-try std.fs.cwd().writeFile("src/tokenizer/merges.zig", embedded_merges);
-```
-
-**运行时**：直接 `@import("merges.zig")`，避免解析 50 万条规则。
-
-### 4. 使用 `GeneralPurposeAllocator` 检测内存问题
-
-Zig 0.16 的 `std.heap.GeneralPurposeAllocator` 在 Debug 模式下提供内存泄漏检测，在 Release 模式下零开销。
-
-```zig
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-defer _ = gpa.deinit();
-const alloc = gpa.allocator();
-// 在 Debug 模式运行，检测内存泄漏
-```
-
-### 5. 耗时度量 ✅
-
-**状态**：✅ 已完成（`WallTimer` in `src/core/engine_common.zig`）
-
-在 Zig 0.16 中，标准库的时间处理 API 经历了重构。`std.time.Timer` 已被移除，使用 `std.Io.Clock` 替代。
-
-```zig
-// 使用 WallTimer（推荐）
-var timer = try engine_common.WallTimer.start(io);
-// ... 要计时的代码 ...
-const elapsed_ns = try timer.read(); // 纳秒
-const elapsed_ms = try timer.readMs(); // 毫秒
-
-// 或使用兼容旧 API 的 currentTimeMs()
-const t = engine_common.currentTimeMs();
-```
-
----
-
-## 🧪 验证与度量
-
-| 工具 | 用途 |
-|------|------|
-| `std.debug.print` | 打印分配统计 |
-| `valgrind --tool=massif` | 分析堆内存峰值 |
-| `heaptrack` | 可视化内存分配 |
-| `zig build --verbose` | 查看编译时内存 |
-
-**Zig 0.16 新增**：`std.mem.Allocator` 支持 `allocatedBytes` 方法，可实时统计分配量。
-
----
-
-## 📌 实施优先级
-
-| 优先级 | 优化项 | 预期收益 | 实施难度 | 状态 |
-|--------|--------|----------|----------|------|
-| **P0** | Arena 管理请求 | 减少碎片 30% | 低 | ✅ 已完成 |
-| **P0** | mmap 加载模型 | 启动速度 2-3 倍 | 中 | ✅ 已完成 |
-| **P1** | 延迟加载多模态 | 启动快 1-2 秒 | 低 | ✅ 已完成 |
-| **P1** | 预分配 KV Cache | 避免重分配 | 中 | ✅ 已完成 |
-| **P1** | WallTimer (std.Io.Clock) | 正确的时间测量 | 低 | ✅ 已完成 |
-| **P2** | 编译期 Tokenizer | 启动快 1-3 秒 | 高 | ⏳ 待实现 |
-| **P2** | SIMD 对齐优化 | 速度提升 5-10% | 中 | ⏳ 待实现 |
-| **P3** | 中间缓冲区复用 | 减少峰值内存 | 高 | ⏳ 待实现 |
-
----
-
-## 💎 总结
-
-Zig 0.16 提供了更强大的内存管理原语，使 `zllama.zig` 能够在以下方面超越 llama.cpp：
-
-1. **编译期预计算**：将运行时成本前移到编译期
-2. **精细的分配器组合**：Arena + 池化 + 栈回退
-3. **显式对齐控制**：SIMD 友好的数据结构
-4. **零开销调试**：GeneralPurposeAllocator 在 Release 下无额外成本
-
-已按 P0 → P1 的顺序完成核心优化，剩余 P2/P3 项按需推进。每项优化均通过 `zig build test` 验证（149/151 测试通过，2 个预存测试失败与优化无关）。
