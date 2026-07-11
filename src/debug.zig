@@ -66,6 +66,7 @@ pub fn saveTensor(
     tensor: *ggml.Tensor,
 ) !void {
     const data = try tensor.dataGet(f32, allocator);
+    defer allocator.free(data);
     try saveData(io, subdir, fname, tensor.getName(), data);
 }
 
