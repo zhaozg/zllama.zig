@@ -180,12 +180,10 @@ pub const Gemma4Graph = struct {
         input_tokens: ?*ggml.Tensor,
         causal: bool,
     ) !*ggml.Tensor {
-        // Skip per-layer embedding for non-causal (media) passes since
-        // input_tokens is null and the media tokens use pre-computed embeddings.
-        self.inp_per_layer = if (causal)
-            try self.buildPerLayerInputs(self.cur, input_tokens, n_tokens_i64)
-        else
-            null;
+        // Always build per-layer embedding inputs — matching llama.cpp gemma4.cpp:194-200.
+        // buildPerLayerInputs internally handles both token-based (input_tokens != null)
+        // and multimodal (input_tokens == null, padding token) paths.
+        self.inp_per_layer = try self.buildPerLayerInputs(self.cur, input_tokens, n_tokens_i64);
 
         for (self.weights.layers, 0..) |*layer, i| {
             self.cur = try self.buildLayer(layer, i, n_tokens_i64, start_pos, kv_cache_mgr, causal);
