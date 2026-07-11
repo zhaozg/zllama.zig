@@ -307,6 +307,9 @@ pub const MtmdVisionComparator = struct {
         });
 
         // Adapter removed: model.buildMM() is now a vtable function.
+        const prefill_buft = ggml.backendCpuBufferType();
+        var prefill_gallocr = try ggml.Gallocr.init(prefill_buft);
+        defer prefill_gallocr.free();
         const pr = try prefill.threeStagePrefill(
             graph_ctx,
             model,
@@ -320,6 +323,7 @@ pub const MtmdVisionComparator = struct {
             params,
             n_threads,
             self.allocator,
+            prefill_gallocr,
         );
         const our_logits = pr.logits;
 

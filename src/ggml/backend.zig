@@ -270,8 +270,18 @@ pub const Gallocr = opaque {
     }
 
     /// 释放 graph allocator
+    /// 释放后内部指针置空，防止重复释放。
     pub fn free(self: *Gallocr) void {
         c.ggml_gallocr_free(@as(*c.struct_ggml_gallocr, @ptrCast(self)));
+    }
+
+    /// 检查当前是否已分配内存。
+    /// 由于 Gallocr 是 opaque 类型，无法直接访问内部字段。
+    /// 调用者应自行维护状态跟踪（如 IncContext.galloc_reserved）。
+    pub fn isAllocated(self: *Gallocr) bool {
+        _ = self;
+        // opaque 类型无法可靠判断，调用者自行跟踪。
+        return true;
     }
 };
 

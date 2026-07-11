@@ -47,6 +47,7 @@ pub const EngineContext = struct {
     no_chat_template: bool,
     no_jinja: bool,
     image_max_pixels: u32 = 0,
+    gallocr: *ggml.Gallocr,
 };
 
 pub const ImageGenResult = struct {};
@@ -60,7 +61,6 @@ fn computeTargetSize(
     src_height: u32,
 ) preprocess.Size2D {
     const p = &enc.params;
-
     // 如果设置了 min_pixels 和 max_pixels，使用动态分辨率
     // 优先使用用户指定的 max_pixels（用于内存控制）
     const effective_max_pixels = if (p.user_max_pixels > 0) p.user_max_pixels else p.image_max_pixels;
@@ -183,7 +183,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     }, ectx.n_threads);
 
     // Compute the vision graph (encoder only builds, caller computes)
-    try engine_common.computeGraph(vision_graph, ectx.n_threads);
+    _ = try engine_common.computeGraph(vision_graph, ectx.n_threads, ectx.gallocr);
 
     vision_ctx.setNoAlloc(true);
 
@@ -274,7 +274,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
 
     // Compute the audio graph (encoder only builds, caller computes)
     logger.debug("Audio encoder: computing graph...", .{});
-    try engine_common.computeGraph(audio_graph, ectx.n_threads);
+    _ = try engine_common.computeGraph(audio_graph, ectx.n_threads, ectx.gallocr);
     logger.debug("Audio encoder: graph computed successfully", .{});
 
     audio_ctx.setNoAlloc(true);
@@ -390,6 +390,7 @@ fn multimodalPrefillUnified(
         &ectx.params,
         ectx.n_threads,
         ectx.allocator,
+        ectx.gallocr,
     );
 
     if (ectx.verbose_prompt) {

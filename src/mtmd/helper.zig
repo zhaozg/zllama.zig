@@ -79,7 +79,10 @@ pub fn evalChunks(
 
                         // Compute the vision graph
                         compute_ctx.setNoAlloc(false);
-                        try engine_common.computeGraph(cgraph, n_threads);
+                        const buft = ggml.backendCpuBufferType();
+                        var gallocr = try ggml.Gallocr.init(buft);
+                        defer gallocr.free();
+                        _ = try engine_common.computeGraph(cgraph, n_threads, gallocr);
 
                         const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
                         const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);
@@ -137,7 +140,10 @@ pub fn evalChunks(
 
                     // Compute the audio graph
                     compute_ctx.setNoAlloc(false);
-                    try engine_common.computeGraph(cgraph, n_threads);
+                    const buft = ggml.backendCpuBufferType();
+                    var gallocr = try ggml.Gallocr.init(buft);
+                    defer gallocr.free();
+                    _ = try engine_common.computeGraph(cgraph, n_threads, gallocr);
 
                     const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
                     const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);

@@ -278,44 +278,37 @@ const testing = std.testing;
 // 共享计算图执行助手
 // ============================================================================
 
+/// 计算图执行结果
+pub const ComputeResult = struct {
+    /// 是否需要重置 gallocr（例如因图结构变化）
+    needs_reset: bool,
+};
+
 /// Execute a ggml compute graph on CPU.
 ///
-/// NOTE: The gallocr and CPU backend are intentionally NOT freed here because
-/// the computed tensor data must remain valid after this function returns.
-/// The caller is responsible for copying out any tensor data they need
-/// (e.g., via tensor.dataF32() + allocator.dupe) before the owning ggml
-/// context is destroyed.
+/// 所有权上移：gallocr 由调用者创建和管理，不再在此函数内泄漏。
+/// 调用者负责在 InferenceEngine 生命周期内管理 gallocr。
 ///
-/// For the multimodal encoding path, the embedding tensor data is copied
-/// to a heap buffer in multimodalPrefillUnified before the vision/audio
-/// context is destroyed.
-///
-/// This function is typically called once per multimodal encode or once
-/// during prefill. The gallocr and backend are freed when the process exits
-/// (deliberate leak-to-exit strategy — see AGENTS.md §III.2).
-pub fn computeGraph(graph: *ggml.CGraph, n_threads: i32) !void {
-    const buft = ggml.backendCpuBufferType();
-    var galloc = try ggml.Gallocr.init(buft);
-    // Deliberately leaked: tensor data lives in gallocr's buffer.
-    // ggml_gallocr_free is never called.
-    if (!galloc.reserve(graph)) return error.GraphReserveFailed;
-    if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
+/// 调用者必须在 computeGraph 返回前完成所有必要的张量数据拷贝，
+/// 因为 gallocr 可能在后续 reset 中释放内存。
+pub fn computeGraph(graph: *ggml.CGraph, n_threads: i32, gallocr: *ggml.Gallocr) !ComputeResult {
+    if (!gallocr.reserve(graph)) return error.GraphReserveFailed;
+    if (!gallocr.allocGraph(graph)) return error.GraphAllocFailed;
 
     const cpu = try ggml.backendCpuInit();
-    // Deliberately leaked: cpu backend may be needed if tensor data is on device.
-    // ggml_backend_free is never called.
+    defer ggml.backendFree(cpu);
     ggml.backendCpuSetNThreads(cpu, n_threads);
     if (!ggml.backendGraphCompute(cpu, graph)) return error.ComputeFailed;
+
+    return ComputeResult{ .needs_reset = false };
 }
 
 /// Execute a ggml compute graph on a specific backend.
-pub fn computeGraphOnBackend(graph: *ggml.CGraph, backend: *ggml.Backend) !void {
-    const buft = ggml.backendGetDefaultBufferType(backend);
-    var galloc = try ggml.Gallocr.init(buft);
-    defer galloc.free();
-    if (!galloc.reserve(graph)) return error.GraphReserveFailed;
-    if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
+pub fn computeGraphOnBackend(graph: *ggml.CGraph, backend: *ggml.Backend, gallocr: *ggml.Gallocr) !ComputeResult {
+    if (!gallocr.reserve(graph)) return error.GraphReserveFailed;
+    if (!gallocr.allocGraph(graph)) return error.GraphAllocFailed;
     if (!ggml.backendGraphCompute(backend, graph)) return error.ComputeFailed;
+    return ComputeResult{ .needs_reset = false };
 }
 
 test "currentTimeUs monotonic" {

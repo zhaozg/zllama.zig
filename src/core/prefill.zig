@@ -19,6 +19,10 @@
 //!   3. Build graph (tensors, graph nodes)
 //!   4. setNoAlloc(true) — lock context
 //!   5. Gallocr alloc + compute
+//!
+//! 内存策略（TASK_MEM.md）：
+//! - Gallocr 所有权上移至 InferenceEngine，由调用者传入。
+//! - 阶段间调用 graph_ctx.reset() 触发 gallocr.reset()，回收中间激活值。
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -59,6 +63,7 @@ pub const PrefillResult = struct {
 /// - params: model parameters
 /// - n_threads: number of CPU threads
 /// - allocator: memory allocator
+/// - gallocr: Gallocr 实例（所有权上移自 engine_common.computeGraph）
 pub fn threeStagePrefill(
     graph_ctx: *ggml.Context,
     model_instance: model.ModelInstance,
@@ -72,6 +77,7 @@ pub fn threeStagePrefill(
     params: *const model.ModelParams,
     n_threads: i32,
     allocator: std.mem.Allocator,
+    gallocr: *ggml.Gallocr,
 ) !PrefillResult {
     const prefix_len: i32 = @intCast(prefix_tokens.len);
     const suffix_len: i32 = @intCast(suffix_tokens.len);
@@ -80,8 +86,6 @@ pub fn threeStagePrefill(
 
     const kv_cache_ptr: ?*kv_cache.KVCache = kv_cache_mgr;
     var pp_time_s: f64 = 0.0;
-
-    const buft = ggml.backendCpuBufferType();
 
     // —— 三阶段预填充参数日志 ——
     log.info("=== Three-stage multimodal prefill ===", .{});
@@ -128,9 +132,8 @@ pub fn threeStagePrefill(
         _ = try model_instance.buildGraph(&p1_builder, p1_input, prefix_len, @ptrCast(kv_cache_ptr), 0);
         graph_ctx.setNoAlloc(true);
 
-        var p1_galloc = try ggml.Gallocr.init(buft);
-        defer p1_galloc.free();
-        if (!p1_galloc.allocGraph(p1_graph)) {
+        // 使用传入的 gallocr（所有权上移）
+        if (!gallocr.allocGraph(p1_graph)) {
             log.err("Graph alloc failed: text-prefix pass", .{});
             return error.GraphAllocFailed;
         }
@@ -185,9 +188,8 @@ pub fn threeStagePrefill(
             );
             graph_ctx.setNoAlloc(true);
 
-            var p2_galloc = try ggml.Gallocr.init(buft);
-            defer p2_galloc.free();
-            if (!p2_galloc.allocGraph(p2_graph)) {
+            // 使用传入的 gallocr（所有权上移）
+            if (!gallocr.allocGraph(p2_graph)) {
                 log.err("Graph alloc failed: media pass chunk {d}", .{chunk_start});
                 return error.GraphAllocFailed;
             }
@@ -233,9 +235,8 @@ pub fn threeStagePrefill(
     const logits = try model_instance.buildGraph(&p3_builder, p3_input, sfx_n, @ptrCast(kv_cache_ptr), suffix_start_pos);
     graph_ctx.setNoAlloc(true);
 
-    var p3_galloc = try ggml.Gallocr.init(buft);
-    defer p3_galloc.free();
-    if (!p3_galloc.allocGraph(p3_graph)) {
+    // 使用传入的 gallocr（所有权上移）
+    if (!gallocr.allocGraph(p3_graph)) {
         log.err("Graph alloc failed: text-suffix pass", .{});
         return error.GraphAllocFailed;
     }

@@ -108,6 +108,9 @@ pub const InferenceEngine = struct {
 
     inc_ctx: graph_context.IncContext,
 
+    /// Gallocr（计算图内存分配器，所有权上移自 engine_common.computeGraph）
+    gallocr: *ggml.Gallocr,
+
     mm_manager: ?mtmd.MultiModalManager = null,
     mtmd_context: ?*mtmd.MtmdContext = null,
     capabilities: model_if.ModelCapabilities = .{},
@@ -231,6 +234,11 @@ pub const InferenceEngine = struct {
         const inc_ctx_size = 512 * 1024 * 1024;
         const inc_ctx = try graph_context.IncContext.init(allocator, &params, inc_ctx_size);
 
+        // Gallocr: 计算图内存分配器，由 InferenceEngine 管理生命周期
+        const buft = ggml.backendCpuBufferType();
+        const gallocr = try ggml.Gallocr.init(buft);
+        errdefer gallocr.free();
+
         var mm_manager: ?mtmd.MultiModalManager = null;
         var mtmd_context: ?*mtmd.MtmdContext = null;
         if (cli_args.mmproj_path.len > 0) {
@@ -293,6 +301,7 @@ pub const InferenceEngine = struct {
             .mapped_file = mapped_file,
             .benchmark = cli_args.benchmark,
             .inc_ctx = inc_ctx,
+            .gallocr = gallocr,
             .mm_manager = mm_manager,
             .mtmd_context = mtmd_context,
             .capabilities = capabilities,
@@ -307,6 +316,8 @@ pub const InferenceEngine = struct {
     }
 
     pub fn deinit(self: *InferenceEngine) void {
+        // Gallocr 必须在所有依赖它的张量使用之后释放
+        self.gallocr.free();
         if (self.gpu_backend) |b| {
             ggml.backendFree(b);
         }
@@ -401,10 +412,8 @@ pub const InferenceEngine = struct {
         var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, &self.params, self.allocator);
         const logits = try self.model.buildGraph(&builder, input_tensor, n_prompt_tokens, @ptrCast(&self.kv_cache_mgr), 0);
 
-        const buft = ggml.backendCpuBufferType();
-        var galloc = try ggml.Gallocr.init(buft);
-        defer galloc.free();
-        if (!galloc.allocGraph(graph)) return error.GraphAllocFailed;
+        // 使用引擎持有的 gallocr（所有权上移）
+        if (!self.gallocr.allocGraph(graph)) return error.GraphAllocFailed;
 
         {
             const data = input_tensor.dataBytes();
@@ -674,6 +683,7 @@ pub const InferenceEngine = struct {
             .verbose_prompt = self.verbose_prompt,
             .benchmark = self.benchmark,
             .inc_ctx = &self.inc_ctx,
+            .gallocr = self.gallocr,
             .mm_manager = if (self.mm_manager) |*m| m else null,
             .mtmd_context = self.mtmd_context,
             .capabilities = self.capabilities,

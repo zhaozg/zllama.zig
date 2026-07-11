@@ -81,7 +81,7 @@ pub const IncContext = struct {
     /// 上下文内存大小
     ctx_size: usize,
 
-    // ---- 输入张量缓存 ----
+    /// ---- 输入张量缓存 ----
     /// 缓存的输入 token 张量（ctx.reset() 后失效）
     cached_input: ?*ggml.Tensor = null,
     /// 缓存是否有效（false 表示需要重建缓存）
@@ -153,22 +153,36 @@ pub const IncContext = struct {
         return ratio >= RECYCLE_THRESHOLD;
     }
 
-    /// 完整重置（回收所有上下文内存）
-    /// 当上下文接近满时自动调用，也支持手动调用。
+    /// 完整重置（回收所有上下文内存和 Gallocr 内存）
+    ///
+    /// 新语义（TASK_MEM.md）：
+    /// 1. 释放并重新创建 Gallocr（回收计算图内存）
+    /// 2. 重置 ggml_context（回收张量元数据）
+    /// 3. 设置 is_dirty 标记，强制下次 beginStep 重新构建图节点
     ///
     /// **警告**：如果 gallocr 已完成预规划（galloc_reserved == true），
     /// 调用此方法会使 gallocr 的预规划失效。调用者必须在 reset 后
     /// 重新调用 reserveGallocr() 进行预规划。
     pub fn resetFull(self: *IncContext) void {
+        // 1. 释放并重新创建 Gallocr
+        if (self.galloc) |g| {
+            g.free();
+            self.galloc = null;
+        }
+        self.galloc_ready = false;
         if (self.galloc_reserved) {
             log.warn("IncContext: resetFull with gallocr_reserved=true — gallocr reservation invalidated", .{});
             self.galloc_reserved = false;
         }
+
+        // 2. 重置 ggml_context
         self.ctx_inc.reset();
+
+        // 3. 清除缓存，强制下次 beginStep 重新构建
         self.cached_input = null;
         self.cache_valid = false;
         self.steps_since_reset = 0;
-        log.debug("IncContext: full reset (ctx recycled)", .{});
+        log.debug("IncContext: full reset (ctx + gallocr recycled)", .{});
     }
 
     /// 为增量解码步骤准备计算环境
@@ -396,4 +410,40 @@ test "IncContext resetFull clears gallocr_reserved" {
 
     ic.resetFull();
     try testing.expect(!ic.galloc_reserved);
+}
+
+test "IncContext resetFull frees and recreates gallocr" {
+    const params = model_if.ModelParams{
+        .n_vocab = 32000,
+        .n_embd = 4096,
+        .n_head = 32,
+        .n_head_dim = 128,
+        .n_kv_head = 32,
+        .n_layer = 1,
+        .n_ff = 11008,
+        .max_seq_len = 2048,
+        .rope_theta = 1000000.0,
+        .rope_dim = 64,
+        .norm_eps = 1e-5,
+    };
+
+    var ic = try IncContext.init(testing.allocator, &params, 64 * 1024 * 1024);
+    defer ic.deinit();
+
+    // Create gallocr
+    const g1 = try ic.getGallocr();
+    _ = g1;
+    try testing.expect(ic.galloc_ready);
+    try testing.expect(ic.galloc != null);
+
+    // resetFull should free gallocr and set it to null
+    ic.resetFull();
+    try testing.expect(!ic.galloc_ready);
+    try testing.expect(ic.galloc == null);
+
+    // After reset, getGallocr creates a new one
+    const g2 = try ic.getGallocr();
+    try testing.expect(ic.galloc_ready);
+    try testing.expect(ic.galloc != null);
+    try testing.expect(g2 != null);
 }
