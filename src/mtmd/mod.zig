@@ -265,6 +265,27 @@ pub const MultiModalManager = struct {
             caps.audio_sample_rate = 16000;
             if (gf.getU32("gemma4.audio.sample_rate")) |v| caps.audio_sample_rate = @intCast(v);
         }
+        // Fill special tokens based on detected encoder types
+        if (caps.has_vision) {
+            if (std.mem.startsWith(u8, caps.vision_encoder_type, "gemma4")) {
+                caps.special_tokens.img_beg = "<|image>";
+                caps.special_tokens.img_end = "<image|>";
+            } else if (std.mem.eql(u8, caps.vision_encoder_type, "qwen3vl") or
+                std.mem.eql(u8, caps.vision_encoder_type, "qwen2vl"))
+            {
+                caps.special_tokens.img_beg = "<|vision_start|>";
+                caps.special_tokens.img_end = "<|vision_end|>";
+            } else {
+                caps.special_tokens.img_beg = "<start_of_image>";
+                caps.special_tokens.img_end = "<end_of_image>";
+            }
+        }
+        if (caps.has_audio) {
+            if (std.mem.startsWith(u8, caps.audio_encoder_type, "gemma4a")) {
+                caps.special_tokens.aud_beg = "<|audio>";
+                caps.special_tokens.aud_end = "<audio|>";
+            }
+        }
         return caps;
     }
 
@@ -383,6 +404,11 @@ pub const MultiModalManager = struct {
 
 fn resolveImageMarkers(caps: *const model.ModelCapabilities) struct { beg: []const u8, end: []const u8 } {
     if (!caps.has_vision) return .{ .beg = "", .end = "" };
+    // Use dynamically configured special tokens if set; fall back to legacy defaults
+    if (caps.special_tokens.img_beg.len > 0 and caps.special_tokens.img_end.len > 0) {
+        return .{ .beg = caps.special_tokens.img_beg, .end = caps.special_tokens.img_end };
+    }
+    // Legacy fallback (backward-compatible)
     if (std.mem.eql(u8, caps.vision_encoder_type, "gemma4v") or
         std.mem.eql(u8, caps.vision_encoder_type, "gemma4uv"))
         return .{ .beg = "<|image>", .end = "<image|>" };
@@ -394,6 +420,10 @@ fn resolveImageMarkers(caps: *const model.ModelCapabilities) struct { beg: []con
 
 fn resolveAudioMarkers(caps: *const model.ModelCapabilities) struct { beg: []const u8, end: []const u8 } {
     if (!caps.has_audio) return .{ .beg = "", .end = "" };
+    // Use dynamically configured special tokens if set; fall back to legacy defaults
+    if (caps.special_tokens.aud_beg.len > 0 and caps.special_tokens.aud_end.len > 0) {
+        return .{ .beg = caps.special_tokens.aud_beg, .end = caps.special_tokens.aud_end };
+    }
     if (std.mem.eql(u8, caps.audio_encoder_type, "gemma4a") or
         std.mem.eql(u8, caps.audio_encoder_type, "gemma4ua"))
         return .{ .beg = "<|audio>", .end = "<audio|>" };

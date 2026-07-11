@@ -197,8 +197,23 @@ pub const ModelVTable = struct {
     buildMM: ?*const fn (ptr: *anyopaque, ctx: *ggml.Context, graph: *ggml.CGraph, input_tokens: *ggml.Tensor, n_tokens: i32, cache: ?*anyopaque, pos: i32, embd_override: *ggml.Tensor, embd_offset: i32, causal: bool) anyerror!*ggml.Tensor = null,
 };
 
+/// 模型架构相关的特殊 Token 标记
+/// 动态配置，消除 chat_template 和 MtmdContext 中的硬编码。
+pub const SpecialTokens = struct {
+    /// 图像开始标记（如 `<|image>` `<|vision_start|>`）
+    img_beg: []const u8 = "",
+    /// 图像结束标记（如 `<image|>` `<|vision_end|>`）
+    img_end: []const u8 = "",
+    /// 音频开始标记（如 `<|audio>`）
+    aud_beg: []const u8 = "",
+    /// 音频结束标记（如 `<audio|>`）
+    aud_end: []const u8 = "",
+    /// 通用媒体占位符（默认 `<__media__>`）
+    media_placeholder: []const u8 = "<__media__>",
+};
+
 /// 模型能力描述
-/// 描述模型支持哪些输入模态
+/// 描述模型支持哪些输入模态以及对应的特殊 Token 标记
 pub const ModelCapabilities = struct {
     /// 是否支持文本输入（总是 true）
     has_text: bool = true,
@@ -212,6 +227,8 @@ pub const ModelCapabilities = struct {
     vision_encoder_type: []const u8 = "",
     /// 音频编码器类型名称
     audio_encoder_type: []const u8 = "",
+    /// 架构相关的特殊 Token 标记
+    special_tokens: SpecialTokens = .{},
 
     /// 格式化输出能力描述
     pub fn format(self: ModelCapabilities, writer: anytype) !void {

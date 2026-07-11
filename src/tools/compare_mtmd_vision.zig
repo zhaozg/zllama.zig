@@ -221,7 +221,7 @@ pub const MtmdVisionComparator = struct {
         log.info("Image placeholder token id: {d}", .{image_token_id});
 
         // 9. 格式化 prompt（使用 GGUF Jinja 模板以匹配 llama.cpp）
-        const content_with_placeholder = try chat_template.ensurePlaceholderInContent(self.config.prompt, .image, self.allocator);
+        const content_with_placeholder = try chat_template.ensurePlaceholderInContent(self.config.prompt, .image, self.allocator, null);
         defer if (content_with_placeholder.ptr != self.config.prompt.ptr) self.allocator.free(content_with_placeholder);
 
         // Use the GGUF built-in Jinja template when available (matches llama.cpp behavior).

@@ -27,55 +27,50 @@ const log = std.log.scoped(.multimodal);
 /// 按占位符在字符串中的出现顺序排列。
 ///
 /// 支持的占位符：
-///   - <|image|> 或 <image>（图像）
-///   - <|audio|> 或 <audio>（音频）
+///   - 默认: <|image|> 或 <image>（图像）
+///   - 默认: <|audio|> 或 <audio>（音频）
+///   - custom_markers: 额外的模型特定标记（如 <|vision_start|> for Qwen）
 ///
 /// @param text 要扫描的字符串
 /// @param allocator 分配器
+/// @param custom_markers 模型特定的媒体标记（img_beg, img_end, aud_beg, aud_end）
 /// @returns 占位符信息列表
 pub fn scanPlaceholders(
     text: []const u8,
     allocator: std.mem.Allocator,
+    custom_markers: ?types.ScanMarkers,
 ) ![]types.PlaceholderInfo {
     var result = std.ArrayListUnmanaged(types.PlaceholderInfo){ .items = &.{}, .capacity = 0 };
     errdefer result.deinit(allocator);
 
+    // Build the search list: default markers + custom markers
+    const SearchEntry = struct { str: []const u8, media_type: types.MediaType };
+    var searches: [8]SearchEntry = undefined;
+    var n_searches: usize = 0;
+    searches[n_searches] = .{ .str = types.IMAGE_PLACEHOLDER, .media_type = .image }; n_searches += 1;
+    searches[n_searches] = .{ .str = types.IMAGE_PLACEHOLDER_ALT, .media_type = .image }; n_searches += 1;
+    searches[n_searches] = .{ .str = types.AUDIO_PLACEHOLDER, .media_type = .audio }; n_searches += 1;
+    searches[n_searches] = .{ .str = types.AUDIO_PLACEHOLDER_ALT, .media_type = .audio }; n_searches += 1;
+    if (custom_markers) |cm| {
+        if (cm.img_beg.len > 0) { searches[n_searches] = .{ .str = cm.img_beg, .media_type = .image }; n_searches += 1; }
+        if (cm.img_end.len > 0) { searches[n_searches] = .{ .str = cm.img_end, .media_type = .image }; n_searches += 1; }
+        if (cm.aud_beg.len > 0) { searches[n_searches] = .{ .str = cm.aud_beg, .media_type = .audio }; n_searches += 1; }
+        if (cm.aud_end.len > 0) { searches[n_searches] = .{ .str = cm.aud_end, .media_type = .audio }; n_searches += 1; }
+    }
+
     var pos: usize = 0;
     while (pos < text.len) {
-        // 查找下一个占位符
-        const next_image = std.mem.indexOf(u8, text[pos..], types.IMAGE_PLACEHOLDER);
-        const next_image_alt = std.mem.indexOf(u8, text[pos..], types.IMAGE_PLACEHOLDER_ALT);
-        const next_audio = std.mem.indexOf(u8, text[pos..], types.AUDIO_PLACEHOLDER);
-        const next_audio_alt = std.mem.indexOf(u8, text[pos..], types.AUDIO_PLACEHOLDER_ALT);
-
-        // 找到最近的下一个占位符
         var best_pos: ?usize = null;
         var best_type: ?types.MediaType = null;
         var best_len: usize = 0;
-        if (next_image) |p| {
-            best_pos = p;
-            best_type = .image;
-            best_len = types.IMAGE_PLACEHOLDER.len;
-        }
-        if (next_image_alt) |p| {
-            if (best_pos == null or p < best_pos.?) {
-                best_pos = p;
-                best_type = .image;
-                best_len = types.IMAGE_PLACEHOLDER_ALT.len;
-            }
-        }
-        if (next_audio) |p| {
-            if (best_pos == null or p < best_pos.?) {
-                best_pos = p;
-                best_type = .audio;
-                best_len = types.AUDIO_PLACEHOLDER.len;
-            }
-        }
-        if (next_audio_alt) |p| {
-            if (best_pos == null or p < best_pos.?) {
-                best_pos = p;
-                best_type = .audio;
-                best_len = types.AUDIO_PLACEHOLDER_ALT.len;
+        for (searches[0..n_searches]) |entry| {
+            if (entry.str.len == 0) continue;
+            if (std.mem.indexOf(u8, text[pos..], entry.str)) |p| {
+                if (best_pos == null or p < best_pos.?) {
+                    best_pos = p;
+                    best_type = entry.media_type;
+                    best_len = entry.str.len;
+                }
             }
         }
 
@@ -84,7 +79,7 @@ pub fn scanPlaceholders(
                 .start = pos + p,
                 .length = best_len,
                 .media_type = best_type.?,
-                .token_count = 0, // 由调用者填充
+                .token_count = 0,
             });
             pos += p + best_len;
         } else {
@@ -147,7 +142,7 @@ pub fn tokenizeWithPlaceholders(
     var tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
     errdefer tokens.deinit(allocator);
 
-    const placeholders = try scanPlaceholders(formatted, allocator);
+    const placeholders = try scanPlaceholders(formatted, allocator, null);
     errdefer allocator.free(placeholders);
 
     for (placeholders) |*ph| {
@@ -252,7 +247,7 @@ pub fn expandPlaceholders(
 ) !types.ExpandedPlaceholders {
     var tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
     errdefer tokens.deinit(allocator);
-    const placeholders = try scanPlaceholders(formatted, allocator);
+    const placeholders = try scanPlaceholders(formatted, allocator, null);
     // 为每个占位符填充 token_count
     for (placeholders, 0..) |*ph, i| {
         _ = i;
@@ -300,17 +295,38 @@ pub fn containsPlaceholder(text: []const u8) bool {
 ///
 /// 对于预设模板，采用固定策略：占位符始终放在文本内容之前。
 /// 这与 llama.cpp 的行为一致。
-pub fn ensurePlaceholderInContent(content: []const u8, media_type: types.MediaType, allocator: std.mem.Allocator) ![]const u8 {
-    if (containsPlaceholder(content)) {
+///
+/// 当提供 custom_markers 时，优先使用模型特定的标记（如 <|vision_start|>），
+/// 否则使用默认标记（<|image|> 或 <|audio|>）。
+pub fn ensurePlaceholderInContent(content: []const u8, media_type: types.MediaType, allocator: std.mem.Allocator, custom_markers: ?types.ScanMarkers) ![]const u8 {
+    if (containsPlaceholderEx(content, custom_markers)) {
         return content;
     }
 
     const placeholder = switch (media_type) {
-        .image => types.IMAGE_PLACEHOLDER,
-        .audio => types.AUDIO_PLACEHOLDER,
+        .image => if (custom_markers) |cm| blk: {
+            if (cm.img_beg.len > 0) break :blk cm.img_beg;
+            break :blk types.IMAGE_PLACEHOLDER;
+        } else types.IMAGE_PLACEHOLDER,
+        .audio => if (custom_markers) |cm| blk: {
+            if (cm.aud_beg.len > 0) break :blk cm.aud_beg;
+            break :blk types.AUDIO_PLACEHOLDER;
+        } else types.AUDIO_PLACEHOLDER,
     };
 
     return try std.fmt.allocPrint(allocator, "{s}{s}", .{ placeholder, content });
+}
+
+/// 检查字符串中是否包含媒体占位符（含自定义标记）
+pub fn containsPlaceholderEx(text: []const u8, custom_markers: ?types.ScanMarkers) bool {
+    if (containsPlaceholder(text)) return true;
+    if (custom_markers) |cm| {
+        if (cm.img_beg.len > 0 and std.mem.indexOf(u8, text, cm.img_beg) != null) return true;
+        if (cm.img_end.len > 0 and std.mem.indexOf(u8, text, cm.img_end) != null) return true;
+        if (cm.aud_beg.len > 0 and std.mem.indexOf(u8, text, cm.aud_beg) != null) return true;
+        if (cm.aud_end.len > 0 and std.mem.indexOf(u8, text, cm.aud_end) != null) return true;
+    }
+    return false;
 }
 
 /// 计算占位符在 token 序列中的偏移量
@@ -412,21 +428,21 @@ test "containsPlaceholder" {
 
 test "ensurePlaceholderInContent: already has" {
     const content = "Describe <|image|> this";
-    const result = try ensurePlaceholderInContent(content, .image, testing.allocator);
+    const result = try ensurePlaceholderInContent(content, .image, testing.allocator, null);
     // 如果已有占位符，返回原内容（指针相同）
     try testing.expect(result.ptr == content.ptr);
 }
 
 test "ensurePlaceholderInContent: add image" {
     const content = "Describe this";
-    const result = try ensurePlaceholderInContent(content, .image, testing.allocator);
+    const result = try ensurePlaceholderInContent(content, .image, testing.allocator, null);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings("<|image|>Describe this", result);
 }
 
 test "ensurePlaceholderInContent: add audio" {
     const content = "Transcribe";
-    const result = try ensurePlaceholderInContent(content, .audio, testing.allocator);
+    const result = try ensurePlaceholderInContent(content, .audio, testing.allocator, null);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings("<|audio|>Transcribe", result);
 }

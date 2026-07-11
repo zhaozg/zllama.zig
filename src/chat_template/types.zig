@@ -80,6 +80,14 @@ pub const PlaceholderInfo = struct {
     token_offset: u32 = 0,
 };
 
+/// 模型特定的媒体标记，用于扩展 scanPlaceholders 的搜索范围
+pub const ScanMarkers = struct {
+    img_beg: []const u8 = "",
+    img_end: []const u8 = "",
+    aud_beg: []const u8 = "",
+    aud_end: []const u8 = "",
+};
+
 /// 检查字符串中是否包含媒体占位符
 pub fn containsPlaceholder(text: []const u8) bool {
     return std.mem.indexOf(u8, text, IMAGE_PLACEHOLDER) != null or

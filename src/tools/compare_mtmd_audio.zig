@@ -247,7 +247,7 @@ pub const MtmdAudioComparator = struct {
         log.info("Audio placeholder token id: {d}", .{audio_token_id});
 
         // 10. 格式化 prompt（使用 GGUF Jinja 模板以匹配 llama.cpp）
-        const content_with_placeholder = try chat_template.ensurePlaceholderInContent(self.config.prompt, .audio, self.allocator);
+        const content_with_placeholder = try chat_template.ensurePlaceholderInContent(self.config.prompt, .audio, self.allocator, null);
         defer if (content_with_placeholder.ptr != self.config.prompt.ptr) self.allocator.free(content_with_placeholder);
 
         // Use the GGUF built-in Jinja template when available (matches llama.cpp behavior).

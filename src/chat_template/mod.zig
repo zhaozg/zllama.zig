@@ -40,11 +40,13 @@ pub const Media = types.Media;
 pub const MediaType = types.MediaType;
 pub const PlaceholderInfo = types.PlaceholderInfo;
 pub const ExpandedPlaceholders = types.ExpandedPlaceholders;
+pub const ScanMarkers = types.ScanMarkers;
 
 // 重新导出多模态辅助函数
 pub const scanPlaceholders = multimodal.scanPlaceholders;
 pub const expandPlaceholders = multimodal.expandPlaceholders;
 pub const containsPlaceholder = multimodal.containsPlaceholder;
+pub const containsPlaceholderEx = multimodal.containsPlaceholderEx;
 pub const ensurePlaceholderInContent = multimodal.ensurePlaceholderInContent;
 
 pub const tokenizeWithPlaceholders = multimodal.tokenizeWithPlaceholders;

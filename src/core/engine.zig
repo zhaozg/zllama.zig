@@ -360,7 +360,7 @@ pub const InferenceEngine = struct {
         // and preset template rendering (where appendMediaContent will skip adding
         // the marker if it's already present, avoiding double placeholders).
         const effective_prompt = if (media) |m| blk: {
-            break :blk try chat_template.ensurePlaceholderInContent(user_prompt, m.type, self.allocator);
+            break :blk try chat_template.ensurePlaceholderInContent(user_prompt, m.type, self.allocator, null);
         } else user_prompt;
         const needs_free = media != null and effective_prompt.ptr != user_prompt.ptr;
         defer if (needs_free) self.allocator.free(effective_prompt);

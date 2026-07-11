@@ -255,6 +255,36 @@ pub fn detectCapabilities(gguf_file: *const gguf.GGUFFile, arch: model_if.Archit
         caps.vision_encoder_type = enc_type;
     }
 
+    // Fill special tokens based on architecture
+    switch (arch) {
+        .gemma4 => {
+            caps.special_tokens.img_beg = "<|image>";
+            caps.special_tokens.img_end = "<image|>";
+            caps.special_tokens.aud_beg = "<|audio>";
+            caps.special_tokens.aud_end = "<audio|>";
+        },
+        .gemma3 => {
+            caps.special_tokens.img_beg = "<start_of_image>";
+            caps.special_tokens.img_end = "<end_of_image>";
+        },
+        .qwen3vl => {
+            caps.special_tokens.img_beg = "<|vision_start|>";
+            caps.special_tokens.img_end = "<|vision_end|>";
+        },
+        .qwen2 => {
+            // Qwen2-VL variant uses qwen2vl vision encoder
+            if (std.mem.eql(u8, caps.vision_encoder_type, "qwen2vl")) {
+                caps.special_tokens.img_beg = "<|vision_start|>";
+                caps.special_tokens.img_end = "<|vision_end|>";
+            }
+        },
+        .llama => {
+            caps.special_tokens.img_beg = "<start_of_image>";
+            caps.special_tokens.img_end = "<end_of_image>";
+        },
+        else => {},
+    }
+
     if (caps.has_audio or caps.has_vision) {
         log.info("Multi-modal capabilities detected: audio={}, vision={}", .{ caps.has_audio, caps.has_vision });
     }

@@ -207,7 +207,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     };
 
     const formatted_prompt = if (ectx.no_chat_template) blk: {
-        const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .image, ectx.allocator);
+        const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .image, ectx.allocator, null);
         break :blk with_ph;
     } else try applyChatTemplateWithMedia(ectx, prompt, chat_template.Media.init(.image));
     defer ectx.allocator.free(formatted_prompt);
@@ -309,7 +309,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     };
 
     const formatted_prompt = if (ectx.no_chat_template) blk: {
-        const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .audio, ectx.allocator);
+        const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .audio, ectx.allocator, null);
         break :blk with_ph;
     } else try applyChatTemplateWithMedia(ectx, prompt, chat_template.Media.init(.audio));
     defer ectx.allocator.free(formatted_prompt);
@@ -460,7 +460,7 @@ fn applyChatTemplateWithMedia(ectx: *EngineContext, user_prompt: []const u8, med
     // both Jinja template rendering (where media info is not passed separately)
     // and preset template rendering (where appendMediaContent will skip adding
     // the marker if it's already present, avoiding double placeholders).
-    const effective_prompt = try chat_template.ensurePlaceholderInContent(user_prompt, media.type, ectx.allocator);
+    const effective_prompt = try chat_template.ensurePlaceholderInContent(user_prompt, media.type, ectx.allocator, null);
     const needs_free = effective_prompt.ptr != user_prompt.ptr;
     defer if (needs_free) ectx.allocator.free(effective_prompt);
 
@@ -478,7 +478,12 @@ pub fn tokenizeWithMediaPlaceholders(
     media_token_count: u32,
     media_type: chat_template.MediaType,
 ) !chat_template.TokenizedSegments {
-    const all_placeholders = try chat_template.scanPlaceholders(formatted_prompt, ectx.allocator);
+    const all_placeholders = try chat_template.scanPlaceholders(formatted_prompt, ectx.allocator, if (ectx.mtmd_context) |ctx| chat_template.ScanMarkers{
+        .img_beg = ctx.img_beg,
+        .img_end = ctx.img_end,
+        .aud_beg = ctx.aud_beg,
+        .aud_end = ctx.aud_end,
+    } else null);
     defer ectx.allocator.free(all_placeholders);
 
     const beg_marker: []const u8 = blk: {

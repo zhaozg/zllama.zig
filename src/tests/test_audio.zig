@@ -24,7 +24,7 @@ const PlaceholderInfo = chat_template.PlaceholderInfo;
 
 test "scanPlaceholders: single audio" {
     const text = "Transcribe <|audio|> please";
-    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator);
+    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator, null);
     defer testing.allocator.free(placeholders);
 
     try testing.expectEqual(@as(usize, 1), placeholders.len);
@@ -35,7 +35,7 @@ test "scanPlaceholders: single audio" {
 
 test "scanPlaceholders: audio alt format" {
     const text = "Listen to <audio> now";
-    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator);
+    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator, null);
     defer testing.allocator.free(placeholders);
 
     try testing.expectEqual(@as(usize, 1), placeholders.len);
@@ -44,7 +44,7 @@ test "scanPlaceholders: audio alt format" {
 
 test "scanPlaceholders: mixed image and audio" {
     const text = "<|image|>First<|audio|>Second";
-    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator);
+    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator, null);
     defer testing.allocator.free(placeholders);
 
     try testing.expectEqual(@as(usize, 2), placeholders.len);
@@ -91,21 +91,21 @@ test "expandPlaceholders: audio with tokens" {
 
 test "ensurePlaceholderInContent: already has audio" {
     const content = "Transcribe <|audio|> this";
-    const result = try chat_template.ensurePlaceholderInContent(content, .audio, testing.allocator);
+    const result = try chat_template.ensurePlaceholderInContent(content, .audio, testing.allocator, null);
     defer if (result.ptr != content.ptr) testing.allocator.free(result);
     try testing.expectEqualStrings(content, result);
 }
 
 test "ensurePlaceholderInContent: add audio" {
     const content = "Transcribe this";
-    const result = try chat_template.ensurePlaceholderInContent(content, .audio, testing.allocator);
+    const result = try chat_template.ensurePlaceholderInContent(content, .audio, testing.allocator, null);
     defer testing.allocator.free(result);
     try testing.expect(std.mem.indexOf(u8, result, "<|audio|>") != null);
 }
 
 test "ensurePlaceholderInContent: add audio with alt already present" {
     const content = "Transcribe <audio> this";
-    const result = try chat_template.ensurePlaceholderInContent(content, .audio, testing.allocator);
+    const result = try chat_template.ensurePlaceholderInContent(content, .audio, testing.allocator, null);
     defer if (result.ptr != content.ptr) testing.allocator.free(result);
     try testing.expectEqualStrings(content, result);
 }

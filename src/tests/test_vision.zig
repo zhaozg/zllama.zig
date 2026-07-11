@@ -23,7 +23,7 @@ const PlaceholderInfo = chat_template.PlaceholderInfo;
 
 test "scanPlaceholders: single image" {
     const text = "Describe <|image|> this";
-    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator);
+    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator, null);
     defer testing.allocator.free(placeholders);
 
     try testing.expectEqual(@as(usize, 1), placeholders.len);
@@ -32,7 +32,7 @@ test "scanPlaceholders: single image" {
 
 test "scanPlaceholders: image alt format" {
     const text = "Look at <image> here";
-    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator);
+    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator, null);
     defer testing.allocator.free(placeholders);
 
     try testing.expectEqual(@as(usize, 1), placeholders.len);
@@ -41,7 +41,7 @@ test "scanPlaceholders: image alt format" {
 
 test "scanPlaceholders: multiple images" {
     const text = "<|image|>A<|image|>B<image>C";
-    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator);
+    const placeholders = try chat_template.scanPlaceholders(text, testing.allocator, null);
     defer testing.allocator.free(placeholders);
 
     try testing.expectEqual(@as(usize, 3), placeholders.len);
@@ -111,21 +111,21 @@ test "expandPlaceholders: two placeholders with tokens" {
 
 test "ensurePlaceholderInContent: already has image" {
     const content = "Describe <|image|> this";
-    const result = try chat_template.ensurePlaceholderInContent(content, .image, testing.allocator);
+    const result = try chat_template.ensurePlaceholderInContent(content, .image, testing.allocator, null);
     defer if (result.ptr != content.ptr) testing.allocator.free(result);
     try testing.expectEqualStrings(content, result);
 }
 
 test "ensurePlaceholderInContent: add image" {
     const content = "Describe this";
-    const result = try chat_template.ensurePlaceholderInContent(content, .image, testing.allocator);
+    const result = try chat_template.ensurePlaceholderInContent(content, .image, testing.allocator, null);
     defer testing.allocator.free(result);
     try testing.expect(std.mem.indexOf(u8, result, "<|image|>") != null);
 }
 
 test "ensurePlaceholderInContent: add image with alt already present" {
     const content = "Describe <image> this";
-    const result = try chat_template.ensurePlaceholderInContent(content, .image, testing.allocator);
+    const result = try chat_template.ensurePlaceholderInContent(content, .image, testing.allocator, null);
     defer if (result.ptr != content.ptr) testing.allocator.free(result);
     try testing.expectEqualStrings(content, result);
 }

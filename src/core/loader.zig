@@ -196,11 +196,25 @@ pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]con
         if (capabilities.audio_sample_rate == 0) {
             capabilities.audio_sample_rate = detected.audio_sample_rate;
         }
+        // Merge special tokens from mmproj (if not already set by architecture)
+        if (capabilities.special_tokens.aud_beg.len == 0) {
+            capabilities.special_tokens.aud_beg = detected.special_tokens.aud_beg;
+        }
+        if (capabilities.special_tokens.aud_end.len == 0) {
+            capabilities.special_tokens.aud_end = detected.special_tokens.aud_end;
+        }
     }
     if (detected.has_vision) {
         capabilities.has_vision = true;
         if (capabilities.vision_encoder_type.len == 0) {
             capabilities.vision_encoder_type = detected.vision_encoder_type;
+        }
+        // Merge special tokens from mmproj (if not already set by architecture)
+        if (capabilities.special_tokens.img_beg.len == 0) {
+            capabilities.special_tokens.img_beg = detected.special_tokens.img_beg;
+        }
+        if (capabilities.special_tokens.img_end.len == 0) {
+            capabilities.special_tokens.img_end = detected.special_tokens.img_end;
         }
     }
 

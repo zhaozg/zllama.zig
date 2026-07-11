@@ -583,7 +583,7 @@ test "resolve: GGUF Gemma4 template routes to Jinja rendering" {
 
     // Apply the template and verify it renders correctly with image placeholder
     const media = Media.init(.image);
-    const content_with_placeholder = try ensurePlaceholderInContent("Describe this", .image, testing.allocator);
+    const content_with_placeholder = try ensurePlaceholderInContent("Describe this", .image, testing.allocator, null);
 
     const messages = [_]ChatMessage{
         ChatMessage.withMedia("user", content_with_placeholder, media),
@@ -721,7 +721,7 @@ test "full multimodal pipeline: Gemma4 preset with image placeholder" {
     defer tmpl.deinit(testing.allocator);
 
     // Content with image placeholder already inserted (as done in main.zig)
-    const content_with_placeholder = try ensurePlaceholderInContent("Describe this image", .image, testing.allocator);
+    const content_with_placeholder = try ensurePlaceholderInContent("Describe this image", .image, testing.allocator, null);
     defer if (content_with_placeholder.ptr != "Describe this image".ptr) testing.allocator.free(content_with_placeholder);
 
     const media = Media{
@@ -745,12 +745,12 @@ test "full multimodal pipeline: Gemma4 preset with image placeholder" {
 test "multimodal: ensurePlaceholderInContent idempotent" {
     // Adding placeholder twice should not duplicate it
     const content = "Describe this";
-    const first = try ensurePlaceholderInContent(content, .image, testing.allocator);
+    const first = try ensurePlaceholderInContent(content, .image, testing.allocator, null);
     defer testing.allocator.free(first);
     try testing.expectEqualStrings("<|image|>Describe this", first);
 
     // Second call should return same content (placeholder already present)
-    const second = try ensurePlaceholderInContent(first, .image, testing.allocator);
+    const second = try ensurePlaceholderInContent(first, .image, testing.allocator, null);
     try testing.expect(second.ptr == first.ptr); // Same pointer = no new allocation
 }
 
