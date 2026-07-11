@@ -12,7 +12,7 @@
 |------|------|------|
 | 1 | `src/models/your_model.zig` | **新建** — 模型实现（参数、权重、buildGraph） |
 | 2 | `src/model.zig` | **修改** — 添加架构枚举值、模型模块导入和重新导出 |
-| 3 | `src/models/registry.zig` | **修改** — 添加架构检测、工厂创建、能力检测 |
+| 3 | `src/models/registry.zig` | **修改** — 添加架构检测、工厂创建、能力检测（含 special_tokens 配置） |
 | 4 | `src/chat_template/mod.zig` | **修改** — 添加对话模板（如需要） |
 | 5 | `build.zig` | **无需修改** — 模型通过 `model.zig` 间接导入，无需单独注册模块 |
 
@@ -402,6 +402,8 @@ pub fn detectArchitecture(gguf_file: *const gguf.GGUFFile) ?model_if.Architectur
 
 ### 3d. 在 detectCapabilities() 中添加能力检测
 
+添加对应架构的能力描述，**必须设置 `special_tokens`** 以动态配置多模态媒体标记：
+
 ```zig
 pub fn detectCapabilities(gguf_file, arch) model_if.ModelCapabilities {
     var caps = model_if.ModelCapabilities{};
@@ -410,9 +412,27 @@ pub fn detectCapabilities(gguf_file, arch) model_if.ModelCapabilities {
         .mistral => {
             // 纯文本模型，无需额外设置
         },
+        .gemma4 => {
+            caps.special_tokens.img_beg = "<|image>";
+            caps.special_tokens.img_end = "<image|>";
+            caps.special_tokens.aud_beg = "<|audio>";
+            caps.special_tokens.aud_end = "<audio|>";
+        },
+        .qwen3vl => {
+            caps.special_tokens.img_beg = "<|vision_start|>";
+            caps.special_tokens.img_end = "<|vision_end|>";
+        },
+        // 纯文本模型：留空或使用默认值
+        else => {},
     }
     return caps;
 }
+```
+
+> **重要**：`special_tokens` 使用 `ModelCapabilities.SpecialTokens` 类型（定义在 `src/model.zig`），
+> 动态驱动 `chat_template/multimodal.zig` 的占位符扫描和 `mtmd/mod.zig` 的媒体标记解析。
+> 新模型须在 `detectCapabilities()` 中根据架构填充对应的 `img_beg`/`img_end`/`aud_beg`/`aud_end`，
+> 以消除模型特定标记的硬编码。
 ```
 
 ---
@@ -520,7 +540,7 @@ for k, v in r.fields.items():
 
 ## 🔄 多模态扩展（如适用）
 
-如果新模型支持图像或音频输入，需要在 `ModelCapabilities` 中声明，并实现对应的编码器函数。请参考 `src/mtmd/` 目录下的现有实现（如 `audio/`、`vision/`），并在模型结构体中增加 `encode_image` 和 `encode_audio` 方法。
+如果新模型支持图像或音频输入，需要在 `ModelCapabilities` 中声明 `has_vision`/`has_audio` 并在 `special_tokens` 中设置媒体标记，同时实现对应的编码器函数。参考 `src/mtmd/` 目录下的现有实现（如 `audio/`、`vision/`），并在 `detectCapabilities()` 中根据编码器类型配置 `special_tokens` 字段（详见步骤 3d）。
 
 具体步骤请参考 `src/mtmd/graph.md` 或询问维护者。
 

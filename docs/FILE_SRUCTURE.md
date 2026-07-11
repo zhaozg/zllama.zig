@@ -15,7 +15,7 @@
 ```
 src/
 ├── main.zig                      # 唯一主入口（Juicy Main）
-├── model.zig                     # Architecture 枚举、ModelVTable、ModelInstance 接口
+├── model.zig                     # Architecture 枚举、ModelVTable、ModelInstance、SpecialTokens、ModelCapabilities
 ├── sampler.zig                   # 采样器
 ├── kv_cache.zig                  # KV 缓存
 ├── gguf.zig                      # GGUF 解析器（保留顶层，因被多处导入）
@@ -110,10 +110,10 @@ src/
 │   ├── llama4.zig                # LLaMA 4 模板
 │   ├── minja.zig                 # minja C++ 桥接（Jinja2 渲染）
 │   ├── mistral_v7.zig            # Mistral V7 模板
-│   ├── multimodal.zig            # 多模态模板（<|image|>/<|audio|> 占位符）
+│   ├── multimodal.zig            # 多模态模板（占位符扫描/展开，支持动态 ScanMarkers）
 │   ├── phi4.zig                  # Phi-4 模板
 │   ├── tinyllama.zig             # TinyLlama 模板
-│   └── types.zig                 # 模板类型定义
+│   └── types.zig                 # 模板类型定义（含 ScanMarkers、PlaceholderInfo）
 │
 ├── mtmd/                         # 多模态
 │   ├── mod.zig                   # MultiModalManager（编码器管理）

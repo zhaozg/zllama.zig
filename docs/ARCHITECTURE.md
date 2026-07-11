@@ -121,7 +121,7 @@ AudioEncoderBackend {
 | 文件 | 核心类型 | 说明 |
 |------|----------|------|
 | `src/gguf.zig` | `GGUFFile` | 业务层 GGUF 读取：`getU32`/`getF32`/`getString`/`getTensor`/`getF32Array` |
-| `src/model.zig` | `Architecture`、`ModelVTable`、`ModelInstance`、`ModelParams`、`ModelWeights`、`ModelCapabilities` | 文本 LLM 的接口契约 |
+| `src/model.zig` | `Architecture`、`ModelVTable`、`ModelInstance`、`ModelParams`、`ModelWeights`、`ModelCapabilities`、`SpecialTokens` | 文本 LLM 的接口契约 + 架构特殊 Token 配置 |
 | `src/core/memory.zig` | `MemoryContext`、`MemoryVTable`、`KVCacheMemory`、`HybridMemory` | 统一内存接口（KV Cache + SSM 状态 + Conv 状态） |
 
 ### L2：共享算子与基础设施

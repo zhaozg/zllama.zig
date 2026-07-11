@@ -213,10 +213,12 @@ pub const MultiModalManager = struct {
 ```
 
 **关键方法**:
-- `detectFromGGUF()`: 从 GGUF 元数据检测多模态能力（检查 `v.patch_embd.weight`、`a.conv1d.0.weight` 等张量）
+- `detectFromGGUF()`: 从 GGUF 元数据检测多模态能力（检查 `v.patch_embd.weight`、`a.conv1d.0.weight` 等张量），同时根据编码器类型填充 `caps.special_tokens`
 - `init()`: 初始化编码器（从 mmproj 文件加载权重）
 - `encodeMedia()`: 编码单个多模态输入，返回嵌入 tokens
 - `estimateTokenCount()`: 估算多模态输入的 token 数量
+- `resolveImageMarkers()`: 从 `caps.special_tokens` 解析图像开始/结束标记（优先 dynamic，fallback legacy）
+- `resolveAudioMarkers()`: 从 `caps.special_tokens` 解析音频开始/结束标记（优先 dynamic，fallback legacy）
 
 ### 4.2 `MtmdContext` — 多模态上下文
 
@@ -233,10 +235,10 @@ pub const MtmdContext = struct {
     n_embd_text: i32,
     tok: ?*tokenizer.Tokenizer = null,
     media_marker: []const u8,       // 默认 "<__media__>"
-    img_beg: []const u8,            // 图像开始标记（如 "<|image>"）
-    img_end: []const u8,            // 图像结束标记（如 "<image|>"）
-    aud_beg: []const u8,            // 音频开始标记（如 "<|audio>"）
-    aud_end: []const u8,            // 音频结束标记（如 "<audio|>"）
+    img_beg: []const u8,            // 图像开始标记（由 caps.special_tokens 动态解析）
+    img_end: []const u8,            // 图像结束标记（由 caps.special_tokens 动态解析）
+    aud_beg: []const u8,            // 音频开始标记（由 caps.special_tokens 动态解析）
+    aud_end: []const u8,            // 音频结束标记（由 caps.special_tokens 动态解析）
     pos_type: PosType = .normal,    // 位置编码类型
     output_embd: ?[]f32 = null,     // 编码器输出缓存
 };

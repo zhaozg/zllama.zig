@@ -197,12 +197,16 @@ pub const MtmdContext = struct {
     caps: model.ModelCapabilities,
     n_embd_text: i32,
     tok: ?*tokenizer.Tokenizer,
-    media_marker: []const u8,   // "<__media__>"
-    img_beg: []const u8,        // "<|image>" (Gemma4)
-    img_end: []const u8,        // "<image|>" (Gemma4)
-    aud_beg: []const u8,        // "<|audio>" (Gemma4)
-    aud_end: []const u8,        // "<audio|>" (Gemma4)
+    media_marker: []const u8,   // "<__media__>" (来自 caps.special_tokens.media_placeholder)
+    img_beg: []const u8,        // 由 caps.special_tokens.img_beg 动态解析
+    img_end: []const u8,        // 由 caps.special_tokens.img_end 动态解析
+    aud_beg: []const u8,        // 由 caps.special_tokens.aud_beg 动态解析
+    aud_end: []const u8,        // 由 caps.special_tokens.aud_end 动态解析
 };
+
+// marker 字段通过 resolveImageMarkers()/resolveAudioMarkers() 从 caps.special_tokens
+// 动态解析，不再硬编码为特定架构的标记（如 Gemma4 的 <|image>）。
+// 参见 src/mtmd/mod.zig 和 src/model.zig:SpecialTokens。
 ```
 
 ### 能力检测（自动）
@@ -234,7 +238,22 @@ pub const ChatMessage = struct {
     media: ?Media = null,
     // ...
 };
+
+/// 模型特定媒体标记，用于扩展占位符扫描
+pub const ScanMarkers = struct {
+    img_beg: []const u8 = "",
+    img_end: []const u8 = "",
+    aud_beg: []const u8 = "",
+    aud_end: []const u8 = "",
+};
 ```
+
+ 是  中  和
+ 的可选参数。当提供时，函数会在通用占位符
+（/）之外额外搜索模型特定标记（如 Qwen 的 ）。
+
+调用方从  中读取标记值传入，
+从而每个架构使用自己的标记方案，无需在 chat_template 层硬编码。
 
 ---
 
