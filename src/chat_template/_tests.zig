@@ -582,12 +582,8 @@ test "resolve: GGUF Gemma4 template routes to Jinja rendering" {
     try testing.expect(!tmpl.jinja_enabled);
 
     // Apply the template and verify it renders correctly with image placeholder
-    const media = Media{
-        .type = .image,
-        .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
-    };
+    const media = Media.init(.image);
     const content_with_placeholder = try ensurePlaceholderInContent("Describe this", .image, testing.allocator);
-    defer if (content_with_placeholder.ptr != "Describe this".ptr) testing.allocator.free(content_with_placeholder);
 
     const messages = [_]ChatMessage{
         ChatMessage.withMedia("user", content_with_placeholder, media),
@@ -649,10 +645,7 @@ test "resolve: unknown GGUF template with media message via Jinja" {
     try testing.expectEqual(TemplateKind.unknown, tmpl.kind);
     try testing.expect(tmpl.jinja_enabled);
 
-    const media = Media{
-        .type = .image,
-        .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
-    };
+    const media = Media.init(.image);
     // Content WITHOUT placeholder - Jinja messagesToList should add it
     const messages = [_]ChatMessage{
         ChatMessage.withMedia("user", "Describe this", media),
@@ -676,10 +669,7 @@ test "full multimodal pipeline: template render + placeholder scan" {
     var tmpl = try resolve(testing.allocator, source, .qwen2, null, true);
     defer tmpl.deinit(testing.allocator);
 
-    const media = Media{
-        .type = .audio,
-        .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } },
-    };
+    const media = Media.init(.audio);
     const messages = [_]ChatMessage{
         ChatMessage.withMedia("user", "Transcribe", media),
     };

@@ -268,10 +268,7 @@ pub const MtmdAudioComparator = struct {
         defer if (!use_gguf_jinja) tmpl.deinit(self.allocator);
 
         // Use withMedia to pass media info to Jinja template engine
-        const media = chat_template.Media{
-            .type = .audio,
-            .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } },
-        };
+        const media = chat_template.Media.init(.audio);
         const messages = [_]chat_template.ChatMessage{
             chat_template.ChatMessage.withMedia("user", content_with_placeholder, media),
         };

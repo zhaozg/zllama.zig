@@ -50,9 +50,8 @@ pub fn scanPlaceholders(
 
         // 找到最近的下一个占位符
         var best_pos: ?usize = null;
-        var best_type: types.MediaType = .none;
+        var best_type: ?types.MediaType = null;
         var best_len: usize = 0;
-
         if (next_image) |p| {
             best_pos = p;
             best_type = .image;
@@ -84,7 +83,7 @@ pub fn scanPlaceholders(
             try result.append(allocator, .{
                 .start = pos + p,
                 .length = best_len,
-                .media_type = best_type,
+                .media_type = best_type.?,
                 .token_count = 0, // 由调用者填充
             });
             pos += p + best_len;
@@ -155,7 +154,6 @@ pub fn tokenizeWithPlaceholders(
         ph.token_count = switch (ph.media_type) {
             .image => image_token_count,
             .audio => audio_token_count,
-            .none => 0,
         };
     }
 
@@ -181,7 +179,6 @@ pub fn tokenizeWithPlaceholders(
         const placeholder_token_id = switch (ph.media_type) {
             .image => image_token_id,
             .audio => audio_token_id,
-            .none => 0,
         };
         for (0..ph.token_count) |_| {
             try tokens.append(allocator, placeholder_token_id);
@@ -208,7 +205,6 @@ pub fn tokenizeWithPlaceholders(
         const media_label = switch (ph.media_type) {
             .image => "image",
             .audio => "audio",
-            .none => "none",
         };
         log.debug("  placeholder[{d}]: type={s} str_pos={d}..{d} token_offset={d} token_count={d} token_id={d}", .{
             i,
@@ -263,7 +259,6 @@ pub fn expandPlaceholders(
         ph.token_count = switch (ph.media_type) {
             .image => image_token_count,
             .audio => audio_token_count,
-            .none => 0,
         };
     }
 
@@ -280,7 +275,6 @@ pub fn expandPlaceholders(
             const placeholder_token_id = switch (ph.media_type) {
                 .image => image_token_id,
                 .audio => audio_token_id,
-                .none => 0,
             };
             try tokens.append(allocator, placeholder_token_id);
         }
@@ -314,7 +308,6 @@ pub fn ensurePlaceholderInContent(content: []const u8, media_type: types.MediaTy
     const placeholder = switch (media_type) {
         .image => types.IMAGE_PLACEHOLDER,
         .audio => types.AUDIO_PLACEHOLDER,
-        .none => return content,
     };
 
     return try std.fmt.allocPrint(allocator, "{s}{s}", .{ placeholder, content });

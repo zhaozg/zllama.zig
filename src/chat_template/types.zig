@@ -10,34 +10,29 @@ const std = @import("std");
 // 媒体类型
 // ============================================================================
 
-/// 媒体数据类型
+/// 媒体类型 — ChatMessage 附件类型，仅标记占位符类型，不携带二进制数据。
+/// 原始图像/音频数据流经 mtmd.Bitmap → mtmd.tokenize 管道。
+/// MediaType.none 已移除：媒体缺席由 ChatMessage.media: ?Media 表示。
 pub const MediaType = enum {
-    none,
     image,
     audio,
 };
 
-/// 媒体数据
+/// 媒体描述符 — 轻量标记，仅表示消息附带的媒体类型。
+/// 二进制负载（像素/音频样本）归属于 mtmd.Bitmap 层。
 pub const Media = struct {
     type: MediaType,
-    data: union(enum) {
-        image: struct {
-            data: []u8,
-            width: u32,
-            height: u32,
-        },
-        audio: struct {
-            samples: []f32,
-            sample_rate: u32,
-        },
-    },
+
+    pub fn init(t: MediaType) Media {
+        return .{ .type = t };
+    }
 };
 
 // ============================================================================
 // 对话消息
 // ============================================================================
 
-/// 单条对话消息，支持关联媒体数据
+/// 单条对话消息，支持关联媒体类型标记
 pub const ChatMessage = struct {
     role: []const u8,
     content: []const u8,
@@ -122,10 +117,7 @@ test "ChatMessage init" {
 }
 
 test "ChatMessage withMedia" {
-    const media = Media{
-        .type = .image,
-        .data = .{ .image = .{ .data = &.{}, .width = 100, .height = 100 } },
-    };
+    const media = Media.init(.image);
     const msg = ChatMessage.withMedia("user", "Describe this", media);
     try testing.expectEqualStrings("user", msg.role);
     try testing.expect(msg.media != null);

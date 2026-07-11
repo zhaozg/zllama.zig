@@ -245,10 +245,7 @@ pub const MtmdVisionComparator = struct {
         defer if (!use_gguf_jinja) tmpl.deinit(self.allocator);
 
         // Use withMedia to pass media info to Jinja template engine
-        const media = chat_template.Media{
-            .type = .image,
-            .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } },
-        };
+        const media = chat_template.Media.init(.image);
         const messages = [_]chat_template.ChatMessage{
             chat_template.ChatMessage.withMedia("user", content_with_placeholder, media),
         };

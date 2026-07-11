@@ -135,11 +135,7 @@ test "ensurePlaceholderInContent: add image with alt already present" {
 // ============================================================================
 
 test "ChatMessage withMedia: image" {
-    var pixel_data = [_]u8{ 255, 0, 0 };
-    const media = Media{
-        .type = .image,
-        .data = .{ .image = .{ .data = &pixel_data, .width = 1, .height = 1 } },
-    };
+    const media = Media.init(.image);
     const msg = ChatMessage.withMedia("user", "Describe this", media);
     try testing.expect(msg.media != null);
     try testing.expect(msg.hasMediaType(.image));

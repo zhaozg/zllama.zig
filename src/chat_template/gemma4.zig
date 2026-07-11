@@ -157,7 +157,6 @@ fn appendMediaContent(
     const marker = switch (media.type) {
         .image => types.IMAGE_PLACEHOLDER,
         .audio => types.AUDIO_PLACEHOLDER,
-        .none => "",
     };
 
     // Only add the marker if it's not already present in the content.

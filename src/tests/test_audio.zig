@@ -115,10 +115,7 @@ test "ensurePlaceholderInContent: add audio with alt already present" {
 // ============================================================================
 
 test "ChatMessage withMedia: audio" {
-    const media = Media{
-        .type = .audio,
-        .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 16000 } },
-    };
+    const media = Media.init(.audio);
     const msg = ChatMessage.withMedia("user", "Transcribe this", media);
     try testing.expect(msg.media != null);
     try testing.expect(msg.hasMediaType(.audio));

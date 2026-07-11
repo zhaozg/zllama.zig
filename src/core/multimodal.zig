@@ -209,7 +209,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     const formatted_prompt = if (ectx.no_chat_template) blk: {
         const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .image, ectx.allocator);
         break :blk with_ph;
-    } else try applyChatTemplateWithMedia(ectx, prompt, chat_template.Media{ .type = .image, .data = .{ .image = .{ .data = &.{}, .width = 0, .height = 0 } } });
+    } else try applyChatTemplateWithMedia(ectx, prompt, chat_template.Media.init(.image));
     defer ectx.allocator.free(formatted_prompt);
 
     logger.info("formatted_prompt: {s}", .{formatted_prompt});
@@ -311,7 +311,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     const formatted_prompt = if (ectx.no_chat_template) blk: {
         const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .audio, ectx.allocator);
         break :blk with_ph;
-    } else try applyChatTemplateWithMedia(ectx, prompt, chat_template.Media{ .type = .audio, .data = .{ .audio = .{ .samples = &.{}, .sample_rate = 0 } } });
+    } else try applyChatTemplateWithMedia(ectx, prompt, chat_template.Media.init(.audio));
     defer ectx.allocator.free(formatted_prompt);
 
     logger.info("formatted_prompt: {s}", .{formatted_prompt});
