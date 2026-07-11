@@ -54,7 +54,6 @@ pub fn printVerbosePrompt(
                 const media_label = switch (info.media_type) {
                     .image => "image",
                     .audio => "audio",
-                    .none => "media",
                 };
                 const line = try std.fmt.bufPrint(&line_buf, "{d:6}: token {d:6} -> '<__media_{s}_{d}tokens__>'  (placeholder, {d} tokens)\n", .{
                     i, input_tokens[i], media_label, info.token_count, info.token_count,

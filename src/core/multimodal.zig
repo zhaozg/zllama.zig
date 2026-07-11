@@ -486,7 +486,6 @@ pub fn tokenizeWithMediaPlaceholders(
             break :blk switch (media_type) {
                 .image => ctx.img_beg,
                 .audio => ctx.aud_beg,
-                .none => "",
             };
         }
         break :blk "";
@@ -496,7 +495,6 @@ pub fn tokenizeWithMediaPlaceholders(
             break :blk switch (media_type) {
                 .image => ctx.img_end,
                 .audio => ctx.aud_end,
-                .none => "",
             };
         }
         break :blk "";
