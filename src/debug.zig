@@ -12,6 +12,63 @@ const ggml = @import("ggml");
 
 const log = std.log.scoped(.debug);
 
+/// 将浮点数组保存为 JSON 数组文件。
+///
+/// 格式：
+/// [
+/// 1.234567,
+/// 2.345678,
+/// ...
+/// 9.876543
+/// ]
+/// 每个值保留 6 位小数。
+///
+/// 参数:
+///   - io: I/O 实例
+///   - subdir: 子目录（如 "debug_audio"），null 表示当前目录
+///   - fname: 文件名（不含路径）
+///   - title: 数据标题（用于日志）
+///   - data: 浮点数据
+pub fn saveData(io: std.Io, subdir: ?[]const u8, fname: []const u8, title: []const u8, data: []const f32) !void {
+    const cwd = std.Io.Dir.cwd();
+
+    if (subdir) |sd| {
+        cwd.createDirPath(io, sd) catch {}; // 忽略目录已存在错误
+        const dir = try cwd.openDir(io, sd, .{});
+        defer dir.close(io);
+
+        log.info("Save {s} debug data to {s}/{s}", .{ title, sd, fname });
+
+        const file = try dir.createFile(io, fname, .{});
+        defer file.close(io);
+        try writeJsonArray(io, file, data);
+    } else {
+        log.info("Save {s} debug data to {s}", .{ title, fname });
+
+        const file = try cwd.createFile(io, fname, .{});
+        defer file.close(io);
+        try writeJsonArray(io, file, data);
+    }
+}
+
+/// 保存单个张量数据到文件
+///
+/// 参数:
+///   - allocator: 分配器（保留供将来使用）
+///   - tensor: 要保存的张量
+///   - storage_path: 存储目录路径
+///   - filename: 输出文件名
+pub fn saveTensor(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    subdir: ?[]const u8,
+    fname: []const u8,
+    tensor: *ggml.Tensor,
+) !void {
+    const data = try tensor.dataGet(f32, allocator);
+    try saveData(io, subdir, fname, tensor.getName(), data);
+}
+
 // ============================================================================
 // 调试张量注册表
 // ============================================================================
@@ -119,6 +176,7 @@ pub const DebugTensorRegistry = struct {
     ///   每个值为 float，保留 6 位小数
     pub fn saveAll(
         self: *DebugTensorRegistry,
+        io: std.Io,
         allocator: std.mem.Allocator,
         storage_path: []const u8,
         file_prefix: []const u8,
@@ -144,54 +202,10 @@ pub const DebugTensorRegistry = struct {
             defer allocator.free(filename);
 
             // 复用 saveTensor 保存单个张量
-            try saveTensor(allocator, tensor, storage_path, filename);
+            try saveTensor(io, allocator, storage_path, filename, tensor);
         }
 
         log.info("debug tensor save complete", .{});
-    }
-
-    /// 保存单个张量数据到文件
-    ///
-    /// 参数:
-    ///   - allocator: 分配器（保留供将来使用）
-    ///   - tensor: 要保存的张量
-    ///   - storage_path: 存储目录路径
-    ///   - filename: 输出文件名
-    pub fn saveTensor(
-        allocator: std.mem.Allocator,
-        tensor: *ggml.Tensor,
-        storage_path: []const u8,
-        filename: []const u8,
-    ) !void {
-        _ = allocator;
-        if (tensor.dataType() != .f32) {
-            log.debug("skipping non-f32 tensor: {s} (type={s})", .{
-                tensor.getName(),
-                @tagName(tensor.dataType()),
-            });
-            return;
-        }
-
-        // 确保存储目录存在
-        var dir = std.fs.cwd();
-        if (storage_path.len > 0) {
-            dir = try std.fs.cwd().makeOpenPath(storage_path, .{});
-            defer dir.close();
-            const data = try tensor.dataGet(f32, std.heap.page_allocator);
-            defer std.heap.page_allocator.free(data);
-            const file = try dir.createFile(filename, .{});
-            defer file.close();
-
-            const writer = file.writer();
-            try writer.writeAll("[\n");
-            for (data, 0..) |val, i| {
-                if (i > 0) try writer.writeAll(",\n");
-                try writer.print("{d:.6}", .{val});
-            }
-            try writer.writeAll("\n]\n");
-
-            log.info("  saved {s}: {d} elements", .{ filename, data.len });
-        }
     }
 
     /// 通过调试名称在图中查找张量并保存
@@ -203,6 +217,7 @@ pub const DebugTensorRegistry = struct {
     ///   - storage_path: 存储目录路径
     ///   - filename: 输出文件名
     pub fn saveTensorByName(
+        io: std.Io,
         allocator: std.mem.Allocator,
         graph: *ggml.CGraph,
         debug_name: [:0]const u8,
@@ -213,7 +228,7 @@ pub const DebugTensorRegistry = struct {
             log.warn("tensor not found in graph: {s}", .{debug_name});
             return;
         };
-        try saveTensor(allocator, tensor, storage_path, filename);
+        try saveTensor(io, allocator, tensor, storage_path, filename, tensor);
     }
 };
 
@@ -255,45 +270,6 @@ pub fn writeJsonArray(io: std.Io, file: std.Io.File, data: []const f32) !void {
     }
 
     try file.writeStreamingAll(io, "]");
-}
-
-/// 将浮点数组保存为 JSON 数组文件。
-///
-/// 格式：
-/// [
-/// 1.234567,
-/// 2.345678,
-/// ...
-/// 9.876543
-/// ]
-/// 每个值保留 6 位小数。
-///
-/// 参数:
-///   - io: I/O 实例
-///   - subdir: 子目录（如 "debug_audio"），null 表示当前目录
-///   - fname: 文件名（不含路径）
-///   - title: 数据标题（用于日志）
-///   - data: 浮点数据
-pub fn saveData(io: std.Io, subdir: ?[]const u8, fname: []const u8, title: []const u8, data: []const f32) !void {
-    const cwd = std.Io.Dir.cwd();
-
-    if (subdir) |sd| {
-        cwd.createDirPath(io, sd) catch {}; // 忽略目录已存在错误
-        const dir = try cwd.openDir(io, sd, .{});
-        defer dir.close(io);
-
-        log.info("Save {s} debug data to {s}/{s}", .{ title, sd, fname });
-
-        const file = try dir.createFile(io, fname, .{});
-        defer file.close(io);
-        try writeJsonArray(io, file, data);
-    } else {
-        log.info("Save {s} debug data to {s}", .{ title, fname });
-
-        const file = try cwd.createFile(io, fname, .{});
-        defer file.close(io);
-        try writeJsonArray(io, file, data);
-    }
 }
 
 /// 从计算图中查找指定名称的 F32 张量，将其数据保存为 JSON 数组文件。
@@ -339,12 +315,7 @@ pub fn saveTensorFromGraph(io: std.Io, allocator: std.mem.Allocator, subdir: ?[]
     }
 
     const tensor = @as(*ggml.Tensor, @ptrCast(t));
-    const data = tensor.dataGet(f32, allocator) catch |err| {
-        log.warn("saveTensorFromGraph: failed to get data for tensor '{s}': {}", .{ title, err });
-        return;
-    };
-    defer allocator.free(data);
-    try saveData(io, subdir, fname, title, data);
+    try saveTensor(io, allocator, subdir, fname, tensor);
 }
 
 // ============================================================================

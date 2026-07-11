@@ -124,7 +124,6 @@ pub const AudioEncoder = struct {
     }
 
     pub fn saveDebugData(self: *const AudioEncoder, io: std.Io, allocator: std.mem.Allocator, cgraph: *ggml.CGraph) void {
-        _ = self;
         const debug = @import("debug");
         const subdir = "debug_audio";
 
@@ -154,5 +153,13 @@ pub const AudioEncoder = struct {
         debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_90_mm_norm.json", "mm_norm", cgraph) catch {};
         debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_91_mm_norm_scaled.json", "mm_norm_scaled", cgraph) catch {};
         debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_92_mm_proj.json", "mm_proj", cgraph) catch {};
+
+        // Save weight tensors
+        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_0_weight.json", self.weights.sscp_conv_w[0].?) catch {};
+        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_1_weight.json", self.weights.sscp_conv_w[1].?) catch {};
+
+        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_input_proj_weight.json", self.weights.sscp_inp_proj_w.?) catch {};
+        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_out_proj_weight.json", self.weights.audio_out_proj_w.?) catch {};
+        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_mm_input_proj_weight.json", self.weights.mm_input_proj_w.?) catch {};
     }
 };
