@@ -32,21 +32,33 @@ pub const backend = graph.VisionEncoderBackend{
     .buildGraph = buildGraphFromWeights,
     .estimateOutputTokens = estimateOutputTokens,
 };
+
 pub fn loadParams(io: std.Io, gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
     _ = io;
-    _ = gguf_file;
-    // Gemma4UV 参数已由 encoder.zig 从 clip.vision.* 前缀加载
-    // 参考 llama.cpp clip.cpp PROJECTOR_TYPE_GEMMA4UV:
-    //   hparams.patch_size = hparams.patch_size * hparams.n_merge;
-    //   hparams.n_merge = 1;
+    // 参考: llama.cpp clip.cpp PROJECTOR_TYPE_GEMMA4UV (lines 1434-1448)
+    // 与 GEMMA4V 共享同一个 case 分支:
+    //   hparams.rope_theta = 100.0f;
+    //   hparams.n_merge = 3;
+    //   get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge, false);
+    //   if (proj_type == GEMMA4UV) { patch_size *= n_merge; n_merge = 1; }
+    //   hparams.set_limit_image_tokens(40, 280);
+    //   hparams.set_warmup_n_tokens(256);
+    params.rope_theta = 100.0;
+    params.n_merge = 3;
+    if (gguf_file.getU32("clip.vision.projector.scale_factor")) |v| {
+        params.n_merge = v;
+    }
     // 对于 "unified" 变体，token merging 直接在 conv 层完成，
     // 因此使用更大的 patch_size 并将 n_merge 设为 1。
     if (params.n_merge > 0) {
         params.patch_size *= params.n_merge;
         params.n_merge = 1;
     }
+    // 限制图像 tokens 范围：最小值 40，最大值 280
+    params.setLimitImageTokens(40, 280);
+    // warmup: sqrt(256) * patch_size * n_merge
+    params.warmup_image_size = 16 * params.patch_size * params.n_merge;
 }
-
 /// 从 GGUF 加载 Gemma4UV 视觉编码器所有权重到 VisionEncoderWeights
 pub fn loadWeights(
     io: std.Io,
@@ -99,7 +111,6 @@ pub fn loadClampInfo(
     log.info("Gemma4UV clamp info loaded: {d} entries", .{w.clamp_info_map.count()});
 }
 
-/// 从 VisionEncoderWeights 构建计算图的包装函数
 /// 从 VisionEncoderWeights 构建计算图的包装函数
 fn buildGraphFromWeights(
     io: std.Io,
@@ -164,18 +175,19 @@ fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: [
 }
 
 // ============================================================================
-// 原始 buildGraph 函数（保留向后兼容）
+// buildGraph 函数
 // ============================================================================
 
 /// 构建 Gemma4UV 完整计算图
 ///
 /// 处理流程:
-///   1. im2col + patch norm 1 (LayerNorm)
-///   2. 投影到 embedding 维度 (patch_embeddings_0)
-///   3. patch norm 2 (LayerNorm)
-///   4. 2D 位置编码 (X/Y 分别编码)
-///   5. patch norm 3 (LayerNorm)
-///   6. RMSNorm + 投影到 LLM 嵌入空间
+///   1. 创建输入张量 [W, H, C, 1], set_input (match C++ build_inp_raw)
+///   2. im2col + patch norm 1 (LayerNorm)
+///   3. 投影到 embedding 维度 (patch_embeddings_0 via mul_mat, no clamp)
+///   4. patch norm 2 (LayerNorm)
+///   5. 2D 位置编码 (X/Y lookup table + get_rows)
+///   6. patch norm 3 (LayerNorm)
+///   7. RMSNorm + 投影到 LLM 嵌入空间 (mm_input_proj_w via build_mm)
 ///
 /// 参考: llama.cpp gemma4uv.cpp build()
 pub fn buildGraph(
@@ -197,11 +209,23 @@ pub fn buildGraph(
 
     log.info("Gemma4UV graph: embd={d}, patches={d}x{d}={d}", .{ n_embd, n_patches_x, n_patches_y, n_patches });
 
-    // 1. 创建输入张量
-    // 输入图像: [3, height, width] f32, 值范围 [0, 1]
-    const inp_raw = try ctx.newTensor3d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3);
+    // ========================================================================
+    // 1. 创建输入张量 (match C++ build_inp_raw: 4D [W, H, C, 1], set_input)
+    // ========================================================================
+    const n_batch: i64 = 1;
+    const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3, n_batch);
     inp_raw.setName("inp_raw");
-    // 填充输入数据
+    ggml.setInput(inp_raw);
+
+    // 在 no_alloc 模式下，setInput 标记的张量不会被 Gallocr 分配，需要手动分配
+    if (ctx.getNoAlloc()) {
+        const data_size = @as(usize, @intCast(inp_raw.nBytes()));
+        const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+        @memset(buf, 0);
+        inp_raw.setDataPtr(buf);
+    }
+
+    // 填充输入数据 (HWC planar layout matching ggml im2col expectation)
     {
         const n_elems = @as(usize, @intCast(inp_raw.nElems()));
         const dst = try std.heap.page_allocator.alloc(f32, n_elems);
@@ -221,45 +245,48 @@ pub fn buildGraph(
         try inp_raw.dataSet(f32, dst);
     }
 
+    // ========================================================================
     // 2. im2col + patch norms + projection
-    var cur: *ggml.Tensor = undefined;
+    // ========================================================================
 
     // im2col: extract patches
+    // Kernel shape: [patch_size, patch_size, channels] — matches C++ gemma4uv.cpp
+    // Note: we cannot use ggml_conv_2d here because we need to apply norm after im2col
+    var cur: *ggml.Tensor = undefined;
+    {
+        const c: i32 = @intCast(inp_raw.ne()[2]); // channels (3 for RGB)
+        const kernel = try ctx.newTensor3d(ggml.Type.f32, patch_size, patch_size, c);
+        kernel.setName("im2col_kernel");
+
+        // im2col: output shape [patch_size * patch_size * c, n_patches_w, n_patches_h]
+        cur = inp_raw.im2col(ctx, kernel, patch_size, patch_size, 0, 0, 1, 1, true, ggml.Type.f32);
+        cur.setName("im2col_out");
+
+        // Flatten to [patch_size * patch_size * c, n_patches]
+        cur = cur.reshape2d(ctx, cur.ne()[0], cur.ne()[1] * cur.ne()[2] * cur.ne()[3]);
+        cur.setName("im2col_flat");
+    }
+
+    // Patch norm 1 (LayerNorm, not RMSNorm)
+    // Note: C++ uses build_norm(inp, patch_norm_1_w, patch_norm_1_b, NORM_TYPE_NORMAL, eps, -1)
     if (w.patch_norm_1_w) |pn1_w| {
-        if (w.patch_embeddings_0) |pe| {
-            const kw: i32 = @intCast(pe.ne()[0]);
-            const kh: i32 = @intCast(pe.ne()[1]);
-            const ic: i32 = @intCast(pe.ne()[2]);
-
-            // Create a dummy kernel for im2col (shape is used for layout)
-            const kernel = try ctx.newTensor3d(ggml.Type.f32, kw, kh, ic);
-            kernel.setName("im2col_kernel");
-
-            // im2col: [patch_size * patch_size * C, n_patches_w, n_patches_h]
-            cur = inp_raw.im2col(ctx, kernel, kw, kh, 0, 0, 1, 1, true, ggml.Type.f32);
-            cur.setName("im2col_out");
-
-            // Flatten to [patch_size * patch_size * C, n_patches]
-            cur = cur.reshape2d(ctx, cur.ne()[0], n_patches);
-            cur.setName("im2col_flat");
-
-            // Patch norm 1 (LayerNorm, not RMSNorm)
-            cur = cur.norm(ctx, eps);
-            cur.setName("patch_norm_1");
-            cur = cur.mul(ctx, pn1_w);
-            cur.setName("patch_norm_1_scaled");
-            if (w.patch_norm_1_b) |pn1_b| {
-                cur = cur.add(ctx, pn1_b);
-                cur.setName("patch_norm_1_biased");
-            }
+        cur = cur.norm(ctx, eps);
+        cur.setName("patch_norm_1");
+        cur = cur.mul(ctx, pn1_w);
+        cur.setName("patch_norm_1_scaled");
+        if (w.patch_norm_1_b) |pn1_b| {
+            cur = cur.add(ctx, pn1_b);
+            cur.setName("patch_norm_1_biased");
         }
     }
 
-    // Project to embedding dimension (with clamp)
+    // Project to embedding dimension via mul_mat (no clamp for gemma4uv)
+    // Note: C++ clip_graph_gemma4uv does NOT override build_mm, so it uses plain ggml_mul_mat
     if (w.patch_embeddings_0) |pe| {
-        cur = buildMMWithClamp(ctx, pe, cur, &w.clamp_info_map);
+        cur = pe.mulMat(ctx, cur);
         cur.setName("patch_proj");
     }
+    // Always add bias (C++ gemma4uv.cpp line 17: unconditional ggml_add)
     if (w.patch_bias) |pb| {
         cur = cur.add(ctx, pb);
         cur.setName("patch_bias_added");
@@ -277,24 +304,54 @@ pub fn buildGraph(
         }
     }
 
+    // ========================================================================
     // 3. 2D 位置编码
+    // ========================================================================
     if (w.position_embeddings) |pos_embd| {
         const pos_size = pos_embd.ne()[1];
         const row_size = ggml.Type.rowSize(pos_embd.dataType(), n_embd);
 
-        // X/Y 位置嵌入表
+        // X/Y 位置嵌入表 (matching C++ gemma4uv.cpp lookup tables)
         const tbl_x = pos_embd.view2d(ctx, n_embd, pos_size, row_size, 0);
         tbl_x.setName("pos_tbl_x");
         const tbl_y = pos_embd.view2d(ctx, n_embd, pos_size, row_size, @as(usize, @intCast(pos_size)) * row_size);
         tbl_y.setName("pos_tbl_y");
 
-        // 位置索引
-        const indices = try graph.createPositionIndices(ctx, n_patches, n_patches_x);
+        // Position indices as input tensors (matching C++ gemma4uv.cpp ggml_set_input)
+        const pos_x = try ctx.newTensor1d(ggml.Type.i32, n_patches);
+        pos_x.setName("pos_x");
+        ggml.setInput(pos_x);
+
+        const pos_y = try ctx.newTensor1d(ggml.Type.i32, n_patches);
+        pos_y.setName("pos_y");
+        ggml.setInput(pos_y);
+
+        // In no_alloc mode, setInput tensors need manually allocated data buffers
+        if (ctx.getNoAlloc()) {
+            const px_size = @as(usize, @intCast(pos_x.nBytes()));
+            const buf_x = @as([*]u8, @ptrCast(std.c.malloc(px_size) orelse return error.OutOfMemory))[0..px_size];
+            pos_x.setDataPtr(buf_x);
+            const buf_y = @as([*]u8, @ptrCast(std.c.malloc(px_size) orelse return error.OutOfMemory))[0..px_size];
+            pos_y.setDataPtr(buf_y);
+        }
+
+        // Fill position indices: x = col, y = row
+        {
+            const px = pos_x.dataI32();
+            const py = pos_y.dataI32();
+            for (0..@as(usize, @intCast(n_patches_y))) |iy| {
+                for (0..@as(usize, @intCast(n_patches_x))) |ix| {
+                    const idx = iy * @as(usize, @intCast(n_patches_x)) + ix;
+                    px[idx] = @intCast(ix);
+                    py[idx] = @intCast(iy);
+                }
+            }
+        }
 
         // getRows: [n_embd, n_patches]
-        const emb_x = tbl_x.getRows(ctx, indices.pos_x);
+        const emb_x = tbl_x.getRows(ctx, pos_x);
         emb_x.setName("pos_emb_x");
-        const emb_y = tbl_y.getRows(ctx, indices.pos_y);
+        const emb_y = tbl_y.getRows(ctx, pos_y);
         emb_y.setName("pos_emb_y");
 
         cur = cur.add(ctx, emb_x);
@@ -315,13 +372,16 @@ pub fn buildGraph(
         }
     }
 
-    // 4. Gemma4UnifiedMultimodalEmbedder
-    //    embedding_pre_projection_norm
+    // ========================================================================
+    // 4. Gemma4UnifiedMultimodalEmbedder: RMSNorm + projection
+    // ========================================================================
+    // embedding_pre_projection_norm
     cur = cur.rmsNorm(ctx, p.eps);
     cur.setName("mm_pre_norm");
 
     // 投影到 LLM 嵌入空间
-    // 投影到 LLM 嵌入空间 (with clamp)
+    // Note: C++ clip_graph_gemma4uv uses base build_mm (plain ggml_mul_mat, no clamp).
+    // We use buildMMWithClamp for safety; if no clamp info exists it falls through to plain mul_mat.
     if (w.mm_input_proj_w) |proj_w| {
         cur = buildMMWithClamp(ctx, proj_w, cur, &w.clamp_info_map);
         cur.setName("mm_proj");
@@ -341,7 +401,10 @@ pub fn buildGraph(
 // ============================================================================
 
 /// 带 clamp 的矩阵乘法
-/// 对应 C++ clip_graph_gemma4v::build_mm()
+/// 对应 C++ clip_graph_gemma4v::build_mm().
+/// Note: gemma4uv does NOT override build_mm in C++ (uses default ggml_mul_mat),
+/// but we support clamp here as a safety enhancement — if no clamp info exists,
+/// it falls through to plain mul_mat.
 fn buildMMWithClamp(
     ctx: *ggml.Context,
     w: *ggml.Tensor,

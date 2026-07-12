@@ -127,8 +127,19 @@ pub fn createPositionIndices(
 ) !struct { pos_x: *ggml.Tensor, pos_y: *ggml.Tensor } {
     const pos_x = try ctx.newTensor1d(ggml.Type.i32, n_patches);
     pos_x.setName("pos_x");
+    ggml.setInput(pos_x);
     const pos_y = try ctx.newTensor1d(ggml.Type.i32, n_patches);
     pos_y.setName("pos_y");
+    ggml.setInput(pos_y);
+
+    // In no_alloc mode, setInput tensors need manually allocated data buffers
+    if (ctx.getNoAlloc()) {
+        const px_size = @as(usize, @intCast(pos_x.nBytes()));
+        const buf_x = @as([*]u8, @ptrCast(std.c.malloc(px_size) orelse return error.OutOfMemory))[0..px_size];
+        pos_x.setDataPtr(buf_x);
+        const buf_y = @as([*]u8, @ptrCast(std.c.malloc(px_size) orelse return error.OutOfMemory))[0..px_size];
+        pos_y.setDataPtr(buf_y);
+    }
 
     const px = pos_x.dataI32();
     const py = pos_y.dataI32();

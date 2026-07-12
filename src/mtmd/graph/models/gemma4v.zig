@@ -121,15 +121,25 @@ pub const backend = graph.VisionEncoderBackend{
 };
 
 /// 从 GGUF 元数据读取视觉编码器超参数
+/// 参考: llama.cpp clip.cpp PROJECTOR_TYPE_GEMMA4V (lines 1434-1448)
 pub fn loadParams(io: std.Io, gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
     _ = io;
-    _ = gguf_file;
-    _ = params;
-    // Gemma4V 参数已由 encoder.zig 从 clip.vision.* 前缀加载
-    // 此处可添加模型特定参数覆盖
+    // llama.cpp 参考:
+    //   hparams.rope_theta = 100.0f;
+    //   hparams.n_merge = 3; // pooling_kernel_size
+    //   get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge, false);
+    //   hparams.set_limit_image_tokens(40, 280);
+    //   hparams.set_warmup_n_tokens(256);
+    params.rope_theta = 100.0;
+    params.n_merge = 3; // pooling_kernel_size (不同于 Gemma4UV 的 conv layer merge)
+    if (gguf_file.getU32("clip.vision.projector.scale_factor")) |v| {
+        params.n_merge = v;
+    }
+    // 限制图像 tokens 范围：最小值 40（避免小图像性能差），最大值 280
+    params.setLimitImageTokens(40, 280);
+    // warmup: sqrt(256) * patch_size * n_merge
+    params.warmup_image_size = 16 * params.patch_size * params.n_merge;
 }
-
-/// 从 GGUF 加载 Gemma4V 视觉编码器所有权重到 VisionEncoderWeights
 pub fn loadWeights(
     io: std.Io,
     allocator: std.mem.Allocator,

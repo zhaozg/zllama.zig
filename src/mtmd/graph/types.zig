@@ -284,7 +284,8 @@ pub const VisionHParams = struct {
         const patch_area = self.patch_size * self.patch_size * cur_merge * cur_merge;
         self.image_min_pixels = @as(i32, @intCast(if (self.custom_image_min_tokens > 0) @as(u32, @intCast(self.custom_image_min_tokens)) else n_tokens_min)) * @as(i32, @intCast(patch_area));
         self.image_max_pixels = @as(i32, @intCast(if (self.custom_image_max_tokens > 0) @as(u32, @intCast(self.custom_image_max_tokens)) else n_tokens_max)) * @as(i32, @intCast(patch_area));
-        self.warmup_image_size = @as(u32, @intCast(@as(f64, @sqrt(@as(f64, @floatFromInt(self.image_max_pixels))))));
+        const px: f64 = @floatFromInt(@as(u32, @intCast(self.image_max_pixels)));
+        self.warmup_image_size = @as(u32, @intFromFloat(@sqrt(px)));
     }
 };
 

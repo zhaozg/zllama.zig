@@ -173,7 +173,6 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     // 输入张量的数据由 normalizeToTensor 在 no_alloc 模式下手动分配。
     var vision_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
     defer vision_ctx.deinit();
-
     const vision_graph = try ggml.CGraph.initReserved(vision_ctx, 32768);
     const vision_embeddings = try mm_mgr.encodeMedia(io, vision_ctx, vision_graph, .{
         .media_type = .image,
@@ -182,14 +181,18 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
         .image_height = img.height,
     }, ectx.n_threads);
 
-    // Compute the vision graph (encoder only builds, caller computes)
-    _ = try engine_common.computeGraph(vision_graph, ectx.n_threads, ectx.gallocr);
+    // Compute the vision graph with a dedicated Gallocr (matching helper.zig pattern).
+    // The engine's Gallocr is sized for the text model; vision graph may need
+    // different memory layout.
+    const buft = ggml.backendCpuBufferType();
+    var vis_gallocr = try ggml.Gallocr.init(buft);
+    defer vis_gallocr.free();
+    _ = try engine_common.computeGraph(vision_graph, ectx.n_threads, vis_gallocr);
 
     vision_ctx.setNoAlloc(true);
 
     const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
     const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
-
     logger.debug("Vision encoder output: shape=[{d}, {d}]", .{ n_embd_val, n_vision_tokens });
     if (ectx.arch == .qwen3vl) {
         logger.debug("  Qwen3VL: allowing encoder dim {d}", .{n_embd_val});
@@ -273,9 +276,12 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     logger.debug("Audio encoder: graph built, embeddings tensor found", .{});
 
     // Compute the audio graph (encoder only builds, caller computes)
+    // Compute the audio graph with a dedicated Gallocr (matching helper.zig pattern).
     logger.debug("Audio encoder: computing graph...", .{});
-    _ = try engine_common.computeGraph(audio_graph, ectx.n_threads, ectx.gallocr);
-    logger.debug("Audio encoder: graph computed successfully", .{});
+    const audio_buft = ggml.backendCpuBufferType();
+    var audio_gallocr = try ggml.Gallocr.init(audio_buft);
+    defer audio_gallocr.free();
+    _ = try engine_common.computeGraph(audio_graph, ectx.n_threads, audio_gallocr);
 
     audio_ctx.setNoAlloc(true);
 

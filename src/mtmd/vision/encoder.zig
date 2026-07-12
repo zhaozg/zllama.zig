@@ -78,7 +78,18 @@ pub const VisionEncoder = struct {
             .eps = params.norm_eps,
             .rope_theta = params.rope_theta,
         };
+        // 模型特定的参数覆盖（如 Gemma4V 设置 rope_theta=100, n_merge=3,
+        // setLimitImageTokens 等）
         backend.loadParams(io, gguf_file, &hparams);
+
+        // 将 loadParams 的修改同步回 params（encode() 从 params 重建 hparams）
+        params.n_merge = hparams.n_merge;
+        params.rope_theta = hparams.rope_theta;
+        if (hparams.image_min_pixels > 0) {
+            // setLimitImageTokens 被调用过，覆盖通用默认值
+            params.image_min_pixels = @intCast(hparams.image_min_pixels);
+            params.image_max_pixels = @intCast(hparams.image_max_pixels);
+        }
 
         var weights = VisionEncoderWeights{};
         try backend.loadWeights(io, allocator, gguf_file, ctx, &weights);
