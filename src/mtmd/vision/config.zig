@@ -65,9 +65,9 @@ pub const VisionEncoderParams = struct {
     n_output_embd: u32 = 1536,
 
     /// Pooling kernel size（每侧合并数）
-    /// Gemma 4 E2B: 2 (from n_merge)
-    n_merge: u32 = 2,
-
+    /// 来自 GGUF: clip.vision.projector.scale_factor 或 gemma4.vision.projector.scale_factor
+    /// 参考 llama.cpp: GEMMA4V/GEMMA4UV 默认值为 3，GGUF 中的实际值覆盖此默认值
+    n_merge: u32 = 3,
     /// RoPE theta
     rope_theta: f32 = 10000.0,
 

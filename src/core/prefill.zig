@@ -186,6 +186,13 @@ pub fn threeStagePrefill(
         }
 
         // 使用传入的 gallocr（所有权上移）
+        // P0 fix (deps/image.md Problem 1): reserve before allocGraph to rebuild
+        // gallocr internal state, avoiding cross-pass tensor pointer staleness
+        // when temporary contexts are freed between passes.
+        if (!gallocr.reserve(p1_graph)) {
+            log.err("Graph reserve failed: text-prefix pass", .{});
+            return error.GraphReserveFailed;
+        }
         if (!gallocr.allocGraph(p1_graph)) {
             log.err("Graph alloc failed: text-prefix pass", .{});
             return error.GraphAllocFailed;
@@ -297,6 +304,12 @@ pub fn threeStagePrefill(
             }
 
             // 使用传入的 gallocr（所有权上移）
+            // P0 fix (deps/image.md Problem 1/4): reserve before allocGraph to
+            // rebuild gallocr internal state for the new pass.
+            if (!gallocr.reserve(p2_graph)) {
+                log.err("Graph reserve failed: media pass chunk {d}", .{chunk_start});
+                return error.GraphReserveFailed;
+            }
             if (!gallocr.allocGraph(p2_graph)) {
                 log.err("Graph alloc failed: media pass chunk {d}", .{chunk_start});
                 return error.GraphAllocFailed;
@@ -371,11 +384,16 @@ pub fn threeStagePrefill(
     }
 
     // 使用传入的 gallocr（所有权上移）
+    // P0 fix (deps/image.md Problem 1/4): reserve before allocGraph to
+    // rebuild gallocr internal state for the final pass.
+    if (!gallocr.reserve(p3_graph)) {
+        log.err("Graph reserve failed: text-suffix pass", .{});
+        return error.GraphReserveFailed;
+    }
     if (!gallocr.allocGraph(p3_graph)) {
         log.err("Graph alloc failed: text-suffix pass", .{});
         return error.GraphAllocFailed;
     }
-
     const t3_start = engine_common.currentTimeMs();
     try p3_graph.compute(n_threads);
     const t3_end = engine_common.currentTimeMs();

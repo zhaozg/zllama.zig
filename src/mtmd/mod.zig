@@ -234,8 +234,10 @@ pub const MultiModalManager = struct {
 
         // 读取 projector_type（通用键，或模态特定键）
         const proj_type = gf.getString("clip.projector_type") orelse "";
-        const vision_proj_type = gf.getString("clip.vision.projector_type") orelse "";
-        const audio_proj_type = gf.getString("clip.audio.projector_type") orelse "";
+        const vision_proj_type = gf.getString("clip.vision.projector_type") orelse
+            gf.getString("gemma4.vision.projector_type") orelse "";
+        const audio_proj_type = gf.getString("clip.audio.projector_type") orelse
+            gf.getString("gemma4.audio.projector_type") orelse "";
 
         // ====================================================================
         // 2. 视觉编码器检测
@@ -248,7 +250,8 @@ pub const MultiModalManager = struct {
             } else if (proj_type.len > 0) {
                 caps.vision_encoder_type = proj_type;
             } else {
-                caps.vision_encoder_type = "gemma4v";
+                // 元数据中缺少 projector_type 键 — 回退到张量名启发式检测
+                caps.vision_encoder_type = detectVisionEncoderByTensors(gf);
             }
         } else {
             // 回退：通过张量名称启发式检测（向后兼容旧 GGUF 文件）
@@ -257,35 +260,7 @@ pub const MultiModalManager = struct {
                 gf.findTensor("mm.soft_emb_norm.weight") != null)
             {
                 caps.has_vision = true;
-                // 注意：mm.input_projection.weight 不再作为视觉检测信号，
-                // 因为它也可能是 gemma4ua 音频编码器的张量。
-                // 区分视觉编码器类型（按特异性从高到低匹配）：
-                // - gemma4uv: 使用 v.patch_norm.1.weight 或 patch_norm_1.weight
-                // - qwen2vl:  使用 v.patch_embd_1.weight（双 patch embedding，qwen2vl 特有）
-                // - qwen3vl:  使用 v.blk.0.attn_qkv.weight（fused QKV）
-                // - gemma4v:  使用 v.blk.0.attn_q.weight + v.std_bias（分离 Q/K/V + 标准化参数）
-                //             注意：gemma4v 和 qwen2vl 都使用 v.blk.{d}.attn_q.weight 命名，
-                //             但 qwen2vl 有 v.patch_embd_1.weight，gemma4v 有 v.std_bias/v.std_scale
-                if (gf.findTensor("v.patch_norm.1.weight") != null or
-                    gf.findTensor("patch_norm_1.weight") != null)
-                {
-                    caps.vision_encoder_type = "gemma4uv";
-                } else if (gf.findTensor("v.patch_embd_1.weight") != null) {
-                    // qwen2vl 有第二个 patch embedding 层（双卷积），gemma4v 没有
-                    caps.vision_encoder_type = "qwen2vl";
-                } else if (gf.findTensor("v.blk.0.attn_qkv.weight") != null) {
-                    caps.vision_encoder_type = "qwen3vl";
-                } else if (gf.findTensor("v.std_bias") != null or
-                    gf.findTensor("v.std_scale") != null)
-                {
-                    // gemma4v 有标准化参数（std_bias/std_scale），qwen2vl 没有
-                    caps.vision_encoder_type = "gemma4v";
-                } else if (gf.findTensor("v.blk.0.attn_q.weight") != null) {
-                    // 分离 Q/K/V 权重，无 std_bias — 默认为 gemma4v
-                    caps.vision_encoder_type = "gemma4v";
-                } else {
-                    caps.vision_encoder_type = "gemma4v";
-                }
+                caps.vision_encoder_type = detectVisionEncoderByTensors(gf);
             }
         }
 
@@ -352,6 +327,37 @@ pub const MultiModalManager = struct {
             }
         }
         return caps;
+    }
+
+    /// 通过张量名启发式检测视觉编码器类型
+    /// 按特异性从高到低匹配：
+    /// - gemma4uv: v.patch_norm.1.weight / patch_norm_1.weight（无 ViT blocks）
+    /// - qwen2vl:  v.patch_embd_1.weight（双 patch embedding，qwen2vl 特有）
+    /// - qwen3vl:  v.blk.0.attn_qkv.weight（fused QKV）
+    /// - gemma4v:  v.std_bias / v.std_scale / v.blk.0.attn_q.weight（分离 Q/K/V + 标准化参数）
+    fn detectVisionEncoderByTensors(gf: *const gguf.GGUFFile) []const u8 {
+        if (gf.findTensor("v.patch_norm.1.weight") != null or
+            gf.findTensor("patch_norm_1.weight") != null)
+        {
+            return "gemma4uv";
+        }
+        if (gf.findTensor("v.patch_embd_1.weight") != null) {
+            return "qwen2vl";
+        }
+        if (gf.findTensor("v.blk.0.attn_qkv.weight") != null) {
+            return "qwen3vl";
+        }
+        // gemma4v 有标准化参数（std_bias/std_scale），qwen2vl 没有
+        if (gf.findTensor("v.std_bias") != null or
+            gf.findTensor("v.std_scale") != null)
+        {
+            return "gemma4v";
+        }
+        // 分离 Q/K/V 权重，无 std_bias — 默认为 gemma4v
+        if (gf.findTensor("v.blk.0.attn_q.weight") != null) {
+            return "gemma4v";
+        }
+        return "gemma4v";
     }
 
     pub fn init(

@@ -40,8 +40,11 @@ pub const VisionEncoder = struct {
         if (gguf_file.getU32("clip.vision.block_count")) |v| params.n_layer = v else if (gguf_file.getU32("gemma4.vision.block_count")) |v| params.n_layer = v;
         if (gguf_file.getU32("clip.vision.feed_forward_length")) |v| params.n_ff = v else if (gguf_file.getU32("gemma4.vision.feed_forward_length")) |v| params.n_ff = v;
         if (gguf_file.getU32("clip.vision.projection_dim")) |v| params.n_output_embd = v else if (gguf_file.getU32("gemma4.vision.projection_dim")) |v| params.n_output_embd = v;
-        if (gguf_file.getU32("clip.vision.projector.scale_factor")) |v| params.n_merge = v;
-        if (gguf_file.getF32("clip.vision.attention.layer_norm_epsilon")) |v| params.norm_eps = v;
+        if (gguf_file.getU32("clip.vision.projector.scale_factor")) |v| {
+            params.n_merge = v;
+        } else if (gguf_file.getU32("gemma4.vision.projector.scale_factor")) |v| {
+            params.n_merge = v;
+        }
         if (gguf_file.getF32("clip.vision.rope_theta")) |v| params.rope_theta = v;
         if (gguf_file.getU32("clip.vision.image_min_pixels")) |v| params.image_min_pixels = v;
         if (gguf_file.getU32("clip.vision.image_max_pixels")) |v| params.image_max_pixels = v;

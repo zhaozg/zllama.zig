@@ -35,8 +35,16 @@ pub const backend = graph.VisionEncoderBackend{
 pub fn loadParams(io: std.Io, gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
     _ = io;
     _ = gguf_file;
-    _ = params;
     // Gemma4UV 参数已由 encoder.zig 从 clip.vision.* 前缀加载
+    // 参考 llama.cpp clip.cpp PROJECTOR_TYPE_GEMMA4UV:
+    //   hparams.patch_size = hparams.patch_size * hparams.n_merge;
+    //   hparams.n_merge = 1;
+    // 对于 "unified" 变体，token merging 直接在 conv 层完成，
+    // 因此使用更大的 patch_size 并将 n_merge 设为 1。
+    if (params.n_merge > 0) {
+        params.patch_size *= params.n_merge;
+        params.n_merge = 1;
+    }
 }
 
 /// 从 GGUF 加载 Gemma4UV 视觉编码器所有权重到 VisionEncoderWeights
