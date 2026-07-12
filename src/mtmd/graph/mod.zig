@@ -20,6 +20,7 @@ pub const model_graphs = struct {
     pub const gemma4v = @import("models/gemma4v.zig");
     pub const gemma4a = @import("models/gemma4a.zig");
     pub const gemma4uv = @import("models/gemma4uv.zig");
+    pub const gemma4ua = @import("models/gemma4ua.zig");
     pub const qwen2vl = @import("models/qwen2vl.zig");
     pub const qwen3vl = @import("models/qwen3vl.zig");
 };

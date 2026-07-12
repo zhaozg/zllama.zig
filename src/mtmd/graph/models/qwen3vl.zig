@@ -435,8 +435,6 @@ pub fn buildGraph(
 
     ggml.setInput(positions);
 
-
-
     {
         const data = positions.dataI32();
         for (0..@as(usize, @intCast(n_patches))) |i| {

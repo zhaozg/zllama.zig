@@ -221,51 +221,116 @@ pub const MultiModalManager = struct {
 
     pub fn detectFromGGUF(gf: *const gguf.GGUFFile) model.ModelCapabilities {
         var caps = model.ModelCapabilities{};
-        if (gf.findTensor("v.patch_embd.weight") != null or
-            gf.findTensor("v.position_embd.weight") != null or
-            gf.findTensor("mm.input_projection.weight") != null or
-            gf.findTensor("mm.soft_emb_norm.weight") != null)
-        {
+
+        // ====================================================================
+        // 1. 优先从 GGUF 元数据键读取（匹配 C++ clip.cpp 行为）
+        //    C++ 参考: clip.cpp clip_model_loader 构造函数
+        //    - clip.has_vision_encoder (bool)
+        //    - clip.has_audio_encoder (bool)
+        //    - clip.projector_type (string) — 或 clip.vision.projector_type / clip.audio.projector_type
+        // ====================================================================
+        const has_vision_meta = gf.getBool("clip.has_vision_encoder") orelse false;
+        const has_audio_meta = gf.getBool("clip.has_audio_encoder") orelse false;
+
+        // 读取 projector_type（通用键，或模态特定键）
+        const proj_type = gf.getString("clip.projector_type") orelse "";
+        const vision_proj_type = gf.getString("clip.vision.projector_type") orelse "";
+        const audio_proj_type = gf.getString("clip.audio.projector_type") orelse "";
+
+        // ====================================================================
+        // 2. 视觉编码器检测
+        // ====================================================================
+        if (has_vision_meta) {
+            // 元数据明确声明有视觉编码器
             caps.has_vision = true;
-            // 区分视觉编码器类型（按特异性从高到低匹配）：
-            // - gemma4uv: 使用 v.patch_norm.1.weight 或 patch_norm_1.weight
-            // - qwen2vl:  使用 v.patch_embd_1.weight（双 patch embedding，qwen2vl 特有）
-            // - qwen3vl:  使用 v.blk.0.attn_qkv.weight（fused QKV）
-            // - gemma4v:  使用 v.blk.0.attn_q.weight + v.std_bias（分离 Q/K/V + 标准化参数）
-            //             注意：gemma4v 和 qwen2vl 都使用 v.blk.{d}.attn_q.weight 命名，
-            //             但 qwen2vl 有 v.patch_embd_1.weight，gemma4v 有 v.std_bias/v.std_scale
-            if (gf.findTensor("v.patch_norm.1.weight") != null or
-                gf.findTensor("patch_norm_1.weight") != null)
-            {
-                caps.vision_encoder_type = "gemma4uv";
-            } else if (gf.findTensor("v.patch_embd_1.weight") != null) {
-                // qwen2vl 有第二个 patch embedding 层（双卷积），gemma4v 没有
-                caps.vision_encoder_type = "qwen2vl";
-            } else if (gf.findTensor("v.blk.0.attn_qkv.weight") != null) {
-                caps.vision_encoder_type = "qwen3vl";
-            } else if (gf.findTensor("v.std_bias") != null or
-                gf.findTensor("v.std_scale") != null)
-            {
-                // gemma4v 有标准化参数（std_bias/std_scale），qwen2vl 没有
-                caps.vision_encoder_type = "gemma4v";
-            } else if (gf.findTensor("v.blk.0.attn_q.weight") != null) {
-                // 分离 Q/K/V 权重，无 std_bias — 默认为 gemma4v
-                caps.vision_encoder_type = "gemma4v";
+            if (vision_proj_type.len > 0) {
+                caps.vision_encoder_type = vision_proj_type;
+            } else if (proj_type.len > 0) {
+                caps.vision_encoder_type = proj_type;
             } else {
                 caps.vision_encoder_type = "gemma4v";
             }
+        } else {
+            // 回退：通过张量名称启发式检测（向后兼容旧 GGUF 文件）
+            if (gf.findTensor("v.patch_embd.weight") != null or
+                gf.findTensor("v.position_embd.weight") != null or
+                gf.findTensor("mm.soft_emb_norm.weight") != null)
+            {
+                caps.has_vision = true;
+                // 注意：mm.input_projection.weight 不再作为视觉检测信号，
+                // 因为它也可能是 gemma4ua 音频编码器的张量。
+                // 区分视觉编码器类型（按特异性从高到低匹配）：
+                // - gemma4uv: 使用 v.patch_norm.1.weight 或 patch_norm_1.weight
+                // - qwen2vl:  使用 v.patch_embd_1.weight（双 patch embedding，qwen2vl 特有）
+                // - qwen3vl:  使用 v.blk.0.attn_qkv.weight（fused QKV）
+                // - gemma4v:  使用 v.blk.0.attn_q.weight + v.std_bias（分离 Q/K/V + 标准化参数）
+                //             注意：gemma4v 和 qwen2vl 都使用 v.blk.{d}.attn_q.weight 命名，
+                //             但 qwen2vl 有 v.patch_embd_1.weight，gemma4v 有 v.std_bias/v.std_scale
+                if (gf.findTensor("v.patch_norm.1.weight") != null or
+                    gf.findTensor("patch_norm_1.weight") != null)
+                {
+                    caps.vision_encoder_type = "gemma4uv";
+                } else if (gf.findTensor("v.patch_embd_1.weight") != null) {
+                    // qwen2vl 有第二个 patch embedding 层（双卷积），gemma4v 没有
+                    caps.vision_encoder_type = "qwen2vl";
+                } else if (gf.findTensor("v.blk.0.attn_qkv.weight") != null) {
+                    caps.vision_encoder_type = "qwen3vl";
+                } else if (gf.findTensor("v.std_bias") != null or
+                    gf.findTensor("v.std_scale") != null)
+                {
+                    // gemma4v 有标准化参数（std_bias/std_scale），qwen2vl 没有
+                    caps.vision_encoder_type = "gemma4v";
+                } else if (gf.findTensor("v.blk.0.attn_q.weight") != null) {
+                    // 分离 Q/K/V 权重，无 std_bias — 默认为 gemma4v
+                    caps.vision_encoder_type = "gemma4v";
+                } else {
+                    caps.vision_encoder_type = "gemma4v";
+                }
+            }
         }
-        if (gf.findTensor("a.conv1d.0.weight") != null or
-            gf.findTensor("a.input_projection.weight") != null or
-            gf.findTensor("a.pre_encode.out.weight") != null or
-            gf.findTensor("mm.a.input_projection.weight") != null)
-        {
+
+        // ====================================================================
+        // 3. 音频编码器检测
+        // ====================================================================
+        if (has_audio_meta) {
+            // 元数据明确声明有音频编码器
             caps.has_audio = true;
-            caps.audio_encoder_type = "gemma4a";
+            if (audio_proj_type.len > 0) {
+                caps.audio_encoder_type = audio_proj_type;
+            } else if (proj_type.len > 0) {
+                caps.audio_encoder_type = proj_type;
+            } else {
+                caps.audio_encoder_type = "gemma4a";
+            }
             caps.audio_sample_rate = 16000;
             if (gf.getU32("gemma4.audio.sample_rate")) |v| caps.audio_sample_rate = @intCast(v);
+        } else {
+            // 回退：通过张量名称启发式检测
+            if (gf.findTensor("a.conv1d.0.weight") != null or
+                gf.findTensor("a.input_projection.weight") != null or
+                gf.findTensor("a.pre_encode.out.weight") != null or
+                gf.findTensor("mm.a.input_projection.weight") != null)
+            {
+                caps.has_audio = true;
+                caps.audio_encoder_type = "gemma4a";
+                caps.audio_sample_rate = 16000;
+                if (gf.getU32("gemma4.audio.sample_rate")) |v| caps.audio_sample_rate = @intCast(v);
+            } else if (gf.findTensor("mm.input_projection.weight") != null and
+                !caps.has_vision and
+                gf.findTensor("a.conv1d.0.weight") == null)
+            {
+                // Gemma4UA: 只有 mm.input_projection.weight，没有 vision 或 conformer 张量
+                // 注意：只有当 has_vision 为 false 时才触发，避免与视觉编码器的 mm.input_projection.weight 冲突
+                caps.has_audio = true;
+                caps.audio_encoder_type = "gemma4ua";
+                caps.audio_sample_rate = 16000;
+                if (gf.getU32("gemma4.audio.sample_rate")) |v| caps.audio_sample_rate = @intCast(v);
+            }
         }
-        // Fill special tokens based on detected encoder types
+
+        // ====================================================================
+        // 4. 填充特殊 Token 标记
+        // ====================================================================
         if (caps.has_vision) {
             if (std.mem.startsWith(u8, caps.vision_encoder_type, "gemma4")) {
                 caps.special_tokens.img_beg = "<|image>";
@@ -281,7 +346,7 @@ pub const MultiModalManager = struct {
             }
         }
         if (caps.has_audio) {
-            if (std.mem.startsWith(u8, caps.audio_encoder_type, "gemma4a")) {
+            if (std.mem.startsWith(u8, caps.audio_encoder_type, "gemma4")) {
                 caps.special_tokens.aud_beg = "<|audio>";
                 caps.special_tokens.aud_end = "<audio|>";
             }
