@@ -300,6 +300,17 @@ pub fn buildGraph(
         // Reference: build_inp_raw() -> ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, img.nx(), img.ny(), 3, n_batch)
         const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(img_width)), @as(i64, @intCast(img_height)), 3, n_batch);
         inp_raw.setName("inp_raw");
+
+        // In no_alloc mode, the tensor data pointer is NULL.
+        // We need to allocate the data manually so we can write to it.
+        const no_alloc = ctx.getNoAlloc();
+        if (no_alloc) {
+            const data_size = @as(usize, @intCast(inp_raw.nBytes()));
+            const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+            @memset(buf, 0);
+            inp_raw.setDataPtr(buf);
+        }
+
         {
             const n_elems = @as(usize, @intCast(inp_raw.nElems()));
             const dst = try std.heap.page_allocator.alloc(f32, n_elems);
@@ -411,7 +422,20 @@ pub fn buildGraph(
     const num_position_ids = n_patches * 4;
     const positions = try ctx.newTensor1d(ggml.Type.i32, num_position_ids);
     positions.setName("positions");
+
+    // In no_alloc mode, the tensor data pointer is NULL.
+    // We need to allocate the data manually so we can write to it.
+    const no_alloc_pos = ctx.getNoAlloc();
+    if (no_alloc_pos) {
+        const data_size = @as(usize, @intCast(positions.nBytes()));
+        const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+        @memset(buf, 0);
+        positions.setDataPtr(buf);
+    }
+
     ggml.setInput(positions);
+
+
 
     {
         const data = positions.dataI32();

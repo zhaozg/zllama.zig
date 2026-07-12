@@ -272,12 +272,19 @@ pub fn resizePositionEmbeddings(
         cur.setName("pos_embd_resized");
         return cur;
     }
-
-    // 非整数倍缩放：使用双线性插值
-    // 在 CPU 端手动计算插值，因为 ggml 没有内置的双线性插值算子
     // 创建目标张量
     const result = try ctx.newTensor2d(ggml.Type.f32, n_embd, target_size);
     result.setName("pos_embd_resized");
+
+    // In no_alloc mode, the tensor data pointer is NULL.
+    // We need to allocate the data manually so we can write to it.
+    const no_alloc = ctx.getNoAlloc();
+    if (no_alloc) {
+        const data_size = @as(usize, @intCast(result.nBytes()));
+        const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
+        @memset(buf, 0);
+        result.setDataPtr(buf);
+    }
 
     // 使用 dataGet 安全读取源张量数据
     const src_data = try pos_embd.dataGet(f32, std.heap.page_allocator);
