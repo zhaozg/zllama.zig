@@ -24,7 +24,7 @@ const VisionHParams = graph.VisionHParams;
 const ViTLayerWeights = graph.ViTLayerWeights;
 const ImageF32 = graph.ImageF32;
 
-const log = std.log.scoped(.qwen3vl_graph);
+const log = std.log.scoped(.graph_qwen3vl);
 
 // ============================================================================
 // 视觉编码器后端注册

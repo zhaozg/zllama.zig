@@ -35,24 +35,26 @@ const InferenceEngine = @import("core/engine.zig").InferenceEngine;
 const loadMMProj = @import("core/loader.zig").loadMMProj;
 
 pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_common.logFilter, .log_scope_levels = &[_]std.log.ScopeLevel{
-    .{ .scope = .tokenizer, .level = .info },
     .{ .scope = .ggml, .level = .info },
-    .{ .scope = .qwen, .level = .info },
-    .{ .scope = .llama, .level = .info },
     .{ .scope = .model, .level = .info },
     .{ .scope = .main, .level = .info },
     .{ .scope = .engine, .level = .info },
-    .{ .scope = .gemma4, .level = .info },
     .{ .scope = .mtmd, .level = .info },
     .{ .scope = .prefill, .level = .debug },
     .{ .scope = .multimodal, .level = .debug },
+
     .{ .scope = .audio_encoder, .level = .debug },
     .{ .scope = .audio_pipeline, .level = .info },
     .{ .scope = .vision_encoder, .level = .info },
     .{ .scope = .vision_pipeline, .level = .info },
 
+    .{ .scope = .gemma4, .level = .info },
+
     .{ .scope = .weight_loader, .level = .info },
-    .{ .scope = .gemma4a, .level = .info },
+    .{ .scope = .graph_gemma4a, .level = .info },
+    .{ .scope = .graph_gemma4v, .level = .info },
+    .{ .scope = .graph_gemma4ua, .level = .info },
+    .{ .scope = .graph_gemma4uv, .level = .info },
 } };
 
 const logger = std.log.scoped(.main);

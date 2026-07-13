@@ -20,7 +20,7 @@ const VisionHParams = graph.VisionHParams;
 const ViTLayerWeights = graph.ViTLayerWeights;
 const ClampInfo = graph.ClampInfo;
 
-const log = std.log.scoped(.gemma4ua_graph);
+const log = std.log.scoped(.graph_gemma4ua);
 
 // ============================================================================
 // 音频编码器后端注册

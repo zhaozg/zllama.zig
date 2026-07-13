@@ -1,7 +1,7 @@
 //! FFN 层构建器
 //!
 //! 提供 FFN（前馈网络）的 ggml 计算图构建，支持多种激活函数。
-//! 参考: deps/llama.cpp/tools/mtmd/clip-graph.h build_ffn()
+//! 参考: deps/llama.cpp/tools/mtmd/clip.cpp clip_graph::build_ffn()
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -34,7 +34,7 @@ const log = std.log.scoped(.graph_ffn);
 ///
 /// 返回: FFN 输出张量 [n_embd, n_patches]
 ///
-/// 参考: clip-graph.h build_ffn()
+/// 参考: clip.cpp clip_graph::build_ffn()
 pub fn buildFFN(
     ctx: *ggml.Context,
     cur: *ggml.Tensor,
@@ -47,6 +47,7 @@ pub fn buildFFN(
     type_op: FFNOpType,
     name: []const u8,
 ) !*ggml.Tensor {
+    // C++: ggml_tensor * tmp = up ? build_mm(up, cur) : cur;
     // Up projection: [n_ff, n_embd] @ [n_embd, n_patches] → [n_ff, n_patches]
     var up_result = up.mulMat(ctx, cur);
 
@@ -55,6 +56,7 @@ pub fn buildFFN(
     }
 
     // Gate projection (optional, for GLU variants)
+    // C++: if (gate) { cur = build_mm(gate, cur); ... }
     var gate_result: ?*ggml.Tensor = null;
     if (gate) |g| {
         gate_result = g.mulMat(ctx, cur);
@@ -63,24 +65,35 @@ pub fn buildFFN(
         }
     }
 
-    var activated = blk: {
-        break :blk switch (type_op) {
-            .gelu => up_result.gelu(ctx),
-            .gelu_erf => up_result.geluErf(ctx),
-            .silu => up_result.silu(ctx),
-            .gelu_quick => up_result.geluQuick(ctx),
-            .relu_sqr => {
-                const relu = up_result.relu(ctx);
-                break :blk relu.mul(ctx, relu);
-            },
-        };
+    // Activation
+    // C++: switch (type_op) { case FFN_SILU: ... }
+    const activated = blk: {
+        if (gate_result) |g| {
+            // GLU variants: use split activation (tensor method)
+            break :blk switch (type_op) {
+                .silu => g.swigluSplit(ctx, up_result),
+                .gelu => g.gegluSplit(ctx, up_result),
+                .gelu_erf => g.gegluErfSplit(ctx, up_result),
+                .gelu_quick => g.gegluQuickSplit(ctx, up_result),
+                .relu_sqr => {
+                    const relu = g.relu(ctx);
+                    break :blk relu.mul(ctx, relu);
+                },
+            };
+        } else {
+            // Non-GLU variants
+            break :blk switch (type_op) {
+                .silu => up_result.silu(ctx),
+                .gelu => up_result.gelu(ctx),
+                .gelu_erf => up_result.geluErf(ctx),
+                .gelu_quick => up_result.geluQuick(ctx),
+                .relu_sqr => {
+                    const relu = up_result.relu(ctx);
+                    break :blk relu.mul(ctx, relu);
+                },
+            };
+        }
     };
-
-    // Gate (element-wise multiply with gate projection)
-    if (gate_result) |g| {
-        activated = activated.mul(ctx, g);
-    }
-
     // Down projection: [n_embd, n_ff] @ [n_ff, n_patches] → [n_embd, n_patches]
     var result = down.mulMat(ctx, activated);
 

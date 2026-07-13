@@ -59,6 +59,12 @@ pub const Context = opaque {
         c.ggml_set_no_alloc(@ptrCast(self), no_alloc);
     }
 
+    // 创建标量常量张量（对应 ggml_new_f32）
+    pub fn newF32(self: *Context, value: f32) *Tensor {
+        const t = c.ggml_new_f32(@ptrCast(self), value);
+        return @as(*Tensor, @ptrCast(t));
+    }
+
     /// 创建 1D 张量
     pub fn newTensor1d(self: *Context, typ: Type, ne0: i64) !*Tensor {
         const t = c.ggml_new_tensor_1d(@ptrCast(self), @intFromEnum(typ), ne0);

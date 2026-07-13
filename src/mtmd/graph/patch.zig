@@ -43,15 +43,15 @@ pub fn buildInp(
 ) !*ggml.Tensor {
     var cur = inp_raw;
 
-    // 1. Scale + bias (optional)
+    // 1. Scale (optional) - applied directly on the graph
     if (scale_val) |s| {
         cur = cur.scale(ctx, s);
         cur.setName("inp_scaled");
     }
     if (bias_val) |b| {
-        const bias_t = try ctx.newTensor1d(ggml.Type.f32, 1);
-        try bias_t.dataSet(f32, &.{b});
-        cur = cur.add(ctx, bias_t);
+        // Bias: use scaleBias with scale=1.0 to add bias
+        // This works in no_alloc context since it's a graph operation
+        cur = cur.scaleBias(ctx, 1.0, b);
         cur.setName("inp_biased");
     }
 

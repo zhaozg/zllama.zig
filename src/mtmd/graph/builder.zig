@@ -91,6 +91,7 @@ pub const GraphBuilder = struct {
     }
 
     /// 矩阵乘法封装（支持 LoRA、clamping 等钩子）
+    /// 对应 C++ clip_graph::build_mm() 虚函数
     pub fn buildMM(self: *const GraphBuilder, w: *ggml.Tensor, x: *ggml.Tensor) !*ggml.Tensor {
         // 查找 clamp info
         const clamp_info = if (self.weights.clamp_info_map.get(w.name())) |ci| ci else null;
@@ -104,6 +105,8 @@ pub const GraphBuilder = struct {
     }
 
     /// 构建 ViT 主干
+    /// 对应 C++ clip_graph::build_vit()
+    /// add_pos 回调签名: fn (ctx, cur, layer) -> cur
     pub fn buildVit(
         self: *GraphBuilder,
         inp: *ggml.Tensor,
@@ -111,8 +114,7 @@ pub const GraphBuilder = struct {
         norm_t: NormType,
         ffn_t: FFNOpType,
         learned_pos_embd: ?*ggml.Tensor,
-        add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights, *ggml.Tensor, ?*anyopaque) *ggml.Tensor,
-        add_pos_data: ?*anyopaque,
+        add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights) *ggml.Tensor,
         opts: BuildVitOpts,
     ) !*ggml.Tensor {
         return vit_builder.buildVit(
@@ -125,7 +127,6 @@ pub const GraphBuilder = struct {
             self.weights,
             self.hparams,
             add_pos,
-            add_pos_data,
             opts,
         );
     }

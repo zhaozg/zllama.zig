@@ -1,7 +1,7 @@
 //! 归一化层构建器
 //!
 //! 提供 LayerNorm 和 RMSNorm 的 ggml 计算图构建。
-//! 参考: deps/llama.cpp/tools/mtmd/clip-graph.h build_norm()
+//! 参考: deps/llama.cpp/tools/mtmd/clip.cpp clip_graph::build_norm()
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -24,7 +24,7 @@ const log = std.log.scoped(.graph_norm);
 ///
 /// 返回: 归一化后的张量 [n_embd, n_patches]
 ///
-/// 参考: clip-graph.h build_norm()
+/// 参考: clip.cpp clip_graph::build_norm()
 pub fn buildNorm(
     ctx: *ggml.Context,
     cur: *ggml.Tensor,
@@ -36,6 +36,7 @@ pub fn buildNorm(
 ) !*ggml.Tensor {
     var result = cur;
 
+    // C++: cur = type == NORM_TYPE_RMS ? ggml_rms_norm(ctx0, cur, norm_eps) : ggml_norm(ctx0, cur, norm_eps);
     switch (norm_type) {
         .layer_norm => {
             result = result.norm(ctx, norm_eps);
@@ -45,9 +46,10 @@ pub fn buildNorm(
         },
     }
 
-    // 广播乘法: mw [n_embd] × result [n_embd, n_patches]
+    // C++: if (mw) { cur = ggml_mul(ctx0, cur, mw); cb(cur, "norm_w", il); }
     result = result.mul(ctx, mw);
 
+    // C++: if (mb) { cur = ggml_add(ctx0, cur, mb); cb(cur, "norm_b", il); }
     if (mb) |b| {
         result = result.add(ctx, b);
     }

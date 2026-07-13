@@ -122,6 +122,9 @@ pub const Tensor = opaque {
     pub fn scale(self: *Tensor, ctx: *anyopaque, s: f32) *Tensor {
         return wrap(c.ggml_scale(@ptrCast(ctx), @ptrCast(@alignCast(self)), s));
     }
+    pub fn scaleBias(self: *Tensor, ctx: *anyopaque, s: f32, b: f32) *Tensor {
+        return @as(*Tensor, @ptrCast(c.ggml_scale_bias(@ptrCast(ctx), @ptrCast(@alignCast(self)), s, b)));
+    }
     pub fn softMax(self: *Tensor, ctx: *anyopaque) *Tensor {
         return wrap(c.ggml_soft_max(@ptrCast(ctx), @ptrCast(@alignCast(self))));
     }

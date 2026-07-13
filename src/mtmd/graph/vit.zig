@@ -3,7 +3,7 @@
 //! 提供 Vision Transformer (ViT) 的通用计算图构建函数。
 //! 覆盖大多数模型，特殊模型可复制此函数进行定制。
 //!
-//! 参考: deps/llama.cpp/tools/mtmd/clip-graph.h build_vit()
+//! 参考: deps/llama.cpp/tools/mtmd/clip.cpp clip_graph::build_vit()
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -22,11 +22,24 @@ const VisionHParams = types.VisionHParams;
 
 const log = std.log.scoped(.graph_vit);
 
+/// 张量命名回调（对应 C++ clip_graph::cb()）
+/// 当 il >= 0 时，格式化为 "{name}-{il}"；否则直接设为 name。
+/// 注意: ggml 的 setName 接受 [:0]const u8，不支持格式化。
+/// 这里使用简单的命名策略：当 il >= 0 时，使用 "{name}_{il}" 格式。
+pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
+    if (il >= 0) {
+        // TODO: 使用 ggml_format_name 或类似功能
+        // 目前 ggml.zig 绑定不支持格式化命名，暂时跳过
+    } else {
+        cur.setName(name);
+    }
+}
+
 /// 构建 Vision Transformer 计算图
 ///
 /// 参数:
 ///   - ctx: ggml 上下文
-///   - inp: 输入张量 [n_embd, n_patches]
+///   - inp: 输入张量 [n_embd, n_patches, n_batch]
 ///   - n_pos: 位置数量
 ///   - norm_t: 归一化类型
 ///   - ffn_t: FFN 激活函数类型
@@ -34,13 +47,12 @@ const log = std.log.scoped(.graph_vit);
 ///   - weights: 视觉编码器权重
 ///   - hparams: 视觉编码器超参数
 ///   - add_pos: 添加位置嵌入的回调函数（对 Q/K 应用 2D RoPE 等）
-///             回调签名: fn (ctx, cur, layer, user_data) -> cur
-///   - add_pos_data: 传递给 add_pos 回调的用户数据指针
+///             回调签名: fn (ctx, cur, layer) -> cur
 ///   - opts: 构建选项
 ///
-/// 返回: 编码后的张量 [n_embd, n_patches]
+/// 返回: 编码后的张量 [n_embd, n_patches, n_batch]
 ///
-/// 参考: clip-graph.h build_vit()
+/// 参考: clip.cpp clip_graph::build_vit()
 pub fn buildVit(
     ctx: *ggml.Context,
     inp: *ggml.Tensor,
@@ -50,179 +62,248 @@ pub fn buildVit(
     learned_pos_embd: ?*ggml.Tensor,
     weights: *const VisionEncoderWeights,
     hparams: *const VisionHParams,
-    add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights, *ggml.Tensor, ?*anyopaque) *ggml.Tensor,
-    add_pos_data: ?*anyopaque,
+    add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights) *ggml.Tensor,
     opts: BuildVitOpts,
 ) !*ggml.Tensor {
+    // batch dim: inp is [n_embd, n_pos, B]
+    const B = inp.ne()[2];
     const n_embd = inp.ne()[0];
     const n_patches = inp.ne()[1];
     const n_head: i64 = @intCast(hparams.n_head);
     const n_head_kv: i64 = if (hparams.n_head_kv > 0) @intCast(hparams.n_head_kv) else n_head;
     const d_head = @divExact(n_embd, n_head);
-    const n_batch: i64 = 1;
     const eps = hparams.eps;
 
-    _ = n_pos;
-
-    // 1. 添加位置嵌入
+    // 1. 添加位置嵌入（对应 C++: if (learned_pos_embd) { inp = ggml_add(...); cb(inp, "pos_embed", -1); }）
     var cur = inp;
     if (learned_pos_embd) |pos_embd| {
-        // 截取或插值位置嵌入以匹配 n_patches
-        const pos_size = pos_embd.ne()[1];
-        if (pos_size >= n_patches) {
-            // 直接截取前 n_patches 个位置
-            const row_size = ggml.Type.rowSize(pos_embd.dataType(), n_embd);
-            const sliced = pos_embd.view2d(ctx, n_embd, n_patches, row_size, 0);
-            sliced.setName("pos_embd_sliced");
-            cur = cur.add(ctx, sliced);
-            cur.setName("inp_with_pos");
-        } else {
-            // 需要插值（通过 resize_position_embeddings）
-            log.warn("Position embedding interpolation not yet implemented", .{});
-        }
+        cur = cur.add(ctx, pos_embd);
+        cb(cur, "pos_embed", -1);
     }
 
-    // 2. Pre-LN (optional)
+    // flatten batch; unflatten again in attention
+    // 对应 C++: inp = ggml_reshape_2d(ctx0, inp, n_embd, n_pos * B);
+    var inpL = cur.reshape2d(ctx, n_embd, n_patches * B);
+
+    // 2. Pre-LN (optional)（对应 C++: if (model.pre_ln_w) { inpL = build_norm(...); cb(inpL, "pre_ln", -1); }）
     if (weights.pre_ln_w) |pln_w| {
-        cur = try norm_builder.buildNorm(ctx, cur, pln_w, weights.pre_ln_b, norm_t, eps, "pre_ln");
+        inpL = try norm_builder.buildNorm(ctx, inpL, pln_w, weights.pre_ln_b, norm_t, eps, "pre_ln");
+        cb(inpL, "pre_ln", -1);
     }
 
-    // 3. ViT blocks
-    var inpL = cur.reshape2d(ctx, n_embd, n_patches * n_batch);
-    inpL.setName("vit_input");
-
+    // 3. ViT blocks（对应 C++: for (int il = 0; il < n_layer; il++)）
     for (weights.layers, 0..) |*layer, il| {
-        var residual = inpL;
+        const il_i32: i32 = @intCast(il);
+
+        // C++: ggml_tensor * cur = inpL; // inpL = residual, cur = hidden_states
+        var hidden = inpL;
 
         // --- Pre-attention norm ---
-        var attn_in = inpL;
-        if (layer.ln_1_w) |ln1_w| {
-            attn_in = try norm_builder.buildNorm(ctx, attn_in, ln1_w, layer.ln_1_b, norm_t, eps, "blk");
-        }
+        // C++: cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
+        //       cb(cur, "layer_inp_normed", il);
+        hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_1_w orelse return error.MissingLN1Weight, layer.ln_1_b, norm_t, eps, "blk");
+        cb(hidden, "layer_inp_normed", il_i32);
 
         // --- Self-attention ---
         {
-            // QKV projections
-            var Qcur = if (layer.q_w) |qw| qw.mulMat(ctx, attn_in) else blk: {
-                log.warn("Layer {d}: q_w is null, using zero tensor", .{il});
-                break :blk try ctx.newTensor2d(ggml.Type.f32, n_embd, n_patches);
-            };
-            Qcur.setName("blk");
+            var Qcur: ?*ggml.Tensor = null;
+            var Kcur: ?*ggml.Tensor = null;
+            var Vcur: ?*ggml.Tensor = null;
 
-            var Kcur = if (layer.k_w) |kw| kw.mulMat(ctx, attn_in) else blk: {
-                log.warn("Layer {d}: k_w is null, using zero tensor", .{il});
-                break :blk try ctx.newTensor2d(ggml.Type.f32, n_embd, n_patches);
-            };
-            Kcur.setName("blk");
+            if (layer.qkv_w) |qkv_w| {
+                // fused qkv（对应 C++: cur = build_mm(layer.qkv_w, cur);）
+                var qkv = qkv_w.mulMat(ctx, hidden);
+                if (layer.qkv_b) |qkv_b| {
+                    qkv = qkv.add(ctx, qkv_b);
+                }
 
-            var Vcur = if (layer.v_w) |vw| vw.mulMat(ctx, attn_in) else blk: {
-                log.warn("Layer {d}: v_w is null, using zero tensor", .{il});
-                break :blk try ctx.newTensor2d(ggml.Type.f32, n_embd, n_patches);
-            };
-            Vcur.setName("blk");
+                // Q/K/V as [d_head, n_head, n_pos, B]
+                // C++: Qcur = ggml_view_4d(ctx0, cur, d_head, n_head, n_pos, B, ...)
+                const row_size = ggml.Type.rowSize(qkv.dataType(), d_head);
+                const nb1: usize = @intCast(qkv.ne()[1]); // stride for n_head dimension
+                const nb2: usize = @intCast(nb1 * @as(usize, @intCast(n_pos))); // stride for n_pos dimension
 
-            // Reshape to [d_head, n_head, n_patches, n_batch]
-            Qcur = Qcur.reshape4d(ctx, d_head, n_head, n_patches, n_batch);
-            Qcur.setName("blk");
-            Kcur = Kcur.reshape4d(ctx, d_head, n_head_kv, n_patches, n_batch);
-            Kcur.setName("blk");
-            Vcur = Vcur.reshape4d(ctx, d_head, n_head_kv, n_patches, n_batch);
-            Vcur.setName("blk");
+                Qcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb1, nb2, 0);
+                Kcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb1, nb2, ggml.Type.rowSize(qkv.dataType(), n_embd));
+                Vcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb1, nb2, ggml.Type.rowSize(qkv.dataType(), 2 * n_embd));
 
-            // Q/K norm (optional)
-            if (layer.q_norm) |qn| {
-                Qcur = try norm_builder.buildNorm(ctx, Qcur, qn, null, norm_t, eps, "blk");
+                // Q/K norm after split (fused path)
+                if (layer.q_norm) |qn| {
+                    Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, "blk");
+                    cb(Qcur.?, "Qcur_norm", il_i32);
+                }
+                if (layer.k_norm) |kn| {
+                    Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, "blk");
+                    cb(Kcur.?, "Kcur_norm", il_i32);
+                }
+            } else {
+                // separate q, k, v（对应 C++: Qcur = build_mm(layer.q_w, cur);）
+                Qcur = (layer.q_w orelse return error.MissingQWeight).mulMat(ctx, hidden);
+                if (layer.q_b) |qb| {
+                    Qcur = Qcur.?.add(ctx, qb);
+                }
+
+                Kcur = (layer.k_w orelse return error.MissingKWeight).mulMat(ctx, hidden);
+                if (layer.k_b) |kb| {
+                    Kcur = Kcur.?.add(ctx, kb);
+                }
+
+                Vcur = (layer.v_w orelse return error.MissingVWeight).mulMat(ctx, hidden);
+                if (layer.v_b) |vb| {
+                    Vcur = Vcur.?.add(ctx, vb);
+                }
+
+                // if true, norm must be applied after reshaping to (d_head, n_head, n_pos)
+                // C++: bool norm_per_head = layer.q_norm && layer.q_norm->ne[0] == d_head;
+                const norm_per_head = if (layer.q_norm) |qn| qn.ne()[0] == d_head else false;
+
+                if (!norm_per_head) {
+                    if (layer.q_norm) |qn| {
+                        Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, "blk");
+                        cb(Qcur.?, "Qcur_norm", il_i32);
+                    }
+                    if (layer.k_norm) |kn| {
+                        Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, "blk");
+                        cb(Kcur.?, "Kcur_norm", il_i32);
+                    }
+                }
+
+                // Reshape to [d_head, n_head, n_patches, n_batch]
+                // C++: Qcur = ggml_reshape_4d(ctx0, Qcur, d_head, n_head, n_pos, B);
+                Qcur = Qcur.?.reshape4d(ctx, d_head, n_head, n_patches, B);
+                Kcur = Kcur.?.reshape4d(ctx, d_head, n_head_kv, n_patches, B);
+                Vcur = Vcur.?.reshape4d(ctx, d_head, n_head_kv, n_patches, B);
+
+                if (norm_per_head) {
+                    if (layer.q_norm) |qn| {
+                        Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, "blk");
+                        cb(Qcur.?, "Qcur_norm_per_head", il_i32);
+                    }
+                    if (layer.k_norm) |kn| {
+                        Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, "blk");
+                        cb(Kcur.?, "Kcur_norm_per_head", il_i32);
+                    }
+                }
             }
-            if (layer.k_norm) |kn| {
-                Kcur = try norm_builder.buildNorm(ctx, Kcur, kn, null, norm_t, eps, "blk");
-            }
 
-            // 2D RoPE via add_pos callback (matching C++ clip_graph::build_vit)
-            if (add_pos) |cb| {
-                Qcur = cb(ctx, Qcur, layer, Qcur, add_pos_data);
-                Kcur = cb(ctx, Kcur, layer, Kcur, add_pos_data);
+            // C++: cb(Qcur, "Qcur", il); cb(Kcur, "Kcur", il); cb(Vcur, "Vcur", il);
+            cb(Qcur.?, "Qcur", il_i32);
+            cb(Kcur.?, "Kcur", il_i32);
+            cb(Vcur.?, "Vcur", il_i32);
+
+            // 2D RoPE via add_pos callback（对应 C++: if (add_pos) { Qcur = add_pos(Qcur, layer); ... }）
+            if (add_pos) |cb_add_pos| {
+                Qcur = cb_add_pos(ctx, Qcur.?, layer);
+                Kcur = cb_add_pos(ctx, Kcur.?, layer);
+                cb(Qcur.?, "Qcur_pos", il_i32);
+                cb(Kcur.?, "Kcur_pos", il_i32);
             }
 
             // Vcur RMSNorm (gemma4v specific, controlled by opts)
+            // C++: if (proj_type == PROJECTOR_TYPE_GEMMA4V) { Vcur = ggml_rms_norm(ctx0, Vcur, eps); cb(Vcur, "Vcur_normed", il); }
             if (opts.v_norm) {
-                Vcur = Vcur.rmsNorm(ctx, opts.v_norm_eps);
-                Vcur.setName("blk");
+                Vcur = Vcur.?.rmsNorm(ctx, opts.v_norm_eps);
+                cb(Vcur.?, "Vcur_normed", il_i32);
             }
 
-            // Attention
+            // Attention（对应 C++: cur = build_attn(layer.o_w, layer.o_b, Qcur, Kcur, Vcur, opts.attn_mask, kq_scale, il);）
             // kq_scale: gemma4v uses 1.0, other models use 1/sqrt(d_head)
             const kq_scale = opts.kq_scale orelse (1.0 / @sqrt(@as(f32, @floatFromInt(d_head))));
-            var attn_out = try attn_builder.buildAttn(
+            hidden = try attn_builder.buildAttn(
                 ctx,
                 layer.o_w orelse return error.MissingOutputWeight,
                 layer.o_b,
-                Qcur,
-                Kcur,
-                Vcur,
+                Qcur.?,
+                Kcur.?,
+                Vcur.?,
                 opts.attn_mask,
                 kq_scale,
                 n_head,
                 "blk",
                 layer.attn_sinks,
             );
-            attn_out.setName("blk");
-
-            // Post-attention norm (optional, e.g. gemma4)
-            if (layer.attn_post_norm_w) |apn| {
-                attn_out = try norm_builder.buildNorm(ctx, attn_out, apn, null, norm_t, eps, "blk");
-            }
-
-            // Residual + layer scale
-            residual = residual.add(ctx, attn_out);
-            residual.setName("blk");
-            if (layer.ls_1_w) |ls1| {
-                residual = residual.mul(ctx, norm_builder.reshapeForBroadcast(ctx, ls1));
-                residual.setName("blk");
-            }
+            // C++: cb(cur, "attn_out", il);
+            cb(hidden, "attn_out", il_i32);
         }
+
+        // Layer scale 1 (optional)（对应 C++: if (layer.ls_1_w) { cur = ggml_mul(ctx0, cur, layer.ls_1_w); cb(cur, "attn_out_scaled", il); }）
+        if (layer.ls_1_w) |ls1| {
+            hidden = hidden.mul(ctx, norm_builder.reshapeForBroadcast(ctx, ls1));
+            cb(hidden, "attn_out_scaled", il_i32);
+        }
+
+        // Post-attention norm (optional, e.g. gemma4)
+        // C++: if (layer.attn_post_norm_w) { cur = build_norm(cur, layer.attn_post_norm_w, nullptr, norm_t, eps, il); cb(cur, "attn_post_normed", il); }
+        if (layer.attn_post_norm_w) |apn| {
+            hidden = try norm_builder.buildNorm(ctx, hidden, apn, null, norm_t, eps, "blk");
+            cb(hidden, "attn_post_normed", il_i32);
+        }
+
+        // Residual 1（对应 C++: cur = ggml_add(ctx0, cur, inpL);）
+        hidden = hidden.add(ctx, inpL);
+        inpL = hidden; // inpL = residual, hidden = hidden_states
+
+        // C++: cb(cur, "ffn_inp", il);
+        cb(hidden, "ffn_inp", il_i32);
 
         // --- Pre-FFN norm ---
-        var ffn_in = residual;
-        if (layer.ln_2_w) |ln2_w| {
-            ffn_in = try norm_builder.buildNorm(ctx, ffn_in, ln2_w, layer.ln_2_b, norm_t, eps, "blk");
-        }
+        // C++: cur = build_norm(cur, layer.ln_2_w, layer.ln_2_b, norm_t, eps, il); cb(cur, "ffn_inp_normed", il);
+        hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_2_w orelse return error.MissingLN2Weight, layer.ln_2_b, norm_t, eps, "blk");
+        cb(hidden, "ffn_inp_normed", il_i32);
 
         // --- FFN ---
-        {
-            const ffn_out = try ffn_builder.buildFFN(
-                ctx,
-                ffn_in,
-                layer.ff_up_w orelse return error.MissingFFNUpWeight,
-                layer.ff_up_b,
-                layer.ff_gate_w,
-                layer.ff_gate_b,
-                layer.ff_down_w orelse return error.MissingFFNDownWeight,
-                layer.ff_down_b,
-                ffn_t,
-                "blk",
-            );
-            ffn_out.setName("blk");
+        // C++: cur = build_ffn(cur, layer.ff_up_w, layer.ff_up_b, layer.ff_gate_w, layer.ff_gate_b, layer.ff_down_w, layer.ff_down_b, ffn_t, il);
+        hidden = try ffn_builder.buildFFN(
+            ctx,
+            hidden,
+            layer.ff_up_w orelse return error.MissingFFNUpWeight,
+            layer.ff_up_b,
+            layer.ff_gate_w,
+            layer.ff_gate_b,
+            layer.ff_down_w orelse return error.MissingFFNDownWeight,
+            layer.ff_down_b,
+            ffn_t,
+            "blk",
+        );
+        // C++: cb(cur, "ffn_out", il);
+        cb(hidden, "ffn_out", il_i32);
 
-            // Post-FFN norm (optional)
-            var ffn_result = ffn_out;
-            if (layer.ff_post_norm_w) |fpn| {
-                ffn_result = try norm_builder.buildNorm(ctx, ffn_result, fpn, null, norm_t, eps, "blk");
-            }
-
-            // Residual + layer scale
-            inpL = residual.add(ctx, ffn_result);
-            inpL.setName("blk");
-            if (layer.ls_2_w) |ls2| {
-                inpL = inpL.mul(ctx, norm_builder.reshapeForBroadcast(ctx, ls2));
-                inpL.setName("blk");
-            }
+        // Post-FFN norm (optional)
+        // C++: if (layer.ff_post_norm_w) { cur = build_norm(cur, layer.ff_post_norm_w, nullptr, norm_t, eps, il); cb(cur, "ffn_post_normed", il); }
+        if (layer.ff_post_norm_w) |fpn| {
+            hidden = try norm_builder.buildNorm(ctx, hidden, fpn, null, norm_t, eps, "blk");
+            cb(hidden, "ffn_post_normed", il_i32);
         }
+
+        // Layer scale 2 (optional)
+        // C++: if (layer.ls_2_w) { cur = ggml_mul(ctx0, cur, layer.ls_2_w); cb(cur, "ffn_out_scaled", il); }
+        if (layer.ls_2_w) |ls2| {
+            hidden = hidden.mul(ctx, norm_builder.reshapeForBroadcast(ctx, ls2));
+            cb(hidden, "ffn_out_scaled", il_i32);
+        }
+
+        // Residual 2（对应 C++: cur = ggml_add(ctx0, inpL, cur); cb(cur, "layer_out", il);）
+        hidden = inpL.add(ctx, hidden);
+        cb(hidden, "layer_out", il_i32);
+
+        // Layer scale out (optional)
+        // C++: if (layer.ls_out_w) { cur = ggml_mul(ctx0, cur, layer.ls_out_w); cb(cur, "layer_out_scaled", il); }
+        if (layer.ls_out_w) |ls_out| {
+            hidden = hidden.mul(ctx, norm_builder.reshapeForBroadcast(ctx, ls_out));
+            cb(hidden, "layer_out_scaled", il_i32);
+        }
+
+        inpL = hidden;
     }
 
-    // 4. Post-LN (optional)
+    // 4. Post-LN (optional)（对应 C++: if (model.post_ln_w) { inpL = build_norm(inpL, model.post_ln_w, model.post_ln_b, norm_t, eps, -1); }）
     if (weights.post_ln_w) |poln_w| {
         inpL = try norm_builder.buildNorm(ctx, inpL, poln_w, weights.post_ln_b, norm_t, eps, "post_ln");
     }
+
+    // restore the batch dim（对应 C++: GGML_ASSERT(inpL->ne[1] % B == 0); inpL = ggml_reshape_3d(ctx0, inpL, n_embd, inpL->ne[1] / B, B);）
+    std.debug.assert(@rem(inpL.ne()[1], B) == 0);
+    inpL = inpL.reshape3d(ctx, n_embd, @divExact(inpL.ne()[1], B), B);
 
     return inpL;
 }
@@ -326,14 +407,15 @@ test "buildVit: basic ViT forward" {
     const n_layer: usize = 2;
     const n_ff: i64 = 256;
     const n_head: i64 = 4;
+    const n_batch: i64 = 1;
 
     var ctx = try ggml.Context.init(allocator, .{ .mem_size = 4 * 1024 * 1024 });
     defer ctx.deinit();
 
-    // Create input
-    const inp = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_patches);
+    // Create input [n_embd, n_patches, n_batch]
+    const inp = try ctx.newTensor3d(ggml.Type.f32, n_embd, n_patches, n_batch);
     {
-        const buf = try allocator.alloc(f32, @as(usize, @intCast(n_embd * n_patches)));
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(n_embd * n_patches * n_batch)));
         defer allocator.free(buf);
         @memset(buf, 0.5);
         try inp.dataSet(f32, buf);
@@ -380,7 +462,7 @@ test "buildVit: basic ViT forward" {
 
     // Simple add_pos callback that does nothing
     const addPosFn = struct {
-        fn f(_: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, _: *ggml.Tensor, _: ?*anyopaque) *ggml.Tensor {
+        fn f(_: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggml.Tensor {
             return cur;
         }
     }.f;
@@ -395,10 +477,10 @@ test "buildVit: basic ViT forward" {
         &weights,
         &hparams,
         addPosFn,
-        null,
         .{},
     );
 
     try testing.expectEqual(n_embd, result.ne()[0]);
     try testing.expectEqual(n_patches, result.ne()[1]);
+    try testing.expectEqual(n_batch, result.ne()[2]);
 }
