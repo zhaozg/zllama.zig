@@ -173,17 +173,13 @@ pub const Loader = struct {
         return model_if.Architecture.fromString(arch_name);
     }
 };
-
 /// Uses mmap for zero-copy loading when possible.
-/// If vision_backend_override or audio_backend_override is non-empty,
-/// they override the auto-detected backend type.
+/// Backend type is auto-detected from the mmproj GGUF metadata.
 pub fn loadMMProj(
     io: std.Io,
     allocator: std.mem.Allocator,
     mmproj_path: [:0]const u8,
     capabilities: *model_if.ModelCapabilities,
-    vision_backend_override: []const u8,
-    audio_backend_override: []const u8,
 ) !mm.MultiModalManager {
     // 使用 mmap 加载 mmproj 文件（零拷贝，启动更快）
     var mapped_file = try engine_common.mmapFile(io, allocator, mmproj_path);
@@ -196,12 +192,8 @@ pub fn loadMMProj(
     // Detect capabilities from mmproj file using shared detection logic
     const detected = mm.MultiModalManager.detectFromGGUF(&gguf_file);
 
-    // Apply vision backend override if specified
-    if (vision_backend_override.len > 0) {
-        log.info("Vision backend overridden: '{s}' -> '{s}'", .{ detected.vision_encoder_type, vision_backend_override });
-        capabilities.has_vision = true;
-        capabilities.vision_encoder_type = vision_backend_override;
-    } else if (detected.has_vision) {
+    // Merge vision capabilities (auto-detected from mmproj GGUF)
+    if (detected.has_vision) {
         capabilities.has_vision = true;
         if (capabilities.vision_encoder_type.len == 0) {
             capabilities.vision_encoder_type = detected.vision_encoder_type;
@@ -215,12 +207,8 @@ pub fn loadMMProj(
         }
     }
 
-    // Apply audio backend override if specified
-    if (audio_backend_override.len > 0) {
-        log.info("Audio backend overridden: '{s}' -> '{s}'", .{ detected.audio_encoder_type, audio_backend_override });
-        capabilities.has_audio = true;
-        capabilities.audio_encoder_type = audio_backend_override;
-    } else if (detected.has_audio) {
+    // Merge audio capabilities (auto-detected from mmproj GGUF)
+    if (detected.has_audio) {
         capabilities.has_audio = true;
         if (capabilities.audio_encoder_type.len == 0) {
             capabilities.audio_encoder_type = detected.audio_encoder_type;

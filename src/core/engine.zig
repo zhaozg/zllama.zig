@@ -243,7 +243,7 @@ pub const InferenceEngine = struct {
         var mm_manager: ?mtmd.MultiModalManager = null;
         var mtmd_context: ?*mtmd.MtmdContext = null;
         if (cli_args.mmproj_path.len > 0) {
-            mm_manager = try loadMMProj(io, allocator, cli_args.mmproj_path, &capabilities, cli_args.vision_backend, cli_args.audio_backend);
+            mm_manager = try loadMMProj(io, allocator, cli_args.mmproj_path, &capabilities);
             logger.info("Multimodal encoder loaded from: {s}", .{cli_args.mmproj_path});
             if (capabilities.has_vision or capabilities.has_audio) {
                 logger.info("Multi-modal: yes", .{});
