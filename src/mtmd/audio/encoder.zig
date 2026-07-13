@@ -50,7 +50,9 @@ pub const AudioEncoder = struct {
     }
 
     pub fn isAvailable(self: *const AudioEncoder) bool {
-        return self.weights.sscp_conv_w[0] != null;
+        // Gemma4UA 没有 Conformer blocks（sscp_conv_w 为空），
+        // 检查 mm_input_proj_w 是否已加载
+        return self.weights.sscp_conv_w[0] != null or self.weights.mm_input_proj_w != null;
     }
 
     /// Encode Mel spectrogram tensor — builds graph only; caller handles compute.
@@ -154,12 +156,12 @@ pub const AudioEncoder = struct {
         debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_91_mm_norm_scaled.json", "mm_norm_scaled", cgraph) catch {};
         debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_92_mm_proj.json", "mm_proj", cgraph) catch {};
 
-        // Save weight tensors
-        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_0_weight.json", self.weights.sscp_conv_w[0].?) catch {};
-        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_1_weight.json", self.weights.sscp_conv_w[1].?) catch {};
+        // Save weight tensors (only if available — gemma4ua may not have sscp_conv_w)
+        if (self.weights.sscp_conv_w[0]) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_0_weight.json", t) catch {};
+        if (self.weights.sscp_conv_w[1]) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_1_weight.json", t) catch {};
 
-        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_input_proj_weight.json", self.weights.sscp_inp_proj_w.?) catch {};
-        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_out_proj_weight.json", self.weights.audio_out_proj_w.?) catch {};
-        debug.saveTensor(io, allocator, subdir, "zllama_audio_00_mm_input_proj_weight.json", self.weights.mm_input_proj_w.?) catch {};
+        if (self.weights.sscp_inp_proj_w) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_input_proj_weight.json", t) catch {};
+        if (self.weights.audio_out_proj_w) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_out_proj_weight.json", t) catch {};
+        if (self.weights.mm_input_proj_w) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_mm_input_proj_weight.json", t) catch {};
     }
 };

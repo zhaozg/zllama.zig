@@ -2,7 +2,7 @@
 //!
 //! 实现 Gemma4UnifiedAudioEmbedder 的计算图构建。
 //! 与 Gemma4A 不同，Gemma4UA 跳过 Conformer blocks，
-//! 仅对输入 Mel 频谱做 RMSNorm + 线性投影到 LLM 嵌入空间。
+//! 仅对输入原始 PCM 波形分帧后做 RMSNorm + 线性投影到 LLM 嵌入空间。
 //!
 //! 参考: deps/llama.cpp/tools/mtmd/models/gemma4ua.cpp
 
@@ -36,12 +36,23 @@ pub const backend = graph.AudioEncoderBackend{
 
 pub fn loadParams(io: std.Io, gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
     _ = io;
-    _ = gguf_file;
-    _ = params;
-    // Gemma4UA 参数已由 encoder.zig 从 clip.audio.* 或 gemma4.audio.* 前缀加载
+    // Gemma4UA 使用 clip.audio.* 前缀的参数
+    if (gguf_file.getU32("clip.audio.embedding_length")) |v| params.n_embd = v;
+    if (gguf_file.getU32("clip.audio.attention.head_count")) |v| params.n_head = v;
+    if (gguf_file.getU32("clip.audio.block_count")) |v| params.n_layer = v;
+    if (gguf_file.getU32("clip.audio.feed_forward_length")) |v| params.n_ff = v;
+    if (gguf_file.getU32("clip.audio.num_mel_bins")) |v| params.n_mel_bins = v;
+    if (gguf_file.getF32("clip.audio.attention.layer_norm_epsilon")) |v| params.eps = v;
+    // projection_dim 用于 mm_input_proj_w 的维度
+    if (gguf_file.getU32("clip.audio.projection_dim")) |v| params.projection_dim = v;
+    log.info("Gemma4UA params: embd={d}, head={d}, layers={d}, ff={d}, mel_bins={d}, eps={e}, proj={d}", .{
+        params.n_embd, params.n_head, params.n_layer, params.n_ff, params.n_mel_bins, params.eps, params.projection_dim,
+    });
 }
 
 /// 从 GGUF 加载 Gemma4UA 音频编码器所有权重到 VisionEncoderWeights
+/// Gemma4UA 加载 mm.a.input_projection.weight（与 gemma4a 相同的投影权重），
+/// 但跳过所有 Conformer blocks。
 pub fn loadWeights(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -51,17 +62,31 @@ pub fn loadWeights(
 ) !void {
     _ = io;
 
-    // Gemma4UA 只需要多模态投影权重
-    // mm.input_projection.weight — 投影到 LLM 嵌入空间
-    w.mm_input_proj_w = findTensorInGGUF(ctx, gguf_file, "mm.input_projection.weight") catch null;
+    // Gemma4UA 加载 mm.a.input_projection.weight（与 gemma4a 相同的投影权重）
+    // 参考: llama.cpp clip.cpp case PROJECTOR_TYPE_GEMMA4UA:
+    //   model.mm_input_proj_w = get_tensor(string_format(TN_A_MM_INP_PROJ, "weight"));
+    w.mm_input_proj_w = findTensorInGGUF(ctx, gguf_file, "mm.a.input_projection.weight") catch
+        findTensorInGGUF(ctx, gguf_file, "mm.input_projection.weight") catch null;
 
     // mm.soft_emb_norm.weight — RMSNorm 权重（可选）
-    w.mm_soft_emb_norm_w = findTensorInGGUF(ctx, gguf_file, "mm.soft_emb_norm.weight") catch null;
+    w.mm_soft_emb_norm_w = findTensorInGGUF(ctx, gguf_file, "mm.a.soft_emb_norm.weight") catch
+        findTensorInGGUF(ctx, gguf_file, "mm.soft_emb_norm.weight") catch null;
 
     // Gemma4UA 没有 Conformer layers
     w.layers = try allocator.alloc(ViTLayerWeights, 0);
 
-    log.info("Gemma4UA weights loaded (no Conformer blocks)", .{});
+    // 从权重维度推断 frame_size（n_mel_bins）
+    // gemma4ua 使用 n_mel_bins 作为原始波形帧大小（不是 Mel bins 数量）
+    // 参考: llama.cpp clip.cpp:1656 hparams.n_mel_bins = 640;
+    // 但实际维度从 mm_input_proj_w->ne[0] 推断
+    if (w.mm_input_proj_w) |proj_w| {
+        const inferred_frame_size: u32 = @intCast(proj_w.ne()[0]);
+        log.info("Gemma4UA weights loaded: mm_input_proj_w shape=[{d},{d}], inferred frame_size={d}", .{
+            proj_w.ne()[0], proj_w.ne()[1], inferred_frame_size,
+        });
+    } else {
+        log.warn("Gemma4UA: mm_input_proj_w not found, audio encoding will fail", .{});
+    }
 }
 
 /// 从 GGUF 加载 Gemma4UA 音频编码器的 clamp 信息
@@ -118,10 +143,11 @@ fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: [
 ///
 /// Gemma4UA 是 Gemma4UnifiedAudioEmbedder 的轻量级实现。
 /// 处理流程:
-///   1. 输入 Mel 频谱 [n_frames, n_mel_bins, 1, 1]
-///   2. Transpose + cont: [n_mel_bins, n_frames, 1, 1]
+///   1. 输入原始 PCM 波形分帧张量 [n_frames, frame_size, 1, 1]
+///      其中 frame_size = mm_input_proj_w.ne[0]（从权重维度推断）
+///   2. Transpose + cont: [frame_size, n_frames, 1, 1]
 ///   3. RMSNorm (embedding_pre_projection_norm)
-///   4. 线性投影到 LLM 嵌入空间 (mm.input_projection.weight)
+///   4. 线性投影到 LLM 嵌入空间 (mm.a.input_projection.weight)
 ///
 /// 参考: llama.cpp gemma4ua.cpp build()
 pub fn buildGraph(
@@ -135,15 +161,15 @@ pub fn buildGraph(
     const eps: f32 = if (p.eps > 0) p.eps else 1e-6;
 
     const n_frames: i64 = mel_tensor.ne()[0];
-    const n_mel_bins: i64 = mel_tensor.ne()[1];
+    const frame_size: i64 = mel_tensor.ne()[1];
 
-    log.info("Gemma4UA graph: frames={d}, mel_bins={d}, embd={d}", .{ n_frames, n_mel_bins, p.n_embd });
+    log.info("Gemma4UA graph: frames={d}, frame_size={d}, embd={d}", .{ n_frames, frame_size, p.n_embd });
 
-    // 1. 输入 Mel 频谱 [n_frames, n_mel_bins, 1, 1]
+    // 1. 输入原始 PCM 波形分帧张量 [n_frames, frame_size, 1, 1]
     //    参考: clip.cpp build_inp_raw() → ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, nx, ny, C, B)
     var cur = mel_tensor;
 
-    // 2. Transpose + cont: [n_mel_bins, n_frames, 1, 1]
+    // 2. Transpose + cont: [frame_size, n_frames, 1, 1]
     //    对应 C++: ggml_cont(ctx0, ggml_permute(ctx0, inp, 1, 0, 2, 3))
     cur = ggml.cont(ctx, ggml.permute(ctx, cur, 1, 0, 2, 3));
     cur.setName("gemma4ua_input");

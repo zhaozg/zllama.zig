@@ -244,13 +244,38 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
         logger.info("Save audio mel data fail: {}", .{err});
     };
 
-    const preprocess_params = audio_mod.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else audio_mod.AUDIO_N_MEL_BINS);
-    var mel = try audio_mod.computeMelSpectrogram(io, ectx.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
-    defer mel.deinit();
+    const is_gemma4ua = mm_mgr.audio_encoder != null and
+        std.mem.eql(u8, ectx.capabilities.audio_encoder_type, "gemma4ua");
 
-    debug.saveData(io, "debug_audio", "zllama_audio_02_mel_conformer.json", "audio_mel", mel.data) catch |err| {
-        logger.info("Save audio mel data fail: {}", .{err});
-    };
+    var mel: audio_mod.types.ProcessedAudio = undefined;
+    var mel_owned = false;
+
+    if (is_gemma4ua) {
+        // Gemma4UA 预处理：直接把原始 PCM 样本分帧，不做 FFT/Mel 频谱
+        // 参考: llama.cpp mtmd_audio_preprocessor_gemma4ua::preprocess()
+        // frame_size 从 mm.a.input_projection.weight->ne[0] 推断
+        const frame_size: u32 = if (mm_mgr.audio_encoder) |enc|
+            @intCast(enc.weights.mm_input_proj_w.?.ne()[0])
+        else
+            return error.AudioEncoderNotAvailable;
+
+        logger.info("Gemma4UA preprocessing: frame_size={d}, samples={d}", .{ frame_size, wav_result.samples.len });
+        mel = try audio_mod.processRawWaveform(ectx.allocator, wav_result.samples, frame_size);
+        mel_owned = true;
+
+        debug.saveData(io, "debug_audio", "zllama_audio_02_raw_waveform.json", "audio_raw", mel.data) catch |err| {
+            logger.info("Save audio raw waveform data fail: {}", .{err});
+        };
+    } else {
+        const preprocess_params = audio_mod.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else audio_mod.AUDIO_N_MEL_BINS);
+        mel = try audio_mod.computeMelSpectrogram(io, ectx.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
+        mel_owned = true;
+
+        debug.saveData(io, "debug_audio", "zllama_audio_02_mel_conformer.json", "audio_mel", mel.data) catch |err| {
+            logger.info("Save audio mel data fail: {}", .{err});
+        };
+    }
+    defer if (mel_owned) mel.deinit();
 
     // 使用独立的 ggml context 构建音频编码器图，避免与主 LLM context 冲突。
     // 视觉路径 (generateWithImage) 也使用独立 context，这是相同的模式。

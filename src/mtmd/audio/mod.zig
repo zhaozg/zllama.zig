@@ -62,6 +62,40 @@ pub const loadWav = loader.loadWav;
 pub const computeMelSpectrogram = pipeline.processPcmSamples;
 pub const melToTensor = pipeline.melToTensor;
 
+/// Gemma4UA 专用预处理：直接将原始 PCM 样本分帧，不做 FFT/Mel 频谱
+/// 参考: llama.cpp mtmd_audio_preprocessor_gemma4ua::preprocess()
+pub fn processRawWaveform(
+    allocator: std.mem.Allocator,
+    samples: []const f32,
+    frame_size: u32,
+) !types.ProcessedAudio {
+    if (samples.len == 0) return error.EmptyAudio;
+    if (frame_size == 0) return error.InvalidFrameSize;
+
+    const n_tokens = (@as(u32, @intCast(samples.len)) + frame_size - 1) / frame_size;
+
+    // 分配 mel-major 布局的数据: data[f * n_tokens + t]
+    // 这样 ggml 张量加载为 [n_tokens, frame_size] 即 ne[0]=n_tokens, ne[1]=frame_size
+    const total_size = @as(usize, frame_size) * @as(usize, n_tokens);
+    const data = try allocator.alloc(f32, total_size);
+    @memset(data, 0.0);
+
+    for (0..@as(usize, n_tokens)) |t| {
+        for (0..@as(usize, frame_size)) |f| {
+            const src_idx = t * @as(usize, frame_size) + f;
+            // mel-major: data[f * n_tokens + t]
+            data[f * @as(usize, n_tokens) + t] = if (src_idx < samples.len) samples[src_idx] else 0.0;
+        }
+    }
+
+    return .{
+        .data = data,
+        .n_mel_bins = frame_size,
+        .n_frames = n_tokens,
+        .allocator = allocator,
+    };
+}
+
 // ============================================================================
 // 常量重新导出（保持向后兼容）
 // ============================================================================
