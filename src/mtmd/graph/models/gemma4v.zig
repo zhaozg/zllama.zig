@@ -1,35 +1,38 @@
-//! Gemma4V 视觉编码器图构建
+//! Gemma4V visual encoder graph builder.
 //!
-//! 实现 Gemma 4 Vision 的视觉编码器计算图构建。
-//! 参考: deps/llama.cpp/tools/mtmd/models/gemma4v.cpp
+//! Ref: deps/llama.cpp/tools/mtmd/models/gemma4v.cpp
+//!
+//! Pipeline:
+//!   1. scale_bias(inp_raw, 2.0, -1.0)
+//!   2. Conv2D patch embedding (no patch_bias)
+//!   3. 2D position embeddings (pos_x/pos_y lookup tables)
+//!   4. ViT blocks (RMS norm)
+//!   5. Pool 2D (avg, kernel=n_merge) + scale(sqrt(n_embd))
+//!   6. Standardization: (hidden - std_bias) * std_scale
+//!   7. Multimodal embedder: rms_norm -> build_mm(mm_input_proj_w)
 
 const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
 const graph = @import("../mod.zig");
 const vit_builder = @import("../vit.zig");
-const patch_builder = @import("../patch.zig");
-const rope_builder = @import("../rope.zig");
 const weight_loader = @import("weight_loader");
 
-const GraphBuilder = graph.GraphBuilder;
-const NormType = graph.NormType;
-const FFNOpType = graph.FFNOpType;
 const BuildVitOpts = graph.BuildVitOpts;
 const VisionHParams = graph.VisionHParams;
 const VisionEncoderWeights = graph.VisionEncoderWeights;
 const ViTLayerWeights = graph.ViTLayerWeights;
-const ImageF32 = graph.ImageF32;
+const ClampInfo = graph.ClampInfo;
 
 const log = std.log.scoped(.graph_model_gemma4v);
 
 // ============================================================================
-// 视觉编码器后端注册
+// Backend
 // ============================================================================
 
-/// Gemma4V 视觉编码器后端
 pub const backend = graph.VisionEncoderBackend{
     .name = "gemma4v",
+    .supportBatch = true,
     .buildGraph = buildGraph,
     .loadParams = loadParams,
     .loadWeights = loadWeights,
@@ -37,238 +40,218 @@ pub const backend = graph.VisionEncoderBackend{
     .estimateOutputTokens = estimateOutputTokens,
 };
 
-/// 加载 Gemma4V 视觉编码器超参数
-pub fn loadParams(io: std.Io, gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void {
+// ============================================================================
+// Params (ref: clip.cpp GEMMA4V case)
+// ============================================================================
+
+pub fn loadParams(io: std.Io, gf: *const gguf.GGUFFile, p: *VisionHParams) void {
     _ = io;
-    _ = gguf_file;
-    _ = params;
-    log.info("Gemma4V loadParams: using clip architecture defaults", .{});
+    p.rope_theta = 100.0;
+    p.n_merge = 3;
+    if (gf.getU32("clip.vision.projector.scale_factor")) |v| p.n_merge = v else if (gf.getU32("gemma4.vision.projector.scale_factor")) |v| p.n_merge = v;
+    p.setLimitImageTokens(40, 280);
+    p.warmup_image_size = 256;
+    log.info("Gemma4V: n_merge={d} rope_theta={d:.1}", .{ p.n_merge, p.rope_theta });
 }
 
-/// 从 GGUF 查找或创建张量
-fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
-    return weight_loader.findOrCreateTensor(ctx, gguf_file, name);
+// ============================================================================
+// Weight Loading
+// ============================================================================
+
+fn findTensor(ctx: *ggml.Context, gf: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
+    return weight_loader.findOrCreateTensor(ctx, gf, name);
 }
 
-/// 加载单层 ViT 权重
-fn loadViTLayer(
-    ctx: *ggml.Context,
-    gguf_file: *const gguf.GGUFFile,
-    prefix: []const u8,
-    allocator: std.mem.Allocator,
-) !ViTLayerWeights {
-    var layer = ViTLayerWeights{};
-
-    // Attention
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.ln1.weight", .{prefix});
-        defer allocator.free(name);
-        layer.ln_1_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
+fn loadLayer(ctx: *ggml.Context, gf: *const gguf.GGUFFile, prefix: []const u8, alloc: std.mem.Allocator) !ViTLayerWeights {
+    var l = ViTLayerWeights{};
+    const fields = [_]struct { suffix: []const u8, ptr: *?*ggml.Tensor }{
+        .{ .suffix = "ln1.weight", .ptr = &l.ln_1_w },
+        .{ .suffix = "attn_q.weight", .ptr = &l.q_w },
+        .{ .suffix = "attn_k.weight", .ptr = &l.k_w },
+        .{ .suffix = "attn_v.weight", .ptr = &l.v_w },
+        .{ .suffix = "attn_out.weight", .ptr = &l.o_w },
+        .{ .suffix = "ln2.weight", .ptr = &l.ln_2_w },
+        .{ .suffix = "ffn_up.weight", .ptr = &l.ff_up_w },
+        .{ .suffix = "ffn_gate.weight", .ptr = &l.ff_gate_w },
+        .{ .suffix = "ffn_down.weight", .ptr = &l.ff_down_w },
+        .{ .suffix = "attn_post_norm.weight", .ptr = &l.attn_post_norm_w },
+        .{ .suffix = "ffn_post_norm.weight", .ptr = &l.ff_post_norm_w },
+        .{ .suffix = "attn_k_norm.weight", .ptr = &l.k_norm },
+        .{ .suffix = "attn_q_norm.weight", .ptr = &l.q_norm },
+    };
+    for (fields) |f| {
+        const full = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ prefix, f.suffix });
+        defer alloc.free(full);
+        f.ptr.* = findTensor(ctx, gf, full) catch null;
     }
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.attn_q.weight", .{prefix});
-        defer allocator.free(name);
-        layer.q_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.attn_k.weight", .{prefix});
-        defer allocator.free(name);
-        layer.k_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.attn_v.weight", .{prefix});
-        defer allocator.free(name);
-        layer.v_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.attn_out.weight", .{prefix});
-        defer allocator.free(name);
-        layer.o_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-
-    // FFN
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.ln2.weight", .{prefix});
-        defer allocator.free(name);
-        layer.ln_2_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.ffn_up.weight", .{prefix});
-        defer allocator.free(name);
-        layer.ff_up_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.ffn_down.weight", .{prefix});
-        defer allocator.free(name);
-        layer.ff_down_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-
-    // Gemma4V specific: gate, attn_post_norm, ffn_post_norm, attn_k_norm, attn_q_norm
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.ffn_gate.weight", .{prefix});
-        defer allocator.free(name);
-        layer.ff_gate_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.attn_post_norm.weight", .{prefix});
-        defer allocator.free(name);
-        layer.attn_post_norm_w = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.attn_k_norm.weight", .{prefix});
-        defer allocator.free(name);
-        layer.k_norm = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-    {
-        const name = try std.fmt.allocPrint(allocator, "{s}.attn_q_norm.weight", .{prefix});
-        defer allocator.free(name);
-        layer.q_norm = findTensorInGGUF(ctx, gguf_file, name) catch null;
-    }
-    return layer;
+    return l;
 }
 
-/// 加载 Gemma4V 视觉编码器权重
-pub fn loadWeights(io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void {
+pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void {
     _ = io;
+    w.patch_embeddings_0 = findTensor(ctx, gf, "v.patch_embd.weight") catch null;
+    w.position_embeddings = findTensor(ctx, gf, "v.position_embd.weight") catch null;
+    w.std_bias = findTensor(ctx, gf, "v.std_bias") catch null;
+    w.std_scale = findTensor(ctx, gf, "v.std_scale") catch null;
+    w.mm_input_proj_w = findTensor(ctx, gf, "mm.input_projection.weight") catch null;
+    w.mm_soft_emb_norm_w = findTensor(ctx, gf, "mm.soft_emb_norm.weight") catch null;
 
-    // Patch embedding
-    w.patch_embeddings_0 = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.weight") catch null;
-    w.patch_bias = findTensorInGGUF(ctx, gguf_file, "v.patch_embd.bias") catch null;
-
-    // 位置编码
-    w.position_embeddings = findTensorInGGUF(ctx, gguf_file, "v.position_embd.weight") catch null;
-
-    // 标准化
-    w.std_bias = findTensorInGGUF(ctx, gguf_file, "v.std_bias") catch null;
-    w.std_scale = findTensorInGGUF(ctx, gguf_file, "v.std_scale") catch null;
-
-    // 多模态投影
-    w.mm_input_proj_w = findTensorInGGUF(ctx, gguf_file, "mm.input_projection.weight") catch null;
-    w.mm_soft_emb_norm_w = findTensorInGGUF(ctx, gguf_file, "mm.soft_emb_norm.weight") catch null;
-
-    // 检测实际层数
-    var actual_n_layer: u32 = 0;
+    var n: u32 = 0;
     for (0..64) |il| {
         var buf: [32]u8 = undefined;
-        const test_name = try std.fmt.bufPrint(&buf, "v.blk.{d}.attn_q.weight", .{il});
-        if (gguf_file.findTensor(test_name) == null) break;
-        actual_n_layer = @intCast(il + 1);
+        if (gf.findTensor(try std.fmt.bufPrint(&buf, "v.blk.{d}.attn_q.weight", .{il})) == null) break;
+        n = @intCast(il + 1);
     }
-
-    const n_layer: usize = @intCast(actual_n_layer);
-    w.layers = try allocator.alloc(ViTLayerWeights, n_layer);
-
-    for (0..n_layer) |il| {
-        const prefix = try std.fmt.allocPrint(allocator, "v.blk.{d}", .{il});
-        defer allocator.free(prefix);
-        w.layers[il] = try loadViTLayer(ctx, gguf_file, prefix, allocator);
+    w.layers = try alloc.alloc(ViTLayerWeights, n);
+    for (0..n) |il| {
+        const pfx = try std.fmt.allocPrint(alloc, "v.blk.{d}", .{il});
+        defer alloc.free(pfx);
+        w.layers[il] = try loadLayer(ctx, gf, pfx, alloc);
     }
-
-    log.info("Gemma4V weights loaded: {d} ViT layers", .{n_layer});
+    log.info("Gemma4V: {d} layers", .{n});
 }
 
-/// 加载 clamp 信息
-pub fn loadClampInfo(io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void {
+pub fn loadClampInfo(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void {
     _ = io;
-    _ = allocator;
-    _ = gguf_file;
+    _ = alloc;
+    _ = gf;
     _ = w;
 }
 
-/// 估计输出 token 数
-pub fn estimateOutputTokens(io: std.Io, img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32 {
+// ============================================================================
+// Output Estimate
+// ============================================================================
+
+pub fn estimateOutputTokens(io: std.Io, iw: u32, ih: u32, ps: u32, nm: u32) u32 {
     _ = io;
-    _ = img_width;
-    _ = img_height;
-    _ = patch_size;
-    _ = n_merge;
-    return 0;
+    const m: u32 = if (nm == 0) 1 else nm;
+    return (iw / ps / m) * (ih / ps / m);
 }
 
-/// 构建 Gemma4V 完整计算图
-///
+// ============================================================================
+// Graph
+// ============================================================================
+
+const Dim = enum { x, y };
+
+fn posIndices(ctx: *ggml.Context, nx: i32, ny: i32, d: Dim) !*ggml.Tensor {
+    const n: usize = @intCast(@as(i32, nx * ny));
+    const data = try std.heap.page_allocator.alloc(i32, n);
+    defer std.heap.page_allocator.free(data);
+    var idx: usize = 0;
+    switch (d) {
+        .x => for (0..@as(usize, @intCast(ny))) |_| {
+            for (0..@as(usize, @intCast(nx))) |x| {
+                data[idx] = @intCast(x);
+                idx += 1;
+            }
+        },
+        .y => for (0..@as(usize, @intCast(ny))) |y| {
+            for (0..@as(usize, @intCast(nx))) |_| {
+                data[idx] = @intCast(y);
+                idx += 1;
+            }
+        },
+    }
+    const nm: [:0]const u8 = if (d == .x) "pos_x" else "pos_y";
+    var t = try ctx.newTensor1d(ggml.Type.i32, @intCast(n));
+    t.setName(nm);
+    ggml.setInput(t);
+    if (ctx.getNoAlloc()) {
+        const sz = @as(usize, @intCast(t.nBytes()));
+        const buf = @as([*]u8, @ptrCast(std.c.malloc(sz) orelse return error.OutOfMemory))[0..sz];
+        @memcpy(buf, @as([*]const u8, @ptrCast(data.ptr))[0..sz]);
+        t.setDataPtr(buf);
+    } else {
+        try t.dataSet(i32, data);
+    }
+    return t;
+}
+
+fn buildMM(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, cm: *const std.StringHashMap(ClampInfo)) *ggml.Tensor {
+    if (cm.get(wt.getName())) |ci| {
+        return wt.mulMat(ctx, x.clamp(ctx, ci.inp_min, ci.inp_max)).clamp(ctx, ci.out_min, ci.out_max);
+    }
+    return wt.mulMat(ctx, x);
+}
+
 pub fn buildGraph(
     io: std.Io,
     ctx: *ggml.Context,
     gf: *ggml.CGraph,
     w: *const VisionEncoderWeights,
     p: *const VisionHParams,
-    image_tensor: *ggml.Tensor,
+    inp: *ggml.Tensor,
 ) anyerror!*ggml.CGraph {
     _ = io;
-    const eps = p.eps;
-    const n_patches: i64 = @intCast((p.image_size / p.patch_size) * (p.image_size / p.patch_size));
+    const ps: i32 = @intCast(p.patch_size);
+    const npx: i32 = @divTrunc(@as(i32, @intCast(p.image_size)), ps);
+    const npy: i32 = @divTrunc(@as(i32, @intCast(p.image_size)), ps);
+    const np: i64 = @as(i64, npx) * @as(i64, npy);
+    const ne: i64 = @intCast(p.n_embd);
 
-    // ========================================================================
-    // 1. Conv2D patch embedding (with scale=2, bias=-1)
-    // 参考: gemma4v.cpp: inp_raw = ggml_scale(ctx0, inp_raw, 2.0f); inp_raw = ggml_add(ctx0, inp_raw, -1.0f);
-    //                    inp = ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, ...);
-    // ========================================================================
-    // ========================================================================
-    // 1. Scale + bias input (scale=2, bias=-1), then Conv2D patch embedding
-    // 参考: gemma4v.cpp: inp_raw = ggml_scale_bias(ctx0, inp_raw, 2.0f, -1.0f);
-    //                    inp = ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, ...);
-    // ========================================================================
-    var cur = image_tensor.scaleBias(ctx, 2.0, -1.0);
-    cur.setName("inp_scaled_biased");
+    // 1. Scale+bias: patches * 2 - 1
+    var cur = inp.scaleBias(ctx, 2.0, -1.0);
+    cur.setName("inp_raw_scaled");
 
-    cur = try patch_builder.buildInp(
-        ctx,
-        cur,
-        w.patch_embeddings_0 orelse return error.MissingPatchEmbedding,
-        w.patch_bias,
-        @intCast(p.image_size),
-        @intCast(p.image_size),
-        null, // scale - already applied above
-        null, // bias - already applied above
-    );
-    cur.setName("patch_embed");
-    // ========================================================================
-    // 2. ViT blocks (via buildVit)
-    // 参考: gemma4v.cpp: build_vit(inp, n_patches, NORM_TYPE_RMS, hparams.ffn_op, nullptr, add_pos)
-    // ========================================================================
-    const vit_opts = BuildVitOpts{
+    // 2. Conv2D patch embedding (NO patch_bias for Gemma4V)
+    const pw = w.patch_embeddings_0 orelse return error.MissingPatchEmbedding;
+    cur = cur.conv2d(ctx, pw, ps, ps, 0, 0, 1, 1);
+    cur = cur.reshape3d(ctx, np, ne, 1);
+    cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
+    cur.setName("inp");
+
+    // 3. 2D Position embeddings (x/y lookup)
+    const pe = w.position_embeddings orelse return error.MissingPositionEmbeddings;
+    const psz: i64 = pe.ne()[1];
+    const nb: usize = @intCast(ggml.Type.rowSize(pe.dataType(), @intCast(ne)));
+    const tx = pe.view2d(ctx, ne, psz, nb, 0);
+    const ty = pe.view2d(ctx, ne, psz, nb, @as(usize, @intCast(psz)) * nb);
+    cur = cur.add(ctx, ggml.getRows(ctx, tx, try posIndices(ctx, npx, npy, .x)));
+    cur = cur.add(ctx, ggml.getRows(ctx, ty, try posIndices(ctx, npx, npy, .y)));
+    cur.setName("pos_embd");
+
+    // 4. ViT blocks
+    cur = try vit_builder.buildVit(ctx, cur, np, .rms_norm, p.ffn_op, null, w, p, null, .{
         .v_norm = true,
-        .v_norm_eps = eps,
+        .v_norm_eps = p.eps,
         .kq_scale = 1.0,
-    };
+    });
+    cur.setName("vit_output");
 
-    cur = try vit_builder.buildVit(
-        ctx,
-        cur,
-        n_patches,
-        .rms_norm,
-        p.ffn_op,
-        null, // learned_pos_embd - already handled above
-        w,
-        p,
-        null, // add_pos - 2D RoPE not yet implemented in this stub
-        vit_opts,
-    );
-    // ========================================================================
-    // 3. Pooling (平均池化下采样)
-    // 参考: gemma4v.cpp: cur = ggml_pool_2d(ctx0, cur, GGML_OP_POOL_AVG, ...);
-    // ========================================================================
-    // TODO: 实现池化层
-
-    // ========================================================================
-    // 4. 标准化 (std_bias, std_scale)
-    // 参考: gemma4v.cpp: cur = ggml_add(ctx0, cur, model.std_bias); cur = ggml_mul(ctx0, cur, model.std_scale);
-    // ========================================================================
-    // TODO: 实现标准化
-
-    // ========================================================================
-    // 5. 多模态投影 (mm_input_proj_w)
-    // 将 ViT 输出从 n_embd 投影到 projection_dim
-    // ========================================================================
-    if (w.mm_input_proj_w) |proj_w| {
-        cur = proj_w.mulMat(ctx, cur);
-        cur.setName("mm_proj");
+    // 5. Pool 2D (avg, kernel=n_merge) + scale
+    const ks: i32 = @intCast(p.n_merge);
+    if (ks > 0) {
+        cur = ggml.cont4d(ctx, ggml.transpose(ctx, cur), npx, npy, ne, 1);
+        cur = cur.pool2d(ctx, @intCast(@intFromEnum(ggml.PoolOp.avg)), ks, ks, ks, ks, 0.0, 0.0);
+        const ox: i64 = @divTrunc(npx, ks);
+        const oy: i64 = @divTrunc(npy, ks);
+        cur = cur.reshape3d(ctx, ox * oy, ne, 1);
+        cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
+        cur = cur.scale(ctx, @sqrt(@as(f32, @floatFromInt(ne))));
+        cur.setName("pooled");
     }
 
-    // 设置输出张量名称并添加到计算图
+    // 6. Standardization
+    if (w.std_bias != null and w.std_scale != null) {
+        cur = cur.sub(ctx, w.std_bias.?);
+        const rs: usize = @intCast(ggml.Type.rowSize(w.std_scale.?.dataType(), @intCast(ne)));
+        cur = cur.mul(ctx, w.std_scale.?.view2d(ctx, ne, 1, rs, 0));
+        cur.setName("std_scaled");
+    }
+
+    // 7. Multimodal embedder
+    cur = cur.rmsNorm(ctx, p.eps);
+    if (w.mm_soft_emb_norm_w) |sn| {
+        const rs2: usize = @intCast(ggml.Type.rowSize(sn.dataType(), @intCast(ne)));
+        cur = cur.mul(ctx, sn.view2d(ctx, ne, 1, rs2, 0));
+    }
+    if (w.mm_input_proj_w) |proj| {
+        cur = buildMM(ctx, proj, cur, &w.clamp_info_map);
+        cur.setName("projected");
+    }
+
     cur.setName("mm_output");
     gf.buildForwardExpand(cur);
-
     return gf;
 }

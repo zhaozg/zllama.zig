@@ -28,8 +28,12 @@ const log = std.log.scoped(.graph_vit);
 /// 这里使用简单的命名策略：当 il >= 0 时，使用 "{name}_{il}" 格式。
 pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
     if (il >= 0) {
-        // TODO: 使用 ggml_format_name 或类似功能
-        // 目前 ggml.zig 绑定不支持格式化命名，暂时跳过
+        var buf: [128]u8 = undefined;
+        if (std.fmt.bufPrintZ(&buf, "{s}-{d}", .{ name, il })) |formatted| {
+            cur.setName(formatted);
+        } else |_| {
+            cur.setName(name);
+        }
     } else {
         cur.setName(name);
     }

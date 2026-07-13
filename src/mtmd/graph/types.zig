@@ -281,11 +281,18 @@ pub const VisionHParams = struct {
 
     pub fn setLimitImageTokens(self: *VisionHParams, n_tokens_min: u32, n_tokens_max: u32) void {
         const cur_merge: u32 = if (self.n_merge == 0) 1 else self.n_merge;
-        const patch_area = self.patch_size * self.patch_size * cur_merge * cur_merge;
-        self.image_min_pixels = @as(i32, @intCast(if (self.custom_image_min_tokens > 0) @as(u32, @intCast(self.custom_image_min_tokens)) else n_tokens_min)) * @as(i32, @intCast(patch_area));
-        self.image_max_pixels = @as(i32, @intCast(if (self.custom_image_max_tokens > 0) @as(u32, @intCast(self.custom_image_max_tokens)) else n_tokens_max)) * @as(i32, @intCast(patch_area));
-        const px: f64 = @floatFromInt(@as(u32, @intCast(self.image_max_pixels)));
-        self.warmup_image_size = @as(u32, @intFromFloat(@sqrt(px)));
+        // Use u64 to avoid overflow in patch_area computation
+        const patch_area: u64 = @as(u64, self.patch_size) * @as(u64, self.patch_size) * @as(u64, cur_merge) * @as(u64, cur_merge);
+        // Use i64 for token*patch multiplication to avoid overflow
+        const tokens_min: i64 = @intCast(if (self.custom_image_min_tokens > 0) @as(u32, @intCast(self.custom_image_min_tokens)) else n_tokens_min);
+        const tokens_max: i64 = @intCast(if (self.custom_image_max_tokens > 0) @as(u32, @intCast(self.custom_image_max_tokens)) else n_tokens_max);
+        const patch_area_i64: i64 = @intCast(patch_area);
+        self.image_min_pixels = @intCast(@min(tokens_min * patch_area_i64, std.math.maxInt(i32)));
+        self.image_max_pixels = @intCast(@min(tokens_max * patch_area_i64, std.math.maxInt(i32)));
+        // Guard against non-positive image_max_pixels in sqrt
+        const max_px: u32 = @intCast(@max(0, self.image_max_pixels));
+        const px: f64 = @floatFromInt(max_px);
+        self.warmup_image_size = @intFromFloat(@sqrt(px));
     }
 };
 

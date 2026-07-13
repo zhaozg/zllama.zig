@@ -54,7 +54,7 @@ pub fn generateTestGGUF(allocator: std.mem.Allocator, config: TestConfig) ![]u8 
     // 2. 写入元数据（架构、维度等）
     // 3. 生成随机权重（正态分布，std=0.01）
     // 4. 返回 GGUF 字节
-    @panic("Not implemented yet");
+    return error.Unimplemented; // GGUF writer not yet available
 }
 
 /// 创建测试用的 ggml context

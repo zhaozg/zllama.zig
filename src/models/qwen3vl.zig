@@ -143,7 +143,7 @@ pub const Qwen3VLModel = struct {
         const pos_tensor = rope.buildMultiPositionTensor(ctx, @intCast(n_tokens_i64), start_pos);
 
         // inp_out_ids for last layer output selection (like reference)
-        const inp_out_ids: ?*ggml.Tensor = null; // TODO: support out_ids if needed
+        const inp_out_ids: ?*ggml.Tensor = null; // out_ids support reserved for future multi-token selection
 
         for (w.layers, 0..) |*layer, i| {
             const il: i64 = @intCast(i);

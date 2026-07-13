@@ -1,7 +1,7 @@
-//! 视觉编码器框架
+//! Vision encoder framework.
 //!
-//! 提供视觉编码器的通用框架，包括生命周期管理、编码接口。
-//! 模型特定实现下沉到 src/mtmd/graph/models/ 中，通过 VisionEncoderBackend 分发。
+//! Model-specific implementations live in src/mtmd/graph/models/
+//! dispatched via VisionEncoderBackend.
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -79,18 +79,16 @@ pub const VisionEncoder = struct {
             .eps = params.norm_eps,
             .rope_theta = params.rope_theta,
         };
-        // 模型特定的参数覆盖（如 Gemma4V 设置 rope_theta=100, n_merge=3,
-        // setLimitImageTokens 等）
+
+        hparams.custom_image_min_tokens = @intCast(params.image_min_pixels);
+        hparams.custom_image_max_tokens = @intCast(params.image_max_pixels);
+
         backend.loadParams(io, gguf_file, &hparams);
 
-        // 将 loadParams 的修改同步回 params（encode() 从 params 重建 hparams）
-        // 注意：gemma4uv 的 loadParams 会修改 patch_size（乘以 n_merge），
-        // 必须同步回来，否则 encode() 中会使用错误的 patch_size
         params.n_merge = hparams.n_merge;
         params.patch_size = hparams.patch_size;
         params.rope_theta = hparams.rope_theta;
         if (hparams.image_min_pixels > 0) {
-            // setLimitImageTokens 被调用过，覆盖通用默认值
             params.image_min_pixels = @intCast(hparams.image_min_pixels);
             params.image_max_pixels = @intCast(hparams.image_max_pixels);
         }
@@ -129,7 +127,6 @@ pub const VisionEncoder = struct {
         return self.weights.patch_embeddings_0 != null;
     }
 
-    /// Whether this encoder supports batch processing (multiple images in one forward pass).
     pub fn supportBatch(self: *const VisionEncoder) bool {
         return self.backend.supportBatch;
     }
@@ -138,12 +135,10 @@ pub const VisionEncoder = struct {
         self.params.user_max_pixels = max_pixels;
     }
 
-    /// Backward-compatible encode without n_threads, defaults to 4.
     pub fn encodeSimple(self: *const VisionEncoder, io: std.Io, ctx: *ggml.Context, cgraph: *ggml.CGraph, image_data: []const u8, img_width: u32, img_height: u32) !*ggml.Tensor {
         return self.encode(io, ctx, cgraph, image_data, img_width, img_height, 4);
     }
 
-    /// Encode RGB image data with compute execution.
     pub fn encode(
         self: *const VisionEncoder,
         io: std.Io,
@@ -159,12 +154,33 @@ pub const VisionEncoder = struct {
         const expected_len: usize = @as(usize, @intCast(img_width)) * @as(usize, @intCast(img_height)) * 3;
         if (image_data.len < expected_len) return error.InvalidImageData;
 
-        var inp = try preprocess.normalizeToTensor(ctx, image_data, img_width, img_height, self.image_mean, self.image_std, .standard);
-        inp.setName("vision_input");
+        const cur_merge: u32 = if (p.n_merge == 0) 1 else p.n_merge;
+        const align_size = p.patch_size * cur_merge;
+        const effective_max = if (p.user_max_pixels > 0) p.user_max_pixels else p.image_max_pixels;
+        const effective_min = p.image_min_pixels;
+
+        const resize_result = try preprocess.resizeAndNormalize(
+            ctx,
+            std.heap.page_allocator,
+            image_data,
+            img_width,
+            img_height,
+            self.image_mean,
+            self.image_std,
+            align_size,
+            effective_min,
+            effective_max,
+        );
+
+        const inp: *ggml.Tensor = resize_result.tensor;
+        const new_w: u32 = resize_result.new_width;
+        const new_h: u32 = resize_result.new_height;
+        log.debug("encode: {d}x{d} -> {d}x{d}", .{ img_width, img_height, new_w, new_h });
+
         ggml.setInput(inp);
 
         var hparams = graph.VisionHParams{
-            .image_size = img_width,
+            .image_size = new_w,
             .patch_size = p.patch_size,
             .n_embd = p.n_embd,
             .n_head = p.n_head,
@@ -174,20 +190,29 @@ pub const VisionEncoder = struct {
             .n_merge = p.n_merge,
             .eps = p.norm_eps,
             .rope_theta = p.rope_theta,
+            .ffn_op = ffnOpToGraph(p.ffn_op),
         };
-        _ = try self.backend.buildGraph(io, ctx, cgraph, &self.weights, &hparams, inp);
 
-        // Return the output tensor by name; caller must compute before reading data.
+        _ = try self.backend.buildGraph(io, ctx, cgraph, &self.weights, &hparams, inp);
         return cgraph.getTensor("mm_output") orelse return error.TensorNotFound;
     }
 
     pub fn estimateOutputTokens(self: *const VisionEncoder, io: std.Io, img_width: u32, img_height: u32) u32 {
         return self.backend.estimateOutputTokens(io, img_width, img_height, self.params.patch_size, self.params.n_merge);
     }
+
     pub fn bestResolution(self: *const VisionEncoder, max_tokens: u32) struct { width: u32, height: u32 } {
-        _ = max_tokens;
-        // TODO: implement proper resolution calculation
-        return .{ .width = self.params.image_size, .height = self.params.image_size };
+        const cur_merge: u32 = if (self.params.n_merge == 0) 1 else self.params.n_merge;
+        const align_size = self.params.patch_size * cur_merge;
+        const max_pixels = max_tokens * align_size * align_size;
+        const size = preprocess.calcSizePreservedRatio(
+            4096,
+            4096,
+            align_size,
+            self.params.image_min_pixels,
+            @min(max_pixels, self.params.image_max_pixels),
+        );
+        return .{ .width = size.w, .height = size.h };
     }
 
     pub fn deinit(self: *VisionEncoder, allocator: std.mem.Allocator) void {
@@ -195,3 +220,11 @@ pub const VisionEncoder = struct {
         allocator.free(self.weights.layers);
     }
 };
+
+/// Convert config.FfnOp to graph.FFNOpType
+fn ffnOpToGraph(op: config.FfnOp) graph.FFNOpType {
+    return switch (op) {
+        .silu => .silu,
+        .gelu => .gelu,
+    };
+}

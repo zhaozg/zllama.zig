@@ -37,9 +37,9 @@ pub const Sampler = struct {
     /// 从 logits 张量采样下一个 token
     pub fn sample(self: *Sampler, logits: *ggml.Tensor) i32 {
         _ = self;
-        _ = logits;
-        // TODO: 实现采样逻辑
-        return 0;
+        // 当前实现：贪心采样（temperature=0 路径）
+        // 未来可扩展 top-k / top-p
+        return sampleGreedy(logits);
     }
 
     /// 从堆上的 logits 数组贪心采样

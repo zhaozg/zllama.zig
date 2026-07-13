@@ -56,7 +56,7 @@ fn generateTestGGUF(allocator: std.mem.Allocator, config: SmallTestConfig) ![]u8
     // TODO: 实现完整的随机 GGUF 生成
     // 当前返回一个最小的有效 GGUF（空模型）
     // 实际测试需要生成包含随机权重的完整 GGUF
-    @panic("Not implemented yet - need GGUF writer");
+    return error.Unimplemented; // GGUF writer not yet available
 }
 
 // ============================================================================
