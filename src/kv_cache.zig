@@ -2,7 +2,7 @@ const std = @import("std");
 const ggml = @import("ggml");
 const memory = @import("memory");
 
-const log = std.log.scoped(.kv_cache);
+const log = std.log.scoped(.core_kv_cache);
 
 // ============================================================================
 // KV Cache

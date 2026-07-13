@@ -5,7 +5,7 @@
 const std = @import("std");
 const ggml = @import("ggml");
 
-const log = std.log.scoped(.sampler);
+const log = std.log.scoped(.core_sampler);
 
 // ============================================================================
 // 采样参数

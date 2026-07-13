@@ -57,7 +57,7 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
     .{ .scope = .graph_gemma4uv, .level = .info },
 } };
 
-const logger = std.log.scoped(.main);
+const logger = std.log.scoped(.app_main);
 
 pub fn main(init: std.process.Init) !void {
     // Set ggml log callback

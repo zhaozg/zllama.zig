@@ -19,7 +19,7 @@ const gemma3 = @import("model").gemma3;
 const gemma4 = @import("model").gemma4;
 const embedding = @import("model").embedding;
 
-const log = std.log.scoped(.registry);
+const log = std.log.scoped(.model_registry);
 
 /// 根据架构枚举创建模型实例
 /// 返回 ModelInstance（虚表包装），调用者无需知道具体模型类型

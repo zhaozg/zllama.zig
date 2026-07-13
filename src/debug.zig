@@ -10,7 +10,7 @@
 const std = @import("std");
 const ggml = @import("ggml");
 
-const log = std.log.scoped(.debug);
+const log = std.log.scoped(.app_debug);
 
 /// 将浮点数组保存为 JSON 数组文件。
 ///

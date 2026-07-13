@@ -19,7 +19,7 @@ const registry = @import("registry");
 const graph_builder = @import("graph_builder");
 const memory = @import("memory");
 
-const log = std.log.scoped(.dump_graph);
+const log = std.log.scoped(.tool_dump_graph);
 
 // ============================================================================
 // 输出格式

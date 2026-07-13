@@ -24,7 +24,7 @@ const weight_loader = @import("weight_loader");
 
 const model = @import("../model.zig");
 
-const log = std.log.scoped(.gemma3);
+const log = std.log.scoped(.model_gemma3);
 
 // ============================================================================
 // Gemma 3 超参数

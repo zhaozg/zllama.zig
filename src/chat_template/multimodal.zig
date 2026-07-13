@@ -15,7 +15,7 @@
 const std = @import("std");
 const types = @import("types");
 
-const log = std.log.scoped(.multimodal);
+const log = std.log.scoped(.chat_multimodal);
 
 // ============================================================================
 // 占位符扫描

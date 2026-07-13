@@ -7,7 +7,7 @@ const std = @import("std");
 const tokenizer = @import("tokenizer");
 const chat_template = @import("chat_template");
 
-const logger = std.log.scoped(.verbose);
+const log = std.log.scoped(.core_verbose);
 
 /// Print verbose prompt information: prompt text, token IDs, decoded text, and logits preview.
 /// Matches llama.cpp's --verbose-prompt output format.

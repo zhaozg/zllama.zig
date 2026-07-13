@@ -18,7 +18,7 @@ const weight_loader = @import("weight_loader");
 
 const model = @import("../model.zig");
 
-const log = std.log.scoped(.qwen35);
+const log = std.log.scoped(.model_qwen35);
 
 pub const QwenParams = struct {
     base: model.ModelParams = .{},

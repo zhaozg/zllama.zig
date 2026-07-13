@@ -22,7 +22,7 @@ const memory = @import("memory");
 const model = @import("../model.zig");
 const qwen2 = @import("qwen2.zig");
 
-const log = std.log.scoped(.embedding);
+const log = std.log.scoped(.model_embedding);
 
 pub const EmbeddingWeights = struct {
     base: model.ModelWeights,

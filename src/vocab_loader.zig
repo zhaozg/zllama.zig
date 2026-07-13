@@ -4,7 +4,7 @@ const gguf = @import("gguf");
 
 const Vocab = @import("./vocab.zig").Vocab;
 
-const log = std.log.scoped(.vocab);
+const log = std.log.scoped(.tokenizer_vocab);
 
 // ========================================================================
 // 内部：初始化

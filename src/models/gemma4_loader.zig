@@ -9,7 +9,7 @@ const Gemma4Params = @import("./gemma4.zig").Gemma4Params;
 const Gemma4Weights = @import("./gemma4.zig").Gemma4Weights;
 const LayerWeights = @import("./gemma4.zig").LayerWeights;
 
-const log = std.log.scoped(.gemma4);
+const log = std.log.scoped(.model_gemma4);
 
 pub fn parseParams(gguf_file: *const gguf.GGUFFile, allocator: std.mem.Allocator) !Gemma4Params {
     var p = Gemma4Params{

@@ -20,7 +20,7 @@ const std = @import("std");
 const gguf = @import("gguf");
 const vocab_loader = @import("vocab_loader.zig");
 
-const log = std.log.scoped(.vocab);
+const log = std.log.scoped(.tokenizer_vocab);
 
 // ============================================================================
 // 枚举类型

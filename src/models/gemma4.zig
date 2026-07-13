@@ -27,7 +27,7 @@ const weight_loader = @import("weight_loader");
 const gemma4_graph = @import("gemma4_graph.zig");
 const model = @import("../model.zig");
 
-const log = std.log.scoped(.gemma4);
+const log = std.log.scoped(.model_gemma4);
 
 // ============================================================================
 // Gemma 4 超参数

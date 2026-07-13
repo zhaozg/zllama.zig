@@ -14,7 +14,7 @@ const tokenizer = @import("tokenizer");
 const sampler = @import("sampler");
 const engine_common = @import("engine_common");
 
-const logger = std.log.scoped(.decode);
+const logger = std.log.scoped(.core_decode);
 
 // ============================================================================
 // Callbacks for the shared decode loop

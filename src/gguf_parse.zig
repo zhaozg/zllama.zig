@@ -12,7 +12,7 @@ const GGUFFile = @import("./gguf.zig").GGUFFile;
 const readString = @import("./gguf.zig").readString;
 const readMetadataValue = @import("./gguf.zig").readMetadataValue;
 
-const log = std.log.scoped(.gguf);
+const log = std.log.scoped(.gguf_parse);
 
 pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
     var arena = std.heap.ArenaAllocator.init(allocator);

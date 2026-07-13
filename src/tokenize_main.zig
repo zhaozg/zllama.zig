@@ -14,7 +14,7 @@ const ggml = @import("ggml");
 const gguf = @import("gguf");
 const tokenizer = @import("tokenizer");
 const utils = @import("utils.zig");
-const logger = std.log.scoped(.tokenize);
+const logger = std.log.scoped(.app_tokenize);
 const c = ggml.c;
 // 运行时日志级别控制
 var runtime_log_level: std.log.Level = .info;

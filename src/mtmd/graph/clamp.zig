@@ -9,7 +9,7 @@ const std = @import("std");
 const gguf = @import("gguf");
 const ClampInfo = @import("types.zig").ClampInfo;
 
-const log = std.log.scoped(.clamp);
+const log = std.log.scoped(.graph_clamp);
 
 /// 从 GGUF 张量数据加载 clamp_info_map
 ///

@@ -52,9 +52,72 @@
 
 - 文件不超过 600 行，接口与实现分离。
 - 资源释放用 `defer`，分配失败返回错误。
-- 优先代码清晰，必要时牺牲微小性能提升。
 
-### 6. 设计哲学
+### 6. 日志作用域命名规则
+
+所有 `std.log.scoped` 调用必须遵循**层级前缀 + 下划线 + 组件名**的命名规则，确保日志作用域名称在整个项目中唯一且可追溯。
+
+#### 命名格式
+
+```
+{layer_prefix}_{component_name}
+```
+
+- 使用**下划线 `_`** 作为层级分隔符（Zig 枚举字面量不支持点号 `.`）。
+- `layer_prefix` 对应模块的 DAG 层级（L0-L7）。
+- `component_name` 使用小写蛇形命名（snake_case）。
+- 同一模块内多个文件共享同一 scope 名（如 `ggml` 下的多个文件都用 `.ggml`）。
+- 变量名统一使用 `log`，仅在变量名与函数名冲突时使用 `logger`。
+
+#### 层级前缀对照表
+
+| 层级前缀 | 对应模块 | 示例文件 |
+|---------|---------|---------|
+| `ggml` | L0: ggml 绑定 | `ggml/context.zig` → `.ggml` |
+| `ggml_gguf` | L0: ggml GGUF 绑定 | `ggml/gguf.zig` → `.ggml_gguf` |
+| `ggml_quantize` | L0: ggml 量化 | `ggml/quantize.zig` → `.ggml_quantize` |
+| `gguf` | L1: GGUF 解析（主模块） | `gguf.zig` → `.gguf` |
+| `gguf_parse` | L1: GGUF 解析子模块 | `gguf_parse.zig` → `.gguf_parse` |
+| `model_*` | L3a: 文本模型 | `models/llama.zig` → `.model_llama` |
+| `model_registry` | L3a: 模型注册 | `models/registry.zig` → `.model_registry` |
+| `core_*` | L2c/L6: 基础设施/引擎 | `core/engine.zig` → `.core_engine` |
+| `layer_*` | L2a: 共享算子 | `layers/pooling.zig` → `.layer_pooling` |
+| `graph_*` | L2b: 多模态图构建块 | `mtmd/graph/attn.zig` → `.graph_attn` |
+| `graph_model_*` | L3b: 多模态模型图 | `mtmd/graph/models/gemma4v.zig` → `.graph_model_gemma4v` |
+| `vision_*` | L4: 视觉编码器 | `mtmd/vision/encoder.zig` → `.vision_encoder` |
+| `audio_*` | L4: 音频编码器 | `mtmd/audio/encoder.zig` → `.audio_encoder` |
+| `mtmd` | L5: 多模态门面（主模块） | `mtmd/mod.zig` → `.mtmd` |
+| `mtmd_*` | L5: 多模态门面子模块 | `mtmd/helper.zig` → `.mtmd_helper` |
+| `chat_*` | L2d: 对话模板 | `chat_template/mod.zig` → `.chat_template` |
+| `tokenizer` | L2d: 分词器（主模块） | `tokenizer/mod.zig` → `.tokenizer` |
+| `tokenizer_vocab` | L2d: 词表 | `vocab.zig` → `.tokenizer_vocab` |
+| `app_*` | L7: 应用入口 | `main.zig` → `.app_main` |
+| `test_*` | 测试 | `tests/test_archs.zig` → `.test_archs` |
+| `tool_*` | 工具 | `tools/compare_with_llamacpp.zig` → `.tool_compare` |
+
+#### 规则要点
+
+1. **唯一性**：每个 scope 名在整个项目中唯一，不同模块即使功能相似也使用不同前缀。
+2. **可追溯**：从 scope 名可直接推断文件所属模块层级和组件。
+3. **一致性**：同一模块内多个文件共享同一 scope 名（如 `ggml` 下的 4 个文件都用 `.ggml`）。
+4. **简洁性**：scope 名不宜过长，`graph_model_gemma4v` 等三层嵌套已是上限。
+5. **变量名**：统一使用 `const log = std.log.scoped(...)`，仅在变量名与函数名冲突时使用 `const logger = std.log.scoped(...)`。
+
+#### 示例
+
+```zig
+// src/core/engine.zig
+const logger = std.log.scoped(.core_engine);  // 与函数名 log 冲突，使用 logger
+
+// src/models/llama.zig
+const log = std.log.scoped(.model_llama);
+
+// src/mtmd/graph/attn.zig
+const log = std.log.scoped(.graph_attn);
+```
+
+
+### 7. 设计哲学
 
 面向 AI 编程助手与贡献者，定义基于 **编译期强类型（comptime）**、**显式分配（Allocator）** 与 **VTable 接口** 构建的"白盒插件系统"的顶层设计约束。所有代码修改与功能扩展必须遵守以下契约。
 

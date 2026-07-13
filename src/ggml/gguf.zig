@@ -11,7 +11,7 @@ const c = @import("c.zig").c;
 const Type = @import("c.zig").Type;
 const GgufValueType = @import("c.zig").GgufValueType;
 
-const log = std.log.scoped(.gguf_bind);
+const log = std.log.scoped(.ggml_gguf);
 
 // ============================================================================
 // 不透明类型

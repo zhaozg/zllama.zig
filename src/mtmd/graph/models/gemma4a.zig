@@ -28,7 +28,7 @@ const VisionHParams = graph.VisionHParams;
 const ViTLayerWeights = graph.ViTLayerWeights;
 const ClampInfo = graph.ClampInfo;
 
-const log = std.log.scoped(.graph_gemma4a);
+const log = std.log.scoped(.graph_model_gemma4a);
 
 /// 音频编码器权重接口（与 VisionEncoderWeights 兼容的字段子集）
 /// 供 buildGraphEx 使用，避免直接依赖 VisionEncoderWeights

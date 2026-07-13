@@ -15,7 +15,7 @@ const model_if = @import("model");
 const mm = @import("mtmd");
 const engine_common = @import("engine_common");
 
-const log = std.log.scoped(.loader);
+const log = std.log.scoped(.core_loader);
 
 /// 张量加载标志
 pub const TensorFlags = struct {

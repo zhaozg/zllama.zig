@@ -20,7 +20,7 @@ const ViTLayerWeights = graph.ViTLayerWeights;
 const ImageF32 = graph.ImageF32;
 const ClampInfo = graph.ClampInfo;
 
-const log = std.log.scoped(.graph_gemma4uv);
+const log = std.log.scoped(.graph_model_gemma4uv);
 
 // ============================================================================
 // 视觉编码器后端注册

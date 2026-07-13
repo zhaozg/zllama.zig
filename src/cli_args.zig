@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const logger = std.log.scoped(.main);
+const logger = std.log.scoped(.app_cli);
 
 pub const CliArgs = struct {
     model_path: [:0]const u8 = "",

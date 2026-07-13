@@ -6,7 +6,7 @@ const std = @import("std");
 const ggml = @import("ggml");
 const stb_image = @import("stb_image");
 
-const log = std.log.scoped(.mm_preprocess);
+const log = std.log.scoped(.mtmd_preprocess);
 
 // ============================================================================
 // 动态分辨率计算

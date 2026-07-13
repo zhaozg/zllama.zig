@@ -30,7 +30,7 @@ const model_if = @import("model");
 const graph_builder = @import("graph_builder");
 const memory = @import("memory");
 
-const log = std.log.scoped(.graph_ctx);
+const log = std.log.scoped(.core_graph_ctx);
 
 /// 内存回收阈值：上下文使用率达到此比例时触发 full reset
 const RECYCLE_THRESHOLD: f64 = 0.80;

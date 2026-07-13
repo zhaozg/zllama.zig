@@ -24,7 +24,7 @@ const graph_context = @import("graph_context");
 
 const audio_mod = mtmd.audio_mod;
 
-const logger = std.log.scoped(.multimodal);
+const logger = std.log.scoped(.core_multimodal);
 
 /// Engine reference needed by the multimodal generation paths.
 pub const EngineContext = struct {

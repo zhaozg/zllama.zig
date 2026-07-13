@@ -19,7 +19,7 @@ const weight_loader = @import("weight_loader");
 
 const model = @import("../model.zig");
 
-const log = std.log.scoped(.llama);
+const log = std.log.scoped(.model_llama);
 
 // ============================================================================
 // LLaMA 特有超参数

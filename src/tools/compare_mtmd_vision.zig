@@ -28,7 +28,7 @@ const chat_template = @import("chat_template");
 const engine_common = @import("engine_common");
 const prefill = @import("prefill");
 
-const log = std.log.scoped(.compare_mtmd_vision);
+const log = std.log.scoped(.tool_compare_mtmd_vision);
 
 // ============================================================================
 // 配置

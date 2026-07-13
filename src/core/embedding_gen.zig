@@ -8,7 +8,7 @@ const model_if = @import("model");
 const graph_builder = @import("graph_builder");
 const tokenizer = @import("tokenizer");
 
-const logger = std.log.scoped(.embedding);
+const log = std.log.scoped(.core_embedding);
 
 /// Generate an embedding vector for the given text prompt.
 /// Returns a heap-allocated f32 slice owned by the caller.

@@ -10,7 +10,7 @@ const LayerWeights = @import("./qwen35.zig").LayerWeights;
 const LayerType = @import("./qwen35.zig").LayerType;
 const isFullAttentionLayer = @import("./qwen35.zig").isFullAttentionLayer;
 
-const log = std.log.scoped(.qwen35);
+const log = std.log.scoped(.model_qwen35);
 
 pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !QwenParams {
     var p = QwenParams{};

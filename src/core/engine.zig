@@ -31,7 +31,7 @@ const multimodal_mod = @import("multimodal");
 const CliArgs = @import("../cli_args.zig").CliArgs;
 const loadMMProj = @import("loader.zig").loadMMProj;
 
-const logger = std.log.scoped(.engine);
+const logger = std.log.scoped(.core_engine);
 
 // ============================================================================
 // Memory size estimation helpers

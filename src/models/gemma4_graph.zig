@@ -14,7 +14,7 @@ const rope = @import("rope");
 const embed = @import("embed");
 const attention = @import("attention");
 
-const log = std.log.scoped(.gemma4);
+const log = std.log.scoped(.model_gemma4);
 
 const Gemma4Params = @import("./gemma4.zig").Gemma4Params;
 const Gemma4Weights = @import("./gemma4.zig").Gemma4Weights;

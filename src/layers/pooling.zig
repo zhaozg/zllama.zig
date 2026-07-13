@@ -11,7 +11,7 @@
 const std = @import("std");
 const ggml = @import("ggml");
 
-const log = std.log.scoped(.pooling);
+const log = std.log.scoped(.layer_pooling);
 
 /// 池化类型
 pub const PoolingType = enum {

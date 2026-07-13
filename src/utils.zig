@@ -2,7 +2,7 @@ const std = @import("std");
 const ggml = @import("ggml");
 const gguf = @import("gguf");
 const tokenizer = @import("tokenizer");
-const logger = std.log.scoped(.utils);
+const logger = std.log.scoped(.core_utils);
 const c = ggml.c;
 // ============================================================================
 // 读取标准输入

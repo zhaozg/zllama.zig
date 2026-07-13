@@ -16,7 +16,7 @@
 
 const std = @import("std");
 
-const log = std.log.scoped(.align_cmp);
+const log = std.log.scoped(.tool_align_cmp);
 
 // ============================================================================
 // 配置

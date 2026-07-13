@@ -17,7 +17,7 @@ const graph_builder = @import("graph_builder");
 const memory = @import("memory");
 const kv_cache = @import("kv_cache");
 
-const log = std.log.scoped(.gen_ref);
+const log = std.log.scoped(.tool_gen_ref);
 
 // ============================================================================
 // 参考输出配置

@@ -13,7 +13,7 @@
 const std = @import("std");
 const ggml = @import("ggml");
 
-const log = std.log.scoped(.mem_pool);
+const log = std.log.scoped(.core_mem_pool);
 
 /// 临时 Context 池
 pub const TempContextPool = struct {

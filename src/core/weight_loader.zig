@@ -17,7 +17,7 @@ const ggml = @import("ggml");
 const gguf = @import("gguf");
 const backend = @import("ggml").backend;
 
-const log = std.log.scoped(.weight_loader);
+const log = std.log.scoped(.core_weight_loader);
 
 // ============================================================================
 // 张量查找与创建

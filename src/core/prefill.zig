@@ -28,7 +28,7 @@ const kv_cache = @import("kv_cache");
 const model = @import("model");
 const engine_common = @import("engine_common");
 
-const log = std.log.scoped(.prefill);
+const log = std.log.scoped(.core_prefill);
 
 /// 临时 context 的最小大小（512 MB），用于首次图构建。
 /// Gemma4 35层模型在 no_alloc=false 模式下，每个中间张量的数据

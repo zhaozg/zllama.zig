@@ -14,7 +14,7 @@ const vdsp = @cImport({
     @cInclude("vecLib/vDSP.h");
 });
 
-const log = std.log.scoped(.fft);
+const log = std.log.scoped(.audio_fft);
 
 /// 使用 Accelerate vDSP 的 FFT 引擎
 ///
