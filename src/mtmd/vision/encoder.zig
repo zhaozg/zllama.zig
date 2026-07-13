@@ -80,8 +80,10 @@ pub const VisionEncoder = struct {
             .rope_theta = params.rope_theta,
         };
 
-        hparams.custom_image_min_tokens = @intCast(params.image_min_pixels);
-        hparams.custom_image_max_tokens = @intCast(params.image_max_pixels);
+        // NOTE: custom_image_min/max_tokens are set by backend.loadParams via setLimitImageTokens,
+        // so we should NOT set them from image_min/max_pixels here (they are pixel counts, not token counts).
+        // hparams.custom_image_min_tokens = @intCast(params.image_min_pixels);  // BUG: pixel count != token count
+        // hparams.custom_image_max_tokens = @intCast(params.image_max_pixels);  // BUG: pixel count != token count
 
         backend.loadParams(io, gguf_file, &hparams);
 
@@ -154,10 +156,14 @@ pub const VisionEncoder = struct {
         const expected_len: usize = @as(usize, @intCast(img_width)) * @as(usize, @intCast(img_height)) * 3;
         if (image_data.len < expected_len) return error.InvalidImageData;
 
+        log.debug("encode: input {d}x{d}, image_data.len={d}, expected_len={d}", .{ img_width, img_height, image_data.len, expected_len });
+
         const cur_merge: u32 = if (p.n_merge == 0) 1 else p.n_merge;
         const align_size = p.patch_size * cur_merge;
         const effective_max = if (p.user_max_pixels > 0) p.user_max_pixels else p.image_max_pixels;
         const effective_min = p.image_min_pixels;
+
+        log.debug("encode: align_size={d}, effective_min={d}, effective_max={d}", .{ align_size, effective_min, effective_max });
 
         const resize_result = try preprocess.resizeAndNormalize(
             ctx,
@@ -171,6 +177,8 @@ pub const VisionEncoder = struct {
             effective_min,
             effective_max,
         );
+
+        log.debug("encode: resizeAndNormalize returned {d}x{d}", .{ resize_result.new_width, resize_result.new_height });
 
         const inp: *ggml.Tensor = resize_result.tensor;
         const new_w: u32 = resize_result.new_width;
@@ -193,7 +201,9 @@ pub const VisionEncoder = struct {
             .ffn_op = ffnOpToGraph(p.ffn_op),
         };
 
+        log.debug("encode: calling backend.buildGraph...", .{});
         _ = try self.backend.buildGraph(io, ctx, cgraph, &self.weights, &hparams, inp);
+        log.debug("encode: buildGraph completed, looking for mm_output...", .{});
         return cgraph.getTensor("mm_output") orelse return error.TensorNotFound;
     }
 

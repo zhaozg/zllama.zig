@@ -45,14 +45,14 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
 
     .{ .scope = .audio_encoder, .level = .debug },
     .{ .scope = .audio_pipeline, .level = .info },
-    .{ .scope = .vision_encoder, .level = .info },
-    .{ .scope = .vision_pipeline, .level = .info },
+    .{ .scope = .vision_encoder, .level = .debug },
+    .{ .scope = .vision_pipeline, .level = .debug },
 
-    .{ .scope = .gemma4, .level = .info },
+    .{ .scope = .gemma4, .level = .debug },
 
     .{ .scope = .weight_loader, .level = .info },
     .{ .scope = .graph_gemma4a, .level = .info },
-    .{ .scope = .graph_gemma4v, .level = .info },
+    .{ .scope = .graph_gemma4v, .level = .debug },
     .{ .scope = .graph_gemma4ua, .level = .info },
     .{ .scope = .graph_gemma4uv, .level = .info },
 } };

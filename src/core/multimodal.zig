@@ -131,6 +131,7 @@ fn loadImageRaw(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8)
 /// Generate text from an image + prompt.
 pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, image_path: [:0]const u8, max_tokens: u32) !void {
     const mm_mgr = ectx.mm_manager orelse return error.MMProjNotLoaded;
+    logger.debug("generateWithImage: START image_path={s}", .{image_path});
     if (!ectx.capabilities.has_vision) return error.VisionNotSupported;
     if (ectx.arch != .gemma4 and ectx.arch != .qwen3vl) {
         logger.err("Vision inference not yet implemented for architecture '{s}'.", .{@tagName(ectx.arch)});
@@ -146,6 +147,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     var raw_img = try loadImageRaw(ectx.allocator, io, image_path);
     defer raw_img.deinit();
 
+    logger.debug("generateWithImage: Step 1 - loadImageRaw done: {d}x{d}", .{ raw_img.width, raw_img.height });
     // 步骤 2: 计算目标尺寸（动态分辨率或固定正方形）
     // 如果用户指定了 image_max_pixels，覆盖 GGUF 默认值
     if (ectx.image_max_pixels > 0) {
@@ -153,10 +155,12 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
             enc.setUserMaxPixels(ectx.image_max_pixels);
         }
     }
+    logger.debug("generateWithImage: Step 2 - computeTargetSize", .{});
     const enc = mm_mgr.vision_encoder.?;
     const target = computeTargetSize(&enc, raw_img.width, raw_img.height);
 
     // 步骤 3: 缩放到目标尺寸
+    logger.debug("generateWithImage: Step 3 - resizeRGB to {d}x{d}", .{ target.width, target.height });
     const resized_data = try preprocess.resizeRGB(ectx.allocator, raw_img.data, raw_img.width, raw_img.height, target.width, target.height);
     var img = preprocess.ProcessedImage{
         .data = resized_data,
@@ -174,6 +178,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     var vision_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
     defer vision_ctx.deinit();
     const vision_graph = try ggml.CGraph.initReserved(vision_ctx, 32768);
+    logger.debug("generateWithImage: Step 4 - creating vision_ctx and calling encodeMedia...", .{});
     const vision_embeddings = try mm_mgr.encodeMedia(io, vision_ctx, vision_graph, .{
         .media_type = .image,
         .image_data = img.data,
@@ -186,11 +191,13 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     // different memory layout.
     const buft = ggml.backendCpuBufferType();
     var vis_gallocr = try ggml.Gallocr.init(buft);
+    logger.debug("generateWithImage: encodeMedia returned, vision_embeddings ne={any}", .{vision_embeddings.ne()});
     defer vis_gallocr.free();
     _ = try engine_common.computeGraph(vision_graph, ectx.n_threads, vis_gallocr);
 
     vision_ctx.setNoAlloc(true);
 
+    logger.debug("generateWithImage: Step 5 - computing vision graph...", .{});
     const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
     const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
     logger.debug("Vision encoder output: shape=[{d}, {d}]", .{ n_embd_val, n_vision_tokens });
@@ -221,6 +228,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     defer expanded.deinit();
 
     try multimodalPrefillUnified(ectx, io, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt, @tagName(ectx.arch));
+    logger.debug("generateWithImage: DONE", .{});
 }
 
 /// Generate text from an audio file + prompt.

@@ -40,16 +40,21 @@ pub fn evalChunks(
     var cur_n_past = n_past;
     var idx: usize = 0;
 
+    log.debug("evalChunks: starting with {d} chunks, n_past={d}", .{ chunks.entries.items.len, n_past });
+
     while (idx < chunks.entries.items.len) {
         const chunk = &chunks.entries.items[idx];
+        log.debug("evalChunks: processing chunk {d}/{d}, type={s}", .{ idx, chunks.entries.items.len, @tagName(chunk.chunk_type) });
         switch (chunk.chunk_type) {
             .text => {
                 if (chunk.tokens_text) |tokens| {
+                    log.debug("evalChunks: text chunk with {d} tokens", .{tokens.len});
                     if (tokens.len > 0) cur_n_past = try decodeTextFn(tokens, cur_n_past);
                 }
                 idx += 1;
             },
             .image => {
+                log.debug("evalChunks: image chunk at idx={d}", .{idx});
                 if (ctx.mm_manager.vision_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.VisionEncoderNotAvailable;
 
@@ -61,6 +66,8 @@ pub fn evalChunks(
                     const batch_size: u32 = @intCast(batch_end - idx);
                     const can_batch = enc.supportBatch() and batch_size > 1;
 
+                    log.debug("evalChunks: batch_size={d}, can_batch={}", .{ batch_size, can_batch });
+
                     if (can_batch) {
                         log.debug("Batching {d} consecutive image chunks", .{batch_size});
                     }
@@ -68,24 +75,33 @@ pub fn evalChunks(
                     // Encode each image in the batch group
                     var bi: usize = idx;
                     while (bi < batch_end) : (bi += 1) {
+                        log.debug("evalChunks: encoding image {d}/{d}", .{ bi - idx, batch_size });
                         const img = &(chunks.entries.items[bi].tokens_image orelse return error.MissingImageTokens);
                         const raw_pixels = img.getRawPixels() orelse return error.NoImageData;
+
+                        log.debug("evalChunks: image size={d}x{d}, raw_pixels.len={d}", .{ img.nx, img.ny, raw_pixels.len });
 
                         const compute_ctx = try ggml.Context.initNoAlloc(4 * 1024 * 1024 * 1024);
                         defer compute_ctx.deinit();
                         const cgraph = try ggml.CGraph.initReserved(compute_ctx, 4096);
 
+                        log.debug("evalChunks: created compute_ctx, calling enc.encode...", .{});
                         const out_tensor = try enc.encode(io, compute_ctx, cgraph, raw_pixels, img.nx, img.ny, n_threads);
 
+                        log.debug("evalChunks: encode returned, out_tensor ne={any}", .{out_tensor.ne()});
+
                         // Compute the vision graph
+                        log.debug("evalChunks: computing vision graph...", .{});
                         compute_ctx.setNoAlloc(false);
                         const buft = ggml.backendCpuBufferType();
                         var gallocr = try ggml.Gallocr.init(buft);
                         defer gallocr.free();
                         _ = try engine_common.computeGraph(cgraph, n_threads, gallocr);
+                        log.debug("evalChunks: vision graph computed successfully", .{});
 
                         const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
                         const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);
+                        log.debug("evalChunks: output embd={d}x{d}", .{ n_embd_out, n_tokens_out });
                         const embd_size = n_embd_out * n_tokens_out;
                         const embd_f32 = try allocator.alloc(f32, embd_size);
                         defer allocator.free(embd_f32);
@@ -99,13 +115,16 @@ pub fn evalChunks(
                         ctx.output_embd = try allocator.dupe(f32, embd_f32);
 
                         const non_causal = ctx.decodeUseNonCausal(&chunks.entries.items[bi]);
+                        log.debug("evalChunks: calling decodeMediaFn with n_past={d}", .{cur_n_past});
                         cur_n_past = try decodeMediaFn(embd_f32, @intCast(n_embd_out), @intCast(n_tokens_out), cur_n_past, non_causal);
                     }
 
                     idx = batch_end;
+                    log.debug("evalChunks: batch done, idx now={d}", .{idx});
                 } else return error.VisionEncoderNotAvailable;
             },
             .audio => {
+                log.debug("evalChunks: audio chunk at idx={d}", .{idx});
                 if (ctx.mm_manager.audio_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.AudioEncoderNotAvailable;
 

@@ -90,6 +90,7 @@ pub fn calcSizePreservedRatio(
     min_pixels: u32,
     max_pixels: u32,
 ) struct { w: u32, h: u32 } {
+    log.debug("calcSizePreservedRatio: input {d}x{d}, align={d}, min={d}, max={d}", .{ width, height, align_size, min_pixels, max_pixels });
     const fa: f64 = @floatFromInt(align_size);
     const round = struct {
         fn r(v: f64, f: f64) u32 {
@@ -112,15 +113,20 @@ pub fn calcSizePreservedRatio(
     var hb: u32 = @max(align_size, round(h, fa));
     var wb: u32 = @max(align_size, round(w, fa));
 
+    log.debug("calcSizePreservedRatio: initial round hb={d} wb={d} product={d}", .{ hb, wb, hb * wb });
+
     if (hb * wb > max_pixels) {
+        log.debug("calcSizePreservedRatio: too large, downscaling...", .{});
         const beta: f64 = @sqrt((h * w) / @as(f64, @floatFromInt(max_pixels)));
         hb = @max(align_size, floor(h / beta, fa));
         wb = @max(align_size, floor(w / beta, fa));
     } else if (hb * wb < min_pixels) {
+        log.debug("calcSizePreservedRatio: too small, upscaling...", .{});
         const beta: f64 = @sqrt(@as(f64, @floatFromInt(min_pixels)) / (h * w));
         hb = ceil(h * beta, fa);
         wb = ceil(w * beta, fa);
     }
+    log.debug("calcSizePreservedRatio: result {d}x{d} product={d}", .{ wb, hb, wb * hb });
     return .{ .w = wb, .h = hb };
 }
 
@@ -132,6 +138,7 @@ pub fn resizeBilinear(
     dst_w: u32,
     dst_h: u32,
 ) ![]f32 {
+    log.debug("resizeBilinear: {d}x{d} -> {d}x{d}", .{ src_w, src_h, dst_w, dst_h });
     const sw: usize = @intCast(src_w);
     const sh: usize = @intCast(src_h);
     const dw: usize = @intCast(dst_w);
@@ -185,10 +192,12 @@ pub fn resizeAndNormalize(
     min_pixels: u32,
     max_pixels: u32,
 ) !struct { tensor: *ggml.Tensor, new_width: u32, new_height: u32 } {
+    log.debug("resizeAndNormalize: START {d}x{d} align={d} min={d} max={d}", .{ img_width, img_height, align_size, min_pixels, max_pixels });
     const size = calcSizePreservedRatio(img_width, img_height, align_size, min_pixels, max_pixels);
     log.debug("resize: {d}x{d} -> {d}x{d}", .{ img_width, img_height, size.w, size.h });
 
     const resized = try resizeBilinear(allocator, image_data, img_width, img_height, size.w, size.h);
+    log.debug("resizeAndNormalize: resizeBilinear done, len={d}", .{resized.len});
     defer allocator.free(resized);
 
     const wh: usize = @as(usize, @intCast(size.w)) * @as(usize, @intCast(size.h));

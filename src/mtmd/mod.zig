@@ -412,6 +412,7 @@ pub const MultiModalManager = struct {
         return switch (input.media_type) {
             .text => error.TextEncodingNotSupportedHere,
             .image => {
+                log.debug("encodeMedia: image {d}x{d}", .{ input.image_width, input.image_height });
                 if (self.vision_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.VisionEncoderNotAvailable;
                     return enc.encode(io, ctx, cgraph, input.image_data.?, input.image_width, input.image_height, n_threads);
@@ -419,6 +420,7 @@ pub const MultiModalManager = struct {
                 return error.VisionEncoderNotAvailable;
             },
             .audio => {
+                log.debug("encodeMedia: audio", .{});
                 if (self.audio_encoder) |*enc| {
                     if (!enc.isAvailable()) return error.AudioEncoderNotAvailable;
                     if (input.mel_tensor) |mt| {

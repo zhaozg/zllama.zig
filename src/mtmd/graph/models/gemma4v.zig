@@ -190,11 +190,15 @@ pub fn buildGraph(
     const np: i64 = @as(i64, npx) * @as(i64, npy);
     const ne: i64 = @intCast(p.n_embd);
 
+    log.debug("buildGraph: image_size={d} patch_size={d} npx={d} npy={d} np={d} ne={d}", .{ p.image_size, p.patch_size, npx, npy, np, ne });
+
     // 1. Scale+bias: patches * 2 - 1
+    log.debug("Step 1: scale_bias", .{});
     var cur = inp.scaleBias(ctx, 2.0, -1.0);
     cur.setName("inp_raw_scaled");
 
     // 2. Conv2D patch embedding (NO patch_bias for Gemma4V)
+    log.debug("Step 2: conv2d patch embedding", .{});
     const pw = w.patch_embeddings_0 orelse return error.MissingPatchEmbedding;
     cur = cur.conv2d(ctx, pw, ps, ps, 0, 0, 1, 1);
     cur = cur.reshape3d(ctx, np, ne, 1);
@@ -207,11 +211,13 @@ pub fn buildGraph(
     const nb: usize = @intCast(ggml.Type.rowSize(pe.dataType(), @intCast(ne)));
     const tx = pe.view2d(ctx, ne, psz, nb, 0);
     const ty = pe.view2d(ctx, ne, psz, nb, @as(usize, @intCast(psz)) * nb);
+    log.debug("Step 3: position embeddings (psz={d})", .{psz});
     cur = cur.add(ctx, ggml.getRows(ctx, tx, try posIndices(ctx, npx, npy, .x)));
     cur = cur.add(ctx, ggml.getRows(ctx, ty, try posIndices(ctx, npx, npy, .y)));
     cur.setName("pos_embd");
 
     // 4. ViT blocks
+    log.debug("Step 4: ViT blocks (n_layer={d})", .{p.n_layer});
     cur = try vit_builder.buildVit(ctx, cur, np, .rms_norm, p.ffn_op, null, w, p, null, .{
         .v_norm = true,
         .v_norm_eps = p.eps,
@@ -220,6 +226,7 @@ pub fn buildGraph(
     cur.setName("vit_output");
 
     // 5. Pool 2D (avg, kernel=n_merge) + scale
+    log.debug("Step 5: pool2d (n_merge={d})", .{p.n_merge});
     const ks: i32 = @intCast(p.n_merge);
     if (ks > 0) {
         cur = ggml.cont4d(ctx, ggml.transpose(ctx, cur), npx, npy, ne, 1);
@@ -233,6 +240,7 @@ pub fn buildGraph(
     }
 
     // 6. Standardization
+    log.debug("Step 6: standardization (std_bias={any} std_scale={any})", .{ w.std_bias != null, w.std_scale != null });
     if (w.std_bias != null and w.std_scale != null) {
         cur = cur.sub(ctx, w.std_bias.?);
         const rs: usize = @intCast(ggml.Type.rowSize(w.std_scale.?.dataType(), @intCast(ne)));
@@ -241,6 +249,7 @@ pub fn buildGraph(
     }
 
     // 7. Multimodal embedder
+    log.debug("Step 7: multimodal embedder", .{});
     cur = cur.rmsNorm(ctx, p.eps);
     if (w.mm_soft_emb_norm_w) |sn| {
         const rs2: usize = @intCast(ggml.Type.rowSize(sn.dataType(), @intCast(ne)));
@@ -252,6 +261,7 @@ pub fn buildGraph(
     }
 
     cur.setName("mm_output");
+    log.debug("buildGraph complete", .{});
     gf.buildForwardExpand(cur);
     return gf;
 }
