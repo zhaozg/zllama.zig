@@ -384,8 +384,7 @@ pub const MultiModalManager = struct {
                 log.err("Unknown vision encoder type: '{s}'", .{caps.vision_encoder_type});
                 return error.UnknownVisionEncoder;
             };
-            vision_enc = try vision.VisionEncoder.init(io, gguf_file, ctx, allocator, backend);
-            log.info("Vision encoder initialized: backend={s}", .{backend.name});
+            vision_enc = try vision.VisionEncoder.init(io, gguf_file, ctx, allocator, backend, caps.vision_encoder_type);
         }
 
         return MultiModalManager{

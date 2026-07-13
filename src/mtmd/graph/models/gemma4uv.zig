@@ -201,13 +201,27 @@ pub fn buildGraph(
     const n_embd: i64 = @intCast(p.n_embd);
     const img_width: u32 = p.image_size;
     const img_height: u32 = p.image_size;
-    const patch_size: i32 = @intCast(p.patch_size);
+
+    // Determine effective patch_size for im2col.
+    // If patch_embeddings_0 is a 4D conv kernel [kh, kw, ic, oc] with kh == 16
+    // (gemma4v format), use the original patch_size=16 instead of the modified one.
+    // If it's [48, 48, 3, 768] (gemma4uv native format), use the modified patch_size.
+    const effective_patch_size: i32 = blk: {
+        if (w.patch_embeddings_0) |pe| {
+            if (pe.nDims() == 4 and pe.ne()[0] == 16) {
+                // gemma4v format weight [16, 16, 3, 768] — use original patch_size
+                break :blk 16;
+            }
+        }
+        break :blk @as(i32, @intCast(p.patch_size));
+    };
+    const patch_size: i32 = effective_patch_size;
     const n_patches_x: i64 = @divTrunc(@as(i64, @intCast(img_width)), patch_size);
     const n_patches_y: i64 = @divTrunc(@as(i64, @intCast(img_height)), patch_size);
     const n_patches: i64 = n_patches_x * n_patches_y;
     const eps: f32 = 1e-5; // Gemma4UV uses pytorch LayerNorm default eps
 
-    log.info("Gemma4UV graph: embd={d}, patches={d}x{d}={d}", .{ n_embd, n_patches_x, n_patches_y, n_patches });
+    log.info("Gemma4UV graph: embd={d}, patches={d}x{d}={d}, patch_size={d}", .{ n_embd, n_patches_x, n_patches_y, n_patches, patch_size });
 
     // ========================================================================
     // 1. 创建输入张量 (match C++ build_inp_raw: 4D [W, H, C, 1], set_input)
@@ -283,7 +297,18 @@ pub fn buildGraph(
     // Project to embedding dimension via mul_mat (no clamp for gemma4uv)
     // Note: C++ clip_graph_gemma4uv does NOT override build_mm, so it uses plain ggml_mul_mat
     if (w.patch_embeddings_0) |pe| {
-        cur = pe.mulMat(ctx, cur);
+        // The weight may be stored as 4D conv kernel [kh, kw, ic, oc] (gemma4v format)
+        // or as 2D matrix [in_features, out_features] (gemma4uv native format).
+        // Reshape to 2D if needed for mul_mat compatibility.
+        const pe_reshaped = if (pe.nDims() == 4) blk: {
+            // Shape [kh, kw, ic, oc] = [16, 16, 3, 768]
+            // Reshape to [kh*kw*ic, oc] = [768, 768]
+            const in_features = pe.ne()[0] * pe.ne()[1] * pe.ne()[2];
+            const out_features = pe.ne()[3];
+            break :blk pe.reshape2d(ctx, in_features, out_features);
+        } else pe;
+        pe_reshaped.setName("patch_embd_2d");
+        cur = pe_reshaped.mulMat(ctx, cur);
         cur.setName("patch_proj");
     }
     // Always add bias (C++ gemma4uv.cpp line 17: unconditional ggml_add)

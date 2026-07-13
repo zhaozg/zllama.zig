@@ -28,11 +28,14 @@ pub const CliArgs = struct {
     image_path: [:0]const u8 = "",
     audio_path: [:0]const u8 = "",
     image_max_pixels: u32 = 0,
+    vision_backend: []const u8 = "",
+    audio_backend: []const u8 = "",
     // Chat template
     chat_template_name: []const u8 = "",
     system_prompt: []const u8 = "",
     no_chat_template: bool = false,
     no_jinja: bool = false,
+
     pub fn parse(args_it: *std.process.Args.Iterator) !CliArgs {
         var result = CliArgs{};
         _ = args_it.next();
@@ -71,6 +74,10 @@ pub const CliArgs = struct {
                 result.audio_path = args_it.next() orelse return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--image-max-pixels")) {
                 result.image_max_pixels = std.fmt.parseUnsigned(u32, args_it.next() orelse return error.InvalidArgs, 10) catch return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--vision-backend")) {
+                result.vision_backend = args_it.next() orelse return error.InvalidArgs;
+            } else if (std.mem.eql(u8, arg, "--audio-backend")) {
+                result.audio_backend = args_it.next() orelse return error.InvalidArgs;
             } else if (std.mem.eql(u8, arg, "--embed")) {
                 result.embed = true;
             } else if (std.mem.eql(u8, arg, "--pooling")) {
@@ -131,6 +138,12 @@ pub const CliArgs = struct {
             \\  --audio <路径>        输入音频文件 (WAV 16-bit PCM)
             \\  --image-max-pixels <N> 限制图像最大像素数 (默认: 4194304)
             \\                  降低此值可减少视觉 token 数和内存使用
+            \\  --vision-backend <类型> 强制指定视觉编码器后端类型
+            \\                  可用: gemma4v | gemma4uv | qwen2vl | qwen3vl
+            \\                  默认: 从 mmproj GGUF 元数据自动检测
+            \\  --audio-backend <类型>  强制指定音频编码器后端类型
+            \\                  可用: gemma4a | gemma4ua
+            \\                  默认: 从 mmproj GGUF 元数据自动检测
         , .{});
     }
 };

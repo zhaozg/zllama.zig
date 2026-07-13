@@ -174,10 +174,17 @@ pub const Loader = struct {
     }
 };
 
-/// Load multimodal projector from separate GGUF file
-/// Also detects audio/vision capabilities from the mmproj GGUF file.
 /// Uses mmap for zero-copy loading when possible.
-pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]const u8, capabilities: *model_if.ModelCapabilities) !mm.MultiModalManager {
+/// If vision_backend_override or audio_backend_override is non-empty,
+/// they override the auto-detected backend type.
+pub fn loadMMProj(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    mmproj_path: [:0]const u8,
+    capabilities: *model_if.ModelCapabilities,
+    vision_backend_override: []const u8,
+    audio_backend_override: []const u8,
+) !mm.MultiModalManager {
     // 使用 mmap 加载 mmproj 文件（零拷贝，启动更快）
     var mapped_file = try engine_common.mmapFile(io, allocator, mmproj_path);
     defer mapped_file.deinit(io);
@@ -188,7 +195,32 @@ pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]con
 
     // Detect capabilities from mmproj file using shared detection logic
     const detected = mm.MultiModalManager.detectFromGGUF(&gguf_file);
-    if (detected.has_audio) {
+
+    // Apply vision backend override if specified
+    if (vision_backend_override.len > 0) {
+        log.info("Vision backend overridden: '{s}' -> '{s}'", .{ detected.vision_encoder_type, vision_backend_override });
+        capabilities.has_vision = true;
+        capabilities.vision_encoder_type = vision_backend_override;
+    } else if (detected.has_vision) {
+        capabilities.has_vision = true;
+        if (capabilities.vision_encoder_type.len == 0) {
+            capabilities.vision_encoder_type = detected.vision_encoder_type;
+        }
+        // Merge special tokens from mmproj (if not already set by architecture)
+        if (capabilities.special_tokens.img_beg.len == 0) {
+            capabilities.special_tokens.img_beg = detected.special_tokens.img_beg;
+        }
+        if (capabilities.special_tokens.img_end.len == 0) {
+            capabilities.special_tokens.img_end = detected.special_tokens.img_end;
+        }
+    }
+
+    // Apply audio backend override if specified
+    if (audio_backend_override.len > 0) {
+        log.info("Audio backend overridden: '{s}' -> '{s}'", .{ detected.audio_encoder_type, audio_backend_override });
+        capabilities.has_audio = true;
+        capabilities.audio_encoder_type = audio_backend_override;
+    } else if (detected.has_audio) {
         capabilities.has_audio = true;
         if (capabilities.audio_encoder_type.len == 0) {
             capabilities.audio_encoder_type = detected.audio_encoder_type;
@@ -202,19 +234,6 @@ pub fn loadMMProj(io: std.Io, allocator: std.mem.Allocator, mmproj_path: [:0]con
         }
         if (capabilities.special_tokens.aud_end.len == 0) {
             capabilities.special_tokens.aud_end = detected.special_tokens.aud_end;
-        }
-    }
-    if (detected.has_vision) {
-        capabilities.has_vision = true;
-        if (capabilities.vision_encoder_type.len == 0) {
-            capabilities.vision_encoder_type = detected.vision_encoder_type;
-        }
-        // Merge special tokens from mmproj (if not already set by architecture)
-        if (capabilities.special_tokens.img_beg.len == 0) {
-            capabilities.special_tokens.img_beg = detected.special_tokens.img_beg;
-        }
-        if (capabilities.special_tokens.img_end.len == 0) {
-            capabilities.special_tokens.img_end = detected.special_tokens.img_end;
         }
     }
 

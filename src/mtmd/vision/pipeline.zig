@@ -32,7 +32,7 @@ pub const VisionPipeline = struct {
         allocator: std.mem.Allocator,
         backend: *const encoder.VisionEncoderBackend,
     ) !VisionPipeline {
-        const enc = try VisionEncoder.init(io, gguf_file, ctx, allocator, backend);
+        const enc = try VisionEncoder.init(io, gguf_file, ctx, allocator, backend, backend.name);
         return VisionPipeline{ .encoder = enc };
     }
 

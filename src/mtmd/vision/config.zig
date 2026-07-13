@@ -90,4 +90,8 @@ pub const VisionEncoderParams = struct {
     /// 用户指定的最大像素数（覆盖 GGUF 默认值）
     /// 用于控制内存使用，0 表示使用 GGUF 默认值
     user_max_pixels: u32 = 0,
+
+    /// 视觉编码器类型（如 "gemma4v", "gemma4uv", "qwen3vl" 等）
+    /// 由 detectFromGGUF 设置，用于运行时识别后端类型
+    projector_type: []const u8 = "",
 };

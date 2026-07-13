@@ -31,6 +31,7 @@ pub const VisionEncoder = struct {
         ctx: *ggml.Context,
         allocator: std.mem.Allocator,
         backend: *const VisionEncoderBackend,
+        projector_type: []const u8,
     ) !VisionEncoder {
         var params = VisionEncoderParams{};
         if (gguf_file.getU32("clip.vision.image_size")) |v| params.image_size = v else if (gguf_file.getU32("gemma4.vision.image_size")) |v| params.image_size = v;
@@ -83,7 +84,10 @@ pub const VisionEncoder = struct {
         backend.loadParams(io, gguf_file, &hparams);
 
         // 将 loadParams 的修改同步回 params（encode() 从 params 重建 hparams）
+        // 注意：gemma4uv 的 loadParams 会修改 patch_size（乘以 n_merge），
+        // 必须同步回来，否则 encode() 中会使用错误的 patch_size
         params.n_merge = hparams.n_merge;
+        params.patch_size = hparams.patch_size;
         params.rope_theta = hparams.rope_theta;
         if (hparams.image_min_pixels > 0) {
             // setLimitImageTokens 被调用过，覆盖通用默认值
@@ -96,7 +100,23 @@ pub const VisionEncoder = struct {
         try backend.loadClampInfo(io, allocator, gguf_file, &weights);
 
         return VisionEncoder{
-            .params = params,
+            .params = VisionEncoderParams{
+                .image_size = params.image_size,
+                .patch_size = params.patch_size,
+                .n_embd = params.n_embd,
+                .n_head = params.n_head,
+                .n_layer = params.n_layer,
+                .n_ff = params.n_ff,
+                .n_output_embd = params.n_output_embd,
+                .n_merge = params.n_merge,
+                .rope_theta = params.rope_theta,
+                .norm_eps = params.norm_eps,
+                .ffn_op = params.ffn_op,
+                .image_min_pixels = params.image_min_pixels,
+                .image_max_pixels = params.image_max_pixels,
+                .user_max_pixels = params.user_max_pixels,
+                .projector_type = projector_type,
+            },
             .weights = weights,
             .ctx_weights = ctx,
             .backend = backend,
@@ -163,6 +183,11 @@ pub const VisionEncoder = struct {
 
     pub fn estimateOutputTokens(self: *const VisionEncoder, io: std.Io, img_width: u32, img_height: u32) u32 {
         return self.backend.estimateOutputTokens(io, img_width, img_height, self.params.patch_size, self.params.n_merge);
+    }
+    pub fn bestResolution(self: *const VisionEncoder, max_tokens: u32) struct { width: u32, height: u32 } {
+        _ = max_tokens;
+        // TODO: implement proper resolution calculation
+        return .{ .width = self.params.image_size, .height = self.params.image_size };
     }
 
     pub fn deinit(self: *VisionEncoder, allocator: std.mem.Allocator) void {
