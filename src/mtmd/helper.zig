@@ -266,9 +266,9 @@ fn loadImage(allocator: std.mem.Allocator, buf: []const u8) !BitmapWrapper {
     var width: c_int = 0;
     var height: c_int = 0;
     var channels: c_int = 0;
-    const data = stb_image.stbi_load_from_memory(buf.ptr, @intCast(buf.len), &width, &height, &channels, 3);
+    const data = stb_image.loadFromMemory(buf.ptr, @intCast(buf.len), &width, &height, &channels, 3);
     if (data == null) return error.ImageDecodeFailed;
-    defer stb_image.stbi_image_free(data);
+    defer stb_image.free(data);
     const w: u32 = @intCast(width);
     const h: u32 = @intCast(height);
     const size: usize = w * h * 3;

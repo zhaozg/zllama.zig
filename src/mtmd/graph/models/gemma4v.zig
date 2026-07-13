@@ -6,10 +6,12 @@
 //!   1. scale_bias(inp_raw, 2.0, -1.0)
 //!   2. Conv2D patch embedding (no patch_bias)
 //!   3. 2D position embeddings (pos_x/pos_y lookup tables)
-//!   4. ViT blocks (RMS norm)
+//!   4. ViT blocks (RMS norm) with 2D RoPE (NEOX ordering)
 //!   5. Pool 2D (avg, kernel=n_merge) + scale(sqrt(n_embd))
 //!   6. Standardization: (hidden - std_bias) * std_scale
 //!   7. Multimodal embedder: rms_norm -> build_mm(mm_input_proj_w)
+//!
+//! NOTE: gemma4v does NOT use mm_soft_emb_norm_w (that's gemma3 only).
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -94,7 +96,8 @@ pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFil
     w.std_bias = findTensor(ctx, gf, "v.std_bias") catch null;
     w.std_scale = findTensor(ctx, gf, "v.std_scale") catch null;
     w.mm_input_proj_w = findTensor(ctx, gf, "mm.input_projection.weight") catch null;
-    w.mm_soft_emb_norm_w = findTensor(ctx, gf, "mm.soft_emb_norm.weight") catch null;
+    // NOTE: gemma4v does NOT use mm_soft_emb_norm_w (that's gemma3 only)
+    // w.mm_soft_emb_norm_w is intentionally NOT loaded
 
     var n: u32 = 0;
     for (0..64) |il| {
@@ -126,6 +129,73 @@ pub fn estimateOutputTokens(io: std.Io, iw: u32, ih: u32, ps: u32, nm: u32) u32 
     _ = io;
     const m: u32 = if (nm == 0) 1 else nm;
     return (iw / ps / m) * (ih / ps / m);
+}
+
+// ============================================================================
+// 2D RoPE state (module-level, set before buildVit call)
+// ============================================================================
+
+var rope_pos_x: ?*ggml.Tensor = null;
+var rope_pos_y: ?*ggml.Tensor = null;
+var rope_freq_base: f32 = 100.0;
+
+/// 2D RoPE callback for ViT blocks.
+/// Ref: deps/llama.cpp/tools/mtmd/models/gemma4v.cpp add_pos lambda
+fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggml.Tensor {
+    const d_head = cur.ne()[0];
+    const n_head = cur.ne()[1];
+    const n_patches = cur.ne()[2];
+    const n_batch = cur.ne()[3];
+    const d_head_half = @divExact(d_head, 2);
+
+    // First half: use pos_x
+    const first = cur.view4d(
+        ctx,
+        d_head_half,
+        n_head,
+        n_patches,
+        n_batch,
+        cur.nb()[1],
+        cur.nb()[2],
+        cur.nb()[3],
+        0,
+    );
+    const rope_first = first.ropeExt(
+        ctx,
+        rope_pos_x orelse unreachable,
+        null,
+        @intCast(d_head_half),
+        2, // GGML_ROPE_TYPE_NEOX
+        0,
+        rope_freq_base,
+        1.0, 0.0, 1.0, 0.0, 0.0,
+    );
+
+    // Second half: use pos_y
+    const offset: usize = @intCast(d_head_half * @sizeOf(f32));
+    const second = cur.view4d(
+        ctx,
+        d_head_half,
+        n_head,
+        n_patches,
+        n_batch,
+        cur.nb()[1],
+        cur.nb()[2],
+        cur.nb()[3],
+        offset,
+    );
+    const rope_second = second.ropeExt(
+        ctx,
+        rope_pos_y orelse unreachable,
+        null,
+        @intCast(d_head_half),
+        2, // GGML_ROPE_TYPE_NEOX
+        0,
+        rope_freq_base,
+        1.0, 0.0, 1.0, 0.0, 0.0,
+    );
+
+    return rope_first.concat(ctx, rope_second, 0);
 }
 
 // ============================================================================
@@ -216,9 +286,14 @@ pub fn buildGraph(
     cur = cur.add(ctx, ggml.getRows(ctx, ty, try posIndices(ctx, npx, npy, .y)));
     cur.setName("pos_embd");
 
-    // 4. ViT blocks
+    // Create pos_x/pos_y tensors for 2D RoPE (used in addPos callback)
+    rope_pos_x = try posIndices(ctx, npx, npy, .x);
+    rope_pos_y = try posIndices(ctx, npx, npy, .y);
+    rope_freq_base = p.rope_theta;
+
+    // 4. ViT blocks with 2D RoPE
     log.debug("Step 4: ViT blocks (n_layer={d})", .{p.n_layer});
-    cur = try vit_builder.buildVit(ctx, cur, np, .rms_norm, p.ffn_op, null, w, p, null, .{
+    cur = try vit_builder.buildVit(ctx, cur, np, .rms_norm, p.ffn_op, null, w, p, addPos, .{
         .v_norm = true,
         .v_norm_eps = p.eps,
         .kq_scale = 1.0,
@@ -243,18 +318,16 @@ pub fn buildGraph(
     log.debug("Step 6: standardization (std_bias={any} std_scale={any})", .{ w.std_bias != null, w.std_scale != null });
     if (w.std_bias != null and w.std_scale != null) {
         cur = cur.sub(ctx, w.std_bias.?);
-        const rs: usize = @intCast(ggml.Type.rowSize(w.std_scale.?.dataType(), @intCast(ne)));
-        cur = cur.mul(ctx, w.std_scale.?.view2d(ctx, ne, 1, rs, 0));
+        // std_scale is [n_embd] 1D tensor, use directly (ggml_mul broadcasts)
+        cur = cur.mul(ctx, w.std_scale.?);
         cur.setName("std_scaled");
     }
 
     // 7. Multimodal embedder
     log.debug("Step 7: multimodal embedder", .{});
     cur = cur.rmsNorm(ctx, p.eps);
-    if (w.mm_soft_emb_norm_w) |sn| {
-        const rs2: usize = @intCast(ggml.Type.rowSize(sn.dataType(), @intCast(ne)));
-        cur = cur.mul(ctx, sn.view2d(ctx, ne, 1, rs2, 0));
-    }
+    // NOTE: gemma4v does NOT use mm_soft_emb_norm_w
+    // Only apply mm_input_proj_w (with optional clamping)
     if (w.mm_input_proj_w) |proj| {
         cur = buildMM(ctx, proj, cur, &w.clamp_info_map);
         cur.setName("projected");
