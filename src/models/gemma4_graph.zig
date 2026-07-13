@@ -398,6 +398,17 @@ pub const Gemma4Graph = struct {
                 break :blk n_tokens_i64;
             } else n_tokens_i64;
 
+            // For SWA layers, the cache view may be truncated to max_seq_len (window size).
+            // cache_start_abs is the absolute position of the first element in the cache view.
+            // When cache_len < currentLen(), the view starts at (currentLen - cache_len).
+            const cache_start_abs: i64 = if (causal and layer_is_swa and kv_cache_mgr != null) blk: {
+                const current_len = kv_cache_mgr.?.currentLen();
+                if (current_len > cache_len) {
+                    break :blk @as(i64, @intCast(current_len)) - cache_len;
+                }
+                break :blk 0;
+            } else 0;
+
             attn_out = attention.scaledDotProductAttention(ctx, q_use, k_attn, v_attn, .{
                 .n_head = n_head_eff,
                 .n_kv_head = n_kv_head,
@@ -408,6 +419,7 @@ pub const Gemma4Graph = struct {
                 .scale_factor = p.f_attention_scale,
                 .attn_logit_softcap = p.attn_logit_softcapping,
                 .causal = causal,
+                .cache_start_abs = cache_start_abs,
             }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
             attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
@@ -432,6 +444,15 @@ pub const Gemma4Graph = struct {
                 // not the global currentLen(), because getKView may clamp to per-layer max_seq_len.
                 const cache_len: i64 = k_cache.ne()[2];
 
+                // For SWA shared KV layers, compute cache_start_abs similarly.
+                const cache_start_abs: i64 = if (layer_is_swa) blk: {
+                    const current_len = cache.currentLen();
+                    if (current_len > cache_len) {
+                        break :blk @as(i64, @intCast(current_len)) - cache_len;
+                    }
+                    break :blk 0;
+                } else 0;
+
                 attn_out = attention.scaledDotProductAttention(ctx, q_use, k_cache, v_cache, .{
                     .n_head = n_head_eff,
                     .n_kv_head = n_kv_head_cache,
@@ -442,6 +463,7 @@ pub const Gemma4Graph = struct {
                     .scale_factor = p.f_attention_scale,
                     .attn_logit_softcap = p.attn_logit_softcapping,
                     .causal = causal,
+                    .cache_start_abs = cache_start_abs,
                 }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
 
                 attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);

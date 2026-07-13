@@ -34,6 +34,10 @@ pub const AttentionParams = struct {
     attn_logit_softcap: f32 = 0.0,
     /// Whether to use causal masking. Set false for multimodal embedding prefill.
     causal: bool = true,
+    /// 缓存视图的起始绝对位置（仅 SWA 层需要）。
+    /// 当 cache 因滑动窗口而截断时，cache 视图中的位置 0 对应绝对位置 cache_start_abs。
+    /// 默认值为 0，表示 cache 视图位置与绝对位置一致（非 SWA 层或 cache 未满时）。
+    cache_start_abs: i64 = 0,
 };
 
 /// 执行缩放点积注意力计算
@@ -90,7 +94,7 @@ pub fn scaledDotProductAttention(
         kq = ggml.softMax(ctx, kq);
     } else if (swa_window) |window| {
         // SWA: build sliding-window + causal mask and use fused softmax_ext
-        const mask = buildAttentionMask(ctx, params.cache_len, n_tokens, start_pos, window);
+        const mask = buildAttentionMask(ctx, params.cache_len, n_tokens, start_pos, window, params.cache_start_abs);
         kq = ggml.softMaxExt(ctx, kq, mask, 1.0, 0.0);
     } else {
         // Full attention: causal mask only
@@ -117,12 +121,16 @@ pub fn scaledDotProductAttention(
 }
 
 /// 构建 SWA（滑动窗口注意力）掩码张量
+/// cache_start_abs: cache 视图第一个位置对应的绝对位置。
+///   当 cache 因滑动窗口截断时，cache 视图中的位置 ci 对应绝对位置 cache_start_abs + ci。
+///   非 SWA 层或 cache 未满时，cache_start_abs = 0。
 fn buildAttentionMask(
     ctx: *ggml.Context,
     cache_len: i64,
     n_tokens: i64,
     start_pos: i32,
     window_size: i64,
+    cache_start_abs: i64,
 ) *ggml.Tensor {
     ctx.setNoAlloc(false);
     const mask = ctx.newTensor2d(.f32, cache_len, n_tokens) catch {
@@ -141,10 +149,11 @@ fn buildAttentionMask(
     const inf: f32 = -std.math.inf(f32);
 
     for (0..@as(usize, @intCast(cache_len))) |ci| {
-        const cache_pos: i64 = @intCast(ci);
+        // cache 视图中的位置 ci 对应绝对位置 cache_start_abs + ci
+        const cache_abs_pos: i64 = cache_start_abs + @as(i64, @intCast(ci));
         for (0..@as(usize, @intCast(n_tokens))) |qi| {
             const query_pos: i64 = @as(i64, start_pos) + @as(i64, @intCast(qi));
-            const dist: i64 = query_pos - cache_pos;
+            const dist: i64 = query_pos - cache_abs_pos;
             if (dist >= 0 and dist < window_size) {
                 data[qi * @as(usize, @intCast(cache_len)) + ci] = 0.0;
             } else {
