@@ -55,7 +55,6 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
     .{ .scope = .graph_model_gemma4v, .level = .debug },
     .{ .scope = .graph_model_gemma4ua, .level = .info },
     .{ .scope = .graph_model_gemma4uv, .level = .info },
-
 } };
 
 const logger = std.log.scoped(.app_main);

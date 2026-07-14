@@ -168,7 +168,11 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggm
         2, // GGML_ROPE_TYPE_NEOX
         0,
         rope_freq_base,
-        1.0, 0.0, 1.0, 0.0, 0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
     );
 
     // Second half: use pos_y
@@ -192,7 +196,11 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggm
         2, // GGML_ROPE_TYPE_NEOX
         0,
         rope_freq_base,
-        1.0, 0.0, 1.0, 0.0, 0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
     );
 
     return rope_first.concat(ctx, rope_second, 0);
@@ -272,24 +280,13 @@ pub fn buildGraph(
     ggml.setInput(inp_raw);
     // 从 builder.img 复制数据到 inp_raw
     // img.buf 是 CHW 布局的 f32 数据 [C, H, W]
-    // inp_raw 是 4D tensor [W, H, C, 1]，需要 WHC 布局
+    // inp_raw 是 4D tensor [W, H, C, 1]，ggml 内存布局也是 CHW (x最快, y次之, c最慢)
+    // 所以 img.buf 的布局与 inp_raw 的 ggml 内存布局一致，直接复制即可
     {
         const w_i64: i64 = @intCast(p.image_size);
         const h_i64: i64 = @intCast(p.image_size);
         const n = w_i64 * h_i64;
         const buf = img.buf;
-        const alloc = std.heap.page_allocator;
-        const whc_data = try alloc.alloc(f32, @as(usize, @intCast(3 * n)));
-        defer alloc.free(whc_data);
-        for (0..@as(usize, @intCast(h_i64))) |y| {
-            for (0..@as(usize, @intCast(w_i64))) |x| {
-                const src_idx = y * @as(usize, @intCast(w_i64)) + x;
-                const dst_idx = y * @as(usize, @intCast(w_i64)) + x;
-                whc_data[0 * @as(usize, @intCast(n)) + dst_idx] = buf[0 * @as(usize, @intCast(n)) + src_idx];
-                whc_data[1 * @as(usize, @intCast(n)) + dst_idx] = buf[1 * @as(usize, @intCast(n)) + src_idx];
-                whc_data[2 * @as(usize, @intCast(n)) + dst_idx] = buf[2 * @as(usize, @intCast(n)) + src_idx];
-            }
-        }
         // In no_alloc mode, we must allocate the tensor data manually before calling dataSet.
         // dataSet will try ggml_get_data first; if that returns null (no_alloc mode without
         // manual allocation), it falls through to ggml_backend_tensor_set which crashes because
@@ -299,7 +296,7 @@ pub fn buildGraph(
             const data_buf = @as([*]u8, @ptrCast(std.c.malloc(sz) orelse return error.OutOfMemory))[0..sz];
             inp_raw.setDataPtr(data_buf);
         }
-        try inp_raw.dataSet(f32, whc_data);
+        try inp_raw.dataSet(f32, buf[0..@as(usize, @intCast(3 * n))]);
     }
 
     // 2. Scale+bias: patches * 2 - 1

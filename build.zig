@@ -680,6 +680,7 @@ pub fn build(b: *std.Build) void {
 
     test_root_mod.addImport("graph", mm_graph_mod);
     test_root_mod.addImport("memory_pool", memory_pool_mod);
+    test_root_mod.addImport("vision", mm_vision_mod);
 
 
     // 测试工具模块（src/tests/utils.zig），与 src/utils.zig 不同
@@ -892,6 +893,23 @@ pub fn build(b: *std.Build) void {
         const t = addTestWithRpath(b, "test-vision", mod);
         const run_t = b.addRunArtifact(t);
         test_vision_step.dependOn(&run_t.step);
+    }
+
+    const test_stb_image_step = b.step("test-stb-image", "Run stb_image integration tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_stb_image.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("stb_image", stb_image_mod);
+        mod.addImport("preprocess", mm_preprocess_mod);
+        mod.addImport("vision", mm_vision_mod);
+        const t = addTestWithRpath(b, "test-stb-image", mod);
+        const run_t = b.addRunArtifact(t);
+        test_stb_image_step.dependOn(&run_t.step);
     }
 
     const test_compare_logits_step = b.step("test-compare-logits", "Run compare_logits tests only");

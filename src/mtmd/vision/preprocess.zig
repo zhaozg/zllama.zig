@@ -245,15 +245,25 @@ pub fn resizeAndNormalize(
     min_pixels: u32,
     max_pixels: u32,
 ) !struct { tensor: *ggml.Tensor, new_width: u32, new_height: u32 } {
-    log.warn("resizeAndNormalize: START {d}x{d} align={d} min={d} max={d}", .{ img_width, img_height, align_size, min_pixels, max_pixels });
     log.warn("resizeAndNormalize: image_data[0..5] = {d}, {d}, {d}, {d}, {d}", .{ image_data[0], image_data[1], image_data[2], image_data[3], image_data[4] });
 
     const size = calcSizePreservedRatio(img_width, img_height, align_size, min_pixels, max_pixels);
     log.warn("resize: {d}x{d} -> {d}x{d}", .{ img_width, img_height, size.w, size.h });
 
     const resized_u8 = try resizeBilinearU8(allocator, image_data, img_width, img_height, size.w, size.h);
-    defer allocator.free(resized_u8);
     log.warn("resizeAndNormalize: resized_u8[0..5] = {d}, {d}, {d}, {d}, {d}", .{ resized_u8[0], resized_u8[1], resized_u8[2], resized_u8[3], resized_u8[4] });
+    log.warn("resizeAndNormalize: resized_u8 first 9 pixels (HWC): [{d},{d},{d}, {d},{d},{d}, {d},{d},{d}]", .{
+        resized_u8[0], resized_u8[1], resized_u8[2],
+        resized_u8[3], resized_u8[4], resized_u8[5],
+        resized_u8[6], resized_u8[7], resized_u8[8],
+    });
+    log.warn("resizeAndNormalize: resized_u8 last 9 pixels (HWC): [{d},{d},{d}, {d},{d},{d}, {d},{d},{d}]", .{
+        resized_u8[resized_u8.len - 9], resized_u8[resized_u8.len - 8], resized_u8[resized_u8.len - 7],
+        resized_u8[resized_u8.len - 6], resized_u8[resized_u8.len - 5], resized_u8[resized_u8.len - 4],
+        resized_u8[resized_u8.len - 3], resized_u8[resized_u8.len - 2], resized_u8[resized_u8.len - 1],
+    });
+    defer allocator.free(resized_u8);
+    log.warn("resizeAndNormalize: mean=[{d:.6},{d:.6},{d:.6}] std=[{d:.6},{d:.6},{d:.6}]", .{ mean[0], mean[1], mean[2], std_val[0], std_val[1], std_val[2] });
 
     const wh: usize = @as(usize, @intCast(size.w)) * @as(usize, @intCast(size.h));
     const normalized = try allocator.alloc(f32, wh * 3);
@@ -273,11 +283,16 @@ pub fn resizeAndNormalize(
             const r_u8: f64 = @floatFromInt(resized_u8[hwc_idx + 0]);
             const g_u8: f64 = @floatFromInt(resized_u8[hwc_idx + 1]);
             const b_u8: f64 = @floatFromInt(resized_u8[hwc_idx + 2]);
-            normalized[chw_idx]          = @as(f32, @floatCast((r_u8 / 255.0 - mr) / sr));
-            normalized[chw_idx + wh]     = @as(f32, @floatCast((g_u8 / 255.0 - mg) / sg));
+            normalized[chw_idx] = @as(f32, @floatCast((r_u8 / 255.0 - mr) / sr));
+            normalized[chw_idx + wh] = @as(f32, @floatCast((g_u8 / 255.0 - mg) / sg));
             normalized[chw_idx + 2 * wh] = @as(f32, @floatCast((b_u8 / 255.0 - mb) / sb));
         }
     }
+    log.warn("resizeAndNormalize: normalized first 9 elements (CHW): [{d:.6},{d:.6},{d:.6}, {d:.6},{d:.6},{d:.6}, {d:.6},{d:.6},{d:.6}]", .{
+        normalized[0], normalized[1], normalized[2],
+        normalized[3], normalized[4], normalized[5],
+        normalized[6], normalized[7], normalized[8],
+    });
 
     var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(size.w), @intCast(size.h), 3);
     inp.setName("inp_raw");
@@ -292,7 +307,6 @@ pub fn resizeAndNormalize(
     try inp.dataSet(f32, normalized);
     return .{ .tensor = inp, .new_width = size.w, .new_height = size.h };
 }
-
 test "calcSizePreservedRatio: no resize" {
     const r = calcSizePreservedRatio(224, 224, 48, 18432, 589824);
     try std.testing.expectEqual(@as(u32, 224), r.w);
@@ -303,7 +317,6 @@ test "calcSizePreservedRatio: downscale" {
     try std.testing.expect(r.w < 1024);
     try std.testing.expect(r.w % 48 == 0);
 }
-
 
 test "resizeBilinear: downscale" {
     const src = [_]u8{ 255, 0, 0, 0, 255, 0, 0, 0, 255, 128, 128, 128, 0, 0, 0, 255, 255, 255, 64, 64, 64, 192, 192, 192 };

@@ -52,4 +52,6 @@ comptime {
     _ = @import("tests/test_ggml_interpolate.zig");
     _ = @import("tests/test_ggml_timestep_embedding.zig");
     _ = @import("tests/test_ggml_pad_reflect_1d.zig");
+
+    _ = @import("tests/test_stb_image.zig");
 }

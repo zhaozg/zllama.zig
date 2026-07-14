@@ -78,6 +78,7 @@ pub const VisionEncoder = struct {
         if (gguf_file.getF32Array("clip.vision.image_std", 3)) |std_val| {
             for (std_val, 0..) |v, i| image_std[i] = v;
         }
+        log.warn("VisionEncoder.init: image_mean=[{d:.6}, {d:.6}, {d:.6}] image_std=[{d:.6}, {d:.6}, {d:.6}]", .{ image_mean[0], image_mean[1], image_mean[2], image_std[0], image_std[1], image_std[2] });
 
         var hparams = graph.VisionHParams{
             .image_size = params.image_size,
