@@ -307,6 +307,11 @@ pub const VisionEncoder = struct {
         // In llama.cpp, the tensor is named "projected" (via cb()), and there is
         // no "mm_output" name set, so llama.cpp can find "projected" but not "mm_output".
 
+        // Step 0: input
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_00_inp_raw.json", "inp_raw", cgraph) catch |err| {
+            log.warn("saveDebugData: failed to save 'inp_raw': {}", .{err});
+        };
+
         // Step 1: Scale+bias input
         debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_01_inp_raw_scaled.json", "inp_raw_scaled", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'inp_raw_scaled': {}", .{err});
@@ -337,15 +342,8 @@ pub const VisionEncoder = struct {
             log.warn("saveDebugData: failed to save 'std_scaled': {}", .{err});
         };
 
-        // Step 7: Multimodal embedder output ("projected" -> same tensor as "mm_output")
-        // In zllama.zig, the tensor is renamed from "projected" to "mm_output" before
-        // buildForwardExpand, so we save "mm_output" data as both 07 and 08.
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_07_projected.json", "mm_output", cgraph) catch |err| {
-            log.warn("saveDebugData: failed to save 'projected' (from mm_output): {}", .{err});
-        };
-
-        // Step 8: Final mm_output
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_08_mm_output.json", "mm_output", cgraph) catch |err| {
+        // Step 7: Final mm_output
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_07_mm_output.json", "mm_output", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'mm_output': {}", .{err});
         };
 

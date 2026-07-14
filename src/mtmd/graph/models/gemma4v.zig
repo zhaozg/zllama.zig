@@ -290,6 +290,15 @@ pub fn buildGraph(
                 whc_data[2 * @as(usize, @intCast(n)) + dst_idx] = buf[2 * @as(usize, @intCast(n)) + src_idx];
             }
         }
+        // In no_alloc mode, we must allocate the tensor data manually before calling dataSet.
+        // dataSet will try ggml_get_data first; if that returns null (no_alloc mode without
+        // manual allocation), it falls through to ggml_backend_tensor_set which crashes because
+        // the backend buffer hasn't been allocated by Gallocr yet.
+        if (ctx.getNoAlloc()) {
+            const sz = @as(usize, @intCast(inp_raw.nBytes()));
+            const data_buf = @as([*]u8, @ptrCast(std.c.malloc(sz) orelse return error.OutOfMemory))[0..sz];
+            inp_raw.setDataPtr(data_buf);
+        }
         try inp_raw.dataSet(f32, whc_data);
     }
 
@@ -361,8 +370,8 @@ pub fn buildGraph(
     // Only apply mm_input_proj_w (with optional clamping)
     if (w.mm_input_proj_w) |proj| {
         cur = buildMM(ctx, proj, cur, &w.clamp_info_map);
-        cur.setName("projected");
     }
+    cur.setName("mm_output");
 
     log.debug("buildGraph complete", .{});
     gf.buildForwardExpand(cur);
