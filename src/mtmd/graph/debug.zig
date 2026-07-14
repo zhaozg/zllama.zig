@@ -12,6 +12,13 @@ const debug_mod = @import("debug");
 
 const log = std.log.scoped(.graph_debug);
 
+// 重新导出 src/debug.zig 中的便捷函数
+pub const saveTensor = debug_mod.saveTensor;
+pub const saveTensorFromGraph = debug_mod.saveTensorFromGraph;
+pub const markTensorAsOutput = debug_mod.markTensorAsOutput;
+pub const saveData = debug_mod.saveData;
+pub const writeJsonArray = debug_mod.writeJsonArray;
+
 // ============================================================================
 // 调试张量注册表
 // ============================================================================

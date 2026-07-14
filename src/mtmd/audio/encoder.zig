@@ -120,6 +120,54 @@ pub const AudioEncoder = struct {
         return self.backend.estimateOutputTokens(io, actual_frames);
     }
 
+    // Names of intermediate tensors in the audio encoder graph that can be
+    // saved for debug/alignment analysis.
+    // These names must match the setName() calls in the model-specific buildGraph().
+    pub const debug_tensor_names = [_][]const u8{
+        "pos_emb",
+        "kq_mask",
+        "debug_audio_04_encoder_input",
+        "debug_audio_conv2d_0_output",
+        "debug_audio_conv2d_1_output",
+        "debug_audio_after_cont",
+        "debug_audio_flatten_output",
+        "debug_audio_input_proj_output",
+        "debug_audio_half_step_1_output",
+        "debug_audio_self_attention_with_RPE_output",
+        "debug_audio_conv_build_normal_output",
+        "debug_audio_conv_glu_output",
+        "debug_audio_conv_dw_output",
+        "debug_audio_conv_dw_norm_silu_output",
+        "debug_audio_convolution_output",
+        "debug_audio_half_step_2_output",
+        "debug_audio_layer_0_norm_output",
+        "debug_audio_conformer_blocks_output",
+        "mm_norm",
+        "mm_norm_scaled",
+        "mm_proj",
+    };
+
+    // Mark intermediate tensors in the graph with ggml.setOutput() so that
+    // their data is preserved after graph computation.
+    //
+    // This MUST be called BEFORE graph allocation/computation (i.e. before
+    // Gallocr.allocGraph or ggml_backend_graph_compute). Without setOutput(),
+    // the graph allocator may reuse the memory buffers of intermediate tensors,
+    // causing saveDebugData() to read stale/overwritten data.
+    //
+    // Call this right after buildGraph() returns, before computeGraph().
+    //
+    // Parameters:
+    //   - cgraph: the computed graph (must have tensors named via setName())
+    pub fn markDebugOutputs(cgraph: *ggml.CGraph) void {
+        const debug = @import("debug");
+        for (debug_tensor_names) |name| {
+            debug.markTensorAsOutput(cgraph, name) catch |err| {
+                log.warn("markDebugOutputs: failed to mark '{s}': {}", .{ name, err });
+            };
+        }
+    }
+
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {
         self.weights.clamp_info_map.deinit();
         allocator.free(self.weights.layers);

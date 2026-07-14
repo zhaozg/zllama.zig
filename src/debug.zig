@@ -273,11 +273,45 @@ pub fn writeJsonArray(io: std.Io, file: std.Io.File, data: []const f32) !void {
     try file.writeStreamingAll(io, "]");
 }
 
+/// 从计算图中查找指定名称的张量，并调用 ggml.setOutput() 标记为输出。
+///
+/// 这必须在图分配/计算之前调用（即在 Gallocr.allocGraph 或
+/// ggml_backend_graph_compute 之前）。没有 setOutput()，图分配器可能会
+/// 重用中间张量的内存缓冲区，导致后续 saveTensorFromGraph() 读取到
+/// 过期/被覆盖的数据。
+///
+/// 参数:
+///   - cgraph: 计算图指针
+///   - name: 张量名称（必须已通过 setName 设置）
+pub fn markTensorAsOutput(cgraph: *ggml.CGraph, name: []const u8) !void {
+    const c = @import("ggml").c;
+
+    var name_buf: [256]u8 = undefined;
+    if (name.len >= name_buf.len) {
+        log.warn("markTensorAsOutput: tensor name too long ({d} >= {d})", .{ name.len, name_buf.len });
+        return;
+    }
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    const t = c.ggml_graph_get_tensor(@ptrCast(cgraph), &name_buf);
+    if (t == null) {
+        log.warn("markTensorAsOutput: tensor '{s}' not found in graph", .{name});
+        return;
+    }
+
+    const tensor = @as(*ggml.Tensor, @ptrCast(t));
+    ggml.setOutput(tensor);
+    log.debug("markTensorAsOutput: marked '{s}' as output", .{name});
+}
+
 /// 从计算图中查找指定名称的 F32 张量，将其数据保存为 JSON 数组文件。
 ///
 /// 注意：此函数通过 `ggml_graph_get_tensor` 查找张量，然后通过 `dataF32()` 直接
 /// 读取 CPU 内存中的数据。如果张量在 GPU 后端上，`dataF32()` 可能返回空指针，
 /// 此时会回退到 `ggml_backend_tensor_get`。
+///
+/// 重要：要保存的中间张量必须在图分配/计算之前通过 markTensorAsOutput()
+/// 标记为输出，否则图分配器可能会重用其内存缓冲区，导致读取到过期数据。
 ///
 /// C++ 参考 (clip.cpp):
 /// ```cpp

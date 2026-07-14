@@ -470,6 +470,7 @@ pub fn build(b: *std.Build) void {
     mm_vision_mod.addImport("gguf", gguf_mod);
     mm_vision_mod.addImport("weight_loader", weight_loader_mod);
     mm_vision_mod.addImport("graph", mm_graph_mod);
+    mm_vision_mod.addImport("debug", debug_mod);
 
     const utils_mod = b.createModule(.{
         .root_source_file = b.path("src/utils.zig"),

@@ -191,11 +191,22 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     // different memory layout.
     const buft = ggml.backendCpuBufferType();
     var vis_gallocr = try ggml.Gallocr.init(buft);
+
+    // Mark intermediate tensors as outputs so their data is preserved after computation.
+    // This must be called BEFORE graph allocation/computation.
+    if (mm_mgr.vision_encoder) |_| {
+        mtmd.vision_mod.VisionEncoder.markDebugOutputs(vision_graph);
+    }
+
     logger.debug("generateWithImage: encodeMedia returned, vision_embeddings ne={any}", .{vision_embeddings.ne()});
     defer vis_gallocr.free();
     _ = try engine_common.computeGraph(vision_graph, ectx.n_threads, vis_gallocr);
 
     vision_ctx.setNoAlloc(true);
+
+    if (mm_mgr.vision_encoder) |encoder| {
+        encoder.saveDebugData(io, ectx.allocator, vision_graph);
+    }
 
     logger.debug("generateWithImage: Step 5 - computing vision graph...", .{});
     const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
@@ -308,7 +319,12 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     }, ectx.n_threads);
     logger.debug("Audio encoder: graph built, embeddings tensor found", .{});
 
-    // Compute the audio graph (encoder only builds, caller computes)
+    // Mark intermediate tensors as outputs so their data is preserved after computation.
+    // This must be called BEFORE graph allocation/computation.
+    if (mm_mgr.audio_encoder) |_| {
+        mtmd.audio_mod.AudioEncoder.markDebugOutputs(audio_graph);
+    }
+
     // Compute the audio graph with a dedicated Gallocr (matching helper.zig pattern).
     logger.debug("Audio encoder: computing graph...", .{});
     const audio_buft = ggml.backendCpuBufferType();
