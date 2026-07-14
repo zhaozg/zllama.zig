@@ -106,7 +106,8 @@ pub fn loadClampInfo(
     log.info("Gemma4UA clamp info loaded: {d} entries", .{w.clamp_info_map.count()});
 }
 
-/// 从 VisionEncoderWeights 构建计算图的包装函数
+/// 从独立参数构建计算图的包装函数
+/// 创建 GraphBuilder 后委托给 buildGraph(builder, mel_tensor, clamp_map)。
 fn buildGraphFromWeights(
     io: std.Io,
     ctx: *ggml.Context,
@@ -117,7 +118,23 @@ fn buildGraphFromWeights(
     clamp_map: *const std.StringHashMap(ClampInfo),
 ) !*ggml.CGraph {
     _ = io;
-    return buildGraph(ctx, gf, w, p, mel_tensor, clamp_map);
+    // 对于音频编码器，GraphBuilder 的 img 字段不使用，
+    // 但为了统一接口，创建一个空的 ImageF32。
+    const dummy_img = graph.ImageF32{
+        .buf = &.{},
+        .nx = 0,
+        .ny = 0,
+    };
+    var hparams = p.*;
+    var builder = GraphBuilder{
+        .weights = w,
+        .hparams = &hparams,
+        .proj_type = .gemma4ua,
+        .img = &dummy_img,
+        .ctx0 = ctx,
+        .gf = gf,
+    };
+    return buildGraph(&builder, mel_tensor, clamp_map);
 }
 
 /// 估算输出 token 数量
@@ -139,7 +156,7 @@ fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: [
 // 计算图构建
 // ============================================================================
 
-/// 构建 Gemma4UA 完整计算图
+/// 构建 Gemma4UA 完整计算图（GraphBuilder 版本）
 ///
 /// Gemma4UA 是 Gemma4UnifiedAudioEmbedder 的轻量级实现。
 /// 处理流程:
@@ -151,13 +168,15 @@ fn findTensorInGGUF(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: [
 ///
 /// 参考: llama.cpp gemma4ua.cpp build()
 pub fn buildGraph(
-    ctx: *ggml.Context,
-    gf: *ggml.CGraph,
-    w: *const VisionEncoderWeights,
-    p: *const graph.VisionHParams,
+    builder: *GraphBuilder,
     mel_tensor: *ggml.Tensor,
     clamp_map: *const std.StringHashMap(ClampInfo),
 ) !*ggml.CGraph {
+    const ctx = builder.ctx0;
+    const gf = builder.gf;
+    const w = builder.weights;
+    const p = builder.hparams;
+
     const eps: f32 = if (p.eps > 0) p.eps else 1e-6;
 
     const n_frames: i64 = mel_tensor.ne()[0];

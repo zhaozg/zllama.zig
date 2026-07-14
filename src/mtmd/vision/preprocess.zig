@@ -130,6 +130,58 @@ pub fn calcSizePreservedRatio(
     return .{ .w = wb, .h = hb };
 }
 
+/// Bilinear resize that outputs u8 (matching llama.cpp behavior exactly).
+pub fn resizeBilinearU8(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+) ![]u8 {
+    log.debug("resizeBilinearU8: {d}x{d} -> {d}x{d}", .{ src_w, src_h, dst_w, dst_h });
+    const sw: i32 = @intCast(src_w);
+    const sh: i32 = @intCast(src_h);
+    const dw: i32 = @intCast(dst_w);
+    const dh: i32 = @intCast(dst_h);
+    const out: []u8 = try allocator.alloc(u8, @as(usize, @intCast(dw * dh * 3)));
+
+    const x_ratio: f64 = if (dw > 1) @as(f64, @floatFromInt(sw - 1)) / @as(f64, @floatFromInt(dw - 1)) else 0.0;
+    const y_ratio: f64 = if (dh > 1) @as(f64, @floatFromInt(sh - 1)) / @as(f64, @floatFromInt(dh - 1)) else 0.0;
+
+    for (0..@as(usize, @intCast(dh))) |dy| {
+        const py: f64 = @as(f64, @floatFromInt(@as(i32, @intCast(dy)))) * y_ratio;
+        const y0: i32 = @min(@as(i32, @intFromFloat(@floor(py))), sh - 1);
+        const y1: i32 = @min(y0 + 1, sh - 1);
+        const yf: f64 = py - @floor(py);
+        for (0..@as(usize, @intCast(dw))) |dx| {
+            const px: f64 = @as(f64, @floatFromInt(@as(i32, @intCast(dx)))) * x_ratio;
+            const x0: i32 = @min(@as(i32, @intFromFloat(@floor(px))), sw - 1);
+            const x1: i32 = @min(x0 + 1, sw - 1);
+            const xf: f64 = px - @floor(px);
+
+            const idx00: usize = @as(usize, @intCast((y0 * sw + x0) * 3));
+            const idx01: usize = @as(usize, @intCast((y0 * sw + x1) * 3));
+            const idx10: usize = @as(usize, @intCast((y1 * sw + x0) * 3));
+            const idx11: usize = @as(usize, @intCast((y1 * sw + x1) * 3));
+            const db: usize = (dy * @as(usize, @intCast(dw)) + dx) * 3;
+
+            inline for (0..3) |c| {
+                const v00: f64 = @floatFromInt(src[idx00 + c]);
+                const v01: f64 = @floatFromInt(src[idx01 + c]);
+                const v10: f64 = @floatFromInt(src[idx10 + c]);
+                const v11: f64 = @floatFromInt(src[idx11 + c]);
+                const top: f64 = v00 * (1.0 - xf) + v01 * xf;
+                const bot: f64 = v10 * (1.0 - xf) + v11 * xf;
+                const val: f64 = top * (1.0 - yf) + bot * yf;
+                out[db + c] = @intFromFloat(val);
+            }
+        }
+    }
+    return out;
+}
+
+/// Legacy: resize to f32 in CHW layout.
 pub fn resizeBilinear(
     allocator: std.mem.Allocator,
     src: []const u8,
@@ -138,7 +190,7 @@ pub fn resizeBilinear(
     dst_w: u32,
     dst_h: u32,
 ) ![]f32 {
-    log.debug("resizeBilinear: {d}x{d} -> {d}x{d}", .{ src_w, src_h, dst_w, dst_h });
+    log.debug("resizeBilinear (legacy): {d}x{d} -> {d}x{d}", .{ src_w, src_h, dst_w, dst_h });
     const sw: usize = @intCast(src_w);
     const sh: usize = @intCast(src_h);
     const dw: usize = @intCast(dst_w);
@@ -180,6 +232,7 @@ pub fn resizeBilinear(
     return out;
 }
 
+/// Resize then normalize to f32 CHW.
 pub fn resizeAndNormalize(
     ctx: *ggml.Context,
     allocator: std.mem.Allocator,
@@ -192,13 +245,15 @@ pub fn resizeAndNormalize(
     min_pixels: u32,
     max_pixels: u32,
 ) !struct { tensor: *ggml.Tensor, new_width: u32, new_height: u32 } {
-    log.debug("resizeAndNormalize: START {d}x{d} align={d} min={d} max={d}", .{ img_width, img_height, align_size, min_pixels, max_pixels });
-    const size = calcSizePreservedRatio(img_width, img_height, align_size, min_pixels, max_pixels);
-    log.debug("resize: {d}x{d} -> {d}x{d}", .{ img_width, img_height, size.w, size.h });
+    log.warn("resizeAndNormalize: START {d}x{d} align={d} min={d} max={d}", .{ img_width, img_height, align_size, min_pixels, max_pixels });
+    log.warn("resizeAndNormalize: image_data[0..5] = {d}, {d}, {d}, {d}, {d}", .{ image_data[0], image_data[1], image_data[2], image_data[3], image_data[4] });
 
-    const resized = try resizeBilinear(allocator, image_data, img_width, img_height, size.w, size.h);
-    log.debug("resizeAndNormalize: resizeBilinear done, len={d}", .{resized.len});
-    defer allocator.free(resized);
+    const size = calcSizePreservedRatio(img_width, img_height, align_size, min_pixels, max_pixels);
+    log.warn("resize: {d}x{d} -> {d}x{d}", .{ img_width, img_height, size.w, size.h });
+
+    const resized_u8 = try resizeBilinearU8(allocator, image_data, img_width, img_height, size.w, size.h);
+    defer allocator.free(resized_u8);
+    log.warn("resizeAndNormalize: resized_u8[0..5] = {d}, {d}, {d}, {d}, {d}", .{ resized_u8[0], resized_u8[1], resized_u8[2], resized_u8[3], resized_u8[4] });
 
     const wh: usize = @as(usize, @intCast(size.w)) * @as(usize, @intCast(size.h));
     const normalized = try allocator.alloc(f32, wh * 3);
@@ -211,22 +266,16 @@ pub fn resizeAndNormalize(
     const sg: f64 = @floatCast(std_val[1]);
     const sb: f64 = @floatCast(std_val[2]);
 
-    inline for (0..3) |c| {
-        const m: f64 = switch (c) {
-            0 => mr,
-            1 => mg,
-            2 => mb,
-            else => unreachable,
-        };
-        const s: f64 = switch (c) {
-            0 => sr,
-            1 => sg,
-            2 => sb,
-            else => unreachable,
-        };
-        for (0..wh) |i| {
-            const rf: f64 = @floatCast(resized[c * wh + i]);
-            normalized[c * wh + i] = @as(f32, @floatCast(rf / 255.0 - m)) / @as(f32, @floatCast(s));
+    for (0..@as(usize, @intCast(size.h))) |y| {
+        for (0..@as(usize, @intCast(size.w))) |x| {
+            const hwc_idx = (y * @as(usize, @intCast(size.w)) + x) * 3;
+            const chw_idx = y * @as(usize, @intCast(size.w)) + x;
+            const r_u8: f64 = @floatFromInt(resized_u8[hwc_idx + 0]);
+            const g_u8: f64 = @floatFromInt(resized_u8[hwc_idx + 1]);
+            const b_u8: f64 = @floatFromInt(resized_u8[hwc_idx + 2]);
+            normalized[chw_idx]          = @as(f32, @floatCast((r_u8 / 255.0 - mr) / sr));
+            normalized[chw_idx + wh]     = @as(f32, @floatCast((g_u8 / 255.0 - mg) / sg));
+            normalized[chw_idx + 2 * wh] = @as(f32, @floatCast((b_u8 / 255.0 - mb) / sb));
         }
     }
 
@@ -255,9 +304,35 @@ test "calcSizePreservedRatio: downscale" {
     try std.testing.expect(r.w % 48 == 0);
 }
 
+
 test "resizeBilinear: downscale" {
     const src = [_]u8{ 255, 0, 0, 0, 255, 0, 0, 0, 255, 128, 128, 128, 0, 0, 0, 255, 255, 255, 64, 64, 64, 192, 192, 192 };
     const out = try resizeBilinear(std.testing.allocator, &src, 4, 2, 2, 1);
     defer std.testing.allocator.free(out);
     try std.testing.expectEqual(@as(usize, 6), out.len);
+}
+
+test "resizeAndNormalize: basic" {
+    const allocator = std.testing.allocator;
+    const src_w: u32 = 4;
+    const src_h: u32 = 4;
+    var image_data: [48]u8 = [_]u8{128} ** 48;
+
+    const ctx = try ggml.Context.initNoAlloc(1024 * 1024);
+    defer ctx.deinit();
+
+    const mean: [3]f32 = .{ 0.5, 0.5, 0.5 };
+    const std_val: [3]f32 = .{ 0.5, 0.5, 0.5 };
+
+    const result = try resizeAndNormalize(ctx, allocator, &image_data, src_w, src_h, mean, std_val, 48, 0, 589824);
+    try std.testing.expectEqual(@as(u32, 48), result.new_width);
+    try std.testing.expectEqual(@as(u32, 48), result.new_height);
+
+    const tensor = result.tensor;
+    const data = try tensor.dataGet(f32, allocator);
+    defer allocator.free(data);
+
+    const expected: f32 = (128.0 / 255.0 - 0.5) / 0.5;
+    try std.testing.expectApproxEqAbs(expected, data[0], 1e-5);
+    try std.testing.expect(data[0] < 0.5);
 }

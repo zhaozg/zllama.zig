@@ -75,12 +75,10 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chun
         pd = res.data;
     }
     var nt: u32 = 0;
-    var nx: u32 = 0;
-    var ny: u32 = 0;
+    const nx: u32 = pw;
+    const ny: u32 = ph;
     if (ctx.mm_manager.vision_encoder) |*enc| {
         nt = enc.estimateOutputTokens(io, pw, ph);
-        nx = nt;
-        ny = 1;
     }
     try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = nx, .ny = ny, .pos = ctx.pos_type, .image_idx = nia.*, .id = bm.id, .raw_pixels = pd, .patch_count = 1 }, .id = bm.id });
     if (ctx.img_end.len > 0) try addTextChunk(ctx, al, chunks, ctx.img_end, true);

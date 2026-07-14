@@ -61,23 +61,33 @@ pub const DebugTensorRegistry = debug.DebugTensorRegistry;
 
 /// 视觉编码器后端接口
 /// 每个视觉模型实现此接口，提供模型特定的操作
+///
+/// 所有模型的 buildGraph 统一使用 GraphBuilder 封装公共参数，
+/// 通过 buildGraphFromWeights 包装函数兼容独立参数调用方式。
 pub const VisionEncoderBackend = struct {
     name: []const u8,
     supportBatch: bool = false,
     loadParams: *const fn (io: std.Io, gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
     loadWeights: *const fn (io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
     loadClampInfo: *const fn (io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
+    /// 构建视觉编码器计算图
+    /// 接收独立参数，内部创建 GraphBuilder 后委托给模型的具体 buildGraph
     buildGraph: *const fn (io: std.Io, ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, image_tensor: *ggml.Tensor) anyerror!*ggml.CGraph,
     estimateOutputTokens: *const fn (io: std.Io, img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32,
 };
 
 /// 音频编码器后端接口
 /// 每个音频模型实现此接口，提供模型特定的操作
+///
+/// 所有模型的 buildGraph 统一使用 GraphBuilder 封装公共参数，
+/// 通过 buildGraphFromWeights 包装函数兼容独立参数调用方式。
 pub const AudioEncoderBackend = struct {
     name: []const u8,
     loadParams: *const fn (io: std.Io, gguf_file: *const gguf.GGUFFile, params: *VisionHParams) void,
     loadWeights: *const fn (io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void,
     loadClampInfo: *const fn (io: std.Io, allocator: std.mem.Allocator, gguf_file: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void,
+    /// 构建音频编码器计算图
+    /// 接收独立参数，内部创建 GraphBuilder 后委托给模型的具体 buildGraph
     buildGraph: *const fn (io: std.Io, ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, mel_tensor: *ggml.Tensor, clamp_map: *const std.StringHashMap(ClampInfo)) anyerror!*ggml.CGraph,
     estimateOutputTokens: *const fn (io: std.Io, n_frames: u32) u32,
 };

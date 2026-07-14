@@ -157,20 +157,13 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     }
     logger.debug("generateWithImage: Step 2 - computeTargetSize", .{});
     const enc = mm_mgr.vision_encoder.?;
-    const target = computeTargetSize(&enc, raw_img.width, raw_img.height);
+    _ = computeTargetSize(&enc, raw_img.width, raw_img.height);
 
-    // 步骤 3: 缩放到目标尺寸
-    logger.debug("generateWithImage: Step 3 - resizeRGB to {d}x{d}", .{ target.width, target.height });
-    const resized_data = try preprocess.resizeRGB(ectx.allocator, raw_img.data, raw_img.width, raw_img.height, target.width, target.height);
-    var img = preprocess.ProcessedImage{
-        .data = resized_data,
-        .width = target.width,
-        .height = target.height,
-        .allocator = ectx.allocator,
-    };
-    defer img.deinit();
+    // 步骤 3: 直接传递原始图像给 encodeMedia，由 encode 中的 resizeAndNormalize 处理缩放
+    // （使用与 llama.cpp 一致的坐标映射）
+    logger.debug("generateWithImage: Step 3 - passing raw image to encodeMedia ({d}x{d})", .{ raw_img.width, raw_img.height });
 
-    if (img.width == 0 or img.height == 0) return error.EmptyImage;
+    if (raw_img.width == 0 or raw_img.height == 0) return error.EmptyImage;
 
     // 使用 no_alloc = true 模式创建视觉编码器上下文。
     // 张量数据由 gallocr 在 computeGraph 中分配，context 仅存储元数据。
@@ -181,18 +174,12 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     logger.debug("generateWithImage: Step 4 - creating vision_ctx and calling encodeMedia...", .{});
     const vision_embeddings = try mm_mgr.encodeMedia(io, vision_ctx, vision_graph, .{
         .media_type = .image,
-        .image_data = img.data,
-        .image_width = img.width,
-        .image_height = img.height,
+        .image_data = raw_img.data,
+        .image_width = raw_img.width,
+        .image_height = raw_img.height,
     }, ectx.n_threads);
-
-    // Compute the vision graph with a dedicated Gallocr (matching helper.zig pattern).
-    // The engine's Gallocr is sized for the text model; vision graph may need
-    // different memory layout.
     const buft = ggml.backendCpuBufferType();
     var vis_gallocr = try ggml.Gallocr.init(buft);
-
-    // Mark intermediate tensors as outputs so their data is preserved after computation.
     // This must be called BEFORE graph allocation/computation.
     if (mm_mgr.vision_encoder) |_| {
         mtmd.vision_mod.VisionEncoder.markDebugOutputs(vision_graph);
