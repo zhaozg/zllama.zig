@@ -21,6 +21,7 @@ const ProjectorType = types.ProjectorType;
 const NormType = types.NormType;
 const FFNOpType = types.FFNOpType;
 const BuildVitOpts = types.BuildVitOpts;
+const defaultBuildMM = types.defaultBuildMM;
 const FlashAttnType = types.FlashAttnType;
 const VisionHParams = types.VisionHParams;
 const VisionEncoderWeights = types.VisionEncoderWeights;
@@ -180,7 +181,7 @@ pub const GraphBuilder = struct {
         type_op: FFNOpType,
         name: []const u8,
     ) !*ggml.Tensor {
-        return ffn_builder.buildFFN(self.ctx0, cur, up, up_b, gate, gate_b, down, down_b, type_op, name);
+        return ffn_builder.buildFFN(self.ctx0, cur, up, up_b, gate, gate_b, down, down_b, type_op, name, defaultBuildMM);
     }
 
     /// 构建注意力层
@@ -209,6 +210,7 @@ pub const GraphBuilder = struct {
             @intCast(self.nHead()),
             name,
             sinks,
+            defaultBuildMM,
         );
     }
 

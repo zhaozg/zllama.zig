@@ -8,6 +8,8 @@ const ggml = @import("ggml");
 const types = @import("types.zig");
 
 const FFNOpType = types.FFNOpType;
+const BuildMMFn = types.BuildMMFn;
+const defaultBuildMM = types.defaultBuildMM;
 
 const log = std.log.scoped(.graph_ffn);
 
@@ -31,6 +33,7 @@ const log = std.log.scoped(.graph_ffn);
 ///   - down_b: down 投影偏置 [n_embd]（可选）
 ///   - type_op: FFN 激活函数类型
 ///   - name: 张量名称前缀（用于调试）
+///   - build_mm: 矩阵乘法回调（对应 C++ clip_graph::build_mm 虚拟函数）
 ///
 /// 返回: FFN 输出张量 [n_embd, n_patches]
 ///
@@ -46,10 +49,11 @@ pub fn buildFFN(
     down_b: ?*ggml.Tensor,
     type_op: FFNOpType,
     name: []const u8,
+    build_mm: BuildMMFn,
 ) !*ggml.Tensor {
     // C++: ggml_tensor * tmp = up ? build_mm(up, cur) : cur;
     // Up projection: [n_ff, n_embd] @ [n_embd, n_patches] → [n_ff, n_patches]
-    var up_result = up.mulMat(ctx, cur);
+    var up_result = build_mm(ctx, up, cur);
 
     if (up_b) |b| {
         up_result = up_result.add(ctx, b);
@@ -59,7 +63,7 @@ pub fn buildFFN(
     // C++: if (gate) { cur = build_mm(gate, cur); ... }
     var gate_result: ?*ggml.Tensor = null;
     if (gate) |g| {
-        gate_result = g.mulMat(ctx, cur);
+        gate_result = build_mm(ctx, g, cur);
         if (gate_b) |gb| {
             gate_result = gate_result.?.add(ctx, gb);
         }
@@ -95,7 +99,8 @@ pub fn buildFFN(
         }
     };
     // Down projection: [n_embd, n_ff] @ [n_ff, n_patches] → [n_embd, n_patches]
-    var result = down.mulMat(ctx, activated);
+    // C++: if (down) { cur = build_mm(down, cur); }
+    var result = build_mm(ctx, down, activated);
 
     if (down_b) |b| {
         result = result.add(ctx, b);
@@ -132,7 +137,7 @@ test "buildFFN: SiLU activation" {
         @memset(buf, 0.1);
         try t.dataSet(f32, buf);
     }
-    const result = try buildFFN(&ctx, cur, up_w, null, null, null, down_w, null, .silu, "test_ffn");
+    const result = try buildFFN(&ctx, cur, up_w, null, null, null, down_w, null, .silu, "test_ffn", defaultBuildMM);
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);
     try testing.expectEqual(@as(i64, n_patches), result.ne()[1]);
 }
@@ -166,7 +171,7 @@ test "buildFFN: GELU with gate" {
         try t.dataSet(f32, buf);
     }
 
-    const result = try buildFFN(&ctx, cur, up_w, null, gate_w, null, down_w, null, .gelu, "test_ffn_gate");
+    const result = try buildFFN(&ctx, cur, up_w, null, gate_w, null, down_w, null, .gelu, "test_ffn_gate", defaultBuildMM);
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);
     try testing.expectEqual(@as(i64, n_patches), result.ne()[1]);
 }

@@ -18,6 +18,7 @@ const graph = @import("../mod.zig");
 const GraphBuilder = graph.GraphBuilder;
 const NormType = graph.NormType;
 const FFNOpType = graph.FFNOpType;
+const defaultBuildMM = graph.defaultBuildMM;
 const BuildVitOpts = graph.BuildVitOpts;
 const VisionEncoderWeights = graph.VisionEncoderWeights;
 const VisionHParams = graph.VisionHParams;
@@ -523,11 +524,11 @@ pub fn buildGraph(
                 n_head,
                 "attn_out",
                 layer.attn_sinks,
+                defaultBuildMM,
             );
         }
 
         // Reference: cur = ggml_add(ctx0, cur, inpL); (residual 1)
-        cur = inpL.add(ctx, cur);
         inpL = cur; // inpL = residual, cur = hidden_states
 
         // Reference: layernorm2
@@ -546,8 +547,11 @@ pub fn buildGraph(
             layer.ff_down_b,
             p.ffn_op,
             "ffn_out",
+            defaultBuildMM,
         );
 
+        // Reference: cur = ggml_add(ctx0, inpL, cur); (residual 2)
+        cur = inpL.add(ctx, cur);
         // Reference: cur = ggml_add(ctx0, inpL, cur); (residual 2)
         cur = inpL.add(ctx, cur);
         inpL = cur;
@@ -561,8 +565,6 @@ pub fn buildGraph(
 
             // Reference: build_norm(feat, layer.deepstack_norm_w, layer.deepstack_norm_b, norm_t, eps, il)
             feat = try graph.buildNorm(ctx, feat, layer.deepstack_norm_w orelse return error.MissingNormWeight, layer.deepstack_norm_b, norm_t, eps, "deepstack_norm");
-
-            // Reference: build_ffn(feat, layer.deepstack_fc1_w, layer.deepstack_fc1_b, nullptr, nullptr, layer.deepstack_fc2_w, layer.deepstack_fc2_b, FFN_GELU, il)
             feat = try graph.buildFFN(
                 ctx,
                 feat,
@@ -574,8 +576,10 @@ pub fn buildGraph(
                 layer.deepstack_fc2_b,
                 .gelu,
                 "deepstack_ffn",
+                defaultBuildMM,
             );
 
+            // Reference: concat along feature dimension
             // Reference: concat along feature dimension
             if (deepstack_features) |dsf| {
                 deepstack_features = dsf.concat(ctx, feat, 0);
@@ -602,7 +606,6 @@ pub fn buildGraph(
     embeddings = ggml.cont(ctx, embeddings).reshape3d(ctx, n_embd * 4, @divExact(n_patches, @as(i64, 4)), n_batch);
     embeddings.setName("mm_reshape");
 
-    // Reference: build_ffn(embeddings, model.mm_0_w, model.mm_0_b, nullptr, nullptr, model.mm_1_w, model.mm_1_b, FFN_GELU, -1)
     embeddings = try graph.buildFFN(
         ctx,
         embeddings,
@@ -614,10 +617,9 @@ pub fn buildGraph(
         w.mm_1_b,
         .gelu,
         "mm_proj",
+        defaultBuildMM,
     );
     embeddings.setName("mm_proj");
-
-    // Reference: if (deepstack_features) { embeddings = ggml_concat(ctx0, embeddings, deepstack_features, 0); }
     if (deepstack_features) |dsf| {
         embeddings = embeddings.concat(ctx, dsf, 0);
         embeddings.setName("mm_with_deepstack");

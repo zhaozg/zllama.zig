@@ -5,6 +5,10 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
+const types = @import("types.zig");
+
+const BuildMMFn = types.BuildMMFn;
+const defaultBuildMM = types.defaultBuildMM;
 
 const log = std.log.scoped(.graph_attn);
 
@@ -23,6 +27,7 @@ const log = std.log.scoped(.graph_attn);
 ///   - n_head: 注意力头数
 ///   - name: 张量名称前缀（用于调试）
 ///   - sinks: attention sinks [n_embd, n_sinks]（可选）
+///   - build_mm: 矩阵乘法回调（对应 C++ clip_graph::build_mm 虚拟函数）
 ///
 /// 返回: 注意力输出张量 [n_embd, n_patches * n_batch]
 ///
@@ -40,6 +45,7 @@ pub fn buildAttn(
     n_head: i64,
     name: []const u8,
     sinks: ?*ggml.Tensor,
+    build_mm: BuildMMFn,
 ) !*ggml.Tensor {
     const d_head = q_cur.ne()[0];
     const n_patches = q_cur.ne()[2];
@@ -93,9 +99,8 @@ pub fn buildAttn(
     cur = cur.reshape2d(ctx, d_head * n_head, n_patches * n_batch);
 
     // 输出投影（对应 C++: if (wo) { cur = build_mm(wo, cur); }）
-    // wo: [n_embd, n_embd], cur: [n_embd, n_patches * n_batch]
-    // ggml_mul_mat(wo, cur): wo->ne[0]=n_embd == cur->ne[0]=n_embd ✓
-    var result = wo.mulMat(ctx, cur);
+    // 使用 build_mm 回调（支持 clamp 等模型特定操作）
+    var result = build_mm(ctx, wo, cur);
 
     if (wo_b) |b| {
         result = result.add(ctx, b);
@@ -140,7 +145,7 @@ test "buildAttn: basic self-attention" {
     var gf = try ctx.newGraph();
     defer gf.deinit();
 
-    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, n_head, "test_attn", null);
+    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, n_head, "test_attn", null, defaultBuildMM);
     try testing.expectEqual(n_embd, result.ne()[0]);
     try testing.expectEqual(n_patches, result.ne()[1]);
 }

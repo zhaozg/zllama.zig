@@ -118,7 +118,8 @@ pub fn buildVit(
 
             if (layer.qkv_w) |qkv_w| {
                 // fused qkv（对应 C++: cur = build_mm(layer.qkv_w, cur);）
-                var qkv = qkv_w.mulMat(ctx, hidden);
+                // 使用 build_mm 回调（支持 clamp 等模型特定操作）
+                var qkv = opts.build_mm(ctx, qkv_w, hidden);
                 if (layer.qkv_b) |qkv_b| {
                     qkv = qkv.add(ctx, qkv_b);
                 }
@@ -144,17 +145,18 @@ pub fn buildVit(
                 }
             } else {
                 // separate q, k, v（对应 C++: Qcur = build_mm(layer.q_w, cur);）
-                Qcur = (layer.q_w orelse return error.MissingQWeight).mulMat(ctx, hidden);
+                // 使用 build_mm 回调（支持 clamp 等模型特定操作）
+                Qcur = opts.build_mm(ctx, layer.q_w orelse return error.MissingQWeight, hidden);
                 if (layer.q_b) |qb| {
                     Qcur = Qcur.?.add(ctx, qb);
                 }
 
-                Kcur = (layer.k_w orelse return error.MissingKWeight).mulMat(ctx, hidden);
+                Kcur = opts.build_mm(ctx, layer.k_w orelse return error.MissingKWeight, hidden);
                 if (layer.k_b) |kb| {
                     Kcur = Kcur.?.add(ctx, kb);
                 }
 
-                Vcur = (layer.v_w orelse return error.MissingVWeight).mulMat(ctx, hidden);
+                Vcur = opts.build_mm(ctx, layer.v_w orelse return error.MissingVWeight, hidden);
                 if (layer.v_b) |vb| {
                     Vcur = Vcur.?.add(ctx, vb);
                 }
@@ -228,6 +230,7 @@ pub fn buildVit(
                 n_head,
                 "blk",
                 layer.attn_sinks,
+                opts.build_mm, // 传递 build_mm 回调
             );
             // C++: cb(cur, "attn_out", il);
             cb(hidden, "attn_out", il_i32);
@@ -271,6 +274,7 @@ pub fn buildVit(
             layer.ff_down_b,
             ffn_t,
             "blk",
+            opts.build_mm, // 传递 build_mm 回调
         );
         // C++: cb(cur, "ffn_out", il);
         cb(hidden, "ffn_out", il_i32);

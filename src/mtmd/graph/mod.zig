@@ -94,6 +94,7 @@ pub const AudioEncoderBackend = struct {
 
 // 重新导出构建函数
 pub const buildVit = vit.buildVit;
+pub const defaultBuildMM = types.defaultBuildMM;
 pub const resizePositionEmbeddings = vit.resizePositionEmbeddings;
 pub const buildAttn = attn.buildAttn;
 pub const buildFFN = ffn.buildFFN;

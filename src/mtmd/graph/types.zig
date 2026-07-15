@@ -190,8 +190,20 @@ pub const FlashAttnType = enum(i8) {
 
 /// ViT 构建选项
 /// 参考: clip-graph.h build_vit_opts
+/// build_mm 函数指针类型
+/// 对应 C++ clip_graph::build_mm() — 虚拟函数，允许子类添加 clamp 等操作
+/// 参数: (ctx, weight, input) -> output
+pub const BuildMMFn = *const fn (ctx: *ggml.Context, w: *ggml.Tensor, x: *ggml.Tensor) *ggml.Tensor;
+
+/// 带上下文的 build_mm 函数指针类型
+/// 用于 GraphBuilder 等需要捕获 self 的场景
+/// 默认 build_mm 实现：直接调用 ggml_mul_mat
+pub fn defaultBuildMM(ctx: *ggml.Context, w: *ggml.Tensor, x: *ggml.Tensor) *ggml.Tensor {
+    return w.mulMat(ctx, x);
+}
+
+/// 构建 ViT 选项
 pub const BuildVitOpts = struct {
-    /// 注意力掩码（可选）
     attn_mask: ?*ggml.Tensor = null,
     /// 是否对 V 应用 RMSNorm（gemma4v 需要）
     v_norm: bool = false,
@@ -199,6 +211,9 @@ pub const BuildVitOpts = struct {
     v_norm_eps: f32 = 1e-6,
     /// KQ 缩放因子（默认 1/sqrt(d_head)，gemma4v 使用 1.0）
     kq_scale: ?f32 = null,
+    /// build_mm 回调（对应 C++ clip_graph::build_mm 虚拟函数）
+    /// 默认使用 ggml_mul_mat，子类可覆盖以添加 clamp 等操作
+    build_mm: BuildMMFn = defaultBuildMM,
 };
 
 // ============================================================================

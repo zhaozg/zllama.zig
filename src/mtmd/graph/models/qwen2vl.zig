@@ -18,6 +18,7 @@ const VisionEncoderWeights = graph.VisionEncoderWeights;
 const VisionHParams = graph.VisionHParams;
 const ViTLayerWeights = graph.ViTLayerWeights;
 const ImageF32 = graph.ImageF32;
+const defaultBuildMM = graph.defaultBuildMM;
 
 const log = std.log.scoped(.graph_model_qwen2vl);
 
@@ -422,6 +423,7 @@ pub fn buildGraph(
                 n_head,
                 "blk",
                 layer.attn_sinks,
+                defaultBuildMM,
             );
             attn_out.setName("blk");
 
@@ -449,9 +451,9 @@ pub fn buildGraph(
                 layer.ff_down_b,
                 .gelu,
                 "blk",
+                defaultBuildMM,
             );
             ffn_out.setName("blk");
-
             // Residual 2
             inpL = inpL.add(ctx, ffn_out);
             inpL.setName("blk");
@@ -485,9 +487,9 @@ pub fn buildGraph(
             w.mm_1_b,
             .gelu,
             "mm_proj",
+            defaultBuildMM,
         );
     } else if (w.mm_input_proj_w != null) {
-        // Gemma3 风格: 直接使用原始 ViT 输出 [n_embd, n_patches]
         embeddings = embeddings.rmsNorm(ctx, eps);
         embeddings.setName("mm_norm");
         if (w.mm_soft_emb_norm_w) |sn| {
