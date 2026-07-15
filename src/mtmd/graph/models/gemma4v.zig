@@ -285,6 +285,7 @@ pub fn buildGraph(
     log.debug("Step 1: scale_bias", .{});
     var cur = inp_raw.scaleBias(ctx, 2.0, -1.0);
     cur.setName("inp_raw_scaled");
+    ggml.setOutput(cur);
 
     // 3. Conv2D patch embedding: ggml_conv_2d(ctx0, patch_embeddings_0, inp_raw_scaled, ps, ps, 0, 0, 1, 1)
     //    Ref: gemma4v.cpp: inp = ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1);
@@ -295,6 +296,8 @@ pub fn buildGraph(
     cur = cur.reshape3d(ctx, np, ne, 1);
     cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
     cur.setName("inp");
+    ggml.setOutput(cur);
+
     // 4. 2D Position embeddings (x/y lookup)
     const pe = w.position_embeddings orelse return error.MissingPositionEmbeddings;
     const psz: i64 = pe.ne()[1];
@@ -305,6 +308,7 @@ pub fn buildGraph(
     cur = cur.add(ctx, ggml.getRows(ctx, tx, try posIndices(ctx, npx, npy, .x)));
     cur = cur.add(ctx, ggml.getRows(ctx, ty, try posIndices(ctx, npx, npy, .y)));
     cur.setName("pos_embd");
+    ggml.setOutput(cur);
 
     // Create pos_x/pos_y tensors for 2D RoPE (used in addPos callback)
     rope_pos_x = try posIndices(ctx, npx, npy, .x);
@@ -319,6 +323,7 @@ pub fn buildGraph(
         .kq_scale = 1.0,
     });
     cur.setName("vit_output");
+    ggml.setOutput(cur);
 
     // 6. Pool 2D (avg, kernel=n_merge) + scale
     log.debug("Step 5: pool2d (n_merge={d})", .{p.n_merge});
@@ -332,6 +337,7 @@ pub fn buildGraph(
         cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
         cur = cur.scale(ctx, @sqrt(@as(f32, @floatFromInt(ne))));
         cur.setName("pooled");
+        ggml.setOutput(cur);
     }
 
     // 7. Standardization
@@ -341,6 +347,7 @@ pub fn buildGraph(
         // std_scale is [n_embd] 1D tensor, use directly (ggml_mul broadcasts)
         cur = cur.mul(ctx, w.std_scale.?);
         cur.setName("std_scaled");
+        ggml.setOutput(cur);
     }
 
     // 8. Multimodal embedder
@@ -352,6 +359,7 @@ pub fn buildGraph(
         cur = buildMM(ctx, proj, cur, &w.clamp_info_map);
     }
     cur.setName("mm_output");
+    ggml.setOutput(cur);
 
     log.debug("buildGraph complete", .{});
     gf.buildForwardExpand(cur);
