@@ -27,6 +27,9 @@ pub const debug_tensor_names = [_][]const u8{
     "pooled",
     "std_scaled",
     "mm_output",
+    "Qcur_pos-0",
+    "Kcur_pos-0",
+    "Vcur_normed-0",
 };
 
 pub const VisionEncoder = struct {
@@ -59,6 +62,8 @@ pub const VisionEncoder = struct {
             params.n_merge = v;
         }
         if (gguf_file.getF32("clip.vision.rope_theta")) |v| params.rope_theta = v;
+        // Ref: llama.cpp clip.cpp line 1205: get_f32(KEY_LAYER_NORM_EPS, hparams.eps)
+        if (gguf_file.getF32("clip.vision.attention.layer_norm_epsilon")) |v| params.norm_eps = v;
         if (gguf_file.getU32("clip.vision.image_min_pixels")) |v| params.image_min_pixels = v;
         if (gguf_file.getU32("clip.vision.image_max_pixels")) |v| params.image_max_pixels = v;
 
@@ -293,6 +298,7 @@ pub const VisionEncoder = struct {
     ///   - allocator: memory allocator
     ///   - cgraph: computed graph (must be computed before calling this)
     pub fn saveDebugData(self: *const VisionEncoder, io: std.Io, allocator: std.mem.Allocator, cgraph: *ggml.CGraph) void {
+        _ = self;
         const debug = @import("debug");
         const subdir = "debug_vision";
 
@@ -308,11 +314,9 @@ pub const VisionEncoder = struct {
         // In llama.cpp, the tensor is named "projected" (via cb()), and there is
         // no "mm_output" name set, so llama.cpp can find "projected" but not "mm_output".
 
-        // Step 0: input
         debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_00_inp_raw.json", "inp_raw", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'inp_raw': {}", .{err});
         };
-
         // Step 1: Scale+bias input
         debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_01_inp_raw_scaled.json", "inp_raw_scaled", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'inp_raw_scaled': {}", .{err});
@@ -326,6 +330,38 @@ pub const VisionEncoder = struct {
         // Step 3: After position embeddings
         debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_03_pos_embd.json", "pos_embd", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'pos_embd': {}", .{err});
+        };
+
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04a_pre_ln.json",
+        "pre_ln", cgraph) catch |err| {
+            log.warn("saveDebugData: failed to save 'pre_ln': {}", .{err});
+        };
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04b_layer0_inp_normed.json",
+        "layer_inp_normed", cgraph) catch |err| {
+            log.warn("saveDebugData: failed to save 'layer_inp_normed': {}", .{err});
+        };
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04c_layer0_attn_out.json",
+        "attn_out", cgraph) catch |err| {
+            log.warn("saveDebugData: failed to save 'attn_out': {}", .{err});
+        };
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04d_layer0_ffn_inp.json",
+        "ffn_inp", cgraph) catch |err| {
+            log.warn("saveDebugData: failed to save 'ffn_inp': {}", .{err});
+        };
+
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04e_layer0_ffn_out.json",
+        "ffn_out", cgraph) catch |err| {
+            log.warn("saveDebugData: failed to save 'ffn_out': {}", .{err});
+        };
+
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04f_layer0_layer_out.json",
+        "layer_out", cgraph) catch |err| {
+            log.warn("saveDebugData: failed to save 'layer_out': {}", .{err});
+        };
+
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04g_out_scaled.json",
+        "out_scaled", cgraph) catch |err| {
+            log.warn("saveDebugData: failed to save 'out_scaled': {}", .{err});
         };
 
         // Step 4: ViT blocks output
@@ -350,21 +386,21 @@ pub const VisionEncoder = struct {
 
         // === Weight tensors (from weights struct, for cross-reference) ===
 
-        if (self.weights.patch_embeddings_0) |t| {
-            debug.saveTensor(io, allocator, subdir, "zllama_vision_00_patch_embeddings_weight.json", t) catch {};
-        }
-        if (self.weights.position_embeddings) |t| {
-            debug.saveTensor(io, allocator, subdir, "zllama_vision_00_position_embeddings_weight.json", t) catch {};
-        }
-        if (self.weights.std_bias) |t| {
-            debug.saveTensor(io, allocator, subdir, "zllama_vision_00_std_bias.json", t) catch {};
-        }
-        if (self.weights.std_scale) |t| {
-            debug.saveTensor(io, allocator, subdir, "zllama_vision_00_std_scale.json", t) catch {};
-        }
-        if (self.weights.mm_input_proj_w) |t| {
-            debug.saveTensor(io, allocator, subdir, "zllama_vision_00_mm_input_proj_weight.json", t) catch {};
-        }
+        // if (self.weights.patch_embeddings_0) |t| {
+        //     debug.saveTensor(io, allocator, subdir, "zllama_vision_00_patch_embeddings_weight.json", t) catch {};
+        // }
+        // if (self.weights.position_embeddings) |t| {
+        //     debug.saveTensor(io, allocator, subdir, "zllama_vision_00_position_embeddings_weight.json", t) catch {};
+        // }
+        // if (self.weights.std_bias) |t| {
+        //     debug.saveTensor(io, allocator, subdir, "zllama_vision_00_std_bias.json", t) catch {};
+        // }
+        // if (self.weights.std_scale) |t| {
+        //     debug.saveTensor(io, allocator, subdir, "zllama_vision_00_std_scale.json", t) catch {};
+        // }
+        // if (self.weights.mm_input_proj_w) |t| {
+        //     debug.saveTensor(io, allocator, subdir, "zllama_vision_00_mm_input_proj_weight.json", t) catch {};
+        // }
     }
 };
 

@@ -320,6 +320,7 @@ pub fn buildGraph(
     cur = try vit_builder.buildVit(ctx, gf, cur, np, .rms_norm, p.ffn_op, null, w, p, addPos, .{
         .v_norm_eps = p.eps,
         .kq_scale = 1.0,
+        .v_norm = true,
     });
     cur.setName("vit_output");
     ggml.setOutput(cur);
