@@ -126,13 +126,13 @@ pub fn buildVit(
 
                 // Q/K/V as [d_head, n_head, n_pos, B]
                 // C++: Qcur = ggml_view_4d(ctx0, cur, d_head, n_head, n_pos, B, ...)
+                // C++: nb1 = ggml_row_size(cur->type, d_head), nb2 = cur->nb[1], nb3 = cur->nb[1] * n_pos
                 const row_size = ggml.Type.rowSize(qkv.dataType(), d_head);
-                const nb1: usize = @intCast(qkv.ne()[1]); // stride for n_head dimension
-                const nb2: usize = @intCast(nb1 * @as(usize, @intCast(n_pos))); // stride for n_pos dimension
-
-                Qcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb1, nb2, 0);
-                Kcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb1, nb2, ggml.Type.rowSize(qkv.dataType(), n_embd));
-                Vcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb1, nb2, ggml.Type.rowSize(qkv.dataType(), 2 * n_embd));
+                const nb2: usize = @intCast(qkv.nb()[1]); // stride for n_embd dimension (bytes)
+                const nb3: usize = nb2 * @as(usize, @intCast(n_pos)); // stride for n_pos dimension (bytes)
+                Qcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb2, nb3, 0);
+                Kcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb2, nb3, ggml.Type.rowSize(qkv.dataType(), n_embd));
+                Vcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb2, nb3, ggml.Type.rowSize(qkv.dataType(), 2 * n_embd));
 
                 // Q/K norm after split (fused path)
                 if (layer.q_norm) |qn| {
