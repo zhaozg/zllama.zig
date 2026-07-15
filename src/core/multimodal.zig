@@ -88,45 +88,16 @@ fn computeTargetSize(
 }
 
 /// 加载图像原始数据（不缩放），返回原始尺寸和 RGB 数据
+/// 通过 preprocess.loadImageRaw 复用 stb_image 绑定层，避免直接调用 stb_image API。
 fn loadImageRaw(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) !preprocess.ProcessedImage {
-    const cwd = std.Io.Dir.cwd();
-    const file = try cwd.openFile(io, file_path, .{ .mode = .read_only });
-    defer file.close(io);
-
-    const stat = try file.stat(io);
-    const raw = try allocator.alloc(u8, @intCast(stat.size));
-    defer allocator.free(raw);
-    const total_read = try file.readPositionalAll(io, raw, 0);
-    if (total_read != raw.len) return error.FileReadError;
-
-    var w: c_int = 0;
-    var h: c_int = 0;
-    var comp: c_int = 0;
-    const stb = @import("stb_image");
-    const pixels = stb.loadFromMemory(raw.ptr, @intCast(raw.len), &w, &h, &comp, 3);
-    if (pixels == null) {
-        const reason = stb.failureReason();
-        logger.err("stb_image failed to load {s}: {s}", .{ file_path, reason });
-        return error.ImageDecodeFailed;
-    }
-    defer stb.free(pixels);
-
-    const src_w: u32 = @intCast(w);
-    const src_h: u32 = @intCast(h);
-    const pixel_bytes = pixels.?[0..@as(usize, @intCast(src_w * src_h * 3))];
-
-    const owned = try allocator.alloc(u8, pixel_bytes.len);
-    @memcpy(owned, pixel_bytes);
-
-    logger.info("Loaded raw image: {d}x{d}", .{ src_w, src_h });
-
-    return preprocess.ProcessedImage{
-        .data = owned,
-        .width = src_w,
-        .height = src_h,
-        .allocator = allocator,
+    const result = preprocess.loadImageRaw(allocator, io, file_path) catch |err| {
+        logger.err("Failed to load image {s}: {}", .{ file_path, err });
+        return err;
     };
+    logger.info("Loaded raw image: {d}x{d}", .{ result.width, result.height });
+    return result;
 }
+
 
 /// Generate text from an image + prompt.
 pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, image_path: [:0]const u8, max_tokens: u32) !void {
@@ -143,7 +114,7 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
         logger.info("Image markers from MtmdContext: '{s}' / '{s}'", .{ ctx.img_beg, ctx.img_end });
     }
 
-    // 步骤 1: 先用 stb_image 加载原始图像尺寸（不缩放）
+    // 步骤 1: 加载原始图像（通过 preprocess.loadImageRaw → stb_image 绑定层）
     var raw_img = try loadImageRaw(ectx.allocator, io, image_path);
     defer raw_img.deinit();
 

@@ -1,6 +1,7 @@
 //! 多模态预处理模块
 //!
 //! 提供图像数据的预处理功能：resize + 像素归一化 + 动态分辨率计算。
+//! 所有图像解码操作通过 stb_image 绑定层（src/stb_image.zig）完成。
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -122,11 +123,12 @@ pub const ProcessedImage = struct {
 };
 
 // ============================================================================
-// 文件加载（stb_image 兼容）
+// 文件加载（通过 stb_image 绑定层）
 // ============================================================================
 
-pub fn loadImage(allocator: std.mem.Allocator, io: std.Io, filepath: []const u8, target_size: u32, format_hint: ?[]const u8) !ProcessedImage {
-    _ = format_hint;
+/// 从文件加载图像并解码为原始 RGB 数据（不缩放），返回原始尺寸。
+/// 所有图像解码操作均通过 src/stb_image.zig 封装层完成。
+pub fn loadImageRaw(allocator: std.mem.Allocator, io: std.Io, filepath: []const u8) !ProcessedImage {
     const cwd = std.Io.Dir.cwd();
     const file = try cwd.openFile(io, filepath, .{ .mode = .read_only });
     defer file.close(io);
@@ -142,7 +144,18 @@ pub fn loadImage(allocator: std.mem.Allocator, io: std.Io, filepath: []const u8,
     defer stb_image.free(pixels);
     const sw: u32 = @intCast(w);
     const sh: u32 = @intCast(h);
-    const resized = try bilinearResizeRGB(allocator, pixels.?[0..@as(usize, @intCast(sw * sh * 3))], sw, sh, target_size, target_size);
+    const pixel_bytes = pixels.?[0..@as(usize, @intCast(sw * sh * 3))];
+    const owned = try allocator.alloc(u8, pixel_bytes.len);
+    @memcpy(owned, pixel_bytes);
+    return .{ .data = owned, .width = sw, .height = sh, .allocator = allocator };
+}
+/// 从文件加载图像，解码并缩放到 target_size × target_size。
+/// 底层复用 loadImageRaw 完成解码，再通过 bilinearResizeRGB 缩放。
+pub fn loadImage(allocator: std.mem.Allocator, io: std.Io, filepath: []const u8, target_size: u32, format_hint: ?[]const u8) !ProcessedImage {
+    _ = format_hint;
+    var raw_img = try loadImageRaw(allocator, io, filepath);
+    defer raw_img.deinit();
+    const resized = try bilinearResizeRGB(allocator, raw_img.data, raw_img.width, raw_img.height, target_size, target_size);
     return .{ .data = resized, .width = target_size, .height = target_size, .allocator = allocator };
 }
 

@@ -396,6 +396,8 @@ pub fn buildGraphFromWeights(
         .ny = p.image_size,
     };
 
+    graph.debug.saveData(io, "debug_vision", "zllama_vision_00_images.json", "images", img_buf);
+
     var hparams = p.*;
     var builder = GraphBuilder{
         .weights = w,
