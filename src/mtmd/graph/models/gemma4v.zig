@@ -317,8 +317,7 @@ pub fn buildGraph(
 
     // 5. ViT blocks with 2D RoPE
     log.debug("Step 4: ViT blocks (n_layer={d})", .{p.n_layer});
-    cur = try vit_builder.buildVit(ctx, cur, np, .rms_norm, p.ffn_op, null, w, p, addPos, .{
-        .v_norm = true,
+    cur = try vit_builder.buildVit(ctx, gf, cur, np, .rms_norm, p.ffn_op, null, w, p, addPos, .{
         .v_norm_eps = p.eps,
         .kq_scale = 1.0,
     });

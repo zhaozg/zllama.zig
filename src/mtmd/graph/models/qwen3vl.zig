@@ -512,6 +512,7 @@ pub fn buildGraph(
             // Reference: cur = build_attn(layer.o_w, layer.o_b, Qcur, Kcur, Vcur, nullptr, kq_scale, il);
             cur = try graph.buildAttn(
                 ctx,
+                builder.gf,
                 layer.o_w orelse return error.MissingOutputWeight,
                 layer.o_b,
                 Qcur,

@@ -43,6 +43,7 @@ pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
 ///
 /// 参数:
 ///   - ctx: ggml 上下文
+///   - gf: ggml 计算图（用于 build_forward_expand）
 ///   - inp: 输入张量 [n_embd, n_patches, n_batch]
 ///   - n_pos: 位置数量
 ///   - norm_t: 归一化类型
@@ -59,6 +60,7 @@ pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
 /// 参考: clip.cpp clip_graph::build_vit()
 pub fn buildVit(
     ctx: *ggml.Context,
+    gf: *ggml.CGraph,
     inp: *ggml.Tensor,
     n_pos: i64,
     norm_t: NormType,
@@ -215,6 +217,7 @@ pub fn buildVit(
             const kq_scale = opts.kq_scale orelse (1.0 / @sqrt(@as(f32, @floatFromInt(d_head))));
             hidden = try attn_builder.buildAttn(
                 ctx,
+                gf,
                 layer.o_w orelse return error.MissingOutputWeight,
                 layer.o_b,
                 Qcur.?,
@@ -232,7 +235,7 @@ pub fn buildVit(
 
         // Layer scale 1 (optional)（对应 C++: if (layer.ls_1_w) { cur = ggml_mul(ctx0, cur, layer.ls_1_w); cb(cur, "attn_out_scaled", il); }）
         if (layer.ls_1_w) |ls1| {
-            hidden = hidden.mul(ctx, norm_builder.reshapeForBroadcast(ctx, ls1));
+            hidden = hidden.mul(ctx, ls1);
             cb(hidden, "attn_out_scaled", il_i32);
         }
 
@@ -282,7 +285,7 @@ pub fn buildVit(
         // Layer scale 2 (optional)
         // C++: if (layer.ls_2_w) { cur = ggml_mul(ctx0, cur, layer.ls_2_w); cb(cur, "ffn_out_scaled", il); }
         if (layer.ls_2_w) |ls2| {
-            hidden = hidden.mul(ctx, norm_builder.reshapeForBroadcast(ctx, ls2));
+            hidden = hidden.mul(ctx, ls2);
             cb(hidden, "ffn_out_scaled", il_i32);
         }
 
@@ -293,7 +296,7 @@ pub fn buildVit(
         // Layer scale out (optional)
         // C++: if (layer.ls_out_w) { cur = ggml_mul(ctx0, cur, layer.ls_out_w); cb(cur, "layer_out_scaled", il); }
         if (layer.ls_out_w) |ls_out| {
-            hidden = hidden.mul(ctx, norm_builder.reshapeForBroadcast(ctx, ls_out));
+            hidden = hidden.mul(ctx, ls_out);
             cb(hidden, "layer_out_scaled", il_i32);
         }
 
@@ -471,8 +474,13 @@ test "buildVit: basic ViT forward" {
         }
     }.f;
 
+    // Create a graph for testing
+    var gf = try ctx.newGraph();
+    defer gf.deinit();
+
     const result = try buildVit(
         &ctx,
+        &gf,
         inp,
         n_patches,
         .rms_norm,

@@ -408,10 +408,10 @@ pub fn buildGraph(
             Kcur = ggml.ropeMulti(ctx, Kcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 24, 32768, 10000, 1, 0, 1, 32, 1);
             Kcur.setName("blk");
 
-            // Attention
             const attn_mask: ?*ggml.Tensor = if (full_attn) null else window_mask;
             var attn_out = try graph.buildAttn(
                 ctx,
+                builder.gf,
                 layer.o_w orelse return error.MissingOutputWeight,
                 layer.o_b,
                 Qcur,

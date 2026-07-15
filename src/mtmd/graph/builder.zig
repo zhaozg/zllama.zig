@@ -119,6 +119,7 @@ pub const GraphBuilder = struct {
     ) !*ggml.Tensor {
         return vit_builder.buildVit(
             self.ctx0,
+            self.gf,
             inp,
             n_pos,
             norm_t,
@@ -197,6 +198,7 @@ pub const GraphBuilder = struct {
     ) !*ggml.Tensor {
         return attn_builder.buildAttn(
             self.ctx0,
+            self.gf,
             wo,
             wo_b,
             q_cur,
