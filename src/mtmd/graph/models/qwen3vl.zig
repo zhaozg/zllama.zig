@@ -318,19 +318,22 @@ pub fn buildGraph(
             const src = img.buf;
             const H: usize = @intCast(img_height);
             const W: usize = @intCast(img_width);
+            // HWC->CHW conversion: src is HWC layout, inp_raw expects CHW layout
+            // Ref: llama.cpp clip.cpp lines 3645-3665
             for (0..H) |y| {
                 for (0..W) |x| {
-                    const src_idx = (y * W + x) * 3;
-                    const dst_base = y * W + x;
-                    dst[dst_base] = src[src_idx];
-                    dst[dst_base + H * W] = src[src_idx + 1];
-                    dst[dst_base + 2 * H * W] = src[src_idx + 2];
+                    const hwc_idx = (y * W + x) * 3;
+                    const chw_base = y * W + x;
+                    dst[chw_base] = src[hwc_idx]; // R
+                    dst[chw_base + H * W] = src[hwc_idx + 1]; // G
+                    dst[chw_base + 2 * H * W] = src[hwc_idx + 2]; // B
                 }
             }
             try inp_raw.dataSet(f32, dst);
         }
 
         // Reference: ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1)
+
         // Reference: ggml_conv_2d(ctx0, model.patch_embeddings_1, inp_raw, patch_size, patch_size, 0, 0, 1, 1)
         // Reference: ggml_add(ctx0, conv0, conv1)
         const pe0 = w.patch_embeddings_0 orelse return error.MissingPatchEmbedding;
@@ -349,6 +352,9 @@ pub fn buildGraph(
         }
     }
 
+    // ============================================================================
+    // 2. Spatial merge
+    // Reference: ggml_permute(ctx0, inp, 1, 2, 0, 3) -> [w, h, c, b] -> [c, w, h, b]
     // ============================================================================
     // 2. Spatial merge
     // Reference: ggml_permute(ctx0, inp, 1, 2, 0, 3) -> [w, h, c, b] -> [c, w, h, b]

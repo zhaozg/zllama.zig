@@ -263,7 +263,7 @@ pub fn buildGraph(
     const gf = builder.gf;
     const w = builder.weights;
     const p = builder.hparams;
-    const img = builder.img;
+    _ = builder.img; // img data is filled after buildGraph returns (see buildGraphFromWeights)
 
     const ps: i32 = @intCast(p.patch_size);
     const npx: i32 = @divTrunc(@as(i32, @intCast(p.image_size)), ps);
@@ -272,42 +272,19 @@ pub fn buildGraph(
     const ne: i64 = @intCast(p.n_embd);
 
     log.debug("buildGraph: image_size={d} patch_size={d} npx={d} npy={d} np={d} ne={d}", .{ p.image_size, p.patch_size, npx, npy, np, ne });
-
     // 1. 创建输入张量 (match C++ build_inp_raw: 4D [W, H, C, 1], set_input)
+    //    Graph construction only — data is filled separately after buildGraph returns.
+    //    Ref: llama.cpp clip-graph.h build_inp_raw() creates empty tensor, clip.cpp fills data later.
     const n_batch: i64 = 1;
     const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(p.image_size)), @as(i64, @intCast(p.image_size)), 3, n_batch);
     inp_raw.setName("inp_raw");
     ggml.setInput(inp_raw);
-    // 从 builder.img 复制数据到 inp_raw
-    // img.buf 是 CHW 布局的 f32 数据 [C, H, W]
-    // inp_raw 是 4D tensor [W, H, C, 1]，ggml 内存布局也是 CHW (x最快, y次之, c最慢)
-    // 所以 img.buf 的布局与 inp_raw 的 ggml 内存布局一致，直接复制即可
-    {
-        const w_i64: i64 = @intCast(p.image_size);
-        const h_i64: i64 = @intCast(p.image_size);
-        const n = w_i64 * h_i64;
-        const buf = img.buf;
-        // In no_alloc mode, we must allocate the tensor data manually before calling dataSet.
-        // dataSet will try ggml_get_data first; if that returns null (no_alloc mode without
-        // manual allocation), it falls through to ggml_backend_tensor_set which crashes because
-        // the backend buffer hasn't been allocated by Gallocr yet.
-        if (ctx.getNoAlloc()) {
-            const sz = @as(usize, @intCast(inp_raw.nBytes()));
-            const data_buf = @as([*]u8, @ptrCast(std.c.malloc(sz) orelse return error.OutOfMemory))[0..sz];
-            inp_raw.setDataPtr(data_buf);
-        }
-        try inp_raw.dataSet(f32, buf[0..@as(usize, @intCast(3 * n))]);
-    }
 
     // 2. Scale+bias: patches * 2 - 1
+    //    Ref: gemma4v.cpp: inp_raw = ggml_scale_bias(ctx0, inp_raw, 2.0f, -1.0f);
     log.debug("Step 1: scale_bias", .{});
     var cur = inp_raw.scaleBias(ctx, 2.0, -1.0);
     cur.setName("inp_raw_scaled");
-
-    // 3. Conv2D patch embedding (NO patch_bias for Gemma4V)
-    log.debug("Step 2: conv2d patch embedding", .{});
-    const pw = w.patch_embeddings_0 orelse return error.MissingPatchEmbedding;
-    cur = cur.conv2d(ctx, pw, ps, ps, 0, 0, 1, 1);
     cur = cur.reshape3d(ctx, np, ne, 1);
     cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
     cur.setName("inp");
@@ -386,7 +363,6 @@ pub fn buildGraphFromWeights(
     p: *const VisionHParams,
     image_tensor: *ggml.Tensor,
 ) anyerror!*ggml.CGraph {
-    _ = io;
     const img_buf = try image_tensor.dataGet(f32, std.heap.page_allocator);
     // Note: img_buf is intentionally leaked (leak-to-exit) since ImageF32
     // is used during graph construction and the data must remain valid.
@@ -396,7 +372,7 @@ pub fn buildGraphFromWeights(
         .ny = p.image_size,
     };
 
-    graph.debug.saveData(io, "debug_vision", "zllama_vision_00_images.json", "images", img_buf);
+    try graph.debug.saveData(io, "debug_vision", "zllama_vision_00_images.json", "images", img_buf);
 
     var hparams = p.*;
     var builder = GraphBuilder{
@@ -408,5 +384,71 @@ pub fn buildGraphFromWeights(
         .gf = gf,
     };
 
-    return buildGraph(&builder);
+    // 1. Build graph (creates inp_raw tensor, sets name, marks as input)
+    _ = buildGraph(&builder) catch unreachable;
+
+    // 2. Fill inp_raw with pixel data (separate from graph construction, matching llama.cpp pattern)
+    //    Ref: llama.cpp clip.cpp lines 3645-3665: set_input_f32("inp_raw", inp_raw)
+    //
+    //    The image tensor (image_tensor) is created by resizeAndNormalize as a 3D [W, H, C] tensor
+    //    with HWC layout (matching llama.cpp convention):
+    //      ne[0]=W (innermost), ne[1]=H, ne[2]=C
+    //    Memory: [R0,G0,B0, R1,G1,B1, ..., R_n,G_n,B_n]
+    //
+    //    The inp_raw tensor is 4D [W, H, C, B] with CHW layout (ggml column-major):
+    //      ne[0]=W, ne[1]=H, ne[2]=C, ne[3]=B
+    //    Memory: [R0,R1,..., G0,G1,..., B0,B1,...]
+    //
+    //    So we need HWC->CHW conversion when filling inp_raw.
+    //    Ref: clip.cpp lines 3645-3665 does HWC->CHW conversion.
+
+    // 2. Fill inp_raw with pixel data (separate from graph construction, matching llama.cpp pattern)
+    //    Ref: llama.cpp clip.cpp lines 3645-3665: set_input_f32("inp_raw", inp_raw)
+    //
+    //    The image tensor (image_tensor) is created by resizeAndNormalize as a 3D [W, H, C] tensor
+    //    with HWC layout (matching llama.cpp convention):
+    //      ne[0]=W (innermost), ne[1]=H, ne[2]=C
+    //    Memory: [R0,G0,B0, R1,G1,B1, ..., R_n,G_n,B_n]
+    //
+    //    The inp_raw tensor is 4D [W, H, C, B] with CHW layout (ggml column-major):
+    //      ne[0]=W, ne[1]=H, ne[2]=C, ne[3]=B
+    //    Memory: [R0,R1,..., G0,G1,..., B0,B1,...]
+    //
+    //    So we need HWC->CHW conversion when filling inp_raw.
+    //    Ref: clip.cpp lines 3645-3665 does HWC->CHW conversion.
+    {
+        const inp_raw = gf.getTensor("inp_raw") orelse return error.TensorNotFound;
+        const W: usize = @intCast(p.image_size);
+        const H: usize = @intCast(p.image_size);
+        const n = W * H;
+        const src = img.buf;
+
+        // In no_alloc mode, we must allocate the tensor data manually before calling dataSet.
+        if (ctx.getNoAlloc()) {
+            const sz = @as(usize, @intCast(inp_raw.nBytes()));
+            const data_buf = @as([*]u8, @ptrCast(std.c.malloc(sz) orelse return error.OutOfMemory))[0..sz];
+            inp_raw.setDataPtr(data_buf);
+        }
+
+        // Allocate temporary buffer
+        const n_elems = @as(usize, @intCast(inp_raw.nElems()));
+        const dst = try std.heap.page_allocator.alloc(f32, n_elems);
+        defer std.heap.page_allocator.free(dst);
+
+        // HWC->CHW conversion: src is HWC layout, inp_raw expects CHW layout
+        // Ref: clip.cpp lines 3645-3665
+        for (0..H) |y| {
+            for (0..W) |x| {
+                const hwc_idx = (y * W + x) * 3;
+                const chw_base = y * W + x;
+                dst[chw_base] = src[hwc_idx]; // R channel
+                dst[chw_base + n] = src[hwc_idx + 1]; // G channel
+                dst[chw_base + 2 * n] = src[hwc_idx + 2]; // B channel
+            }
+        }
+
+        try inp_raw.dataSet(f32, dst);
+    }
+
+    return gf;
 }

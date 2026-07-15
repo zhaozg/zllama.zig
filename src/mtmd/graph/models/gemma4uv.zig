@@ -239,7 +239,9 @@ pub fn buildGraph(
         inp_raw.setDataPtr(buf);
     }
 
-    // 填充输入数据 (HWC planar layout matching ggml im2col expectation)
+    // 填充输入数据 — HWC→CHW 转换
+    // resizeAndNormalize 输出 HWC 布局，而 inp_raw 需要 CHW 布局（ggml im2col 期望）
+    // Ref: llama.cpp clip.cpp lines 3645-3665
     {
         const n_elems = @as(usize, @intCast(inp_raw.nElems()));
         const dst = try std.heap.page_allocator.alloc(f32, n_elems);
@@ -249,11 +251,11 @@ pub fn buildGraph(
         const W: usize = @intCast(img_width);
         for (0..H) |y| {
             for (0..W) |x| {
-                const src_idx = (y * W + x) * 3;
-                const dst_base = y * W + x;
-                dst[dst_base] = src[src_idx]; // R
-                dst[dst_base + H * W] = src[src_idx + 1]; // G
-                dst[dst_base + 2 * H * W] = src[src_idx + 2]; // B
+                const hwc_idx = (y * W + x) * 3;
+                const chw_base = y * W + x;
+                dst[chw_base] = src[hwc_idx]; // R
+                dst[chw_base + H * W] = src[hwc_idx + 1]; // G
+                dst[chw_base + 2 * H * W] = src[hwc_idx + 2]; // B
             }
         }
         try inp_raw.dataSet(f32, dst);
@@ -261,6 +263,11 @@ pub fn buildGraph(
 
     // ========================================================================
     // 2. im2col + patch norms + projection
+
+    // ========================================================================
+    // 2. im2col + patch norms + projection
+    // ========================================================================
+
     // ========================================================================
 
     // im2col: extract patches

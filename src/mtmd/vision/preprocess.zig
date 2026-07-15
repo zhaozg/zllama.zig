@@ -24,7 +24,7 @@ pub fn normalizeToTensor(
     const wh: usize = W * H;
 
     var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(img_width), @intCast(img_height), 3);
-    inp.setName("inp_raw");
+    // Don't set name "inp_raw" here — the model's buildGraph creates its own inp_raw tensor.
 
     const no_alloc = ctx.getNoAlloc();
     if (no_alloc) {
@@ -276,26 +276,27 @@ pub fn resizeAndNormalize(
     const sg: f64 = @floatCast(std_val[1]);
     const sb: f64 = @floatCast(std_val[2]);
 
+    // Normalize and store in HWC layout (matching llama.cpp convention)
+    // Memory: [R0,G0,B0, R1,G1,B1, ...]  — same as resized_u8 layout
     for (0..@as(usize, @intCast(size.h))) |y| {
         for (0..@as(usize, @intCast(size.w))) |x| {
             const hwc_idx = (y * @as(usize, @intCast(size.w)) + x) * 3;
-            const chw_idx = y * @as(usize, @intCast(size.w)) + x;
             const r_u8: f64 = @floatFromInt(resized_u8[hwc_idx + 0]);
             const g_u8: f64 = @floatFromInt(resized_u8[hwc_idx + 1]);
             const b_u8: f64 = @floatFromInt(resized_u8[hwc_idx + 2]);
-            normalized[chw_idx] = @as(f32, @floatCast((r_u8 / 255.0 - mr) / sr));
-            normalized[chw_idx + wh] = @as(f32, @floatCast((g_u8 / 255.0 - mg) / sg));
-            normalized[chw_idx + 2 * wh] = @as(f32, @floatCast((b_u8 / 255.0 - mb) / sb));
+            normalized[hwc_idx + 0] = @as(f32, @floatCast((r_u8 / 255.0 - mr) / sr));
+            normalized[hwc_idx + 1] = @as(f32, @floatCast((g_u8 / 255.0 - mg) / sg));
+            normalized[hwc_idx + 2] = @as(f32, @floatCast((b_u8 / 255.0 - mb) / sb));
         }
     }
-    log.warn("resizeAndNormalize: normalized first 9 elements (CHW): [{d:.6},{d:.6},{d:.6}, {d:.6},{d:.6},{d:.6}, {d:.6},{d:.6},{d:.6}]", .{
+    log.warn("resizeAndNormalize: normalized first 9 elements (HWC): [{d:.6},{d:.6},{d:.6}, {d:.6},{d:.6},{d:.6}, {d:.6},{d:.6},{d:.6}]", .{
         normalized[0], normalized[1], normalized[2],
         normalized[3], normalized[4], normalized[5],
         normalized[6], normalized[7], normalized[8],
     });
 
     var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(size.w), @intCast(size.h), 3);
-    inp.setName("inp_raw");
+    // Don't set name "inp_raw" here — the model's buildGraph creates its own inp_raw tensor.
 
     const no_alloc = ctx.getNoAlloc();
     if (no_alloc) {
@@ -307,6 +308,7 @@ pub fn resizeAndNormalize(
     try inp.dataSet(f32, normalized);
     return .{ .tensor = inp, .new_width = size.w, .new_height = size.h };
 }
+
 test "calcSizePreservedRatio: no resize" {
     const r = calcSizePreservedRatio(224, 224, 48, 18432, 589824);
     try std.testing.expectEqual(@as(u32, 224), r.w);

@@ -173,29 +173,36 @@ pub const ImageNormalize = enum { div255, imagenet, siglip, none };
 pub fn imageToTensor(ctx: *ggml.Context, image: *const ProcessedImage, normalize: ImageNormalize) !*ggml.Tensor {
     const W: usize = @intCast(image.width);
     const H: usize = @intCast(image.height);
-    const wh: usize = W * H;
     const tensor = try ctx.newTensor3d(ggml.Type.f32, @intCast(image.width), @intCast(image.height), 3);
     const n_elems = @as(usize, @intCast(tensor.nElems()));
     const data = try std.heap.page_allocator.alloc(f32, n_elems);
     defer std.heap.page_allocator.free(data);
+    // Store in HWC layout (matching llama.cpp convention)
+    // Memory: [R0,G0,B0, R1,G1,B1, ...]
     switch (normalize) {
-        .siglip => for (0..wh) |i| {
+        .siglip => for (0..W * H) |i| {
             const idx = i * 3;
-            data[i] = @as(f32, @floatFromInt(image.data[idx])) / 255.0 * 2.0 - 1.0;
-            data[i + wh] = @as(f32, @floatFromInt(image.data[idx + 1])) / 255.0 * 2.0 - 1.0;
-            data[i + 2 * wh] = @as(f32, @floatFromInt(image.data[idx + 2])) / 255.0 * 2.0 - 1.0;
+            const r: f32 = @as(f32, @floatFromInt(image.data[idx])) / 255.0 * 2.0 - 1.0;
+            const g: f32 = @as(f32, @floatFromInt(image.data[idx + 1])) / 255.0 * 2.0 - 1.0;
+            const b: f32 = @as(f32, @floatFromInt(image.data[idx + 2])) / 255.0 * 2.0 - 1.0;
+            data[idx + 0] = r;
+            data[idx + 1] = g;
+            data[idx + 2] = b;
         },
-        .none => for (0..wh) |i| {
+        .none => for (0..W * H) |i| {
             const idx = i * 3;
-            data[i] = @floatFromInt(image.data[idx]);
-            data[i + wh] = @floatFromInt(image.data[idx + 1]);
-            data[i + 2 * wh] = @floatFromInt(image.data[idx + 2]);
+            data[idx + 0] = @floatFromInt(image.data[idx]);
+            data[idx + 1] = @floatFromInt(image.data[idx + 1]);
+            data[idx + 2] = @floatFromInt(image.data[idx + 2]);
         },
-        .div255, .imagenet => for (0..wh) |i| {
+        .div255, .imagenet => for (0..W * H) |i| {
             const idx = i * 3;
-            data[i] = @as(f32, @floatFromInt(image.data[idx])) / 255.0;
-            data[i + wh] = @as(f32, @floatFromInt(image.data[idx + 1])) / 255.0;
-            data[i + 2 * wh] = @as(f32, @floatFromInt(image.data[idx + 2])) / 255.0;
+            const r: f32 = @as(f32, @floatFromInt(image.data[idx])) / 255.0;
+            const g: f32 = @as(f32, @floatFromInt(image.data[idx + 1])) / 255.0;
+            const b: f32 = @as(f32, @floatFromInt(image.data[idx + 2])) / 255.0;
+            data[idx + 0] = r;
+            data[idx + 1] = g;
+            data[idx + 2] = b;
         },
     }
     try tensor.dataSet(f32, data);

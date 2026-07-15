@@ -268,38 +268,44 @@ pub fn buildGraph(
         const src = img.buf;
         const H: usize = @intCast(img_height);
         const W: usize = @intCast(img_width);
+        // HWC->CHW conversion: src is HWC layout, inp_raw expects CHW layout
+        // Ref: llama.cpp clip.cpp lines 3645-3665
         for (0..H) |y| {
             for (0..W) |x| {
-                const src_idx = (y * W + x) * 3;
-                const dst_base = y * W + x;
-                dst[dst_base] = src[src_idx];
-                dst[dst_base + H * W] = src[src_idx + 1];
-                dst[dst_base + 2 * H * W] = src[src_idx + 2];
+                const hwc_idx = (y * W + x) * 3;
+                const chw_base = y * W + x;
+                dst[chw_base] = src[hwc_idx]; // R
+                dst[chw_base + H * W] = src[hwc_idx + 1]; // G
+                dst[chw_base + 2 * H * W] = src[hwc_idx + 2]; // B
             }
         }
         try inp_raw.dataSet(f32, dst);
     }
 
     // 2. Temporal merge: two Conv2D added together
+
+    // 2. Temporal merge: two Conv2D added together
     var inp: *ggml.Tensor = undefined;
-    if (w.patch_embeddings_0) |pe0| {
-        const kw: i32 = @intCast(pe0.ne()[0]);
-        const kh: i32 = @intCast(pe0.ne()[1]);
-        var conv0 = inp_raw.conv2d(ctx, pe0, kw, kh, 0, 0, 1, 1);
-        conv0.setName("conv0");
 
-        if (w.patch_embeddings_1) |pe1| {
-            var conv1 = inp_raw.conv2d(ctx, pe1, kw, kh, 0, 0, 1, 1);
-            conv1.setName("conv1");
-            inp = conv0.add(ctx, conv1);
-            inp.setName("temporal_merge");
+    {
+        if (w.patch_embeddings_0) |pe0| {
+            const kw: i32 = @intCast(pe0.ne()[0]);
+            const kh: i32 = @intCast(pe0.ne()[1]);
+            var conv0 = inp_raw.conv2d(ctx, pe0, kw, kh, 0, 0, 1, 1);
+            conv0.setName("conv0");
+
+            if (w.patch_embeddings_1) |pe1| {
+                var conv1 = inp_raw.conv2d(ctx, pe1, kw, kh, 0, 0, 1, 1);
+                conv1.setName("conv1");
+                inp = conv0.add(ctx, conv1);
+                inp.setName("temporal_merge");
+            } else {
+                inp = conv0;
+            }
         } else {
-            inp = conv0;
+            return error.MissingPatchEmbedding;
         }
-    } else {
-        return error.MissingPatchEmbedding;
     }
-
     // 3. Spatial merge
     // [w, h, c, b] -> [c, w, h, b] via permute(1, 2, 0, 3)
     inp = inp.permute(ctx, 1, 2, 0, 3).cont(ctx);
