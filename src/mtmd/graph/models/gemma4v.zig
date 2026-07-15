@@ -285,10 +285,16 @@ pub fn buildGraph(
     log.debug("Step 1: scale_bias", .{});
     var cur = inp_raw.scaleBias(ctx, 2.0, -1.0);
     cur.setName("inp_raw_scaled");
+
+    // 3. Conv2D patch embedding: ggml_conv_2d(ctx0, patch_embeddings_0, inp_raw_scaled, ps, ps, 0, 0, 1, 1)
+    //    Ref: gemma4v.cpp: inp = ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1);
+    //    Output shape: [n_embd, n_patches_w, n_patches_h, B]
+    //    Then reshape to [n_patches, n_embd, n_batch], then transpose to [n_embd, n_patches, n_batch]
+    const pe_w = w.patch_embeddings_0 orelse return error.MissingPatchEmbeddings;
+    cur = cur.conv2d(ctx, pe_w, ps, ps, 0, 0, 1, 1);
     cur = cur.reshape3d(ctx, np, ne, 1);
     cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
     cur.setName("inp");
-
     // 4. 2D Position embeddings (x/y lookup)
     const pe = w.position_embeddings orelse return error.MissingPositionEmbeddings;
     const psz: i64 = pe.ne()[1];
