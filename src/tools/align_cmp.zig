@@ -15,6 +15,7 @@
 //!   - 二进制: 连续 f32 小端字节序，无元数据
 
 const std = @import("std");
+const metrics_mod = @import("metrics");
 
 const log = std.log.scoped(.tool_align_cmp);
 
@@ -73,14 +74,8 @@ pub const AlignMetrics = struct {
 };
 
 /// Argmax 匹配结果
-pub const ArgmaxResult = struct {
-    ours: usize,
-    ref: usize,
-    match: bool,
-};
-
-// ============================================================================
-// 对齐比较器
+/// Argmax 匹配结果（重新导出共享类型以保证 API 兼容）
+pub const ArgmaxResult = metrics_mod.ArgmaxResult;
 // ============================================================================
 
 pub const AlignComparator = struct {
@@ -395,44 +390,26 @@ pub fn computeMetrics(v1: []const f32, v2: []const f32) AlignMetrics {
 }
 
 /// 计算 Argmax 匹配
+/// 委托给共享 metrics 模块
 pub fn calcArgmaxMatch(a: []const f32, b: []const f32) ArgmaxResult {
-    var max_a: f32 = -std.math.inf(f32);
-    var max_b: f32 = -std.math.inf(f32);
-    var idx_a: usize = 0;
-    var idx_b: usize = 0;
-
-    for (a, 0..) |v, i| {
-        if (v > max_a) {
-            max_a = v;
-            idx_a = i;
-        }
-    }
-    for (b, 0..) |v, i| {
-        if (v > max_b) {
-            max_b = v;
-            idx_b = i;
-        }
-    }
-
-    return .{ .ours = idx_a, .ref = idx_b, .match = idx_a == idx_b };
+    return metrics_mod.calcArgmaxMatch(a, b);
 }
 
 // ============================================================================
 // 判决
 // ============================================================================
-
 /// 输出算法对齐的判决结果
-pub fn alignmentVerdict(metrics: AlignMetrics, config: AlignCmpConfig) []const u8 {
-    if (metrics.cosine < config.tol_cosine) {
+pub fn alignmentVerdict(al_metrics: AlignMetrics, config: AlignCmpConfig) []const u8 {
+    if (al_metrics.cosine < config.tol_cosine) {
         return "❌ 对齐失败: 余弦相似度不满足要求";
     }
-    if (metrics.rmse > config.tol_rmse) {
+    if (al_metrics.rmse > config.tol_rmse) {
         return "❌ 对齐失败: 均方根误差 (RMSE) 超出允许误差";
     }
-    if (metrics.is_scaled) {
+    if (al_metrics.is_scaled) {
         return "⚠️ 疑似存在线性缩放，算法未完全对齐！";
     }
-    const ratio_deviation = @abs(metrics.avg_ratio - 1.0);
+    const ratio_deviation = @abs(al_metrics.avg_ratio - 1.0);
     if (ratio_deviation > config.tol_ratio_deviation) {
         return "⚠️ 平均幅值比值偏离 1.0，算法未完全对齐！";
     }

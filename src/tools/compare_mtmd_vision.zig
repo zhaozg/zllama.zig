@@ -27,7 +27,8 @@ const preprocess = @import("preprocess");
 const chat_template = @import("chat_template");
 const engine_common = @import("engine_common");
 const prefill = @import("prefill");
-
+const metrics = @import("metrics");
+const tokenize_cb = @import("tokenize_cb");
 const log = std.log.scoped(.tool_compare_mtmd_vision);
 
 // ============================================================================
@@ -52,13 +53,7 @@ pub const CompareMtmdVisionConfig = struct {
 // Tokenize callback for multimodal placeholder expansion
 // ============================================================================
 
-fn tokenizeTextSegment(ctx: ?*anyopaque, text: []const u8, alloc: std.mem.Allocator) ![]u32 {
-    const tok: *tokenizer.Tokenizer = @ptrCast(@alignCast(ctx orelse return error.NullCtx));
-    var result = try tok.encode(text, false, false);
-    defer result.deinit(alloc);
-    return try result.toOwnedSlice(alloc);
-}
-
+// tokenizeTextSegment: 使用共享 tokenize_cb 模块（见 src/tools/tokenize_cb.zig）
 // ============================================================================
 // 视觉对比器
 // ============================================================================
@@ -259,7 +254,7 @@ pub const MtmdVisionComparator = struct {
             self.allocator,
             formatted_prompt,
             @ptrCast(&tok),
-            tokenizeTextSegment,
+            tokenize_cb.tokenizeTextSegment,
             image_token_id,
             0, // audio_token_id (unused)
             @intCast(n_vision_tokens),
@@ -338,21 +333,18 @@ pub const MtmdVisionComparator = struct {
         }
 
         // 13. 计算指标
-        const nmse = calcNMSE(our_logits, ref_logits);
-        const cos_sim = calcCosineSimilarity(our_logits, ref_logits);
-        const max_abs_err = calcMaxAbsError(our_logits, ref_logits);
-        const argmax_match = calcArgmaxMatch(our_logits, ref_logits);
+        const nmse = metrics.calcNMSE(our_logits, ref_logits);
+        const cos_sim = metrics.calcCosineSimilarity(our_logits, ref_logits);
+        const max_abs_err = metrics.calcMaxAbsError(our_logits, ref_logits);
+        const argmax_match = metrics.calcArgmaxMatch(our_logits, ref_logits);
 
-        // Free our logits (heap-allocated by threeStagePrefill)
-        self.allocator.free(our_logits);
-
-        // 14. 输出结果
         const stdout_file = std.Io.File.stdout();
-        try stdout_file.writeStreamingAll(io, "\n=== zllama.zig Vision vs llama.cpp mtmd Comparison ===\n");
-        try printMetric(io, "NMSE", nmse, self.config.nmse_threshold, true);
-        try printMetric(io, "Cosine Similarity", cos_sim, self.config.cosine_threshold, false);
-        try printMetric(io, "Max Abs Error", max_abs_err, 0.01, true);
-        try printArgmaxResult(io, argmax_match);
+        try stdout_file.writeStreamingAll(io, "\n");
+        try stdout_file.writeStreamingAll(io, "=== Multimodal Vision Comparison ===\n");
+        try metrics.printMetric(io, "NMSE", nmse, self.config.nmse_threshold, true);
+        try metrics.printMetric(io, "Cosine Similarity", cos_sim, self.config.cosine_threshold, false);
+        try metrics.printMetric(io, "Max Abs Error", max_abs_err, 0.01, true);
+        try metrics.printArgmaxResult(io, argmax_match);
 
         const passed = nmse < self.config.nmse_threshold and cos_sim > self.config.cosine_threshold;
         if (passed) {
@@ -391,78 +383,8 @@ pub const MtmdVisionComparator = struct {
 // ============================================================================
 // 指标计算
 // ============================================================================
-
-fn calcNMSE(a: []const f32, b: []const f32) f64 {
-    var sum_sq_err: f64 = 0.0;
-    var sum_sq_ref: f64 = 0.0;
-    for (a, b) |av, bv| {
-        const err: f64 = @as(f64, @floatCast(av)) - @as(f64, @floatCast(bv));
-        sum_sq_err += err * err;
-        sum_sq_ref += @as(f64, @floatCast(av)) * @as(f64, @floatCast(av));
-    }
-    return sum_sq_err / (sum_sq_ref + 1e-10);
-}
-
-fn calcCosineSimilarity(a: []const f32, b: []const f32) f64 {
-    var dot: f64 = 0.0;
-    var norm_a: f64 = 0.0;
-    var norm_b: f64 = 0.0;
-    for (a, b) |av, bv| {
-        dot += @as(f64, @floatCast(av)) * @as(f64, @floatCast(bv));
-        norm_a += @as(f64, @floatCast(av)) * @as(f64, @floatCast(av));
-        norm_b += @as(f64, @floatCast(bv)) * @as(f64, @floatCast(bv));
-    }
-    return dot / (@sqrt(norm_a) * @sqrt(norm_b) + 1e-10);
-}
-
-fn calcMaxAbsError(a: []const f32, b: []const f32) f32 {
-    var max_err: f32 = 0.0;
-    for (a, b) |av, bv| {
-        const err = @abs(av - bv);
-        if (err > max_err) max_err = err;
-    }
-    return max_err;
-}
-
-const ArgmaxResult = struct { ours: usize, ref: usize, match: bool };
-
-fn calcArgmaxMatch(a: []const f32, b: []const f32) ArgmaxResult {
-    var max_ours: f32 = -std.math.inf(f32);
-    var max_ref: f32 = -std.math.inf(f32);
-    var idx_ours: usize = 0;
-    var idx_ref: usize = 0;
-    for (a, 0..) |v, i| {
-        if (v > max_ours) {
-            max_ours = v;
-            idx_ours = i;
-        }
-    }
-    for (b, 0..) |v, i| {
-        if (v > max_ref) {
-            max_ref = v;
-            idx_ref = i;
-        }
-    }
-    return .{ .ours = idx_ours, .ref = idx_ref, .match = idx_ours == idx_ref };
-}
-
-fn printMetric(io: std.Io, name: []const u8, value: anytype, threshold: anytype, lower_is_better: bool) !void {
-    const stdout_file = std.Io.File.stdout();
-    var buf: [256]u8 = undefined;
-    const pass = if (lower_is_better) value < threshold else value > threshold;
-    const status = if (pass) "✅" else "❌";
-    const line = try std.fmt.bufPrint(&buf, "  {s} {s}: {e} (threshold: {e})\n", .{ status, name, value, threshold });
-    try stdout_file.writeStreamingAll(io, line);
-}
-
-fn printArgmaxResult(io: std.Io, argmax: ArgmaxResult) !void {
-    const stdout_file = std.Io.File.stdout();
-    var buf: [256]u8 = undefined;
-    const status = if (argmax.match) "✅" else "❌";
-    const line = try std.fmt.bufPrint(&buf, "  {s} Argmax: ours={d}, ref={d}, match={}\n", .{ status, argmax.ours, argmax.ref, argmax.match });
-    try stdout_file.writeStreamingAll(io, line);
-}
-
+// Main
+// ============================================================================
 // ============================================================================
 // Main
 // ============================================================================

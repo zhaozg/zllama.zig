@@ -7,9 +7,35 @@ const ggml = @import("ggml");
 const gguf = @import("gguf");
 const graph = @import("graph");
 const config_mod = @import("config.zig");
+const encoder_debug = @import("encoder_debug");
 const log = std.log.scoped(.audio_encoder);
-
 pub const AudioEncoderBackend = graph.AudioEncoderBackend;
+
+/// Debug tensor entries: (tensor_name_in_graph, output_filename).
+/// Used by both markDebugOutputs and saveDebugData.
+pub const debug_entries = [_]encoder_debug.DebugTensorEntry{
+    .{ .tensor_name = "pos_emb", .filename = "zllama_audio_00_pos_emb.json" },
+    .{ .tensor_name = "kq_mask", .filename = "zllama_audio_00_kq_mask.json" },
+    .{ .tensor_name = "debug_audio_04_encoder_input", .filename = "zllama_audio_04_mel_input.json" },
+    .{ .tensor_name = "debug_audio_conv2d_0_output", .filename = "zllama_audio_05_conv2d_0_output.json" },
+    .{ .tensor_name = "debug_audio_conv2d_1_output", .filename = "zllama_audio_06_conv2d_1_output.json" },
+    .{ .tensor_name = "debug_audio_after_cont", .filename = "zllama_audio_07_after_cont.json" },
+    .{ .tensor_name = "debug_audio_flatten_output", .filename = "zllama_audio_08_flatten_output.json" },
+    .{ .tensor_name = "debug_audio_input_proj_output", .filename = "zllama_audio_09_input_proj_output.json" },
+    .{ .tensor_name = "debug_audio_half_step_1_output", .filename = "zllama_audio_10_layer0_half_step_1_output.json" },
+    .{ .tensor_name = "debug_audio_self_attention_with_RPE_output", .filename = "zllama_audio_11_layer0_self_attention_with_RPE_output.json" },
+    .{ .tensor_name = "debug_audio_conv_build_normal_output", .filename = "zllama_audio_12_conv_build_normal_output.json" },
+    .{ .tensor_name = "debug_audio_conv_glu_output", .filename = "zllama_audio_13_conv_pw1_glu_output.json" },
+    .{ .tensor_name = "debug_audio_conv_dw_output", .filename = "zllama_audio_14_conv_dw_output.json" },
+    .{ .tensor_name = "debug_audio_conv_dw_norm_silu_output", .filename = "zllama_audio_15_conv_dw_norm_silu_output.json" },
+    .{ .tensor_name = "debug_audio_convolution_output", .filename = "zllama_audio_16_layer0_convolution_output.json" },
+    .{ .tensor_name = "debug_audio_half_step_2_output", .filename = "zllama_audio_17_layer0_half_step_2_output.json" },
+    .{ .tensor_name = "debug_audio_layer_0_norm_output", .filename = "zllama_audio_18_layer0_norm_output.json" },
+    .{ .tensor_name = "debug_audio_conformer_blocks_output", .filename = "zllama_audio_19_conformer_blocks_output.json" },
+    .{ .tensor_name = "mm_norm", .filename = "zllama_audio_90_mm_norm.json" },
+    .{ .tensor_name = "mm_norm_scaled", .filename = "zllama_audio_91_mm_norm_scaled.json" },
+    .{ .tensor_name = "mm_proj", .filename = "zllama_audio_92_mm_proj.json" },
+};
 
 pub const AudioEncoder = struct {
     params: config_mod.AudioEncoderParams,
@@ -56,8 +82,6 @@ pub const AudioEncoder = struct {
     }
 
     /// Encode Mel spectrogram tensor — builds graph only; caller handles compute.
-    /// n_threads is not needed here because this function only builds the graph;
-    /// the caller (encodeMedia / generateWithAudio) passes n_threads to computeGraph.
     pub fn encode(
         self: *const AudioEncoder,
         io: std.Io,
@@ -120,52 +144,10 @@ pub const AudioEncoder = struct {
         return self.backend.estimateOutputTokens(io, actual_frames);
     }
 
-    // Names of intermediate tensors in the audio encoder graph that can be
-    // saved for debug/alignment analysis.
-    // These names must match the setName() calls in the model-specific buildGraph().
-    pub const debug_tensor_names = [_][]const u8{
-        "pos_emb",
-        "kq_mask",
-        "debug_audio_04_encoder_input",
-        "debug_audio_conv2d_0_output",
-        "debug_audio_conv2d_1_output",
-        "debug_audio_after_cont",
-        "debug_audio_flatten_output",
-        "debug_audio_input_proj_output",
-        "debug_audio_half_step_1_output",
-        "debug_audio_self_attention_with_RPE_output",
-        "debug_audio_conv_build_normal_output",
-        "debug_audio_conv_glu_output",
-        "debug_audio_conv_dw_output",
-        "debug_audio_conv_dw_norm_silu_output",
-        "debug_audio_convolution_output",
-        "debug_audio_half_step_2_output",
-        "debug_audio_layer_0_norm_output",
-        "debug_audio_conformer_blocks_output",
-        "mm_norm",
-        "mm_norm_scaled",
-        "mm_proj",
-    };
-
-    // Mark intermediate tensors in the graph with ggml.setOutput() so that
-    // their data is preserved after graph computation.
-    //
-    // This MUST be called BEFORE graph allocation/computation (i.e. before
-    // Gallocr.allocGraph or ggml_backend_graph_compute). Without setOutput(),
-    // the graph allocator may reuse the memory buffers of intermediate tensors,
-    // causing saveDebugData() to read stale/overwritten data.
-    //
-    // Call this right after buildGraph() returns, before computeGraph().
-    //
-    // Parameters:
-    //   - cgraph: the computed graph (must have tensors named via setName())
+    /// Mark intermediate tensors with ggml.setOutput() so their data
+    /// is preserved after graph computation. Delegates to shared encoder_debug.
     pub fn markDebugOutputs(cgraph: *ggml.CGraph) void {
-        const debug = @import("debug");
-        for (debug_tensor_names) |name| {
-            debug.markTensorAsOutput(cgraph, name) catch |err| {
-                log.warn("markDebugOutputs: failed to mark '{s}': {}", .{ name, err });
-            };
-        }
+        encoder_debug.markDebugOutputs(cgraph, &debug_entries, log);
     }
 
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {
@@ -173,41 +155,16 @@ pub const AudioEncoder = struct {
         allocator.free(self.weights.layers);
     }
 
+    /// Save debug data for audio encoder alignment analysis with llama.cpp.
+    /// Uses shared encoder_debug.saveDebugTensors for graph tensors.
     pub fn saveDebugData(self: *const AudioEncoder, io: std.Io, allocator: std.mem.Allocator, cgraph: *ggml.CGraph) void {
-        const debug = @import("debug");
         const subdir = "debug_audio";
-
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_00_pos_emb.json", "pos_emb", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_00_kq_mask.json", "kq_mask", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_04_mel_input.json", "debug_audio_04_encoder_input", cgraph) catch {};
-
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_05_conv2d_0_output.json", "debug_audio_conv2d_0_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_06_conv2d_1_output.json", "debug_audio_conv2d_1_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_07_after_cont.json", "debug_audio_after_cont", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_08_flatten_output.json", "debug_audio_flatten_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_09_input_proj_output.json", "debug_audio_input_proj_output", cgraph) catch {};
-
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_10_layer0_half_step_1_output.json", "debug_audio_half_step_1_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_11_layer0_self_attention_with_RPE_output.json", "debug_audio_self_attention_with_RPE_output", cgraph) catch {};
-
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_12_conv_build_normal_output.json", "debug_audio_conv_build_normal_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_13_conv_pw1_glu_output.json", "debug_audio_conv_glu_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_14_conv_dw_output.json", "debug_audio_conv_dw_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_15_conv_dw_norm_silu_output.json", "debug_audio_conv_dw_norm_silu_output", cgraph) catch {};
-
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_16_layer0_convolution_output.json", "debug_audio_convolution_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_17_layer0_half_step_2_output.json", "debug_audio_half_step_2_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_18_layer0_norm_output.json", "debug_audio_layer_0_norm_output", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_19_conformer_blocks_output.json", "debug_audio_conformer_blocks_output", cgraph) catch {};
-
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_90_mm_norm.json", "mm_norm", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_91_mm_norm_scaled.json", "mm_norm_scaled", cgraph) catch {};
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_audio_92_mm_proj.json", "mm_proj", cgraph) catch {};
+        encoder_debug.saveDebugTensors(io, allocator, subdir, &debug_entries, cgraph, log);
 
         // Save weight tensors (only if available — gemma4ua may not have sscp_conv_w)
+        const debug = @import("debug");
         if (self.weights.sscp_conv_w[0]) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_0_weight.json", t) catch {};
         if (self.weights.sscp_conv_w[1]) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_1_weight.json", t) catch {};
-
         if (self.weights.sscp_inp_proj_w) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_input_proj_weight.json", t) catch {};
         if (self.weights.audio_out_proj_w) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_out_proj_weight.json", t) catch {};
         if (self.weights.mm_input_proj_w) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_mm_input_proj_weight.json", t) catch {};

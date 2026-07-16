@@ -4,12 +4,20 @@
 //! 参考 llama.cpp 的 llm_graph_context 设计。
 //!
 //! 每个模型通过 GraphBuilder 构建计算图，共享算子通过此上下文调用。
+//!
+//! GraphBuilder 的 build* 方法委托给 src/layers/ 模块，
+//! 确保与模型直接调用的 layers/ 函数共享同一实现，消除重复代码。
 
 const std = @import("std");
 const ggml = @import("ggml");
 const model_if = @import("model");
 const memory = @import("memory");
+
+// 委托给共享 layers 模块
+const rms_norm = @import("rms_norm");
 const rope = @import("rope");
+const attention = @import("attention");
+const swiglu = @import("swiglu");
 
 /// RoPE 配置
 pub const RopeConfig = struct {
@@ -65,23 +73,16 @@ pub const GraphBuilder = struct {
     // 归一化操作
     // ======================================================================
 
-    /// 构建 RMS 归一化
-    /// x: [n_embd, n_tokens]
-    /// weight: [n_embd]
+    /// 构建 RMS 归一化（委托给 layers/rms_norm 模块）
     pub fn buildRmsNorm(self: *GraphBuilder, x: *ggml.Tensor, weight: *ggml.Tensor, eps: f32) *ggml.Tensor {
-        var result = ggml.rmsNorm(self.ctx, x, eps);
-        result = ggml.mul(self.ctx, result, ggml.reshape2d(self.ctx, weight, @intCast(self.params.n_embd), 1));
-        return result;
+        return rms_norm.rmsNorm(self.ctx, x, weight, eps);
     }
 
     // ======================================================================
     // RoPE 位置编码
     // ======================================================================
 
-    /// 对 Q 和 K 应用 RoPE
-    /// q: [head_dim, n_head, n_tokens]
-    /// k: [head_dim, n_kv_head, n_tokens]
-    /// pos: [n_tokens] 位置索引
+    /// 对 Q 和 K 应用 RoPE（委托给 layers/rope 模块）
     pub fn buildRope(
         self: *GraphBuilder,
         q: *ggml.Tensor,
@@ -89,41 +90,16 @@ pub const GraphBuilder = struct {
         pos: *ggml.Tensor,
         config: RopeConfig,
     ) struct { q: *ggml.Tensor, k: *ggml.Tensor } {
-        const q_rope = ggml.ropeExt(
-            self.ctx,
-            q,
-            pos,
-            null,
-            @intCast(config.rope_dim),
-            config.mode,
-            0,
-            config.rope_theta,
-            config.freq_scale,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-        );
-        const k_rope = ggml.ropeExt(
-            self.ctx,
-            k,
-            pos,
-            null,
-            @intCast(config.rope_dim),
-            config.mode,
-            0,
-            config.rope_theta,
-            config.freq_scale,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-        );
-        return .{ .q = q_rope, .k = k_rope };
+        const result = rope.applyRope(self.ctx, q, k, pos, .{
+            .rope_dim = config.rope_dim,
+            .rope_theta = config.rope_theta,
+            .rope_scaling_factor = config.freq_scale,
+            .mode = config.mode,
+        });
+        return .{ .q = result.q, .k = result.k };
     }
 
-    /// 构建位置张量 [start_pos, start_pos+1, ..., start_pos+n_tokens-1]
-    /// 委托给 rope 模块的实现
+    /// 构建位置张量（委托给 layers/rope 模块）
     pub fn buildPositionTensor(self: *GraphBuilder, n_tokens: i32, start_pos: i32) !*ggml.Tensor {
         return rope.buildPositionTensor(self.ctx, n_tokens, start_pos);
     }
@@ -132,10 +108,7 @@ pub const GraphBuilder = struct {
     // 注意力操作
     // ======================================================================
 
-    /// 构建缩放点积注意力
-    /// q: [head_dim, n_head, n_tokens] (已 RoPE)
-    /// k: [head_dim, n_kv_head, cache_len] (已 RoPE)
-    /// v: [head_dim, n_kv_head, cache_len]
+    /// 构建缩放点积注意力（委托给 layers/attention 模块）
     pub fn buildAttention(
         self: *GraphBuilder,
         q: *ggml.Tensor,
@@ -148,49 +121,22 @@ pub const GraphBuilder = struct {
         cache_len: i64,
         start_pos: i32,
     ) *ggml.Tensor {
-        const scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
-        _ = n_kv_head;
-
-        // permute(0,2,1,3) 与 llama.cpp build_attn_mha 一致
-        var q_perm = ggml.permute(self.ctx, q, 0, 2, 1, 3);
-        q_perm = ggml.cont(self.ctx, q_perm);
-        var k_perm = ggml.permute(self.ctx, k, 0, 2, 1, 3);
-        k_perm = ggml.cont(self.ctx, k_perm);
-        var v_perm = ggml.permute(self.ctx, v, 0, 2, 1, 3);
-        v_perm = ggml.cont(self.ctx, v_perm);
-
-        // kq = k @ q (mul_mat, ggml 自动处理 GQA 广播)
-        var kq = ggml.mulMat(self.ctx, k_perm, q_perm);
-        kq = ggml.scale(self.ctx, kq, scale_factor);
-
-        // 因果 mask + softmax
-        kq = ggml.reshape2d(self.ctx, kq, cache_len, n_tokens * n_head);
-        kq = ggml.diagMaskInf(self.ctx, kq, start_pos);
-        kq = ggml.softMax(self.ctx, kq);
-        kq = ggml.reshape3d(self.ctx, kq, cache_len, n_tokens, n_head);
-
-        // v^T @ kq
-        const v_t = ggml.cont(self.ctx, ggml.transpose(self.ctx, v_perm));
-        var kqv = ggml.mulMat(self.ctx, v_t, kq);
-
-        // permute(0,2,1,3) 恢复布局
-        kqv = ggml.permute(self.ctx, kqv, 0, 2, 1, 3);
-        kqv = ggml.cont(self.ctx, kqv);
-
-        // 展平为 [n_head * head_dim, n_tokens]
-        kqv = ggml.reshape2d(self.ctx, kqv, n_head * head_dim, n_tokens);
-        return kqv;
+        return attention.scaledDotProductAttention(self.ctx, q, k, v, .{
+            .n_head = n_head,
+            .n_kv_head = n_kv_head,
+            .head_dim = head_dim,
+            .n_tokens = n_tokens,
+            .cache_len = cache_len,
+            .start_pos = start_pos,
+            .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
+        }, null);
     }
 
     // ======================================================================
     // FFN 操作
     // ======================================================================
 
-    /// 构建 SwiGLU FFN
-    /// x: [n_embd, n_tokens]
-    /// gate: [n_ff, n_embd]
-    /// up: [n_ff, n_embd]
-    /// down: [n_embd, n_ff]
+    /// 构建 SwiGLU FFN（委托给 layers/swiglu 模块）
     pub fn buildSwiGLU(
         self: *GraphBuilder,
         x: *ggml.Tensor,
@@ -198,11 +144,7 @@ pub const GraphBuilder = struct {
         up: *ggml.Tensor,
         down: *ggml.Tensor,
     ) *ggml.Tensor {
-        const gate_out = ggml.mulMat(self.ctx, gate, x);
-        const up_out = ggml.mulMat(self.ctx, up, x);
-        const silu_out = ggml.silu(self.ctx, gate_out);
-        const mul_out = ggml.mul(self.ctx, silu_out, up_out);
-        return ggml.mulMat(self.ctx, down, mul_out);
+        return swiglu.swiGLU(self.ctx, x, gate, up, down);
     }
 
     // ======================================================================
@@ -213,7 +155,6 @@ pub const GraphBuilder = struct {
     pub fn forwardExpand(self: *GraphBuilder, tensor: *ggml.Tensor) void {
         self.gf.buildForwardExpand(tensor);
     }
-
     /// 设置输出张量
     pub fn setOutput(self: *GraphBuilder, tensor: *ggml.Tensor) void {
         _ = self;

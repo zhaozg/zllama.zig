@@ -173,6 +173,9 @@ pub fn build(b: *std.Build) void {
     });
     graph_builder_mod.addImport("ggml", ggml_mod);
     graph_builder_mod.addImport("rope", rope_mod);
+    graph_builder_mod.addImport("rms_norm", rms_norm_mod);
+    graph_builder_mod.addImport("attention", attention_mod);
+    graph_builder_mod.addImport("swiglu", swiglu_mod);
 
     graph_builder_mod.addImport("model", model_mod);
     graph_builder_mod.addImport("memory", memory_mod);
@@ -201,7 +204,6 @@ pub fn build(b: *std.Build) void {
     engine_common_mod.addImport("ggml", ggml_mod);
     engine_common_mod.addImport("model", model_mod);
 
-
     const memory_pool_mod = b.createModule(.{
         .root_source_file = b.path("src/core/memory_pool.zig"),
         .target = target,
@@ -221,6 +223,16 @@ pub fn build(b: *std.Build) void {
     prefill_mod.addImport("kv_cache", kv_cache_mod);
     prefill_mod.addImport("model", model_mod);
     prefill_mod.addImport("engine_common", engine_common_mod);
+
+    // ===================================================================
+    // Shared tool module: metrics
+    // ===================================================================
+    const metrics_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/metrics.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
 
     const registry_mod = b.createModule(.{
         .root_source_file = b.path("src/models/registry.zig"),
@@ -285,6 +297,13 @@ pub fn build(b: *std.Build) void {
     });
     sampler_mod.addImport("ggml", ggml_mod);
 
+    const tokenize_cb_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/tokenize_cb.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    tokenize_cb_mod.addImport("tokenizer", tokenizer_mod);
     const chat_template_mod = b.createModule(.{
         .root_source_file = b.path("src/chat_template/mod.zig"),
         .target = target,
@@ -413,7 +432,6 @@ pub fn build(b: *std.Build) void {
     embedding_gen_mod.addImport("graph_builder", graph_builder_mod);
     embedding_gen_mod.addImport("tokenizer", tokenizer_mod);
 
-
     // ======================================================================
     // 多模态模块
     // ======================================================================
@@ -447,6 +465,15 @@ pub fn build(b: *std.Build) void {
     mm_graph_mod.addImport("weight_loader", weight_loader_mod);
     mm_graph_mod.addImport("debug", debug_mod);
 
+    const encoder_debug_mod = b.createModule(.{
+        .root_source_file = b.path("src/mtmd/encoder_debug.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    encoder_debug_mod.addImport("ggml", ggml_mod);
+    encoder_debug_mod.addImport("debug", debug_mod);
+
     const mm_audio_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/audio/mod.zig"),
         .target = target,
@@ -459,6 +486,7 @@ pub fn build(b: *std.Build) void {
     mm_audio_mod.addImport("fft", fft_mod);
     mm_audio_mod.addImport("graph", mm_graph_mod);
     mm_audio_mod.addImport("debug", debug_mod);
+    mm_audio_mod.addImport("encoder_debug", encoder_debug_mod);
 
     const mm_vision_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/vision/mod.zig"),
@@ -471,6 +499,7 @@ pub fn build(b: *std.Build) void {
     mm_vision_mod.addImport("weight_loader", weight_loader_mod);
     mm_vision_mod.addImport("graph", mm_graph_mod);
     mm_vision_mod.addImport("debug", debug_mod);
+    mm_vision_mod.addImport("encoder_debug", encoder_debug_mod);
 
     const utils_mod = b.createModule(.{
         .root_source_file = b.path("src/utils.zig"),
@@ -551,7 +580,6 @@ pub fn build(b: *std.Build) void {
         tokenize_mod.addImport("preprocess", mm_preprocess_mod);
         mm_manager_mod.addImport("tokenize", tokenize_mod);
     }
-
 
     // --- 核心引擎多模态子模块（从 engine.zig 拆分 refact.md §1） ---
     const multimodal_mod = b.createModule(.{
@@ -684,7 +712,6 @@ pub fn build(b: *std.Build) void {
     test_root_mod.addImport("graph", mm_graph_mod);
     test_root_mod.addImport("memory_pool", memory_pool_mod);
     test_root_mod.addImport("vision", mm_vision_mod);
-
 
     // 测试工具模块（src/tests/utils.zig），与 src/utils.zig 不同
     const test_utils_mod_for_root = b.createModule(.{
@@ -1036,6 +1063,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("tokenizer", tokenizer_mod);
         mod.addImport("kv_cache", kv_cache_mod);
 
+        mod.addImport("metrics", metrics_mod);
         const exe_tool = b.addExecutable(.{
             .name = "zllama-compare-llamacpp",
             .root_module = mod,
@@ -1071,6 +1099,8 @@ pub fn build(b: *std.Build) void {
         mod.addImport("chat_template", chat_template_mod);
         mod.addImport("engine_common", engine_common_mod);
         mod.addImport("prefill", prefill_mod);
+        mod.addImport("metrics", metrics_mod);
+        mod.addImport("tokenize_cb", tokenize_cb_mod);
 
         const exe_tool = b.addExecutable(.{
             .name = "zllama-compare-mtmd-vision",
@@ -1108,6 +1138,8 @@ pub fn build(b: *std.Build) void {
         mod.addImport("engine_common", engine_common_mod);
         mod.addImport("prefill", prefill_mod);
 
+        mod.addImport("metrics", metrics_mod);
+        mod.addImport("tokenize_cb", tokenize_cb_mod);
         const exe_tool = b.addExecutable(.{
             .name = "zllama-compare-mtmd-audio",
             .root_module = mod,
@@ -1120,7 +1152,6 @@ pub fn build(b: *std.Build) void {
         _ = b.step("compare-mtmd-audio", "Run zllama-compare-mtmd-audio tool");
     }
 
-
     {
         // zllama-align-cmp: vector alignment comparison tool
         const mod = b.createModule(.{
@@ -1129,7 +1160,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         });
-
+        mod.addImport("metrics", metrics_mod);
         const exe_tool = b.addExecutable(.{
             .name = "zllama-align-cmp",
             .root_module = mod,
