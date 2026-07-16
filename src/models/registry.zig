@@ -18,6 +18,7 @@ const llama = @import("model").llama;
 const gemma3 = @import("model").gemma3;
 const gemma4 = @import("model").gemma4;
 const embedding = @import("model").embedding;
+const minicpm = @import("model").minicpm;
 
 const log = std.log.scoped(.model_registry);
 
@@ -63,6 +64,15 @@ pub fn createModel(
             try m.init(allocator, gguf_file, io);
             return model_if.ModelInstance{
                 .vtable = &llama.LlamaModel.vtable,
+                .ptr = @as(*anyopaque, @ptrCast(m)),
+            };
+        },
+        .minicpm => {
+            var m = try allocator.create(minicpm.MiniCPMModel);
+            errdefer allocator.destroy(m);
+            try m.init(allocator, gguf_file, io);
+            return model_if.ModelInstance{
+                .vtable = &minicpm.MiniCPMModel.vtable,
                 .ptr = @as(*anyopaque, @ptrCast(m)),
             };
         },
@@ -240,6 +250,9 @@ pub fn detectCapabilities(gguf_file: *const gguf.GGUFFile, arch: model_if.Archit
         },
         .embedding_qwen2 => {
             // Embedding models: no vision/audio, text-only
+        },
+        .minicpm => {
+            // MiniCPM: text-only by default
         },
     }
 

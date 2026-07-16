@@ -1,7 +1,13 @@
-//! LLaMA 系列模型实现
+//! MiniCPM 系列模型实现
 //!
-//! 支持 LLaMA 2 / 3 / 3.1 架构。
-//! 标准 Transformer 架构：RMSNorm + RoPE + GQA + SwiGLU FFN。
+//! 支持 MiniCPM / MiniCPM5 架构。
+//! MiniCPM 架构与 Granite 共享图构建逻辑，本质上与 LLaMA 架构相同，
+//! 但额外支持 f_embedding_scale、f_residual_scale、f_logit_scale 等缩放参数。
+//!
+//! 参考 llama.cpp: src/models/minicpm.cpp, src/models/granite.cpp
+//!
+//! 注意：MiniCPM5 的 GGUF 文件可能使用 general.architecture = 'llama'，
+//! 此时会走 LLaMA 模型路径。本模块处理 general.architecture = 'minicpm' 的情况。
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -19,19 +25,24 @@ const weight_loader = @import("weight_loader");
 
 const model = @import("../model.zig");
 
-const log = std.log.scoped(.model_llama);
+const log = std.log.scoped(.model_minicpm);
 
 // ============================================================================
-// LLaMA 特有超参数
+// MiniCPM 特有超参数
 // ============================================================================
 
-pub const LlamaParams = struct {
+pub const MiniCPMParams = struct {
     base: model.ModelParams = .{},
     rope_scaling: ?model.RopeScaling = null,
+    // MiniCPM / Granite 缩放参数
+    embedding_scale: f32 = 12.0,
+    residual_scale: f32 = 1.4,
+    logit_scale: f32 = 1.0,
+    attention_scale: f32 = 0.0,
 };
 
 // ============================================================================
-// LLaMA 模型权重
+// MiniCPM 模型权重
 // ============================================================================
 
 pub const LayerWeights = struct {
@@ -53,11 +64,11 @@ pub const LayerWeights = struct {
     ffn_down_weight: *ggml.Tensor,
 };
 
-pub const LlamaWeights = struct {
+pub const MiniCPMWeights = struct {
     base: model.ModelWeights,
     layers: []LayerWeights,
 
-    pub fn deinit(self: *LlamaWeights, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *MiniCPMWeights, allocator: std.mem.Allocator) void {
         for (self.layers) |*layer| {
             allocator.free(layer.prefix);
         }
@@ -66,38 +77,37 @@ pub const LlamaWeights = struct {
 };
 
 // ============================================================================
-pub const LlamaModel = struct {
-    params: LlamaParams,
-    weights: LlamaWeights,
+pub const MiniCPMModel = struct {
+    params: MiniCPMParams,
+    weights: MiniCPMWeights,
     ctx_weights: *ggml.Context,
 
-    pub fn init(self: *LlamaModel, allocator: std.mem.Allocator, gguf_file: *gguf.GGUFFile, io: std.Io) !void {
+    pub fn init(self: *MiniCPMModel, allocator: std.mem.Allocator, gguf_file: *gguf.GGUFFile, io: std.Io) !void {
         _ = io;
         self.params = try parseParams(gguf_file, allocator);
 
         // 根据模型参数动态估计所需内存
-        // 对于 Q4_K_M 量化，每个参数约 0.5 字节，加上元数据开销
         const mem_size_estimate = weight_loader.estimateMemSize(gguf_file);
         self.ctx_weights = try ggml.Context.initNoAlloc(mem_size_estimate);
 
         self.weights = try loadWeights(gguf_file, self.ctx_weights, &self.params, allocator);
     }
 
-    pub fn deinit(self: *LlamaModel, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *MiniCPMModel, allocator: std.mem.Allocator) void {
         self.weights.deinit(allocator);
         self.ctx_weights.deinit();
     }
 
-    pub fn getParams(self: *const LlamaModel) *const model.ModelParams {
+    pub fn getParams(self: *const MiniCPMModel) *const model.ModelParams {
         return &self.params.base;
     }
 
-    pub fn getWeights(self: *const LlamaModel) *const model.ModelWeights {
+    pub fn getWeights(self: *const MiniCPMModel) *const model.ModelWeights {
         return &self.weights.base;
     }
 
     pub fn forward(
-        self: *LlamaModel,
+        self: *MiniCPMModel,
         ctx: *ggml.Context,
         graph: *ggml.CGraph,
         input_tokens: *ggml.Tensor,
@@ -117,6 +127,10 @@ pub const LlamaModel = struct {
         var cur = embed.tokenEmbedding(ctx, w.base.token_embd, input_tokens);
         cur.setName("token_embd");
 
+        // MiniCPM: scale the input embeddings
+        cur = ggml.scale(ctx, cur, p.embedding_scale);
+        cur.setName("inp_scaled");
+
         // 逐层处理
         for (w.layers, 0..) |*layer, i| {
             var name_buf: [128]u8 = undefined;
@@ -134,7 +148,7 @@ pub const LlamaModel = struct {
             var k = ggml.mulMat(ctx, layer.attn_k_weight, attn_input);
             var v = ggml.mulMat(ctx, layer.attn_v_weight, attn_input);
 
-            // 重塑为 [head_dim, n_head/kv_head, n_tokens]（与 llama.cpp 布局一致）
+            // 重塑为 [head_dim, n_head/kv_head, n_tokens]
             q = ggml.reshape3d(ctx, q, head_dim, n_head, n_tokens_i64);
             k = ggml.reshape3d(ctx, k, head_dim, n_kv_head, n_tokens_i64);
             v = ggml.reshape3d(ctx, v, head_dim, n_kv_head, n_tokens_i64);
@@ -162,6 +176,11 @@ pub const LlamaModel = struct {
                 n_tokens_i64;
 
             // 注意力计算
+            const kq_scale = if (p.attention_scale == 0.0)
+                1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)))
+            else
+                p.attention_scale;
+
             var attn_out = attention.scaledDotProductAttention(ctx, q, k, v, .{
                 .n_head = n_head,
                 .n_kv_head = n_kv_head,
@@ -169,8 +188,8 @@ pub const LlamaModel = struct {
                 .n_tokens = n_tokens_i64,
                 .cache_len = cache_len,
                 .start_pos = start_pos,
-                .scale_factor = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
-            }, null); // LLaMA: no SWA mask
+                .scale_factor = kq_scale,
+            }, null);
 
             // 输出投影
             attn_out = ggml.mulMat(ctx, layer.attn_output_weight, attn_out);
@@ -178,6 +197,11 @@ pub const LlamaModel = struct {
                 const name = std.fmt.bufPrint(&name_buf, "blk.{d}.attn_out", .{i}) catch unreachable;
                 name_buf[name.len] = 0;
                 attn_out.setName(name_buf[0..name.len :0]);
+            }
+
+            // MiniCPM: scale residual
+            if (p.residual_scale != 0.0) {
+                attn_out = ggml.scale(ctx, attn_out, p.residual_scale);
             }
 
             // 残差连接
@@ -198,6 +222,11 @@ pub const LlamaModel = struct {
                 ffn_out.setName(name_buf[0..name.len :0]);
             }
 
+            // MiniCPM: scale residual
+            if (p.residual_scale != 0.0) {
+                _ = ggml.scale(ctx, ffn_out, p.residual_scale);
+            }
+
             cur = ggml.add(ctx, cur, ffn_out);
         }
 
@@ -210,15 +239,18 @@ pub const LlamaModel = struct {
         var logits_tensor = ggml.mulMat(ctx, out_w, cur);
         logits_tensor.setName("logits");
 
-        // graph output determined by buildForwardExpand
+        // MiniCPM: scale logits
+        if (p.logit_scale != 0.0) {
+            logits_tensor = ggml.scale(ctx, logits_tensor, 1.0 / p.logit_scale);
+        }
+
         graph.buildForwardExpand(logits_tensor);
 
         return logits_tensor;
     }
 
-    /// 适配 buildGraph 接口（通过 GraphBuilder 调用）
     pub fn buildGraph(
-        self: *LlamaModel,
+        self: *MiniCPMModel,
         builder: *graph_builder.GraphBuilder,
         input_tokens: *ggml.Tensor,
         n_tokens: i32,
@@ -231,7 +263,6 @@ pub const LlamaModel = struct {
         return self.forward(ctx, graph, input_tokens, n_tokens, kv_cache_mgr, start_pos);
     }
 
-    /// 虚表定义（用于 ModelInstance 运行时多态）
     pub const vtable = model.ModelVTable{
         .deinit = deinitAdapter,
         .buildGraph = buildGraphAdapter,
@@ -240,12 +271,9 @@ pub const LlamaModel = struct {
     };
 
     fn deinitAdapter(data: *anyopaque, allocator: std.mem.Allocator) void {
-        const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
-        // 释放 weights 中的分配内存
+        const self = @as(*MiniCPMModel, @ptrCast(@alignCast(data)));
         self.weights.deinit(allocator);
-        // 释放 ctx_weights（ggml 上下文）
         self.ctx_weights.deinit();
-        // 释放 LlamaModel 结构体本身
         allocator.destroy(self);
     }
 
@@ -257,17 +285,17 @@ pub const LlamaModel = struct {
         mem_ctx: ?*anyopaque,
         start_pos: i32,
     ) anyerror!*ggml.Tensor {
-        const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
+        const self = @as(*MiniCPMModel, @ptrCast(@alignCast(data)));
         return self.buildGraph(builder, input_tokens, n_tokens, mem_ctx, start_pos);
     }
 
     fn getParamsAdapter(data: *anyopaque) *const model.ModelParams {
-        const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
+        const self = @as(*MiniCPMModel, @ptrCast(@alignCast(data)));
         return self.getParams();
     }
 
     fn resetSSMStatesAdapter(data: *anyopaque) void {
-        const self = @as(*LlamaModel, @ptrCast(@alignCast(data)));
+        const self = @as(*MiniCPMModel, @ptrCast(@alignCast(data)));
         _ = self;
     }
 };
@@ -276,51 +304,82 @@ pub const LlamaModel = struct {
 // 辅助函数
 // ============================================================================
 
-pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !LlamaParams {
-    var p = LlamaParams{};
+pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !MiniCPMParams {
+    var p = MiniCPMParams{};
 
-    p.base.n_vocab = gguf_file.getU32("llama.vocab_size") orelse
+    p.base.n_vocab = gguf_file.getU32("minicpm.vocab_size") orelse
+        gguf_file.getU32("llama.vocab_size") orelse
         blk: {
             if (gguf_file.metadata.get("tokenizer.ggml.tokens")) |val| {
                 if (val.value_type == .array) break :blk @intCast(val.array_val.len);
             }
             break :blk 0;
         };
-    p.base.n_embd = gguf_file.getU32("llama.embedding_length") orelse 0;
-    p.base.n_head = gguf_file.getU32("llama.attention.head_count") orelse
+    p.base.n_embd = gguf_file.getU32("minicpm.embedding_length") orelse
+        gguf_file.getU32("llama.embedding_length") orelse 0;
+    p.base.n_head = gguf_file.getU32("minicpm.attention.head_count") orelse
+        gguf_file.getU32("llama.attention.head_count") orelse
+        gguf_file.getU32("minicpm.head_count") orelse
         gguf_file.getU32("llama.head_count") orelse 0;
-    p.base.n_kv_head = gguf_file.getU32("llama.attention.head_count_kv") orelse
+    p.base.n_kv_head = gguf_file.getU32("minicpm.attention.head_count_kv") orelse
+        gguf_file.getU32("llama.attention.head_count_kv") orelse
+        gguf_file.getU32("minicpm.head_count_kv") orelse
         gguf_file.getU32("llama.head_count_kv") orelse p.base.n_head;
-    p.base.n_layer = gguf_file.getU32("llama.block_count") orelse 0;
-    p.base.n_ff = gguf_file.getU32("llama.feed_forward_length") orelse 0;
+    p.base.n_layer = gguf_file.getU32("minicpm.block_count") orelse
+        gguf_file.getU32("llama.block_count") orelse 0;
+    p.base.n_ff = gguf_file.getU32("minicpm.feed_forward_length") orelse
+        gguf_file.getU32("llama.feed_forward_length") orelse 0;
 
     // MiniCPM5 uses attention.key_length and attention.value_length
-    // which may differ from n_embd / n_head
-    if (gguf_file.getU32("llama.attention.key_length")) |key_len| {
+    if (gguf_file.getU32("minicpm.attention.key_length")) |key_len| {
         p.base.n_head_dim = key_len;
+    } else if (gguf_file.getU32("llama.attention.key_length")) |key_len| {
+        p.base.n_head_dim = key_len;
+    } else if (gguf_file.getU32("minicpm.attention.head_dim")) |head_dim| {
+        p.base.n_head_dim = head_dim;
     } else if (gguf_file.getU32("llama.attention.head_dim")) |head_dim| {
         p.base.n_head_dim = head_dim;
     } else if (p.base.n_head > 0 and p.base.n_embd > 0) {
         p.base.n_head_dim = p.base.n_embd / p.base.n_head;
     }
     p.base.n_head_dim_k = p.base.n_head_dim;
-    p.base.n_head_dim_v = gguf_file.getU32("llama.attention.value_length") orelse p.base.n_head_dim;
+    p.base.n_head_dim_v = gguf_file.getU32("minicpm.attention.value_length") orelse
+        gguf_file.getU32("llama.attention.value_length") orelse p.base.n_head_dim;
 
-    p.base.max_seq_len = gguf_file.getU32("llama.context_length") orelse 4096;
-    p.base.rope_theta = gguf_file.getF32("llama.rope.freq_base") orelse 10000.0;
-    p.base.rope_dim = gguf_file.getU32("llama.rope.dimension_count") orelse
+    p.base.max_seq_len = gguf_file.getU32("minicpm.context_length") orelse
+        gguf_file.getU32("llama.context_length") orelse 4096;
+    p.base.rope_theta = gguf_file.getF32("minicpm.rope.freq_base") orelse
+        gguf_file.getF32("llama.rope.freq_base") orelse 10000.0;
+    p.base.rope_dim = gguf_file.getU32("minicpm.rope.dimension_count") orelse
+        gguf_file.getU32("llama.rope.dimension_count") orelse
         @divExact(p.base.n_head_dim, 2);
-    p.base.norm_eps = gguf_file.getF32("llama.attention.layer_norm_rms_epsilon") orelse 1e-5;
+    p.base.norm_eps = gguf_file.getF32("minicpm.attention.layer_norm_rms_epsilon") orelse
+        gguf_file.getF32("llama.attention.layer_norm_rms_epsilon") orelse 1e-5;
     p.base.model_name = gguf_file.getString("general.name") orelse "";
     p.base.tokenizer_name = gguf_file.getString("tokenizer.ggml.model") orelse "llama";
 
+    // MiniCPM / Granite 缩放参数
+    p.embedding_scale = gguf_file.getF32("minicpm.embedding_scale") orelse
+        gguf_file.getF32("llama.embedding_scale") orelse 12.0;
+    p.residual_scale = gguf_file.getF32("minicpm.residual_scale") orelse
+        gguf_file.getF32("llama.residual_scale") orelse
+        if (p.base.n_layer > 0) 1.4 / @sqrt(@as(f32, @floatFromInt(p.base.n_layer))) else 1.4;
+    p.logit_scale = gguf_file.getF32("minicpm.logit_scale") orelse
+        gguf_file.getF32("llama.logit_scale") orelse
+        if (p.base.n_embd > 0) 256.0 / @as(f32, @floatFromInt(p.base.n_embd)) else 1.0;
+    p.attention_scale = gguf_file.getF32("minicpm.attention_scale") orelse
+        gguf_file.getF32("llama.attention_scale") orelse 0.0;
+
     if (p.base.n_vocab == 0 or p.base.n_embd == 0 or p.base.n_head == 0 or p.base.n_layer == 0) {
-        log.err("Missing required LLaMA parameters", .{});
+        log.err("Missing required MiniCPM parameters", .{});
         return error.InvalidModelParams;
     }
 
-    log.info("LLaMA: vocab={d}, embd={d}, heads={d}, kv_heads={d}, layers={d}, ff={d}, head_dim={d}", .{
+    log.info("MiniCPM: vocab={d}, embd={d}, heads={d}, kv_heads={d}, layers={d}, ff={d}, head_dim={d}", .{
         p.base.n_vocab, p.base.n_embd, p.base.n_head, p.base.n_kv_head, p.base.n_layer, p.base.n_ff, p.base.n_head_dim,
+    });
+    log.info("MiniCPM scales: embd={d:.4}, residual={d:.4}, logit={d:.4}, attn={d:.4}", .{
+        p.embedding_scale, p.residual_scale, p.logit_scale, p.attention_scale,
     });
 
     return p;
@@ -329,14 +388,14 @@ pub fn parseParams(gguf_file: *const gguf.GGUFFile, _: std.mem.Allocator) !Llama
 fn loadWeights(
     gguf_file: *const gguf.GGUFFile,
     ctx: *ggml.Context,
-    params: *const LlamaParams,
+    params: *const MiniCPMParams,
     allocator: std.mem.Allocator,
-) !LlamaWeights {
+) !MiniCPMWeights {
     const n_layer: usize = @intCast(params.base.n_layer);
-    log.info("Loading LLaMA weights...", .{});
+    log.info("Loading MiniCPM weights...", .{});
 
     const token_embd = findOrCreateTensor(ctx, gguf_file, "token_embd.weight") catch |err| {
-        log.err("Failed to load token_embd.weight: {}", .{err});
+        log.err("Failed to load token_embd.weight: {}\n", .{err});
         return error.MissingWeight;
     };
     token_embd.setName("token_embd.weight");
@@ -345,7 +404,7 @@ fn loadWeights(
     if (output_weight) |ow| ow.setName("output.weight");
 
     const output_norm_weight = findOrCreateTensor(ctx, gguf_file, "output_norm.weight") catch |err| {
-        log.err("Failed to load output_norm.weight: {}", .{err});
+        log.err("Failed to load output_norm.weight: {}\n", .{err});
         return error.MissingWeight;
     };
     output_norm_weight.setName("output_norm.weight");
@@ -376,9 +435,9 @@ fn loadWeights(
         layers_loaded = i + 1;
     }
 
-    log.info("All LLaMA weights loaded ({d} layers)", .{n_layer});
+    log.info("All MiniCPM weights loaded ({d} layers)\n", .{n_layer});
 
-    return LlamaWeights{
+    return MiniCPMWeights{
         .base = .{
             .params = params.base,
             .token_embd = token_embd,
@@ -387,13 +446,6 @@ fn loadWeights(
         },
         .layers = layers,
     };
-}
-
-fn loadLayerWeight(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, prefix: []const u8, name: []const u8) !*ggml.Tensor {
-    var buf: [256]u8 = undefined;
-    const full_name = try std.fmt.bufPrint(&buf, "{s}.{s}", .{ prefix, name });
-    buf[full_name.len] = 0;
-    return findOrCreateTensor(ctx, gguf_file, buf[0..full_name.len :0]);
 }
 
 fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
@@ -418,7 +470,7 @@ fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name:
         const tensor_data = gguf_file.getTensorData(info);
         const tensor_bytes = tensor.dataBytes();
         if (tensor_bytes.len != tensor_data.len) {
-            log.warn("Tensor '{s}' size mismatch: expected {d} bytes, got {d} bytes", .{ name, tensor_bytes.len, tensor_data.len });
+            log.warn("Tensor '{s}' size mismatch: expected {d} bytes, got {d} bytes\n", .{ name, tensor_bytes.len, tensor_data.len });
         }
         @memcpy(tensor_bytes, tensor_data);
 
@@ -427,14 +479,14 @@ fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name:
     return error.TensorNotFound;
 }
 
-// estimateMemSize is now in weight_loader.zig
-
-// ===========================================================================
+// ============================================================================
+// 测试
+// ============================================================================
 
 const testing = std.testing;
 
-test "LlamaParams defaults" {
-    const p = LlamaParams{};
+test "MiniCPMParams defaults" {
+    const p = MiniCPMParams{};
     try testing.expectEqual(@as(u32, 0), p.base.n_vocab);
-    try testing.expectEqual(@as(f32, 10000.0), p.base.rope_theta);
+    try testing.expectEqual(@as(f32, 12.0), p.embedding_scale);
 }

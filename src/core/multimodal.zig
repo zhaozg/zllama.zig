@@ -98,7 +98,6 @@ fn loadImageRaw(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8)
     return result;
 }
 
-
 /// Generate text from an image + prompt.
 pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, image_path: [:0]const u8, max_tokens: u32) !void {
     const mm_mgr = ectx.mm_manager orelse return error.MMProjNotLoaded;

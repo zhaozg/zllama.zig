@@ -23,6 +23,7 @@ pub const llama = @import("models/llama.zig");
 pub const gemma3 = @import("models/gemma3.zig");
 pub const gemma4 = @import("models/gemma4.zig");
 pub const embedding = @import("models/embedding.zig");
+pub const minicpm = @import("models/minicpm.zig");
 
 pub const gemma4_graph = @import("models/gemma4_graph.zig");
 
@@ -41,6 +42,7 @@ pub const Architecture = enum {
     gemma3,
     gemma4,
     embedding_qwen2,
+    minicpm,
 
     /// 从 GGUF 元数据中的 general.architecture 字段解析
     pub fn fromString(s: []const u8) ?Architecture {
@@ -69,6 +71,9 @@ pub const Architecture = enum {
         }
         if (std.mem.eql(u8, s, "gemma4")) {
             return .gemma4;
+        }
+        if (std.mem.eql(u8, s, "minicpm")) {
+            return .minicpm;
         }
         if (std.mem.eql(u8, s, "bert") or
             std.mem.eql(u8, s, "nomic-bert") or
