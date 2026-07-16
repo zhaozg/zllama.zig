@@ -224,6 +224,7 @@ pub const BuildVitOpts = struct {
 /// 参考: clip-model.h clip_hparams
 pub const VisionHParams = struct {
     image_size: u32 = 0,
+    image_height: u32 = 0, // Set to non-zero when image is not square; used by gemma4v etc.
     patch_size: u32 = 0,
     n_embd: u32 = 0,
     n_ff: u32 = 0,

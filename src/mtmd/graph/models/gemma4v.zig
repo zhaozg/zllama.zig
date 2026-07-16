@@ -76,18 +76,48 @@ fn loadLayer(ctx: *ggml.Context, gf: *const gguf.GGUFFile, prefix: []const u8) !
     l.v_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_v.weight");
     l.o_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_out.weight");
 
+    // Attention biases (optional — matching C++ get_tensor with false)
+    // Ref: clip.cpp lines 1912-1915
+    l.q_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_q.bias") catch null;
+    l.k_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_k.bias") catch null;
+    l.v_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_v.bias") catch null;
+    l.o_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_out.bias") catch null;
+
     // FFN weights (required — matching C++ get_tensor without false)
     l.ff_up_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_up.weight");
     l.ff_gate_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_gate.weight");
     l.ff_down_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_down.weight");
 
-    // Optional weights (matching C++ get_tensor with false)
+    // FFN biases (optional — matching C++ get_tensor with false)
+    // Ref: clip.cpp lines 1922-1926
+    l.ff_up_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_up.bias") catch null;
+    l.ff_gate_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_gate.bias") catch null;
+    l.ff_down_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_down.bias") catch null;
+
+    // LayerNorm weights & biases (optional — matching C++ get_tensor with false)
+    // Ref: clip.cpp lines 1904-1905, 1917-1918
     l.ln_1_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln1.weight") catch null;
+    l.ln_1_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln1.bias") catch null;
     l.ln_2_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln2.weight") catch null;
+    l.ln_2_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln2.bias") catch null;
+
+    // Post-attn / post-FFN norms (optional, gemma4-specific)
+    // Ref: clip.cpp lines 1909-1910
     l.attn_post_norm_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_post_norm.weight") catch null;
     l.ff_post_norm_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_post_norm.weight") catch null;
+
+    // Per-head Q/K norms (optional)
     l.k_norm = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_k_norm.weight") catch null;
     l.q_norm = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_q_norm.weight") catch null;
+
+    // Layer scales (optional, gemma4-specific)
+    // Ref: clip.cpp lines 1906-1908
+    // C++: layer.ls_1_w   = get_tensor(string_format(TN_LS_1,   prefix, il, "weight"), false);
+    //       layer.ls_2_w   = get_tensor(string_format(TN_LS_2,   prefix, il, "weight"), false);
+    //       layer.ls_out_w = get_tensor(string_format(TN_LS_OUT, prefix, il, "weight"), false);
+    l.ls_1_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ls1.weight") catch null;
+    l.ls_2_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ls2.weight") catch null;
+    l.ls_out_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "out_scale.weight") catch null;
 
     return l;
 }
@@ -318,18 +348,23 @@ pub fn buildGraph(
     _ = builder.img; // img data is filled after buildGraph returns (see buildGraphFromWeights)
 
     const ps: i32 = @intCast(p.patch_size);
-    const npx: i32 = @divTrunc(@as(i32, @intCast(p.image_size)), ps);
-    const npy: i32 = @divTrunc(@as(i32, @intCast(p.image_size)), ps);
+    // Use image_height if set (non-zero), otherwise fall back to image_size (square)
+    // Ref: C++ clip_graph constructor uses img.nx() and img.ny() directly
+    const img_h: i32 = if (p.image_height > 0) @intCast(p.image_height) else @intCast(p.image_size);
+    const img_w: i32 = @intCast(p.image_size);
+    const npx: i32 = @divTrunc(img_w, ps);
+    const npy: i32 = @divTrunc(img_h, ps);
     const np: i64 = @as(i64, npx) * @as(i64, npy);
     const ne: i64 = @intCast(p.n_embd);
 
-    log.debug("buildGraph: image_size={d} patch_size={d} npx={d} npy={d} np={d} ne={d}", .{ p.image_size, p.patch_size, npx, npy, np, ne });
+    log.debug("buildGraph: image_size={d}x{d} patch_size={d} npx={d} npy={d} np={d} ne={d}", .{ img_w, img_h, p.patch_size, npx, npy, np, ne });
     // 1. Create input tensor (match C++ build_inp_raw: 4D [W, H, C, 1], set_input)
     //    Graph construction only — data is filled separately after buildGraph returns.
     //    Ref: llama.cpp clip-graph.h build_inp_raw() creates empty tensor, clip.cpp fills data later.
     const n_batch: i64 = 1;
-    const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, @intCast(p.image_size)), @as(i64, @intCast(p.image_size)), 3, n_batch);
+    const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, img_w), @as(i64, img_h), 3, n_batch);
     inp_raw.setName("inp_raw");
+    ggml.setInput(inp_raw);
     ggml.setInput(inp_raw);
 
     // 2. Scale+bias: patches * 2 - 1
@@ -434,10 +469,12 @@ pub fn buildGraphFromWeights(
     const img_buf = try image_tensor.dataGet(f32, std.heap.page_allocator);
     // Note: img_buf is intentionally leaked (leak-to-exit) since ImageF32
     // is used during graph construction and the data must remain valid.
+    const img_h: u32 = if (p.image_height > 0) p.image_height else p.image_size;
+    const img_w: u32 = p.image_size;
     const img = ImageF32{
         .buf = img_buf,
-        .nx = p.image_size,
-        .ny = p.image_size,
+        .nx = img_w,
+        .ny = img_h,
     };
 
     try graph.debug.saveData(io, "debug_vision", "zllama_vision_00_images.json", "images", img_buf);
@@ -486,8 +523,8 @@ pub fn buildGraphFromWeights(
     //    Ref: clip.cpp lines 3645-3665 does HWC->CHW conversion.
     {
         const inp_raw = gf.getTensor("inp_raw") orelse return error.TensorNotFound;
-        const W: usize = @intCast(p.image_size);
-        const H: usize = @intCast(p.image_size);
+        const W: usize = @intCast(img_w);
+        const H: usize = @intCast(img_h);
         const n = W * H;
         const src = img.buf;
 

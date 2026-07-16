@@ -225,6 +225,7 @@ pub const VisionEncoder = struct {
 
         var hparams = graph.VisionHParams{
             .image_size = new_w,
+            .image_height = new_h,
             .patch_size = p.patch_size,
             .n_embd = p.n_embd,
             .n_head = p.n_head,
