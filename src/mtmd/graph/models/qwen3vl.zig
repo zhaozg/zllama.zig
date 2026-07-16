@@ -471,8 +471,6 @@ pub fn buildGraph(
     // Reference: for (int il = 0; il < n_layer; il++)
     // ============================================================================
     for (w.layers, 0..) |*layer, il| {
-        _ = il;
-
         var cur = inpL; // inpL = residual, cur = hidden_states
 
         // Reference: cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
@@ -521,18 +519,14 @@ pub fn buildGraph(
                 Vcur,
                 null,
                 kq_scale,
-                n_head,
-                "attn_out",
+                @intCast(il),
                 layer.attn_sinks,
+                builder.flash_attn_type,
                 defaultBuildMM,
                 null,
             );
         }
 
-        // Reference: cur = ggml_add(ctx0, cur, inpL); (residual 1)
-        inpL = cur; // inpL = residual, cur = hidden_states
-
-        // Reference: layernorm2
         cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, "ffn_inp_normed");
 
         // Reference: ffn

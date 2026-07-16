@@ -420,12 +420,13 @@ pub fn buildGraph(
                 Vcur,
                 attn_mask,
                 kq_scale,
-                n_head,
-                "blk",
+                @intCast(il),
                 layer.attn_sinks,
+                builder.flash_attn_type,
                 defaultBuildMM,
                 null,
             );
+
             attn_out.setName("blk");
 
             // Residual

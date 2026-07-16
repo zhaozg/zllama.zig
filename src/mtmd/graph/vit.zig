@@ -247,13 +247,12 @@ pub fn buildVit(
                 Vcur.?,
                 opts.attn_mask,
                 kq_scale,
-                n_head,
-                "blk",
+                @intCast(il),
                 layer.attn_sinks,
+                opts.flash_attn_type,
                 opts.build_mm, // 传递 build_mm 回调
                 opts.data, // 传递模型私有数据
             );
-            // C++: cb(cur, "attn_out", il);
             cb(hidden, "attn_out", il_i32);
         }
 

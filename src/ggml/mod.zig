@@ -74,6 +74,9 @@ pub const mulMat = @import("ops.zig").mulMat;
 pub const mulMatSetPrec = @import("ops.zig").mulMatSetPrec;
 pub const flashAttnExtSetPrec = @import("ops.zig").flashAttnExtSetPrec;
 pub const mul = @import("ops.zig").mul;
+pub const flashAttnExtAddSinks = @import("ops.zig").flashAttnExtAddSinks;
+pub const softMaxAddSinks = @import("ops.zig").softMaxAddSinks;
+
 pub const add = @import("ops.zig").add;
 pub const neg = @import("ops.zig").neg;
 pub const exp = @import("ops.zig").exp;

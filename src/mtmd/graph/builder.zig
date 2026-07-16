@@ -194,7 +194,7 @@ pub const GraphBuilder = struct {
         v_cur: *ggml.Tensor,
         kq_mask: ?*ggml.Tensor,
         kq_scale: f32,
-        name: []const u8,
+        il: i32,
         sinks: ?*ggml.Tensor,
     ) !*ggml.Tensor {
         return attn_builder.buildAttn(
@@ -207,9 +207,9 @@ pub const GraphBuilder = struct {
             v_cur,
             kq_mask,
             kq_scale,
-            @intCast(self.nHead()),
-            name,
+            il,
             sinks,
+            self.flash_attn_type,
             defaultBuildMM,
             null,
         );

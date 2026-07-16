@@ -275,6 +275,18 @@ pub fn flashAttnExtSetPrec(a: *Tensor, prec: cmod.Prec) void {
     c.ggml_flash_attn_ext_set_prec(@ptrCast(@alignCast(a)), @intFromEnum(prec));
 }
 
+/// Add attention sinks to flash attention output
+/// Corresponds to ggml_flash_attn_ext_add_sinks
+pub fn flashAttnExtAddSinks(a: *Tensor, sinks: *Tensor) void {
+    c.ggml_flash_attn_ext_add_sinks(@ptrCast(@alignCast(a)), @ptrCast(@alignCast(sinks)));
+}
+
+/// Add attention sinks to softmax output (non-flash attention path)
+/// Corresponds to ggml_soft_max_add_sinks
+pub fn softMaxAddSinks(a: *Tensor, sinks: *Tensor) void {
+    c.ggml_soft_max_add_sinks(@ptrCast(@alignCast(a)), @ptrCast(@alignCast(sinks)));
+}
+
 // ============================================================================
 // 输出设置
 // ============================================================================

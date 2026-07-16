@@ -211,6 +211,8 @@ pub const BuildVitOpts = struct {
     v_norm_eps: f32 = 1e-6,
     /// KQ 缩放因子（默认 1/sqrt(d_head)，gemma4v 使用 1.0）
     kq_scale: ?f32 = null,
+    /// Flash attention 类型
+    flash_attn_type: FlashAttnType = .enabled,
     /// build_mm 回调（对应 C++ clip_graph::build_mm 虚拟函数）
     /// 默认使用 ggml_mul_mat，子类可覆盖以添加 clamp 等操作
     build_mm: BuildMMFn = defaultBuildMM,

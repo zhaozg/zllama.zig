@@ -9,10 +9,14 @@ const types = @import("types.zig");
 
 const BuildMMFn = types.BuildMMFn;
 const defaultBuildMM = types.defaultBuildMM;
+const FlashAttnType = types.FlashAttnType;
 
 const log = std.log.scoped(.graph_attn);
 
 /// 构建多头注意力层
+///
+/// 参数顺序对齐 C++: clip_graph::build_attn(wo, wo_b, q_cur, k_cur, v_cur, kq_mask, kq_scale, il, sinks)
+/// Zig 额外参数: flash_attn_type, build_mm, data（替代 C++ 虚函数 build_mm 和成员 flash_attn_type）
 ///
 /// 参数:
 ///   - ctx: ggml 上下文
@@ -24,10 +28,11 @@ const log = std.log.scoped(.graph_attn);
 ///   - v_cur: V 张量 [d_head, n_head, n_patches, n_batch]
 ///   - kq_mask: KQ 掩码 [n_patches, n_patches]（可选）
 ///   - kq_scale: KQ 缩放因子（通常 1/sqrt(d_head)）
-///   - n_head: 注意力头数
-///   - name: 张量名称前缀（用于调试）
+///   - il: 层索引（用于调试命名，-1 表示不使用）
 ///   - sinks: attention sinks [n_embd, n_sinks]（可选）
+///   - flash_attn_type: flash attention 类型（.enabled / .disabled / .auto）
 ///   - build_mm: 矩阵乘法回调（对应 C++ clip_graph::build_mm 虚拟函数）
+///   - data: 模型私有数据指针，传递给 build_mm 回调
 ///
 /// 返回: 注意力输出张量 [n_embd, n_patches * n_batch]
 ///
@@ -42,22 +47,25 @@ pub fn buildAttn(
     v_cur: *ggml.Tensor,
     kq_mask: ?*ggml.Tensor,
     kq_scale: f32,
-    n_head: i64,
-    name: []const u8,
+    il: i32,
     sinks: ?*ggml.Tensor,
+    flash_attn_type: FlashAttnType,
     build_mm: BuildMMFn,
     data: ?*anyopaque,
 ) !*ggml.Tensor {
     const d_head = q_cur.ne()[0];
+    const n_head = q_cur.ne()[1];
     const n_patches = q_cur.ne()[2];
     const n_batch = q_cur.ne()[3];
-    _ = name;
+    _ = il;
     std.debug.assert(k_cur.ne()[0] == d_head);
+    std.debug.assert(k_cur.ne()[1] == n_head);
     std.debug.assert(k_cur.ne()[2] == n_patches);
     std.debug.assert(v_cur.ne()[0] == d_head);
+    std.debug.assert(v_cur.ne()[1] == n_head);
     std.debug.assert(v_cur.ne()[2] == n_patches);
 
-    // 对应 C++: ggml_build_forward_expand(gf, q_cur); ggml_build_forward_expand(gf, k_cur); ggml_build_forward_expand(gf, v_cur);
+    // C++: ggml_build_forward_expand(gf, q_cur); ggml_build_forward_expand(gf, k_cur); ggml_build_forward_expand(gf, v_cur);
     // 这些节点被一起加入图，防止重排序导致图分裂数增加
     gf.buildForwardExpand(q_cur);
     gf.buildForwardExpand(k_cur);
@@ -68,36 +76,71 @@ pub fn buildAttn(
     const q = q_cur.permute(ctx, 0, 2, 1, 3);
     const k = k_cur.permute(ctx, 0, 2, 1, 3);
 
-    // V: permute(0, 2, 1, 3) -> [d_head, n_patches, n_head, n_batch]
-    // C++: ggml_tensor * v = ggml_permute(ctx0, v_cur, 0, 2, 1, 3);
-    const v = v_cur.permute(ctx, 0, 2, 1, 3);
+    var cur: *ggml.Tensor = undefined;
 
-    // C++: k = ggml_cast(ctx0, k, GGML_TYPE_F16);
-    //      v = ggml_cast(ctx0, v, GGML_TYPE_F16);
-    //      if (kq_mask) { kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16); }
-    const k_f16 = ggml.cast(ctx, k, ggml.Type.f16);
-    const v_f16 = ggml.cast(ctx, v, ggml.Type.f16);
-    const mask_f16 = if (kq_mask) |m| ggml.cast(ctx, m, ggml.Type.f16) else null;
+    // C++: if (flash_attn_type == CLIP_FLASH_ATTN_TYPE_ENABLED) {
+    if (flash_attn_type == .enabled) {
+        // Flash attention 路径
+        // C++: ggml_tensor * v = ggml_permute(ctx0, v_cur, 0, 2, 1, 3);
+        const v = v_cur.permute(ctx, 0, 2, 1, 3);
 
-    // flash_attn_ext(Q, K, V, mask, scale, max_bias, logit_softcap)
-    // C++: cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, 0.0f, 0.0f);
-    // 结果: [d_head, n_head, n_patches, n_batch]
-    var cur = ggml.flashAttnExt(ctx, q, k_f16, v_f16, mask_f16, kq_scale, 0.0, 0.0);
+        // C++: k = ggml_cast(ctx0, k, GGML_TYPE_F16);
+        //       v = ggml_cast(ctx0, v, GGML_TYPE_F16);
+        //       if (kq_mask) { kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16); }
+        const k_f16 = ggml.cast(ctx, k, ggml.Type.f16);
+        const v_f16 = ggml.cast(ctx, v, ggml.Type.f16);
+        const mask_f16 = if (kq_mask) |m| ggml.cast(ctx, m, ggml.Type.f16) else null;
 
-    // C++: ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
-    ggml.flashAttnExtSetPrec(cur, .f32);
+        // flash_attn_ext(Q, K, V, mask, scale, max_bias, logit_softcap)
+        // C++: cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, 0.0f, 0.0f);
+        // 结果: [d_head, n_head, n_patches, n_batch]
+        cur = ggml.flashAttnExt(ctx, q, k_f16, v_f16, mask_f16, kq_scale, 0.0, 0.0);
 
-    // Attention sinks (optional)
-    // C++: if (sinks != nullptr) { ggml_flash_attn_ext_add_sinks(cur, sinks); }
-    if (sinks) |s| {
-        _ = s;
-        log.warn("Attention sinks not yet implemented", .{});
+        // C++: ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
+        ggml.flashAttnExtSetPrec(cur, .f32);
+
+        // Attention sinks (optional)
+        // C++: if (sinks != nullptr) { ggml_flash_attn_ext_add_sinks(cur, sinks); }
+        if (sinks) |s| {
+            ggml.flashAttnExtAddSinks(cur, s);
+        }
+
+        // C++: cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
+        // flash_attn_ext 输出: [d_head, n_head, n_patches, n_batch]
+        // reshape_2d: [d_head * n_head, n_patches * n_batch] = [n_embd, n_patches * n_batch]
+        cur = cur.reshape2d(ctx, d_head * n_head, n_patches * n_batch);
+    } else {
+        // 非 flash_attn 路径（CLIP_FLASH_ATTN_TYPE_DISABLED）
+        // C++: ggml_tensor * v = ggml_permute(ctx0, v_cur, 1, 2, 0, 3);
+        //       v = ggml_cont(ctx0, v);
+        const v = v_cur.permute(ctx, 1, 2, 0, 3);
+        const v_cont = ggml.cont(ctx, v);
+
+        // C++: ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+        //      // F32 may not needed for vision encoders?
+        //      // ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        var kq = ggml.mulMat(ctx, k, q);
+
+        // C++: kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, 0.0f);
+        kq = ggml.softMaxExt(ctx, kq, kq_mask, kq_scale, 0.0);
+
+        // Attention sinks (optional) — non-flash path uses soft_max_add_sinks
+        // C++: if (sinks != nullptr) { ggml_soft_max_add_sinks(kq, sinks); }
+        if (sinks) |s| {
+            ggml.softMaxAddSinks(kq, s);
+        }
+
+        // C++: ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
+        const kqv = ggml.mulMat(ctx, v_cont, kq);
+
+        // C++: cur = ggml_permute(ctx0, kqv, 0, 2, 1, 3);
+        //      cur = ggml_cont_2d(ctx0, cur, cur->ne[0] * cur->ne[1], cur->ne[2] * cur->ne[3]);
+        cur = kqv.permute(ctx, 0, 2, 1, 3);
+        cur = ggml.cont2d(ctx, cur, cur.ne()[0] * cur.ne()[1], cur.ne()[2] * cur.ne()[3]);
     }
 
-    // C++: cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
-    // flash_attn_ext 输出: [d_head, n_head, n_patches, n_batch]
-    // reshape_2d: [d_head * n_head, n_patches * n_batch] = [n_embd, n_patches * n_batch]
-    cur = cur.reshape2d(ctx, d_head * n_head, n_patches * n_batch);
+    // C++: cb(cur, "kqv_out", il);
+    // 调试回调由调用方（vit.zig 的 buildVit）负责
 
     // 输出投影（对应 C++: if (wo) { cur = build_mm(wo, cur); }）
     // 使用 build_mm 回调（支持 clamp 等模型特定操作）
@@ -110,7 +153,7 @@ pub fn buildAttn(
     return result;
 }
 
-test "buildAttn: basic self-attention" {
+test "buildAttn: basic self-attention (flash)" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -146,7 +189,48 @@ test "buildAttn: basic self-attention" {
     var gf = try ctx.newGraph();
     defer gf.deinit();
 
-    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, n_head, "test_attn", null, defaultBuildMM, null);
+    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, -1, null, .enabled, defaultBuildMM, null);
+    try testing.expectEqual(n_embd, result.ne()[0]);
+    try testing.expectEqual(n_patches, result.ne()[1]);
+}
+
+test "buildAttn: basic self-attention (non-flash)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var ctx = try ggml.Context.init(allocator, .{ .mem_size = 1024 * 1024 });
+    defer ctx.deinit();
+
+    const n_embd: i64 = 64;
+    const n_head: i64 = 4;
+    const d_head: i64 = n_embd / n_head;
+    const n_patches: i64 = 16;
+    const n_batch: i64 = 1;
+
+    const wo = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_embd);
+    const q = try ctx.newTensor4d(ggml.Type.f32, d_head, n_head, n_patches, n_batch);
+    const k = try ctx.newTensor4d(ggml.Type.f32, d_head, n_head, n_patches, n_batch);
+    const v = try ctx.newTensor4d(ggml.Type.f32, d_head, n_head, n_patches, n_batch);
+
+    {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(wo.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 0.1);
+        try wo.dataSet(f32, buf);
+    }
+    for ([_]*ggml.Tensor{ q, k, v }) |t| {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(t.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 0.5);
+        try t.dataSet(f32, buf);
+    }
+    const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
+
+    // Create a graph for testing
+    var gf = try ctx.newGraph();
+    defer gf.deinit();
+
+    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, -1, null, .disabled, defaultBuildMM, null);
     try testing.expectEqual(n_embd, result.ne()[0]);
     try testing.expectEqual(n_patches, result.ne()[1]);
 }
