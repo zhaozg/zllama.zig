@@ -8,7 +8,7 @@ const ggml = @import("ggml");
 const gguf = @import("gguf");
 const config = @import("config.zig");
 const types = @import("types.zig");
-const preprocess = @import("preprocess.zig");
+const preprocess = @import("preprocess");
 const graph = @import("graph");
 
 const VisionEncoderParams = config.VisionEncoderParams;

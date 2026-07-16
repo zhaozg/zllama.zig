@@ -365,7 +365,6 @@ pub fn buildGraph(
     const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, img_w), @as(i64, img_h), 3, n_batch);
     inp_raw.setName("inp_raw");
     ggml.setInput(inp_raw);
-    ggml.setInput(inp_raw);
 
     // 2. Scale+bias: patches * 2 - 1
     //    Ref: gemma4v.cpp: inp_raw = ggml_scale_bias(ctx0, inp_raw, 2.0f, -1.0f);

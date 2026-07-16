@@ -71,7 +71,7 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chun
             pw = ns.width;
             ph = ns.height;
         }
-        const res = try preprocess.resizeAndNormalize(al, rd, bm.nx, bm.ny, pw, ph, enc.image_mean, enc.image_std);
+        const res = try preprocess.resizeToU8(al, rd, bm.nx, bm.ny, pw, ph);
         pd = res.data;
     }
     var nt: u32 = 0;

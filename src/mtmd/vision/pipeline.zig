@@ -9,7 +9,7 @@ const gguf = @import("gguf");
 const config = @import("config.zig");
 const types = @import("types.zig");
 const encoder = @import("encoder.zig");
-const preprocess = @import("preprocess.zig");
+const preprocess = @import("preprocess");
 const postprocess = @import("postprocess.zig");
 
 const VisionEncoder = encoder.VisionEncoder;

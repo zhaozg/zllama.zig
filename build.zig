@@ -518,6 +518,9 @@ pub fn build(b: *std.Build) void {
 
     mm_preprocess_mod.addImport("stb_image", stb_image_mod);
 
+    // vision module needs preprocess (was previously using relative @import)
+    mm_vision_mod.addImport("preprocess", mm_preprocess_mod);
+
     // mtmd 子模块（helper 和 tokenize 通过 mm 模块导入 mod.zig）
     {
         const helper_mod = b.createModule(.{
