@@ -325,17 +325,7 @@ fn posIndices(ctx: *ggml.Context, nx: i32, ny: i32, d: Dim) !*ggml.Tensor {
     return t;
 }
 
-/// build_mm callback with clamp support
-
-/// Direct build_mm with clamp info (used for final projection, not through callback)
-fn buildMM(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, cm: *const std.StringHashMap(ClampInfo)) *ggml.Tensor {
-    if (cm.get(wt.getName())) |ci| {
-        return wt.mulMat(ctx, x.clamp(ctx, ci.inp_min, ci.inp_max)).clamp(ctx, ci.out_min, ci.out_max);
-    }
-    return wt.mulMat(ctx, x);
-}
-
-
+/// build_mm callback with clamp support (used for ViT block internal projections)
 /// Corresponds to C++ clip_graph_gemma4v::build_mm()
 /// data 指向 Gemma4VData（用于获取 clamp_info_map）
 fn buildMMWithClamp(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, data: ?*anyopaque) *ggml.Tensor {
@@ -346,10 +336,17 @@ fn buildMMWithClamp(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, data:
     return wt.mulMat(ctx, x);
 }
 
+/// Direct build_mm with clamp info (used for final mm_input_proj_w projection)
+fn buildMMWithClampDirect(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, cm: *const std.StringHashMap(ClampInfo)) *ggml.Tensor {
+    if (cm.get(wt.getName())) |ci| {
+        return wt.mulMat(ctx, x.clamp(ctx, ci.inp_min, ci.inp_max)).clamp(ctx, ci.out_min, ci.out_max);
+    }
+    return wt.mulMat(ctx, x);
+}
+
 /// Build Gemma4V full compute graph (GraphBuilder version)
 /// Receives GraphBuilder, extracts ctx, gf, weights, hparams etc.
 /// Gets image data from builder.img and creates input tensor.
-
 pub fn buildGraph(
     builder: *GraphBuilder,
 ) !*ggml.CGraph {
@@ -397,21 +394,27 @@ pub fn buildGraph(
     ggml.setOutput(cur);
 
     // 4. 2D Position embeddings (x/y lookup)
+    //    Create pos_x and pos_y tensors ONCE, reuse for both position embedding and add_pos callback
+    //    Ref: gemma4v.cpp: pos_x = ggml_new_tensor_1d(...); pos_y = ggml_new_tensor_1d(...);
+    const pos_x = try posIndices(ctx, npx, npy, .x);
+    const pos_y = try posIndices(ctx, npx, npy, .y);
+
     const pe = w.position_embeddings orelse return error.MissingPositionEmbeddings;
     const psz: i64 = pe.ne()[1];
     const nb: usize = @intCast(ggml.Type.rowSize(pe.dataType(), @intCast(ne)));
     const tx = pe.view2d(ctx, ne, psz, nb, 0);
     const ty = pe.view2d(ctx, ne, psz, nb, @as(usize, @intCast(psz)) * nb);
     log.debug("Step 3: position embeddings (psz={d})", .{psz});
-    cur = cur.add(ctx, ggml.getRows(ctx, tx, try posIndices(ctx, npx, npy, .x)));
-    cur = cur.add(ctx, ggml.getRows(ctx, ty, try posIndices(ctx, npx, npy, .y)));
+    cur = cur.add(ctx, ggml.getRows(ctx, tx, pos_x));
+    cur = cur.add(ctx, ggml.getRows(ctx, ty, pos_y));
     cur.setName("pos_embd");
     ggml.setOutput(cur);
 
     // Create Gemma4VData struct for passing to callbacks (replaces module-level vars)
+    // Reuses pos_x and pos_y created above (single allocation)
     const gemma4v_data = Gemma4VData{
-        .pos_x = try posIndices(ctx, npx, npy, .x),
-        .pos_y = try posIndices(ctx, npx, npy, .y),
+        .pos_x = pos_x,
+        .pos_y = pos_y,
         .freq_base = p.rope_theta,
         .clamp_info_map = &w.clamp_info_map,
     };
@@ -425,6 +428,8 @@ pub fn buildGraph(
         .build_mm = buildMMWithClamp,
         .data = @constCast(@ptrCast(&gemma4v_data)),
     });
+    cur.setName("vit_output");
+    ggml.setOutput(cur);
 
     // 6. Pool 2D (avg, kernel=n_merge) + scale
     log.debug("Step 5: pool2d (n_merge={d})", .{p.n_merge});
@@ -457,7 +462,7 @@ pub fn buildGraph(
     // NOTE: gemma4v does NOT use mm_soft_emb_norm_w
     // Only apply mm_input_proj_w (with optional clamping)
     if (w.mm_input_proj_w) |proj| {
-        cur = buildMM(ctx, proj, cur, &w.clamp_info_map);
+        cur = buildMMWithClampDirect(ctx, proj, cur, &w.clamp_info_map);
     }
     cur.setName("mm_output");
     ggml.setOutput(cur);
@@ -502,22 +507,7 @@ pub fn buildGraphFromWeights(
     };
 
     // 1. Build graph (creates inp_raw tensor, sets name, marks as input)
-    _ = buildGraph(&builder) catch unreachable;
-
-    // 2. Fill inp_raw with pixel data (separate from graph construction, matching llama.cpp pattern)
-    //    Ref: llama.cpp clip.cpp lines 3645-3665: set_input_f32("inp_raw", inp_raw)
-    //
-    //    The image tensor (image_tensor) is created by resizeAndNormalize as a 3D [W, H, C] tensor
-    //    with HWC layout (matching llama.cpp convention):
-    //      ne[0]=W (innermost), ne[1]=H, ne[2]=C
-    //    Memory: [R0,G0,B0, R1,G1,B1, ..., R_n,G_n,B_n]
-    //
-    //    The inp_raw tensor is 4D [W, H, C, B] with CHW layout (ggml column-major):
-    //      ne[0]=W, ne[1]=H, ne[2]=C, ne[3]=B
-    //    Memory: [R0,R1,..., G0,G1,..., B0,B1,...]
-    //
-    //    So we need HWC->CHW conversion when filling inp_raw.
-    //    Ref: clip.cpp lines 3645-3665 does HWC->CHW conversion.
+    try buildGraph(&builder);
 
     // 2. Fill inp_raw with pixel data (separate from graph construction, matching llama.cpp pattern)
     //    Ref: llama.cpp clip.cpp lines 3645-3665: set_input_f32("inp_raw", inp_raw)
