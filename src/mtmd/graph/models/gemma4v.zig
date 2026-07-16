@@ -184,13 +184,13 @@ pub fn estimateOutputTokens(io: std.Io, iw: u32, ih: u32, ps: u32, nm: u32) u32 
 }
 
 // ============================================================================
-// 2D RoPE state (module-level, set before buildVit call)
+// 2D RoPE state & clamp info (module-level, set before buildVit call)
 // ============================================================================
 
 var rope_pos_x: ?*ggml.Tensor = null;
 var rope_pos_y: ?*ggml.Tensor = null;
 var rope_freq_base: f32 = 100.0;
-
+var clamp_info_map: ?*const std.StringHashMap(ClampInfo) = null;
 /// 2D RoPE callback for ViT blocks.
 /// Ref: deps/llama.cpp/tools/mtmd/models/gemma4v.cpp add_pos lambda
 fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggml.Tensor {
@@ -297,10 +297,18 @@ fn posIndices(ctx: *ggml.Context, nx: i32, ny: i32, d: Dim) !*ggml.Tensor {
     }
     return t;
 }
-
 fn buildMM(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, cm: *const std.StringHashMap(ClampInfo)) *ggml.Tensor {
     if (cm.get(wt.getName())) |ci| {
         return wt.mulMat(ctx, x.clamp(ctx, ci.inp_min, ci.inp_max)).clamp(ctx, ci.out_min, ci.out_max);
+    }
+    return wt.mulMat(ctx, x);
+}
+
+/// build_mm 回调（使用模块级 clamp_info_map 变量）
+/// 对应 C++ clip_graph_gemma4v::build_mm()
+fn buildMMWithClamp(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor) *ggml.Tensor {
+    if (clamp_info_map) |cm| {
+        return buildMM(ctx, wt, x, cm);
     }
     return wt.mulMat(ctx, x);
 }
@@ -366,6 +374,7 @@ pub fn buildGraph(
     rope_pos_x = try posIndices(ctx, npx, npy, .x);
     rope_pos_y = try posIndices(ctx, npx, npy, .y);
     rope_freq_base = p.rope_theta;
+    clamp_info_map = &w.clamp_info_map;
 
     // 5. ViT blocks with 2D RoPE
     log.debug("Step 4: ViT blocks (n_layer={d})", .{p.n_layer});
@@ -373,6 +382,7 @@ pub fn buildGraph(
         .v_norm_eps = p.eps,
         .kq_scale = 1.0,
         .v_norm = true,
+        .build_mm = buildMMWithClamp,
     });
     cur.setName("vit_output");
     ggml.setOutput(cur);
