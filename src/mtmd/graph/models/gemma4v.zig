@@ -218,71 +218,69 @@ pub const Gemma4VData = struct {
 };
 
 /// 2D RoPE callback for ViT blocks.
-/// Ref: deps/llama.cpp/tools/mtmd/models/gemma4v.cpp add_pos lambda
+/// 1:1 translation of deps/llama.cpp/tools/mtmd/models/gemma4v.cpp add_pos lambda
 fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, data: ?*anyopaque) *ggml.Tensor {
     const d = @as(*const Gemma4VData, @ptrCast(@alignCast(data orelse unreachable)));
-    const d_head = cur.ne()[0];
+
+    // C++: const int64_t n_dim  = cur->ne[0];
+    const n_dim = cur.ne()[0];
+    // C++: const int64_t n_head = cur->ne[1];
     const n_head = cur.ne()[1];
-    const n_patches = cur.ne()[2];
+    // C++: const int64_t n_pos  = cur->ne[2];
+    const n_pos = cur.ne()[2];
+    // n_batch is captured from outer scope in C++ lambda [&]
     const n_batch = cur.ne()[3];
-    const d_head_half = @divExact(d_head, 2);
 
-    // First half: use pos_x
-    const first = cur.view4d(
-        ctx,
-        d_head_half,
-        n_head,
-        n_patches,
-        n_batch,
-        cur.nb()[1],
-        cur.nb()[2],
-        cur.nb()[3],
-        0,
-    );
-    const rope_first = first.ropeExt(
-        ctx,
-        d.pos_x,
-        null,
-        @intCast(d_head_half),
+    // C++: const int64_t n_dim/2
+    const n_dim_half = @divExact(n_dim, 2);
+
+    // ---- first half ----
+    // C++: first = ggml_view_4d(ctx0, cur, n_dim/2, n_head, n_pos, n_batch,
+    //       cur->nb[1], cur->nb[2], cur->nb[3], 0);
+    var first = cur.view4d(ctx, n_dim_half, n_head, n_pos, n_batch,
+        cur.nb()[1], cur.nb()[2], cur.nb()[3], 0);
+
+    // C++: first = ggml_rope_ext(ctx0, first, pos_x, nullptr,
+    //       n_dim/2, GGML_ROPE_TYPE_NEOX, 0, hparams.rope_theta,
+    //       1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+    first = first.ropeExt(ctx, d.pos_x, null,
+        @intCast(n_dim_half),
         2, // GGML_ROPE_TYPE_NEOX
-        0,
+        0, // n_ctx_orig
         d.freq_base,
-        1.0,
-        0.0,
-        1.0,
-        0.0,
-        0.0,
+        1.0, // freq_scale
+        0.0, // ext_factor
+        1.0, // attn_factor
+        0.0, // beta_fast
+        0.0  // beta_slow
     );
 
-    // Second half: use pos_y
-    const offset: usize = @as(usize, @intCast(d_head_half)) * cur.elementSize();
-    const second = cur.view4d(
-        ctx,
-        d_head_half,
-        n_head,
-        n_patches,
-        n_batch,
-        cur.nb()[1],
-        cur.nb()[2],
-        cur.nb()[3],
-        offset,
-    );
-    const rope_second = second.ropeExt(
-        ctx,
-        d.pos_y,
-        null,
-        @intCast(d_head_half),
+    // ---- second half ----
+    // C++: second = ggml_view_4d(ctx0, cur, n_dim/2, n_head, n_pos, n_batch,
+    //       cur->nb[1], cur->nb[2], cur->nb[3],
+    //       n_dim/2 * ggml_element_size(cur));
+    var second = cur.view4d(ctx, n_dim_half, n_head, n_pos, n_batch,
+        cur.nb()[1], cur.nb()[2], cur.nb()[3],
+        @as(usize, @intCast(n_dim_half)) * cur.elementSize());
+
+    // C++: second = ggml_rope_ext(ctx0, second, pos_y, nullptr,
+    //       n_dim/2, GGML_ROPE_TYPE_NEOX, 0, hparams.rope_theta,
+    //       1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+    second = second.ropeExt(ctx, d.pos_y, null,
+        @intCast(n_dim_half),
         2, // GGML_ROPE_TYPE_NEOX
-        0,
+        0, // n_ctx_orig
         d.freq_base,
-        1.0,
-        0.0,
-        1.0,
-        0.0,
-        0.0,
+        1.0, // freq_scale
+        0.0, // ext_factor
+        1.0, // attn_factor
+        0.0, // beta_fast
+        0.0  // beta_slow
     );
 
-    return rope_first.concat(ctx, rope_second, 0);
+    // C++: cur = ggml_concat(ctx0, first, second, 0);
+    // C++: return cur;
+    return first.concat(ctx, second, 0);
 }
 
 // ============================================================================
@@ -507,7 +505,7 @@ pub fn buildGraphFromWeights(
     };
 
     // 1. Build graph (creates inp_raw tensor, sets name, marks as input)
-    try buildGraph(&builder);
+    _ = try buildGraph(&builder);
 
     // 2. Fill inp_raw with pixel data (separate from graph construction, matching llama.cpp pattern)
     //    Ref: llama.cpp clip.cpp lines 3645-3665: set_input_f32("inp_raw", inp_raw)
