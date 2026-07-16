@@ -525,6 +525,7 @@ pub fn buildGraph(
                 "attn_out",
                 layer.attn_sinks,
                 defaultBuildMM,
+                null,
             );
         }
 
@@ -548,6 +549,7 @@ pub fn buildGraph(
             p.ffn_op,
             "ffn_out",
             defaultBuildMM,
+            null,
         );
 
         // Reference: cur = ggml_add(ctx0, inpL, cur); (residual 2)
@@ -577,6 +579,7 @@ pub fn buildGraph(
                 .gelu,
                 "deepstack_ffn",
                 defaultBuildMM,
+                null,
             );
 
             // Reference: concat along feature dimension
@@ -618,6 +621,7 @@ pub fn buildGraph(
         .gelu,
         "mm_proj",
         defaultBuildMM,
+        null,
     );
     embeddings.setName("mm_proj");
     if (deepstack_features) |dsf| {

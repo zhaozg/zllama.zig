@@ -68,7 +68,7 @@ pub fn buildVit(
     learned_pos_embd: ?*ggml.Tensor,
     weights: *const VisionEncoderWeights,
     hparams: *const VisionHParams,
-    add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights) *ggml.Tensor,
+    add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights, ?*anyopaque) *ggml.Tensor,
     opts: BuildVitOpts,
 ) !*ggml.Tensor {
     // batch dim: inp is [n_embd, n_pos, B]
@@ -127,7 +127,7 @@ pub fn buildVit(
             if (layer.qkv_w) |qkv_w| {
                 // fused qkv（对应 C++: cur = build_mm(layer.qkv_w, cur);）
                 // 使用 build_mm 回调（支持 clamp 等模型特定操作）
-                var qkv = opts.build_mm(ctx, qkv_w, hidden);
+                var qkv = opts.build_mm(ctx, qkv_w, hidden, opts.data);
                 if (layer.qkv_b) |qkv_b| {
                     qkv = qkv.add(ctx, qkv_b);
                 }
@@ -154,17 +154,17 @@ pub fn buildVit(
             } else {
                 // separate q, k, v（对应 C++: Qcur = build_mm(layer.q_w, cur);）
                 // 使用 build_mm 回调（支持 clamp 等模型特定操作）
-                Qcur = opts.build_mm(ctx, layer.q_w orelse return error.MissingQWeight, hidden);
+                Qcur = opts.build_mm(ctx, layer.q_w orelse return error.MissingQWeight, hidden, opts.data);
                 if (layer.q_b) |qb| {
                     Qcur = Qcur.?.add(ctx, qb);
                 }
 
-                Kcur = opts.build_mm(ctx, layer.k_w orelse return error.MissingKWeight, hidden);
+                Kcur = opts.build_mm(ctx, layer.k_w orelse return error.MissingKWeight, hidden, opts.data);
                 if (layer.k_b) |kb| {
                     Kcur = Kcur.?.add(ctx, kb);
                 }
 
-                Vcur = opts.build_mm(ctx, layer.v_w orelse return error.MissingVWeight, hidden);
+                Vcur = opts.build_mm(ctx, layer.v_w orelse return error.MissingVWeight, hidden, opts.data);
                 if (layer.v_b) |vb| {
                     Vcur = Vcur.?.add(ctx, vb);
                 }
@@ -209,8 +209,8 @@ pub fn buildVit(
 
             // 2D RoPE via add_pos callback（对应 C++: if (add_pos) { Qcur = add_pos(Qcur, layer); ... }）
             if (add_pos) |cb_add_pos| {
-                Qcur = cb_add_pos(ctx, Qcur.?, layer);
-                Kcur = cb_add_pos(ctx, Kcur.?, layer);
+                Qcur = cb_add_pos(ctx, Qcur.?, layer, opts.data);
+                Kcur = cb_add_pos(ctx, Kcur.?, layer, opts.data);
                 cb(Qcur.?, "Qcur_pos", il_i32);
                 cb(Kcur.?, "Kcur_pos", il_i32);
             }
@@ -251,6 +251,7 @@ pub fn buildVit(
                 "blk",
                 layer.attn_sinks,
                 opts.build_mm, // 传递 build_mm 回调
+                opts.data, // 传递模型私有数据
             );
             // C++: cb(cur, "attn_out", il);
             cb(hidden, "attn_out", il_i32);
@@ -303,6 +304,7 @@ pub fn buildVit(
             ffn_t,
             "blk",
             opts.build_mm, // 传递 build_mm 回调
+            opts.data, // 传递模型私有数据
         );
         // C++: cb(cur, "ffn_out", il);
         cb(hidden, "ffn_out", il_i32);
@@ -509,10 +511,9 @@ test "buildVit: basic ViT forward" {
         .n_ff = n_ff,
         .eps = 1e-5,
     };
-
     // Simple add_pos callback that does nothing
     const addPosFn = struct {
-        fn f(_: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggml.Tensor {
+        fn f(_: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, _: ?*anyopaque) *ggml.Tensor {
             return cur;
         }
     }.f;

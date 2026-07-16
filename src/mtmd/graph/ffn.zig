@@ -50,10 +50,11 @@ pub fn buildFFN(
     type_op: FFNOpType,
     name: []const u8,
     build_mm: BuildMMFn,
+    data: ?*anyopaque,
 ) !*ggml.Tensor {
     // C++: ggml_tensor * tmp = up ? build_mm(up, cur) : cur;
     // Up projection: [n_ff, n_embd] @ [n_embd, n_patches] → [n_ff, n_patches]
-    var up_result = build_mm(ctx, up, cur);
+    var up_result = build_mm(ctx, up, cur, data);
 
     if (up_b) |b| {
         up_result = up_result.add(ctx, b);
@@ -63,7 +64,7 @@ pub fn buildFFN(
     // C++: if (gate) { cur = build_mm(gate, cur); ... }
     var gate_result: ?*ggml.Tensor = null;
     if (gate) |g| {
-        gate_result = build_mm(ctx, g, cur);
+        gate_result = build_mm(ctx, g, cur, data);
         if (gate_b) |gb| {
             gate_result = gate_result.?.add(ctx, gb);
         }
@@ -100,7 +101,7 @@ pub fn buildFFN(
     };
     // Down projection: [n_embd, n_ff] @ [n_ff, n_patches] → [n_embd, n_patches]
     // C++: if (down) { cur = build_mm(down, cur); }
-    var result = build_mm(ctx, down, activated);
+    var result = build_mm(ctx, down, activated, data);
 
     if (down_b) |b| {
         result = result.add(ctx, b);
@@ -128,7 +129,6 @@ test "buildFFN: SiLU activation" {
     {
         const buf = try allocator.alloc(f32, @as(usize, @intCast(cur.nElems())));
         defer allocator.free(buf);
-        @memset(buf, 1.0);
         try cur.dataSet(f32, buf);
     }
     for ([_]*ggml.Tensor{ up_w, down_w }) |t| {
@@ -137,7 +137,7 @@ test "buildFFN: SiLU activation" {
         @memset(buf, 0.1);
         try t.dataSet(f32, buf);
     }
-    const result = try buildFFN(&ctx, cur, up_w, null, null, null, down_w, null, .silu, "test_ffn", defaultBuildMM);
+    const result = try buildFFN(&ctx, cur, up_w, null, null, null, down_w, null, .silu, "test_ffn", defaultBuildMM, null);
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);
     try testing.expectEqual(@as(i64, n_patches), result.ne()[1]);
 }
@@ -170,8 +170,7 @@ test "buildFFN: GELU with gate" {
         @memset(buf, 0.1);
         try t.dataSet(f32, buf);
     }
-
-    const result = try buildFFN(&ctx, cur, up_w, null, gate_w, null, down_w, null, .gelu, "test_ffn_gate", defaultBuildMM);
+    const result = try buildFFN(&ctx, cur, up_w, null, gate_w, null, down_w, null, .gelu, "test_ffn_gate", defaultBuildMM, null);
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);
     try testing.expectEqual(@as(i64, n_patches), result.ne()[1]);
 }

@@ -46,6 +46,7 @@ pub fn buildAttn(
     name: []const u8,
     sinks: ?*ggml.Tensor,
     build_mm: BuildMMFn,
+    data: ?*anyopaque,
 ) !*ggml.Tensor {
     const d_head = q_cur.ne()[0];
     const n_patches = q_cur.ne()[2];
@@ -100,7 +101,7 @@ pub fn buildAttn(
 
     // 输出投影（对应 C++: if (wo) { cur = build_mm(wo, cur); }）
     // 使用 build_mm 回调（支持 clamp 等模型特定操作）
-    var result = build_mm(ctx, wo, cur);
+    var result = build_mm(ctx, wo, cur, data);
 
     if (wo_b) |b| {
         result = result.add(ctx, b);
@@ -145,7 +146,7 @@ test "buildAttn: basic self-attention" {
     var gf = try ctx.newGraph();
     defer gf.deinit();
 
-    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, n_head, "test_attn", null, defaultBuildMM);
+    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, n_head, "test_attn", null, defaultBuildMM, null);
     try testing.expectEqual(n_embd, result.ne()[0]);
     try testing.expectEqual(n_patches, result.ne()[1]);
 }

@@ -204,18 +204,23 @@ pub fn estimateOutputTokens(io: std.Io, iw: u32, ih: u32, ps: u32, nm: u32) u32 
     const m: u32 = if (nm == 0) 1 else nm;
     return (iw / ps / m) * (ih / ps / m);
 }
-
 // ============================================================================
-// 2D RoPE state & clamp info (module-level, set before buildVit call)
+// Gemma4V 模型私有数据
 // ============================================================================
 
-var rope_pos_x: ?*ggml.Tensor = null;
-var rope_pos_y: ?*ggml.Tensor = null;
-var rope_freq_base: f32 = 100.0;
-var clamp_info_map: ?*const std.StringHashMap(ClampInfo) = null;
+/// Gemma4V 模型私有数据，通过 BuildVitOpts.data 传递给回调函数
+/// 替代之前的模块级全局变量，确保线程安全
+pub const Gemma4VData = struct {
+    pos_x: *ggml.Tensor,
+    pos_y: *ggml.Tensor,
+    freq_base: f32,
+    clamp_info_map: *const std.StringHashMap(ClampInfo),
+};
+
 /// 2D RoPE callback for ViT blocks.
 /// Ref: deps/llama.cpp/tools/mtmd/models/gemma4v.cpp add_pos lambda
-fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggml.Tensor {
+fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, data: ?*anyopaque) *ggml.Tensor {
+    const d = @as(*const Gemma4VData, @ptrCast(@alignCast(data orelse unreachable)));
     const d_head = cur.ne()[0];
     const n_head = cur.ne()[1];
     const n_patches = cur.ne()[2];
@@ -236,12 +241,12 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggm
     );
     const rope_first = first.ropeExt(
         ctx,
-        rope_pos_x orelse unreachable,
+        d.pos_x,
         null,
         @intCast(d_head_half),
         2, // GGML_ROPE_TYPE_NEOX
         0,
-        rope_freq_base,
+        d.freq_base,
         1.0,
         0.0,
         1.0,
@@ -250,7 +255,7 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggm
     );
 
     // Second half: use pos_y
-    const offset: usize = @intCast(d_head_half * @sizeOf(f32));
+    const offset: usize = @as(usize, @intCast(d_head_half)) * cur.elementSize();
     const second = cur.view4d(
         ctx,
         d_head_half,
@@ -264,12 +269,12 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights) *ggm
     );
     const rope_second = second.ropeExt(
         ctx,
-        rope_pos_y orelse unreachable,
+        d.pos_y,
         null,
         @intCast(d_head_half),
         2, // GGML_ROPE_TYPE_NEOX
         0,
-        rope_freq_base,
+        d.freq_base,
         1.0,
         0.0,
         1.0,
@@ -319,6 +324,10 @@ fn posIndices(ctx: *ggml.Context, nx: i32, ny: i32, d: Dim) !*ggml.Tensor {
     }
     return t;
 }
+
+/// build_mm callback with clamp support
+
+/// Direct build_mm with clamp info (used for final projection, not through callback)
 fn buildMM(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, cm: *const std.StringHashMap(ClampInfo)) *ggml.Tensor {
     if (cm.get(wt.getName())) |ci| {
         return wt.mulMat(ctx, x.clamp(ctx, ci.inp_min, ci.inp_max)).clamp(ctx, ci.out_min, ci.out_max);
@@ -326,11 +335,13 @@ fn buildMM(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, cm: *const std
     return wt.mulMat(ctx, x);
 }
 
-/// build_mm callback (uses module-level clamp_info_map variable)
+
 /// Corresponds to C++ clip_graph_gemma4v::build_mm()
-fn buildMMWithClamp(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor) *ggml.Tensor {
-    if (clamp_info_map) |cm| {
-        return buildMM(ctx, wt, x, cm);
+/// data 指向 Gemma4VData（用于获取 clamp_info_map）
+fn buildMMWithClamp(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, data: ?*anyopaque) *ggml.Tensor {
+    const d = @as(*const Gemma4VData, @ptrCast(@alignCast(data orelse unreachable)));
+    if (d.clamp_info_map.get(wt.getName())) |ci| {
+        return wt.mulMat(ctx, x.clamp(ctx, ci.inp_min, ci.inp_max)).clamp(ctx, ci.out_min, ci.out_max);
     }
     return wt.mulMat(ctx, x);
 }
@@ -338,6 +349,7 @@ fn buildMMWithClamp(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor) *ggml
 /// Build Gemma4V full compute graph (GraphBuilder version)
 /// Receives GraphBuilder, extracts ctx, gf, weights, hparams etc.
 /// Gets image data from builder.img and creates input tensor.
+
 pub fn buildGraph(
     builder: *GraphBuilder,
 ) !*ggml.CGraph {
@@ -396,11 +408,13 @@ pub fn buildGraph(
     cur.setName("pos_embd");
     ggml.setOutput(cur);
 
-    // Create pos_x/pos_y tensors for 2D RoPE (used in addPos callback)
-    rope_pos_x = try posIndices(ctx, npx, npy, .x);
-    rope_pos_y = try posIndices(ctx, npx, npy, .y);
-    rope_freq_base = p.rope_theta;
-    clamp_info_map = &w.clamp_info_map;
+    // Create Gemma4VData struct for passing to callbacks (replaces module-level vars)
+    const gemma4v_data = Gemma4VData{
+        .pos_x = try posIndices(ctx, npx, npy, .x),
+        .pos_y = try posIndices(ctx, npx, npy, .y),
+        .freq_base = p.rope_theta,
+        .clamp_info_map = &w.clamp_info_map,
+    };
 
     // 5. ViT blocks with 2D RoPE
     log.debug("Step 4: ViT blocks (n_layer={d})", .{p.n_layer});
@@ -409,9 +423,8 @@ pub fn buildGraph(
         .kq_scale = 1.0,
         .v_norm = true,
         .build_mm = buildMMWithClamp,
+        .data = @constCast(@ptrCast(&gemma4v_data)),
     });
-    cur.setName("vit_output");
-    ggml.setOutput(cur);
 
     // 6. Pool 2D (avg, kernel=n_merge) + scale
     log.debug("Step 5: pool2d (n_merge={d})", .{p.n_merge});

@@ -424,6 +424,7 @@ pub fn buildGraph(
                 "blk",
                 layer.attn_sinks,
                 defaultBuildMM,
+                null,
             );
             attn_out.setName("blk");
 
@@ -452,6 +453,7 @@ pub fn buildGraph(
                 .gelu,
                 "blk",
                 defaultBuildMM,
+                null,
             );
             ffn_out.setName("blk");
             // Residual 2
@@ -488,6 +490,7 @@ pub fn buildGraph(
             .gelu,
             "mm_proj",
             defaultBuildMM,
+            null,
         );
     } else if (w.mm_input_proj_w != null) {
         embeddings = embeddings.rmsNorm(ctx, eps);

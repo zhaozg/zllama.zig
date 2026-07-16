@@ -43,6 +43,7 @@ pub const Tensor = opaque {
         const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
         return @as([*]u8, @ptrCast(t.data))[0..@as(usize, @intCast(c.ggml_nbytes(t)))];
     }
+
     /// 获取张量数据为 f32 切片。
     /// 注意：此函数仅适用于类型为 f32 的张量。
     /// 对于 F16/BF16 张量，请使用 dataF16() 或 dataBF16()。
@@ -90,6 +91,11 @@ pub const Tensor = opaque {
     pub fn nBytes(self: *Tensor) usize {
         return @as(usize, @intCast(c.ggml_nbytes(@ptrCast(@alignCast(self)))));
     }
+    pub fn elementSize(self: *Tensor) usize {
+        const t = @as(*c.struct_ggml_tensor, @ptrCast(@alignCast(self)));
+        return c.ggml_element_size(t);
+    }
+
     pub fn isContiguous(self: *Tensor) bool {
         return c.ggml_is_contiguous(@ptrCast(@alignCast(self))) != 0;
     }

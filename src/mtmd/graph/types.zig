@@ -192,13 +192,13 @@ pub const FlashAttnType = enum(i8) {
 /// 参考: clip-graph.h build_vit_opts
 /// build_mm 函数指针类型
 /// 对应 C++ clip_graph::build_mm() — 虚拟函数，允许子类添加 clamp 等操作
-/// 参数: (ctx, weight, input) -> output
-pub const BuildMMFn = *const fn (ctx: *ggml.Context, w: *ggml.Tensor, x: *ggml.Tensor) *ggml.Tensor;
+/// 参数: (ctx, weight, input, data) -> output
+/// data 为模型私有数据指针（通过 BuildVitOpts.data 传入）
+pub const BuildMMFn = *const fn (ctx: *ggml.Context, w: *ggml.Tensor, x: *ggml.Tensor, data: ?*anyopaque) *ggml.Tensor;
 
-/// 带上下文的 build_mm 函数指针类型
-/// 用于 GraphBuilder 等需要捕获 self 的场景
 /// 默认 build_mm 实现：直接调用 ggml_mul_mat
-pub fn defaultBuildMM(ctx: *ggml.Context, w: *ggml.Tensor, x: *ggml.Tensor) *ggml.Tensor {
+pub fn defaultBuildMM(ctx: *ggml.Context, w: *ggml.Tensor, x: *ggml.Tensor, data: ?*anyopaque) *ggml.Tensor {
+    _ = data;
     return w.mulMat(ctx, x);
 }
 
@@ -214,8 +214,10 @@ pub const BuildVitOpts = struct {
     /// build_mm 回调（对应 C++ clip_graph::build_mm 虚拟函数）
     /// 默认使用 ggml_mul_mat，子类可覆盖以添加 clamp 等操作
     build_mm: BuildMMFn = defaultBuildMM,
+    /// 模型私有数据指针，传递给 build_mm 和 add_pos 回调
+    /// 由各模型在 buildGraph 中设置，指向模型特定的上下文数据
+    data: ?*anyopaque = null,
 };
-
 // ============================================================================
 // 超参数
 // ============================================================================

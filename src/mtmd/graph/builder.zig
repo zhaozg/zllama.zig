@@ -115,7 +115,7 @@ pub const GraphBuilder = struct {
         norm_t: NormType,
         ffn_t: FFNOpType,
         learned_pos_embd: ?*ggml.Tensor,
-        add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights) *ggml.Tensor,
+        add_pos: ?*const fn (*ggml.Context, *ggml.Tensor, *const ViTLayerWeights, ?*anyopaque) *ggml.Tensor,
         opts: BuildVitOpts,
     ) !*ggml.Tensor {
         return vit_builder.buildVit(
@@ -181,7 +181,7 @@ pub const GraphBuilder = struct {
         type_op: FFNOpType,
         name: []const u8,
     ) !*ggml.Tensor {
-        return ffn_builder.buildFFN(self.ctx0, cur, up, up_b, gate, gate_b, down, down_b, type_op, name, defaultBuildMM);
+        return ffn_builder.buildFFN(self.ctx0, cur, up, up_b, gate, gate_b, down, down_b, type_op, name, defaultBuildMM, null);
     }
 
     /// 构建注意力层
@@ -211,6 +211,7 @@ pub const GraphBuilder = struct {
             name,
             sinks,
             defaultBuildMM,
+            null,
         );
     }
 
