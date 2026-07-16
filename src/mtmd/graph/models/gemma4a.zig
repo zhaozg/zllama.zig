@@ -932,30 +932,6 @@ fn loadConformerLayer(io: std.Io, allocator: std.mem.Allocator, ctx: *ggml.Conte
     // Layer output
     layer.ln_2_w = findLayerWeight(ctx, gguf_file, prefix, "ln2.weight") catch null;
 
-    if (il == 0) {
-        // Debug save — only for f32 tensors; quantized tensors (Q4_K_M etc.) are skipped
-        if (layer.norm_conv_w) |t| {
-            const data = try t.dataGet(f32, allocator);
-            defer allocator.free(data);
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_norm_conv_w.json", "norm_conv_w", data) catch {};
-        }
-        if (layer.conv_pw1_w) |t| {
-            const data = try t.dataGet(f32, allocator);
-            defer allocator.free(data);
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw1_w.json", "conv_pw1_w", data) catch {};
-        }
-        if (layer.conv_dw_w) |t| {
-            const data = try t.dataGet(f32, allocator);
-            defer allocator.free(data);
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_dw_w.json", "conv_dw_w", data) catch {};
-        }
-        if (layer.conv_pw2_w) |t| {
-            const data = try t.dataGet(f32, allocator);
-            defer allocator.free(data);
-            debug_mod.saveData(io, "debug_audio", "zllama_audio_00_conv_pw2_w.json", "conv_pw2_w", data) catch {};
-        }
-    }
-
     return layer;
 }
 
