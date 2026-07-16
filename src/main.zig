@@ -43,12 +43,13 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
     .{ .scope = .prefill, .level = .debug },
     .{ .scope = .multimodal, .level = .debug },
 
-    .{ .scope = .audio_encoder, .level = .debug },
+    .{ .scope = .audio_encoder, .level = .info },
     .{ .scope = .audio_pipeline, .level = .info },
     .{ .scope = .vision_encoder, .level = .debug },
     .{ .scope = .vision_pipeline, .level = .debug },
 
-    .{ .scope = .gemma4, .level = .debug },
+    .{ .scope = .gemma4, .level = .info },
+    .{ .scope = .core_weight_loader, .level = .debug },
 
     .{ .scope = .weight_loader, .level = .info },
     .{ .scope = .graph_model_gemma4a, .level = .info },
