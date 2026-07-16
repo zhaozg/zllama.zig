@@ -879,6 +879,10 @@ fn findTensorInGGUFWithRequired(ctx: *ggml.Context, gguf_file: *const gguf.GGUFF
     };
 }
 fn loadConformerLayer(io: std.Io, allocator: std.mem.Allocator, ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, prefix: []const u8, il: usize) !ViTLayerWeights {
+    _ = io;
+    _ = allocator;
+    _ = il;
+
     var layer = ViTLayerWeights{};
 
     layer.q_w = try findLayerWeight(ctx, gguf_file, prefix, "attn_q.weight");

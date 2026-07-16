@@ -303,6 +303,16 @@ pub const VisionEncoder = struct {
             .{ .tensor_name = "inp", .filename = "zllama_vision_02_inp.json" },
             .{ .tensor_name = "pos_embd", .filename = "zllama_vision_03_pos_embd.json" },
             .{ .tensor_name = "pre_ln", .filename = "zllama_vision_04a_pre_ln.json" },
+
+            .{ .tensor_name = "qkv",        .filename = "zllama_vision_04b1_qkv.json" },
+            .{ .tensor_name = "Qcur",       .filename = "zllama_vision_04b2_Qcur.json" },
+            .{ .tensor_name = "Kcur",       .filename = "zllama_vision_04b3_Kcur.json" },
+            .{ .tensor_name = "Vcur",       .filename = "zllama_vision_04b4_Vcur.json" },
+            .{ .tensor_name = "Qcur_pos",   .filename = "zllama_vision_04b5_Ocur_pos.json" },
+            .{ .tensor_name = "Kcur_pos",   .filename = "zllama_vision_04b6_Kcur_pos.json" },
+            .{ .tensor_name = "Vcur_normed",.filename = "zllama_vision_04b7_Vcur_normed.json" },
+
+
             .{ .tensor_name = "layer_inp_normed", .filename = "zllama_vision_04b_layer0_inp_normed.json" },
             .{ .tensor_name = "attn_out", .filename = "zllama_vision_04c_layer0_attn_out.json" },
             .{ .tensor_name = "ffn_inp", .filename = "zllama_vision_04d_layer0_ffn_inp.json" },

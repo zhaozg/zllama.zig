@@ -123,7 +123,6 @@ fn loadLayer(ctx: *ggml.Context, gf: *const gguf.GGUFFile, prefix: []const u8) !
 }
 
 pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void {
-    _ = io;
 
     // Load patch embedding weight (required)
     log.debug("Loading patch_embeddings_0 (v.patch_embd.weight)...", .{});
@@ -185,6 +184,13 @@ pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFil
         log.debug("  -> ViT layer {d}/{d} loaded successfully", .{ il + 1, n });
     }
     log.info("Gemma4V: {d} layers loaded", .{n});
+
+    if (w.layers[0].ln_1_w) | t | {
+        try graph.debug.saveTensor(io, alloc, "debug_vision", "zllama_vision_04a_1_layer0_ln_1_w.json",  t);
+    }
+    if (w.layers[0].ln_1_b) | t | {
+        try graph.debug.saveTensor(io, alloc, "debug_vision", "zllama_vision_04a_2_layer0_ln_1_b.json",  t);
+    }
 }
 pub fn loadClampInfo(io: std.Io, allocator: std.mem.Allocator, gf: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void {
     _ = io;

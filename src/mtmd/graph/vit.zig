@@ -27,7 +27,7 @@ const log = std.log.scoped(.graph_vit);
 /// 注意: ggml 的 setName 接受 [:0]const u8，不支持格式化。
 /// 这里使用简单的命名策略：当 il >= 0 时，使用 "{name}_{il}" 格式。
 pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
-    if (il >= 0) {
+    if (il > 0) {
         var buf: [128]u8 = undefined;
         if (std.fmt.bufPrintZ(&buf, "{s}-{d}", .{ name, il })) |formatted| {
             cur.setName(formatted);
@@ -36,6 +36,7 @@ pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
         }
     } else {
         cur.setName(name);
+        ggml.setOutput(cur);
     }
 }
 
@@ -94,11 +95,8 @@ pub fn buildVit(
     // 2. Pre-LN (optional)（对应 C++: if (model.pre_ln_w) { inpL = build_norm(...); cb(inpL, "pre_ln", -1); }）
     if (weights.pre_ln_w) |pln_w| {
         inpL = try norm_builder.buildNorm(ctx, inpL, pln_w, weights.pre_ln_b, norm_t, eps, "pre_ln");
-        cb(inpL, "pre_ln", -1);
     }
-
-    inpL.setName("pre_ln");
-    ggml.setOutput(inpL);
+    cb(inpL, "pre_ln", -1);
 
     // 3. ViT blocks（对应 C++: for (int il = 0; il < n_layer; il++)）
     for (weights.layers, 0..) |*layer, il| {
@@ -107,16 +105,13 @@ pub fn buildVit(
         // C++: ggml_tensor * cur = inpL; // inpL = residual, cur = hidden_states
         var hidden = inpL;
 
+        log.info("layer{} norm_t={}, eps={}\n",  .{il, norm_t, eps});
+
         // --- Pre-attention norm ---
         // C++: cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
         //       cb(cur, "layer_inp_normed", il);
         hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_1_w orelse return error.MissingLN1Weight, layer.ln_1_b, norm_t, eps, "blk");
         cb(hidden, "layer_inp_normed", il_i32);
-
-        if (il == 0) {
-            hidden.setName("layer_inp_normed");
-            ggml.setOutput(hidden);
-        }
 
         // --- Self-attention ---
         {
@@ -131,16 +126,25 @@ pub fn buildVit(
                 if (layer.qkv_b) |qkv_b| {
                     qkv = qkv.add(ctx, qkv_b);
                 }
+                cb(qkv, "qkv", il_i32);
 
-                // Q/K/V as [d_head, n_head, n_pos, B]
+                // Q/K/V as [d_head, n_head/n_head_kv, n_pos, B]
                 // C++: Qcur = ggml_view_4d(ctx0, cur, d_head, n_head, n_pos, B, ...)
                 // C++: nb1 = ggml_row_size(cur->type, d_head), nb2 = cur->nb[1], nb3 = cur->nb[1] * n_pos
                 const row_size = ggml.Type.rowSize(qkv.dataType(), d_head);
-                const nb2: usize = @intCast(qkv.nb()[1]); // stride for n_embd dimension (bytes)
-                const nb3: usize = nb2 * @as(usize, @intCast(n_pos)); // stride for n_pos dimension (bytes)
-                Qcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb2, nb3, 0);
-                Kcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb2, nb3, ggml.Type.rowSize(qkv.dataType(), n_embd));
-                Vcur = qkv.view4d(ctx, d_head, n_head, n_patches, B, row_size, nb2, nb3, ggml.Type.rowSize(qkv.dataType(), 2 * n_embd));
+                const nb2: usize = @intCast(qkv.nb()[1]); // stride for n_pos dimension (bytes) = 3 * n_embd * element_size
+                const nb3: usize = nb2 * @as(usize, @intCast(n_pos)); // stride for B dimension (bytes)
+                // zig fmt: off
+                Qcur = qkv.view4d(ctx, d_head, n_head, n_pos, B, row_size, nb2, nb3,
+                    0);
+                // K and V use n_head_kv for GQA/MQA support (fused qkv weights layout:
+                // [Q_all_heads | K_all_heads | V_all_heads], each with n_embd = n_head * d_head elements.
+                // When n_head_kv < n_head, we only view the first n_head_kv heads of K and V)
+                Kcur = qkv.view4d(ctx, d_head, n_head_kv, n_pos, B, row_size, nb2, nb3,
+                    ggml.Type.rowSize(qkv.dataType(), n_embd));
+                Vcur = qkv.view4d(ctx, d_head, n_head_kv, n_pos, B, row_size, nb2, nb3,
+                    ggml.Type.rowSize(qkv.dataType(), 2 * n_embd));
+                // zig fmt: on
 
                 // Q/K norm after split (fused path)
                 if (layer.q_norm) |qn| {
@@ -184,11 +188,11 @@ pub fn buildVit(
                     }
                 }
 
-                // Reshape to [d_head, n_head, n_patches, n_batch]
+                // Reshape to [d_head, n_head/n_head_kv, n_pos, n_batch]
                 // C++: Qcur = ggml_reshape_4d(ctx0, Qcur, d_head, n_head, n_pos, B);
-                Qcur = Qcur.?.reshape4d(ctx, d_head, n_head, n_patches, B);
-                Kcur = Kcur.?.reshape4d(ctx, d_head, n_head_kv, n_patches, B);
-                Vcur = Vcur.?.reshape4d(ctx, d_head, n_head_kv, n_patches, B);
+                Qcur = Qcur.?.reshape4d(ctx, d_head, n_head, n_pos, B);
+                Kcur = Kcur.?.reshape4d(ctx, d_head, n_head_kv, n_pos, B);
+                Vcur = Vcur.?.reshape4d(ctx, d_head, n_head_kv, n_pos, B);
 
                 if (norm_per_head) {
                     if (layer.q_norm) |qn| {
@@ -214,13 +218,6 @@ pub fn buildVit(
                 cb(Qcur.?, "Qcur_pos", il_i32);
                 cb(Kcur.?, "Kcur_pos", il_i32);
             }
-            // Debug: mark Q/K as outputs for alignment comparison
-            if (il == 0) {
-                Qcur.?.setName("Qcur_pos-0");
-                ggml.setOutput(Qcur.?);
-                Kcur.?.setName("Kcur_pos-0");
-                ggml.setOutput(Kcur.?);
-            }
 
             // Vcur RMSNorm (gemma4v specific, controlled by opts)
             // C++: if (proj_type == PROJECTOR_TYPE_GEMMA4V) { Vcur = ggml_rms_norm(ctx0, Vcur, eps); cb(Vcur, "Vcur_normed", il); }
@@ -229,11 +226,6 @@ pub fn buildVit(
                 cb(Vcur.?, "Vcur_normed", il_i32);
             }
 
-            // Debug: mark V as output for alignment comparison
-            if (il == 0) {
-                Vcur.?.setName("Vcur_normed-0");
-                ggml.setOutput(Vcur.?);
-            }
             // Attention（对应 C++: cur = build_attn(layer.o_w, layer.o_b, Qcur, Kcur, Vcur, opts.attn_mask, kq_scale, il);）
             // kq_scale: gemma4v uses 1.0, other models use 1/sqrt(d_head)
             const kq_scale = opts.kq_scale orelse (1.0 / @sqrt(@as(f32, @floatFromInt(d_head))));
@@ -256,10 +248,6 @@ pub fn buildVit(
             cb(hidden, "attn_out", il_i32);
         }
 
-        if (il == 0) {
-            hidden.setName("attn_out");
-            ggml.setOutput(hidden);
-        }
         // Layer scale 1 (optional)（对应 C++: if (layer.ls_1_w) { cur = ggml_mul(ctx0, cur, layer.ls_1_w); cb(cur, "attn_out_scaled", il); }）
         if (layer.ls_1_w) |ls1| {
             hidden = hidden.mul(ctx, ls1);
@@ -280,10 +268,6 @@ pub fn buildVit(
         // C++: cb(cur, "ffn_inp", il);
         cb(hidden, "ffn_inp", il_i32);
 
-        if (il == 0) {
-            hidden.setName("ffn_inp");
-            ggml.setOutput(hidden);
-        }
         // --- Pre-FFN norm ---
         // C++: cur = build_norm(cur, layer.ln_2_w, layer.ln_2_b, norm_t, eps, il); cb(cur, "ffn_inp_normed", il);
         hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_2_w orelse return error.MissingLN2Weight, layer.ln_2_b, norm_t, eps, "blk");
@@ -308,10 +292,6 @@ pub fn buildVit(
         // C++: cb(cur, "ffn_out", il);
         cb(hidden, "ffn_out", il_i32);
 
-        if (il == 0) {
-            hidden.setName("ffn_out");
-            ggml.setOutput(hidden);
-        }
         // Post-FFN norm (optional)
         // C++: if (layer.ff_post_norm_w) { cur = build_norm(cur, layer.ff_post_norm_w, nullptr, norm_t, eps, il); cb(cur, "ffn_post_normed", il); }
         if (layer.ff_post_norm_w) |fpn| {
@@ -329,10 +309,6 @@ pub fn buildVit(
         // Residual 2（对应 C++: cur = ggml_add(ctx0, inpL, cur); cb(cur, "layer_out", il);）
         hidden = inpL.add(ctx, hidden);
         cb(hidden, "layer_out", il_i32);
-        if (il == 0) {
-            hidden.setName("layer_out");
-            ggml.setOutput(hidden);
-        }
 
         // Layer scale out (optional)
         // C++: if (layer.ls_out_w) { cur = ggml_mul(ctx0, cur, layer.ls_out_w); cb(cur, "layer_out_scaled", il); }
