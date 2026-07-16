@@ -84,33 +84,85 @@ fn loadLayer(ctx: *ggml.Context, gf: *const gguf.GGUFFile, prefix: []const u8, a
         const full = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ prefix, f.suffix });
         defer alloc.free(full);
         f.ptr.* = findTensor(ctx, gf, full) catch null;
+        // 输出每层每个权重的加载状态
+        if (f.ptr.*) |t| {
+            log.debug("  Layer weight loaded: {s} -> shape:[{d},{d},{d},{d}] type={s}", .{ full, t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
+        } else {
+            log.debug("  Layer weight NOT found (optional): {s}", .{full});
+        }
     }
     return l;
 }
 
 pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void {
     _ = io;
+
+    // 加载 patch embedding 权重
+    log.debug("Loading patch_embeddings_0 (v.patch_embd.weight)...", .{});
     w.patch_embeddings_0 = findTensor(ctx, gf, "v.patch_embd.weight") catch null;
+    if (w.patch_embeddings_0) |t| {
+        log.debug("  patch_embeddings_0 loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
+    } else {
+        log.warn("  patch_embeddings_0 NOT found!", .{});
+    }
+
+    // 加载位置编码权重
+    log.debug("Loading position_embeddings (v.position_embd.weight)...", .{});
     w.position_embeddings = findTensor(ctx, gf, "v.position_embd.weight") catch null;
+    if (w.position_embeddings) |t| {
+        log.debug("  position_embeddings loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
+    } else {
+        log.warn("  position_embeddings NOT found!", .{});
+    }
+
+    // 加载标准化权重
+    log.debug("Loading std_bias (v.std_bias)...", .{});
     w.std_bias = findTensor(ctx, gf, "v.std_bias") catch null;
+    if (w.std_bias) |t| {
+        log.debug("  std_bias loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
+    } else {
+        log.warn("  std_bias NOT found!", .{});
+    }
+
+    log.debug("Loading std_scale (v.std_scale)...", .{});
     w.std_scale = findTensor(ctx, gf, "v.std_scale") catch null;
+    if (w.std_scale) |t| {
+        log.debug("  std_scale loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
+    } else {
+        log.warn("  std_scale NOT found!", .{});
+    }
+
+    // 加载多模态投影权重
+    log.debug("Loading mm_input_proj_w (mm.input_projection.weight)...", .{});
     w.mm_input_proj_w = findTensor(ctx, gf, "mm.input_projection.weight") catch null;
+    if (w.mm_input_proj_w) |t| {
+        log.debug("  mm_input_proj_w loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
+    } else {
+        log.warn("  mm_input_proj_w NOT found!", .{});
+    }
+
     // NOTE: gemma4v does NOT use mm_soft_emb_norm_w (that's gemma3 only)
     // w.mm_soft_emb_norm_w is intentionally NOT loaded
 
+    // 检测 ViT 层数
     var n: u32 = 0;
     for (0..64) |il| {
         var buf: [32]u8 = undefined;
         if (gf.findTensor(try std.fmt.bufPrint(&buf, "v.blk.{d}.attn_q.weight", .{il})) == null) break;
         n = @intCast(il + 1);
     }
+    log.debug("Detected {d} ViT layers from GGUF", .{n});
+
+    // 加载所有 ViT 层权重
     w.layers = try alloc.alloc(ViTLayerWeights, n);
     for (0..n) |il| {
         const pfx = try std.fmt.allocPrint(alloc, "v.blk.{d}", .{il});
         defer alloc.free(pfx);
+        log.debug("Loading ViT layer {d}/{d} (prefix: {s})...", .{ il + 1, n, pfx });
         w.layers[il] = try loadLayer(ctx, gf, pfx, alloc);
+        log.debug("  -> ViT layer {d}/{d} loaded successfully", .{ il + 1, n });
     }
-    log.info("Gemma4V: {d} layers", .{n});
+    log.info("Gemma4V: {d} layers loaded", .{n});
 }
 pub fn loadClampInfo(io: std.Io, allocator: std.mem.Allocator, gf: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void {
     _ = io;

@@ -11,9 +11,11 @@
 const std = @import("std");
 
 /// FFN 激活函数类型
+/// 参考: llama.cpp clip-model.h ffn_op_type
 pub const FfnOp = enum {
     silu,
     gelu,
+    gelu_quick,
 };
 
 /// 视觉编码器类型

@@ -64,6 +64,22 @@ pub const VisionEncoder = struct {
         if (gguf_file.getF32("clip.vision.rope_theta")) |v| params.rope_theta = v;
         // Ref: llama.cpp clip.cpp line 1205: get_f32(KEY_LAYER_NORM_EPS, hparams.eps)
         if (gguf_file.getF32("clip.vision.attention.layer_norm_epsilon")) |v| params.norm_eps = v;
+        // Ref: llama.cpp clip.cpp lines 1262-1276: use_gelu / use_silu -> ffn_op
+        {
+            const use_gelu = gguf_file.getBool("clip.use_gelu") orelse false;
+            const use_silu = gguf_file.getBool("clip.use_silu") orelse false;
+            if (use_gelu and use_silu) {
+                log.err("VisionEncoder.init: both clip.use_gelu and clip.use_silu are true", .{});
+                return error.InvalidGGUFMetadata;
+            }
+            if (use_gelu) {
+                params.ffn_op = .gelu;
+            } else if (use_silu) {
+                params.ffn_op = .silu;
+            } else {
+                params.ffn_op = .gelu_quick;
+            }
+        }
         if (gguf_file.getU32("clip.vision.image_min_pixels")) |v| params.image_min_pixels = v;
         if (gguf_file.getU32("clip.vision.image_max_pixels")) |v| params.image_max_pixels = v;
 
@@ -96,6 +112,7 @@ pub const VisionEncoder = struct {
             .n_merge = params.n_merge,
             .eps = params.norm_eps,
             .rope_theta = params.rope_theta,
+            .ffn_op = ffnOpToGraph(params.ffn_op),
         };
 
         // NOTE: custom_image_min/max_tokens are set by backend.loadParams via setLimitImageTokens,
@@ -108,6 +125,7 @@ pub const VisionEncoder = struct {
         params.n_merge = hparams.n_merge;
         params.patch_size = hparams.patch_size;
         params.rope_theta = hparams.rope_theta;
+        params.ffn_op = graphFfnOpToConfig(hparams.ffn_op);
         if (hparams.image_min_pixels > 0) {
             params.image_min_pixels = @intCast(hparams.image_min_pixels);
             params.image_max_pixels = @intCast(hparams.image_max_pixels);
@@ -332,35 +350,28 @@ pub const VisionEncoder = struct {
             log.warn("saveDebugData: failed to save 'pos_embd': {}", .{err});
         };
 
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04a_pre_ln.json",
-        "pre_ln", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04a_pre_ln.json", "pre_ln", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'pre_ln': {}", .{err});
         };
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04b_layer0_inp_normed.json",
-        "layer_inp_normed", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04b_layer0_inp_normed.json", "layer_inp_normed", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'layer_inp_normed': {}", .{err});
         };
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04c_layer0_attn_out.json",
-        "attn_out", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04c_layer0_attn_out.json", "attn_out", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'attn_out': {}", .{err});
         };
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04d_layer0_ffn_inp.json",
-        "ffn_inp", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04d_layer0_ffn_inp.json", "ffn_inp", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'ffn_inp': {}", .{err});
         };
 
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04e_layer0_ffn_out.json",
-        "ffn_out", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04e_layer0_ffn_out.json", "ffn_out", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'ffn_out': {}", .{err});
         };
 
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04f_layer0_layer_out.json",
-        "layer_out", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04f_layer0_layer_out.json", "layer_out", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'layer_out': {}", .{err});
         };
 
-        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04g_out_scaled.json",
-        "out_scaled", cgraph) catch |err| {
+        debug.saveTensorFromGraph(io, allocator, subdir, "zllama_vision_04g_out_scaled.json", "out_scaled", cgraph) catch |err| {
             log.warn("saveDebugData: failed to save 'out_scaled': {}", .{err});
         };
 
@@ -409,5 +420,17 @@ fn ffnOpToGraph(op: config.FfnOp) graph.FFNOpType {
     return switch (op) {
         .silu => .silu,
         .gelu => .gelu,
+        .gelu_quick => .gelu_quick,
+    };
+}
+
+/// Convert graph.FFNOpType to config.FfnOp
+fn graphFfnOpToConfig(op: graph.FFNOpType) config.FfnOp {
+    return switch (op) {
+        .silu => .silu,
+        .gelu => .gelu,
+        .gelu_quick => .gelu_quick,
+        .gelu_erf => .gelu,
+        .relu_sqr => .silu,
     };
 }
