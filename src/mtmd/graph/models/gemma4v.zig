@@ -237,45 +237,36 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, data
     // ---- first half ----
     // C++: first = ggml_view_4d(ctx0, cur, n_dim/2, n_head, n_pos, n_batch,
     //       cur->nb[1], cur->nb[2], cur->nb[3], 0);
-    var first = cur.view4d(ctx, n_dim_half, n_head, n_pos, n_batch,
-        cur.nb()[1], cur.nb()[2], cur.nb()[3], 0);
+    var first = cur.view4d(ctx, n_dim_half, n_head, n_pos, n_batch, cur.nb()[1], cur.nb()[2], cur.nb()[3], 0);
 
     // C++: first = ggml_rope_ext(ctx0, first, pos_x, nullptr,
     //       n_dim/2, GGML_ROPE_TYPE_NEOX, 0, hparams.rope_theta,
     //       1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-    first = first.ropeExt(ctx, d.pos_x, null,
-        @intCast(n_dim_half),
-        2, // GGML_ROPE_TYPE_NEOX
+    first = first.ropeExt(ctx, d.pos_x, null, @intCast(n_dim_half), 2, // GGML_ROPE_TYPE_NEOX
         0, // n_ctx_orig
-        d.freq_base,
-        1.0, // freq_scale
+        d.freq_base, 1.0, // freq_scale
         0.0, // ext_factor
         1.0, // attn_factor
         0.0, // beta_fast
-        0.0  // beta_slow
+        0.0 // beta_slow
     );
 
     // ---- second half ----
     // C++: second = ggml_view_4d(ctx0, cur, n_dim/2, n_head, n_pos, n_batch,
     //       cur->nb[1], cur->nb[2], cur->nb[3],
     //       n_dim/2 * ggml_element_size(cur));
-    var second = cur.view4d(ctx, n_dim_half, n_head, n_pos, n_batch,
-        cur.nb()[1], cur.nb()[2], cur.nb()[3],
-        @as(usize, @intCast(n_dim_half)) * cur.elementSize());
+    var second = cur.view4d(ctx, n_dim_half, n_head, n_pos, n_batch, cur.nb()[1], cur.nb()[2], cur.nb()[3], @as(usize, @intCast(n_dim_half)) * cur.elementSize());
 
     // C++: second = ggml_rope_ext(ctx0, second, pos_y, nullptr,
     //       n_dim/2, GGML_ROPE_TYPE_NEOX, 0, hparams.rope_theta,
     //       1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-    second = second.ropeExt(ctx, d.pos_y, null,
-        @intCast(n_dim_half),
-        2, // GGML_ROPE_TYPE_NEOX
+    second = second.ropeExt(ctx, d.pos_y, null, @intCast(n_dim_half), 2, // GGML_ROPE_TYPE_NEOX
         0, // n_ctx_orig
-        d.freq_base,
-        1.0, // freq_scale
+        d.freq_base, 1.0, // freq_scale
         0.0, // ext_factor
         1.0, // attn_factor
         0.0, // beta_fast
-        0.0  // beta_slow
+        0.0 // beta_slow
     );
 
     // C++: cur = ggml_concat(ctx0, first, second, 0);
@@ -418,13 +409,13 @@ pub fn buildGraph(
     };
 
     // 5. ViT blocks with 2D RoPE
-    log.debug("Step 4: ViT blocks (n_layer={d})", .{p.n_layer});
     cur = try vit_builder.buildVit(ctx, gf, cur, np, .rms_norm, p.ffn_op, null, w, p, addPos, .{
         .v_norm_eps = p.eps,
         .kq_scale = 1.0,
         .v_norm = true,
+        .flash_attn_type = builder.flash_attn_type,
         .build_mm = buildMMWithClamp,
-        .data = @constCast(@ptrCast(&gemma4v_data)),
+        .data = @ptrCast(@constCast(&gemma4v_data)),
     });
     cur.setName("vit_output");
     ggml.setOutput(cur);
