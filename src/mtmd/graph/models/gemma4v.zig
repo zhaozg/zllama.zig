@@ -58,93 +58,85 @@ pub fn loadParams(io: std.Io, gf: *const gguf.GGUFFile, p: *VisionHParams) void 
 // ============================================================================
 // Weight Loading
 // ============================================================================
+// Uses weight_loader.loadLayerWeight for layer weights (consistent with gemma4a.zig)
+// and weight_loader.findOrCreateTensor for top-level weights.
+// Both functions handle quantized tensor dequantization automatically.
 
-fn findTensor(ctx: *ggml.Context, gf: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
-    return weight_loader.findOrCreateTensor(ctx, gf, name);
-}
-
-fn loadLayer(ctx: *ggml.Context, gf: *const gguf.GGUFFile, prefix: []const u8, alloc: std.mem.Allocator) !ViTLayerWeights {
+/// Load a single ViT layer's weights from GGUF using weight_loader.loadLayerWeight.
+/// This is the gemma4v equivalent of gemma4a.zig's loadConformerLayer().
+/// Required weights (attn_q, attn_k, attn_v, attn_out, ffn_up, ffn_gate, ffn_down)
+/// will return error.TensorNotFound if missing.
+/// Optional weights (ln1, ln2, norms) return null if not found.
+fn loadLayer(ctx: *ggml.Context, gf: *const gguf.GGUFFile, prefix: []const u8) !ViTLayerWeights {
     var l = ViTLayerWeights{};
-    const fields = [_]struct { suffix: []const u8, ptr: *?*ggml.Tensor }{
-        .{ .suffix = "ln1.weight", .ptr = &l.ln_1_w },
-        .{ .suffix = "attn_q.weight", .ptr = &l.q_w },
-        .{ .suffix = "attn_k.weight", .ptr = &l.k_w },
-        .{ .suffix = "attn_v.weight", .ptr = &l.v_w },
-        .{ .suffix = "attn_out.weight", .ptr = &l.o_w },
-        .{ .suffix = "ln2.weight", .ptr = &l.ln_2_w },
-        .{ .suffix = "ffn_up.weight", .ptr = &l.ff_up_w },
-        .{ .suffix = "ffn_gate.weight", .ptr = &l.ff_gate_w },
-        .{ .suffix = "ffn_down.weight", .ptr = &l.ff_down_w },
-        .{ .suffix = "attn_post_norm.weight", .ptr = &l.attn_post_norm_w },
-        .{ .suffix = "ffn_post_norm.weight", .ptr = &l.ff_post_norm_w },
-        .{ .suffix = "attn_k_norm.weight", .ptr = &l.k_norm },
-        .{ .suffix = "attn_q_norm.weight", .ptr = &l.q_norm },
-    };
-    for (fields) |f| {
-        const full = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ prefix, f.suffix });
-        defer alloc.free(full);
-        f.ptr.* = findTensor(ctx, gf, full) catch null;
-        // 输出每层每个权重的加载状态
-        if (f.ptr.*) |t| {
-            log.debug("  Layer weight loaded: {s} -> shape:[{d},{d},{d},{d}] type={s}", .{ full, t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
-        } else {
-            log.debug("  Layer weight NOT found (optional): {s}", .{full});
-        }
-    }
+
+    // Attention weights (required — matching C++ get_tensor without false)
+    l.q_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_q.weight");
+    l.k_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_k.weight");
+    l.v_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_v.weight");
+    l.o_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_out.weight");
+
+    // FFN weights (required — matching C++ get_tensor without false)
+    l.ff_up_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_up.weight");
+    l.ff_gate_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_gate.weight");
+    l.ff_down_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_down.weight");
+
+    // Optional weights (matching C++ get_tensor with false)
+    l.ln_1_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln1.weight") catch null;
+    l.ln_2_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln2.weight") catch null;
+    l.attn_post_norm_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_post_norm.weight") catch null;
+    l.ff_post_norm_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_post_norm.weight") catch null;
+    l.k_norm = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_k_norm.weight") catch null;
+    l.q_norm = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_q_norm.weight") catch null;
+
     return l;
 }
 
 pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void {
     _ = io;
 
-    // 加载 patch embedding 权重
+    // Load patch embedding weight (required)
     log.debug("Loading patch_embeddings_0 (v.patch_embd.weight)...", .{});
-    w.patch_embeddings_0 = findTensor(ctx, gf, "v.patch_embd.weight") catch null;
+    w.patch_embeddings_0 = try weight_loader.findOrCreateTensor(ctx, gf, "v.patch_embd.weight");
     if (w.patch_embeddings_0) |t| {
         log.debug("  patch_embeddings_0 loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
-    } else {
-        log.warn("  patch_embeddings_0 NOT found!", .{});
     }
 
-    // 加载位置编码权重
+    // Load position embedding weight (required)
     log.debug("Loading position_embeddings (v.position_embd.weight)...", .{});
-    w.position_embeddings = findTensor(ctx, gf, "v.position_embd.weight") catch null;
+    w.position_embeddings = try weight_loader.findOrCreateTensor(ctx, gf, "v.position_embd.weight");
     if (w.position_embeddings) |t| {
         log.debug("  position_embeddings loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
-    } else {
-        log.warn("  position_embeddings NOT found!", .{});
     }
 
-    // 加载标准化权重
+    // Load standardization weights (optional)
     log.debug("Loading std_bias (v.std_bias)...", .{});
-    w.std_bias = findTensor(ctx, gf, "v.std_bias") catch null;
+    w.std_bias = weight_loader.findOrCreateTensor(ctx, gf, "v.std_bias") catch null;
     if (w.std_bias) |t| {
         log.debug("  std_bias loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
     } else {
-        log.warn("  std_bias NOT found!", .{});
+        log.debug("  std_bias NOT found (optional)", .{});
     }
 
     log.debug("Loading std_scale (v.std_scale)...", .{});
-    w.std_scale = findTensor(ctx, gf, "v.std_scale") catch null;
+    w.std_scale = weight_loader.findOrCreateTensor(ctx, gf, "v.std_scale") catch null;
     if (w.std_scale) |t| {
         log.debug("  std_scale loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
     } else {
-        log.warn("  std_scale NOT found!", .{});
+        log.debug("  std_scale NOT found (optional)", .{});
     }
 
-    // 加载多模态投影权重
+    // Load multimodal projection weight (required)
     log.debug("Loading mm_input_proj_w (mm.input_projection.weight)...", .{});
-    w.mm_input_proj_w = findTensor(ctx, gf, "mm.input_projection.weight") catch null;
+    w.mm_input_proj_w = try weight_loader.findOrCreateTensor(ctx, gf, "mm.input_projection.weight");
     if (w.mm_input_proj_w) |t| {
         log.debug("  mm_input_proj_w loaded: shape=[{d},{d},{d},{d}] type={s}", .{ t.ne()[0], t.ne()[1], t.ne()[2], t.ne()[3], @tagName(t.dataType()) });
-    } else {
-        log.warn("  mm_input_proj_w NOT found!", .{});
     }
 
     // NOTE: gemma4v does NOT use mm_soft_emb_norm_w (that's gemma3 only)
     // w.mm_soft_emb_norm_w is intentionally NOT loaded
 
-    // 检测 ViT 层数
+    // Detect ViT layer count from GGUF
     var n: u32 = 0;
     for (0..64) |il| {
         var buf: [32]u8 = undefined;
@@ -153,13 +145,13 @@ pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFil
     }
     log.debug("Detected {d} ViT layers from GGUF", .{n});
 
-    // 加载所有 ViT 层权重
+    // Load all ViT layer weights
     w.layers = try alloc.alloc(ViTLayerWeights, n);
     for (0..n) |il| {
         const pfx = try std.fmt.allocPrint(alloc, "v.blk.{d}", .{il});
         defer alloc.free(pfx);
         log.debug("Loading ViT layer {d}/{d} (prefix: {s})...", .{ il + 1, n, pfx });
-        w.layers[il] = try loadLayer(ctx, gf, pfx, alloc);
+        w.layers[il] = try loadLayer(ctx, gf, pfx);
         log.debug("  -> ViT layer {d}/{d} loaded successfully", .{ il + 1, n });
     }
     log.info("Gemma4V: {d} layers loaded", .{n});
@@ -304,8 +296,8 @@ fn buildMM(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, cm: *const std
     return wt.mulMat(ctx, x);
 }
 
-/// build_mm 回调（使用模块级 clamp_info_map 变量）
-/// 对应 C++ clip_graph_gemma4v::build_mm()
+/// build_mm callback (uses module-level clamp_info_map variable)
+/// Corresponds to C++ clip_graph_gemma4v::build_mm()
 fn buildMMWithClamp(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor) *ggml.Tensor {
     if (clamp_info_map) |cm| {
         return buildMM(ctx, wt, x, cm);
@@ -313,9 +305,9 @@ fn buildMMWithClamp(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor) *ggml
     return wt.mulMat(ctx, x);
 }
 
-/// 构建 Gemma4V 完整计算图（GraphBuilder 版本）
-/// 接收 GraphBuilder，从中提取 ctx, gf, weights, hparams 等公共参数。
-/// 从 builder.img 获取图像数据并创建输入 tensor。
+/// Build Gemma4V full compute graph (GraphBuilder version)
+/// Receives GraphBuilder, extracts ctx, gf, weights, hparams etc.
+/// Gets image data from builder.img and creates input tensor.
 pub fn buildGraph(
     builder: *GraphBuilder,
 ) !*ggml.CGraph {
@@ -332,7 +324,7 @@ pub fn buildGraph(
     const ne: i64 = @intCast(p.n_embd);
 
     log.debug("buildGraph: image_size={d} patch_size={d} npx={d} npy={d} np={d} ne={d}", .{ p.image_size, p.patch_size, npx, npy, np, ne });
-    // 1. 创建输入张量 (match C++ build_inp_raw: 4D [W, H, C, 1], set_input)
+    // 1. Create input tensor (match C++ build_inp_raw: 4D [W, H, C, 1], set_input)
     //    Graph construction only — data is filled separately after buildGraph returns.
     //    Ref: llama.cpp clip-graph.h build_inp_raw() creates empty tensor, clip.cpp fills data later.
     const n_batch: i64 = 1;
@@ -428,9 +420,9 @@ pub fn buildGraph(
     return gf;
 }
 
-/// 构建 Gemma4V 完整计算图（独立参数版本）
-/// 从独立参数创建 GraphBuilder，然后委托给 buildGraph(builder)。
-/// 此函数作为 Backend.buildGraph 的入口，兼容现有调用方式。
+/// Build Gemma4V full compute graph (standalone parameter version)
+/// Creates GraphBuilder from standalone parameters, then delegates to buildGraph(builder).
+/// This function serves as the Backend.buildGraph entry point, compatible with existing callers.
 pub fn buildGraphFromWeights(
     io: std.Io,
     ctx: *ggml.Context,
