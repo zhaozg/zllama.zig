@@ -14,8 +14,8 @@ pub const AudioEncoderBackend = graph.AudioEncoderBackend;
 /// Debug tensor entries: (tensor_name_in_graph, output_filename).
 /// Used by both markDebugOutputs and saveDebugData.
 pub const debug_entries = [_]encoder_debug.DebugTensorEntry{
-    .{ .tensor_name = "pos_emb", .filename = "zllama_audio_00_pos_emb.json" },
-    .{ .tensor_name = "kq_mask", .filename = "zllama_audio_00_kq_mask.json" },
+    .{ .tensor_name = "pos_emb", .filename = "zllama_audio_00_pos_emb.json", .is_input = true },
+    .{ .tensor_name = "kq_mask", .filename = "zllama_audio_00_kq_mask.json", .is_input = true },
     .{ .tensor_name = "debug_audio_04_encoder_input", .filename = "zllama_audio_04_mel_input.json" },
     .{ .tensor_name = "debug_audio_conv2d_0_output", .filename = "zllama_audio_05_conv2d_0_output.json" },
     .{ .tensor_name = "debug_audio_conv2d_1_output", .filename = "zllama_audio_06_conv2d_1_output.json" },

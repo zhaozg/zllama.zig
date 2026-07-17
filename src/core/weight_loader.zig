@@ -3,9 +3,11 @@
 //! 提供统一的 GGUF 张量查找、创建和加载功能。
 //! 消除各模型实现中重复的 findOrCreateTensor / loadLayerWeight / estimateMemSize 代码。
 //!
-//! 核心设计：
-//! - 量化张量（q4_0, q4_K_M 等）自动反量化为 f32，确保 dataF32() 可正常调用
-//! - 非量化张量（f32, f16 等）直接 memcpy
+//! 核心设计（与 llama.cpp clip.cpp load_tensors 的 get_tensor 一致）：
+//! - 创建与 GGUF 中相同形状和数据类型的张量（包括量化类型如 q4_K_M），
+//!   语义等价于 ggml_dup_tensor（创建相同形状和类型的新张量，不复制数据）
+//! - 数据直接从 GGUF 文件加载到 tensor data，不进行显式反量化
+//! - 计算时直接使用量化权重，由 ggml_mul_mat 内部支持量化运算（通过后端实现）
 //! - 支持 GPU 后端通过 ggml_backend_tensor_set 加载
 //!
 //! 参考 llama.cpp clip.cpp load_tensors 的两种加载方式：
@@ -26,7 +28,10 @@ const log = std.log.scoped(.core_weight_loader);
 /// 从 GGUF 文件中查找并创建张量，复制权重数据。
 /// 如果张量不存在，返回 error.TensorNotFound。
 ///
-/// 量化张量自动反量化为 f32，确保返回的张量始终可通过 dataF32() 访问。
+/// 创建与 GGUF 中相同形状和数据类型的张量（包括量化类型），
+/// 语义等价于 ggml_dup_tensor（创建相同形状和类型的新张量，不复制数据）。
+/// 数据直接从 GGUF 文件加载，不进行显式反量化。
+/// 计算时直接使用量化权重，由 ggml_mul_mat 内部支持量化运算。
 pub fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, name: []const u8) !*ggml.Tensor {
     return findOrCreateTensorWithBuft(ctx, gguf_file, name, null);
 }
@@ -34,9 +39,11 @@ pub fn findOrCreateTensor(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, n
 /// 带 buffer type 的 findOrCreateTensor。
 /// 支持 GPU 后端通过 ggml_backend_tensor_set 加载。
 ///
-/// 如果 GGUF 中的张量是量化类型（如 q4_K_M），会自动创建 f32 张量并
-/// 使用 ggml 的类型特征表（type_traits）进行反量化，确保返回的张量始终为 f32。
-/// 这使得下游代码可以安全调用 dataF32() 获取权重数据。
+/// 与 llama.cpp clip.cpp load_tensors 的 get_tensor 实现一致：
+/// 创建与 GGUF 中相同形状和数据类型的张量（包括量化类型），
+/// 语义等价于 ggml_dup_tensor（创建相同形状和类型的新张量，不复制数据）。
+/// 数据直接从 GGUF 文件加载，不进行显式反量化。
+/// 计算时直接使用量化权重，由 ggml_mul_mat 内部支持量化运算（通过后端实现）。
 pub fn findOrCreateTensorWithBuft(
     ctx: *ggml.Context,
     gguf_file: *const gguf.GGUFFile,
@@ -51,14 +58,14 @@ pub fn findOrCreateTensorWithBuft(
     const n_dims = info.n_dims;
     const dims = info.dims;
     const storage_type: ggml.Type = info.data_type;
-    const is_quant = storage_type.isQuantized();
 
-    // 量化张量创建 f32 张量用于反量化；非量化张量保持原类型
-    const target_type: ggml.Type = if (is_quant) .f32 else storage_type;
-
-    // 创建张量
+    // 创建与 GGUF 中相同形状和数据类型的张量（与 llama.cpp 的 get_tensor 一致）
+    // 使用 ggml_dup_tensor 语义：创建具有相同形状和数据类型的新张量，但不复制数据。
+    // 数据将在后续步骤中从 GGUF 文件加载。
+    // 注意：ggml_dup_tensor 内部调用 ggml_new_tensor(ctx, type, n_dims, ne)，
+    // 我们直接使用 createTensorByDims 达到相同效果，避免创建多余的 template 张量。
     ctx.setNoAlloc(false);
-    const tensor = createTensorByDims(ctx, target_type, n_dims, dims) catch |err| {
+    const tensor = createTensorByDims(ctx, storage_type, n_dims, dims) catch |err| {
         ctx.setNoAlloc(true);
         return err;
     };
@@ -67,14 +74,9 @@ pub fn findOrCreateTensorWithBuft(
     // 设置名称
     setNameBuf(tensor, name) catch |err| return err;
 
-    // 加载数据
+    // 加载数据：直接从 GGUF 文件读取原始字节到 tensor data
     const tensor_data = gguf_file.getTensorData(info);
-
-    if (is_quant) {
-        try loadQuantizedData(tensor, storage_type, tensor_data, name);
-    } else {
-        try loadPlainData(tensor, storage_type, tensor_data, name, buft);
-    }
+    try loadTensorData(tensor, storage_type, tensor_data, name, buft);
 
     // 输出详细日志，格式参考: n_dims = 1, name = a.blk.0.conv_norm.weight, tensor_size=4096, offset=39887616, shape:[1024, 1, 1, 1], type = f32
     log.debug(
@@ -114,26 +116,15 @@ pub fn loadLayerWeight(ctx: *ggml.Context, gguf_file: *const gguf.GGUFFile, pref
 /// 根据 GGUF 文件中实际张量数据大小估计所需内存。
 /// 加上 ggml 元数据开销（每个张量 ~256 字节）和 50% 安全余量 + 128MB 固定缓冲。
 ///
-/// 注意：由于 findOrCreateTensorWithBuft 会将量化张量反量化为 f32，
-/// 量化张量的实际内存占用会扩大约 4 倍。此函数会检测量化张量并相应调整估算。
+/// 注意：与 llama.cpp 一致，量化张量保持原始量化类型，不反量化为 f32，
+/// 因此内存估算直接使用 GGUF 中的压缩大小。
 pub fn estimateMemSize(gguf_file: *const gguf.GGUFFile) usize {
     const n_tensors = gguf_file.tensors.items.len;
 
-    // 计算反量化后的内存需求
+    // 计算实际内存需求（使用 GGUF 中的原始压缩大小）
     var total_data_size: usize = 0;
     for (gguf_file.tensors.items) |tensor_info| {
-        const typ: ggml.Type = @enumFromInt(@intFromEnum(tensor_info.data_type));
-        if (typ.isQuantized()) {
-            // 量化张量：计算 f32 大小（4x 或更多）
-            var n_elems: u64 = 1;
-            for (tensor_info.dims[0..tensor_info.n_dims]) |d| {
-                n_elems *= d;
-            }
-            total_data_size += @as(usize, n_elems) * @sizeOf(f32);
-        } else {
-            // 非量化张量：使用 GGUF 中的压缩大小
-            total_data_size += tensor_info.sizeBytes();
-        }
+        total_data_size += tensor_info.sizeBytes();
     }
 
     // ggml 内部每个张量需要: ggml_tensor (~256B) + ggml_object (~64B) + 对齐
@@ -175,39 +166,12 @@ fn setNameBuf(tensor: *ggml.Tensor, name: []const u8) !void {
     tensor.setName(name_buf[0..name.len :0]);
 }
 
-/// 加载量化张量数据：反量化为 f32
-/// 使用 ggml 的类型特征表（type_traits）中的 to_float 回调逐行反量化。
-/// 确保目标张量类型为 f32，dataF32() 可正常调用。
-fn loadQuantizedData(
-    tensor: *ggml.Tensor,
-    storage_type: ggml.Type,
-    tensor_data: []const u8,
-    name: []const u8,
-) !void {
-    // 验证张量类型为 f32（由调用方保证）
-    std.debug.assert(tensor.dataType() == .f32);
-
-    const n_elems = tensor.nElems();
-    const ne0 = tensor.ne()[0];
-    const n_rows = @divExact(n_elems, ne0);
-
-    // 分配临时 f32 缓冲区，反量化后通过 dataSet 写入张量
-    const f32_buf = try std.heap.page_allocator.alloc(f32, @as(usize, @intCast(n_elems)));
-    defer std.heap.page_allocator.free(f32_buf);
-
-    // 使用 ggml 的类型特征表进行反量化
-    try ggml.dequantizeTensor(storage_type, tensor_data, f32_buf, ne0, n_rows);
-
-    // 通过 dataSet 安全写入张量（支持 host 和 backend 张量）
-    try tensor.dataSet(f32, f32_buf);
-
-    log.debug("Dequantized tensor '{s}' from {s} to f32 ({d} elements, {d} rows)", .{
-        name, storage_type.name(), n_elems, n_rows,
-    });
-}
-
-/// 加载非量化张量数据：直接 memcpy 或通过 backend 设置
-fn loadPlainData(
+/// 加载张量数据：直接从 GGUF 文件读取原始字节到 tensor data。
+/// 与 llama.cpp clip.cpp load_tensors 的 get_tensor 实现一致：
+/// - 量化张量保持原始量化类型，不反量化
+/// - 数据直接从 GGUF 文件加载
+/// - 计算时由 ggml_mul_mat 内部支持量化运算
+fn loadTensorData(
     tensor: *ggml.Tensor,
     _: ggml.Type,
     tensor_data: []const u8,

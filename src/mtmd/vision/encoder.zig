@@ -298,9 +298,11 @@ pub const VisionEncoder = struct {
 
         // Extended entries for saveDebugData (includes layer-level details)
         const save_entries = [_]encoder_debug.DebugTensorEntry{
-            .{ .tensor_name = "inp_raw", .filename = "zllama_vision_00_inp_raw.json" },
+            .{ .tensor_name = "inp_raw", .filename = "zllama_vision_00_inp_raw.json", .is_input = true },
             .{ .tensor_name = "inp_raw_scaled", .filename = "zllama_vision_01_inp_raw_scaled.json" },
             .{ .tensor_name = "inp", .filename = "zllama_vision_02_inp.json" },
+            .{ .tensor_name = "pos_x", .filename = "zllama_vision_02a_pos_x.json", .is_input = true },
+            .{ .tensor_name = "pos_y", .filename = "zllama_vision_02b_pos_y.json", .is_input = true },
             .{ .tensor_name = "pos_embd", .filename = "zllama_vision_03_pos_embd.json" },
             .{ .tensor_name = "pre_ln", .filename = "zllama_vision_04a_pre_ln.json" },
 
