@@ -365,7 +365,20 @@ pub fn buildGraph(
         inp.setName("spatial_permuted");
 
         // Reference: ggml_cont_4d(ctx0, inp, n_embd * 2, n_patches_x / 2, n_patches_y, batch_size)
-        inp = inp.cont4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
+        inp = inp.cont4d(ctx, n_embd * 2, @divTrunc(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
+        inp.setName("spatial_reshaped_1");
+
+        // Reference: ggml_reshape_4d(ctx0, inp, n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2))
+        inp = inp.reshape4d(ctx, n_embd * 2, @divTrunc(n_patches_x, @as(i64, 2)), 2, n_batch * @divTrunc(n_patches_y, @as(i64, 2)));
+        inp.setName("spatial_reshaped_2");
+
+        // Reference: ggml_permute(ctx0, inp, 0, 2, 1, 3)
+        inp = inp.permute(ctx, 0, 2, 1, 3).cont(ctx);
+        inp.setName("spatial_permuted_2");
+
+        // Reference: ggml_cont_3d(ctx0, inp, n_embd, n_patches_x * n_patches_y, batch_size)
+        inp = ggml.cont(ctx, inp).reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
+        inp.setName("spatial_merged");
         inp.setName("spatial_reshaped_1");
 
         // Reference: ggml_reshape_4d(ctx0, inp, n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2))

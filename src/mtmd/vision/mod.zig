@@ -55,6 +55,6 @@ pub fn getBackend(name: []const u8) ?*const VisionEncoderBackend {
     if (std.mem.eql(u8, name, "gemma4v")) return &registered_backends.gemma4v;
     if (std.mem.eql(u8, name, "gemma4uv")) return &registered_backends.gemma4uv;
     if (std.mem.eql(u8, name, "qwen2vl")) return &registered_backends.qwen2vl;
-    if (std.mem.eql(u8, name, "qwen3vl")) return &registered_backends.qwen3vl;
+    if (std.mem.eql(u8, name, "qwen3vl") or std.mem.eql(u8, name, "qwen3vl_merger")) return &registered_backends.qwen3vl;
     return null;
 }
