@@ -332,7 +332,7 @@ pub fn buildGraph(
 
     // 4. Pre-LN (optional)
     if (w.pre_ln_w) |pln_w| {
-        inpL = try graph.buildNorm(ctx, inpL, pln_w, w.pre_ln_b, norm_t, eps, "pre_ln");
+        inpL = try graph.buildNorm(ctx, inpL, pln_w, w.pre_ln_b, norm_t, eps, -1);
     }
 
     // 5. Window attention inputs (if applicable)
@@ -368,7 +368,7 @@ pub fn buildGraph(
         var cur = inpL;
 
         // LayerNorm 1
-        cur = try graph.buildNorm(ctx, cur, layer.ln_1_w orelse return error.MissingNormWeight, layer.ln_1_b, norm_t, eps, "blk");
+        cur = try graph.buildNorm(ctx, cur, layer.ln_1_w orelse return error.MissingNormWeight, layer.ln_1_b, norm_t, eps, @intCast(il));
         cur.setName("blk");
 
         // Self-attention
@@ -437,7 +437,7 @@ pub fn buildGraph(
         inpL = cur;
 
         // LayerNorm 2
-        cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, "blk");
+        cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, -1);
         cur.setName("blk");
 
         // FFN
@@ -465,7 +465,7 @@ pub fn buildGraph(
 
     // 8. Post-LN (optional)
     if (w.post_ln_w) |poln_w| {
-        inpL = try graph.buildNorm(ctx, inpL, poln_w, w.post_ln_b, norm_t, eps, "post_ln");
+        inpL = try graph.buildNorm(ctx, inpL, poln_w, w.post_ln_b, norm_t, eps, -1);
     }
 
     // 9. Multimodal projection

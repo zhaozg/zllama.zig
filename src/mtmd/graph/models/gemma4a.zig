@@ -210,14 +210,15 @@ pub fn buildGraphEx(
 
     // 6. Conformer Blocks
     for (w.layers, 0..) |*layer, il| {
+        const il_i32 = @as(i32, @intCast(il));
         var residual = cur;
 
         // FFN 1 (half-step) — with clamp, matching C++ clip_graph_gemma4a::build_mm
         if (layer.ff_norm_w != null and layer.ff_up_w != null and layer.ff_down_w != null) {
-            cur = try graph.buildNorm(ctx, residual, layer.ff_norm_w.?, null, .rms_norm, norm_eps, "blk");
+            cur = try graph.buildNorm(ctx, residual, layer.ff_norm_w.?, null, .rms_norm, norm_eps, il_i32);
             cur = buildFFNWithClamp(ctx, layer.ff_up_w.?, null, null, null, layer.ff_down_w.?, null, .silu, cur, clamp_map);
             if (layer.ff_post_norm_w) |post_norm| {
-                cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, "blk");
+                cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, il_i32);
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
         }
@@ -233,7 +234,7 @@ pub fn buildGraphEx(
             const softcap: f32 = 50.0;
             const attn_norm = if (layer.attn_pre_norm_w) |w2| w2 else layer.ln_1_w;
             const attn_in = if (attn_norm) |norm_w|
-                try graph.buildNorm(ctx, residual, norm_w, null, .rms_norm, norm_eps, "blk")
+                try graph.buildNorm(ctx, residual, norm_w, null, .rms_norm, norm_eps, il_i32)
             else
                 residual;
 
@@ -323,7 +324,7 @@ pub fn buildGraphEx(
                 x = x.add(ctx, ob);
             }
             if (layer.attn_post_norm_w) |post_norm| {
-                x = try graph.buildNorm(ctx, x, post_norm, null, .rms_norm, norm_eps, "blk");
+                x = try graph.buildNorm(ctx, x, post_norm, null, .rms_norm, norm_eps, il_i32);
             }
             residual = residual.add(ctx, x);
         }
@@ -347,7 +348,7 @@ pub fn buildGraphEx(
         if (layer.norm_conv_w != null and layer.conv_pw1_w != null and
             layer.conv_dw_w != null and layer.conv_pw2_w != null)
         {
-            cur = try graph.buildNorm(ctx, residual, layer.norm_conv_w.?, null, .rms_norm, norm_eps, "blk");
+            cur = try graph.buildNorm(ctx, residual, layer.norm_conv_w.?, null, .rms_norm, norm_eps, il_i32);
             var x_conv = buildMMWithClamp(ctx, layer.conv_pw1_w.?, cur, clamp_map);
             // x_conv shape: [intermediate=2048, n_pos]
 
@@ -437,10 +438,10 @@ pub fn buildGraphEx(
 
         // FFN 2 (half-step) — with clamp, matching C++ clip_graph_gemma4a::build_mm
         if (layer.ff_norm_1_w != null and layer.ff_up_1_w != null and layer.ff_down_1_w != null) {
-            cur = try graph.buildNorm(ctx, residual, layer.ff_norm_1_w.?, null, .rms_norm, norm_eps, "blk");
+            cur = try graph.buildNorm(ctx, residual, layer.ff_norm_1_w.?, null, .rms_norm, norm_eps, il_i32);
             cur = buildFFNWithClamp(ctx, layer.ff_up_1_w.?, null, null, null, layer.ff_down_1_w.?, null, .silu, cur, clamp_map);
             if (layer.ff_post_norm_1_w) |post_norm| {
-                cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, "blk");
+                cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, il_i32);
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
         }
@@ -451,7 +452,7 @@ pub fn buildGraphEx(
 
         // Layer output norm
         cur = if (layer.ln_2_w) |ln2|
-            try graph.buildNorm(ctx, residual, ln2, null, .rms_norm, norm_eps, "blk")
+            try graph.buildNorm(ctx, residual, ln2, null, .rms_norm, norm_eps, il_i32)
         else
             residual;
 

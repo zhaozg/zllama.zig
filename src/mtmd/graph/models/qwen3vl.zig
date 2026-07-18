@@ -470,7 +470,7 @@ pub fn buildGraph(
     // Reference: if (model.pre_ln_w) { inpL = build_norm(inpL, model.pre_ln_w, model.pre_ln_b, norm_t, eps, -1); }
     // ============================================================================
     if (w.pre_ln_w) |pln_w| {
-        inpL = try graph.buildNorm(ctx, inpL, pln_w, w.pre_ln_b, norm_t, eps, "pre_ln");
+        inpL = try graph.buildNorm(ctx, inpL, pln_w, w.pre_ln_b, norm_t, eps, -1);
     }
 
     // ============================================================================
@@ -487,7 +487,7 @@ pub fn buildGraph(
         var cur = inpL; // inpL = residual, cur = hidden_states
 
         // Reference: cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
-        cur = try graph.buildNorm(ctx, cur, layer.ln_1_w orelse return error.MissingNormWeight, layer.ln_1_b, norm_t, eps, "ln1");
+        cur = try graph.buildNorm(ctx, cur, layer.ln_1_w orelse return error.MissingNormWeight, layer.ln_1_b, norm_t, eps, @intCast(il));
 
         // Reference: self-attention block
         {
@@ -540,7 +540,7 @@ pub fn buildGraph(
             );
         }
 
-        cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, "ffn_inp_normed");
+        cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, -1);
 
         // Reference: ffn
         // build_ffn(cur, layer.ff_up_w, layer.ff_up_b, layer.ff_gate_w, layer.ff_gate_b, layer.ff_down_w, layer.ff_down_b, hparams.ffn_op, il)
@@ -573,7 +573,7 @@ pub fn buildGraph(
             feat.setName("deepstack_reshape");
 
             // Reference: build_norm(feat, layer.deepstack_norm_w, layer.deepstack_norm_b, norm_t, eps, il)
-            feat = try graph.buildNorm(ctx, feat, layer.deepstack_norm_w orelse return error.MissingNormWeight, layer.deepstack_norm_b, norm_t, eps, "deepstack_norm");
+            feat = try graph.buildNorm(ctx, feat, layer.deepstack_norm_w orelse return error.MissingNormWeight, layer.deepstack_norm_b, norm_t, eps, -1);
             feat = try graph.buildFFN(
                 ctx,
                 feat,
@@ -605,7 +605,7 @@ pub fn buildGraph(
     // Reference: if (model.post_ln_w) { inpL = build_norm(inpL, model.post_ln_w, model.post_ln_b, norm_t, eps, n_layer); }
     // ============================================================================
     if (w.post_ln_w) |poln_w| {
-        inpL = try graph.buildNorm(ctx, inpL, poln_w, w.post_ln_b, norm_t, eps, "post_ln");
+        inpL = try graph.buildNorm(ctx, inpL, poln_w, w.post_ln_b, norm_t, eps, -1);
     }
 
     // ============================================================================

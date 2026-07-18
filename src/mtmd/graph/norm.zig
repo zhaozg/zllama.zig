@@ -32,7 +32,7 @@ pub fn buildNorm(
     mb: ?*ggml.Tensor,
     norm_type: NormType,
     norm_eps: f32,
-    name: []const u8,
+    il: i32,
 ) !*ggml.Tensor {
     var result = cur;
 
@@ -54,7 +54,7 @@ pub fn buildNorm(
         result = result.add(ctx, b);
     }
 
-    _ = name; // 保留参数以保持 API 兼容性
+    _ = il;
     return result;
 }
 

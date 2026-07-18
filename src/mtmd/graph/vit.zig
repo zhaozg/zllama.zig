@@ -27,7 +27,7 @@ const log = std.log.scoped(.graph_vit);
 /// 注意: ggml 的 setName 接受 [:0]const u8，不支持格式化。
 /// 这里使用简单的命名策略：当 il >= 0 时，使用 "{name}_{il}" 格式。
 pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
-    if (il > 0) {
+    if (il >= 0) {
         var buf: [128]u8 = undefined;
         if (std.fmt.bufPrintZ(&buf, "{s}-{d}", .{ name, il })) |formatted| {
             cur.setName(formatted);
@@ -36,7 +36,6 @@ pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
         }
     } else {
         cur.setName(name);
-        ggml.setOutput(cur);
     }
 }
 
@@ -94,7 +93,7 @@ pub fn buildVit(
 
     // 2. Pre-LN (optional)（对应 C++: if (model.pre_ln_w) { inpL = build_norm(...); cb(inpL, "pre_ln", -1); }）
     if (weights.pre_ln_w) |pln_w| {
-        inpL = try norm_builder.buildNorm(ctx, inpL, pln_w, weights.pre_ln_b, norm_t, eps, "pre_ln");
+        inpL = try norm_builder.buildNorm(ctx, inpL, pln_w, weights.pre_ln_b, norm_t, eps, -1);
     }
     cb(inpL, "pre_ln", -1);
 
@@ -105,12 +104,12 @@ pub fn buildVit(
         // C++: ggml_tensor * cur = inpL; // inpL = residual, cur = hidden_states
         var hidden = inpL;
 
-        log.info("layer{} norm_t={}, eps={}\n",  .{il, norm_t, eps});
+        log.info("layer{} norm_t={}, eps={}",  .{il, norm_t, eps});
 
         // --- Pre-attention norm ---
         // C++: cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
         //       cb(cur, "layer_inp_normed", il);
-        hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_1_w orelse return error.MissingLN1Weight, layer.ln_1_b, norm_t, eps, "blk");
+        hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_1_w orelse return error.MissingLN1Weight, layer.ln_1_b, norm_t, eps, il_i32);
         cb(hidden, "layer_inp_normed", il_i32);
 
         // --- Self-attention ---
@@ -148,11 +147,11 @@ pub fn buildVit(
 
                 // Q/K norm after split (fused path)
                 if (layer.q_norm) |qn| {
-                    Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, "blk");
+                    Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, il_i32);
                     cb(Qcur.?, "Qcur_norm", il_i32);
                 }
                 if (layer.k_norm) |kn| {
-                    Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, "blk");
+                    Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, il_i32);
                     cb(Kcur.?, "Kcur_norm", il_i32);
                 }
             } else {
@@ -179,11 +178,11 @@ pub fn buildVit(
 
                 if (!norm_per_head) {
                     if (layer.q_norm) |qn| {
-                        Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, "blk");
+                        Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, il_i32);
                         cb(Qcur.?, "Qcur_norm", il_i32);
                     }
                     if (layer.k_norm) |kn| {
-                        Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, "blk");
+                        Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, il_i32);
                         cb(Kcur.?, "Kcur_norm", il_i32);
                     }
                 }
@@ -196,11 +195,11 @@ pub fn buildVit(
 
                 if (norm_per_head) {
                     if (layer.q_norm) |qn| {
-                        Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, "blk");
+                        Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, il_i32);
                         cb(Qcur.?, "Qcur_norm_per_head", il_i32);
                     }
                     if (layer.k_norm) |kn| {
-                        Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, "blk");
+                        Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, il_i32);
                         cb(Kcur.?, "Kcur_norm_per_head", il_i32);
                     }
                 }
@@ -257,7 +256,7 @@ pub fn buildVit(
         // Post-attention norm (optional, e.g. gemma4)
         // C++: if (layer.attn_post_norm_w) { cur = build_norm(cur, layer.attn_post_norm_w, nullptr, norm_t, eps, il); cb(cur, "attn_post_normed", il); }
         if (layer.attn_post_norm_w) |apn| {
-            hidden = try norm_builder.buildNorm(ctx, hidden, apn, null, norm_t, eps, "blk");
+            hidden = try norm_builder.buildNorm(ctx, hidden, apn, null, norm_t, eps, il_i32);
             cb(hidden, "attn_post_normed", il_i32);
         }
 
@@ -270,7 +269,7 @@ pub fn buildVit(
 
         // --- Pre-FFN norm ---
         // C++: cur = build_norm(cur, layer.ln_2_w, layer.ln_2_b, norm_t, eps, il); cb(cur, "ffn_inp_normed", il);
-        hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_2_w orelse return error.MissingLN2Weight, layer.ln_2_b, norm_t, eps, "blk");
+        hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_2_w orelse return error.MissingLN2Weight, layer.ln_2_b, norm_t, eps, il_i32);
         cb(hidden, "ffn_inp_normed", il_i32);
 
         // --- FFN ---
@@ -295,7 +294,7 @@ pub fn buildVit(
         // Post-FFN norm (optional)
         // C++: if (layer.ff_post_norm_w) { cur = build_norm(cur, layer.ff_post_norm_w, nullptr, norm_t, eps, il); cb(cur, "ffn_post_normed", il); }
         if (layer.ff_post_norm_w) |fpn| {
-            hidden = try norm_builder.buildNorm(ctx, hidden, fpn, null, norm_t, eps, "blk");
+            hidden = try norm_builder.buildNorm(ctx, hidden, fpn, null, norm_t, eps, il_i32);
             cb(hidden, "ffn_post_normed", il_i32);
         }
 
@@ -325,7 +324,7 @@ pub fn buildVit(
 
     // 4. Post-LN (optional)（对应 C++: if (model.post_ln_w) { inpL = build_norm(inpL, model.post_ln_w, model.post_ln_b, norm_t, eps, -1); }）
     if (weights.post_ln_w) |poln_w| {
-        inpL = try norm_builder.buildNorm(ctx, inpL, poln_w, weights.post_ln_b, norm_t, eps, "post_ln");
+        inpL = try norm_builder.buildNorm(ctx, inpL, poln_w, weights.post_ln_b, norm_t, eps, -1);
     }
 
     // restore the batch dim（对应 C++: GGML_ASSERT(inpL->ne[1] % B == 0); inpL = ggml_reshape_3d(ctx0, inpL, n_embd, inpL->ne[1] / B, B);）
