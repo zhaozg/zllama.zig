@@ -298,17 +298,17 @@ pub const VisionEncoder = struct {
 
         // Extended entries for saveDebugData (includes layer-level details)
         const save_entries = [_]encoder_debug.DebugTensorEntry{
-            .{ .tensor_name = "inp_raw", .filename = "zllama_vision_00_inp_raw.json", .is_input = true },
-            .{ .tensor_name = "inp_raw_scaled", .filename = "zllama_vision_01_inp_raw_scaled.json" },
-            .{ .tensor_name = "inp", .filename = "zllama_vision_02_inp.json" },
-            .{ .tensor_name = "pos_x", .filename = "zllama_vision_02a_pos_x.json", .is_input = true },
-            .{ .tensor_name = "pos_y", .filename = "zllama_vision_02b_pos_y.json", .is_input = true },
-            .{ .tensor_name = "pos_embd", .filename = "zllama_vision_03_pos_embd.json" },
-            .{ .tensor_name = "pre_ln", .filename = "zllama_vision_04a0_pre_ln.json" },
-            .{ .tensor_name = "norm_w", .filename = "llama_vision_04a1_norm_w-0.json" },
-            .{ .tensor_name = "norm_b", .filename = "llama_vision_04a1_norm_b-0.json" },
+            .{ .tensor_name = "inp_raw",            .filename = "zllama_vision_00_inp_raw.json", .is_input = true },
+            .{ .tensor_name = "inp_raw_scaled",     .filename = "zllama_vision_01_inp_raw_scaled.json" },
+            .{ .tensor_name = "inp",                .filename = "zllama_vision_02_inp.json" },
+            .{ .tensor_name = "pos_x",              .filename = "zllama_vision_02a_pos_x.json", .is_input = true },
+            .{ .tensor_name = "pos_y",              .filename = "zllama_vision_02b_pos_y.json", .is_input = true },
+            .{ .tensor_name = "pos_embd",           .filename = "zllama_vision_03_pos_embd.json" },
+            .{ .tensor_name = "pre_ln",             .filename = "zllama_vision_04a0_pre_ln.json" },
+            .{ .tensor_name = "pre_ln_norm",        .filename = "zllama_vision_04a1_pre_ln_norm.json" },
+            .{ .tensor_name = "pre_ln_norm_w",      .filename = "zllama_vision_04a2_pre_ln_norm_w.json" },
 
-            .{ .tensor_name = "layer_inp_normed-0", .filename = "zllama_vision_04b0_layer0_inp_normed.json" },
+            .{ .tensor_name = "layer_inp_normed-0", .filename = "zllama_vision_04b0_layer_inp_normed.json" },
             .{ .tensor_name = "qkv",                .filename = "zllama_vision_04b1_qkv.json" },
 
             .{ .tensor_name = "Qcur-0",             .filename = "zllama_vision_04b2_Qcur.json" },
@@ -319,10 +319,10 @@ pub const VisionEncoder = struct {
             .{ .tensor_name = "Vcur_normed-0",      .filename = "zllama_vision_04b7_Vcur_normed.json" },
 
 
-            .{ .tensor_name = "attn_out-0",         .filename = "zllama_vision_04c_layer0_attn_out.json" },
-            .{ .tensor_name = "ffn_inp-0",          .filename = "zllama_vision_04d_layer0_ffn_inp.json" },
-            .{ .tensor_name = "ffn_out-0",          .filename = "zllama_vision_04e_layer0_ffn_out.json" },
-            .{ .tensor_name = "layer_out-0",        .filename = "zllama_vision_04f_layer0_layer_out.json" },
+            .{ .tensor_name = "attn_out-0",         .filename = "zllama_vision_04c_layer_attn_out.json" },
+            .{ .tensor_name = "ffn_inp-0",          .filename = "zllama_vision_04d_layer_ffn_inp.json" },
+            .{ .tensor_name = "ffn_out-0",          .filename = "zllama_vision_04e_layer_ffn_out.json" },
+            .{ .tensor_name = "layer_out-0",        .filename = "zllama_vision_04f_layer_layer_out.json" },
             .{ .tensor_name = "out_scaled",         .filename = "zllama_vision_04g_out_scaled.json" },
             .{ .tensor_name = "vit_output",         .filename = "zllama_vision_04_vit_output.json" },
             .{ .tensor_name = "pooled",             .filename = "zllama_vision_05_pooled.json" },
