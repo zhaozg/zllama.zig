@@ -1,0 +1,32 @@
+用法: zllama-align-cmp --ref <文件> --test <文件> [选项]
+
+必需参数:
+  --ref <文件>          参考向量文件 (JSON 或二进制)
+  --test <文件>         测试向量文件 (JSON 或二进制)
+
+可选参数:
+  --key <路径>          JSON 向量路径，如 "data.emb" (点分隔)
+  --mode <模式>         比较模式: general | alignment (默认: alignment)
+  --tol-nmse <f>        归一化均方误差最大容忍度 (默认: 1e-4)
+  --tol-cosine <f>      余弦相似度最低要求 (默认: 0.9999)
+  --tol-rmse <f>        均方根误差最大容忍度 (默认: 0.001)
+  --tol-max-abs-err <f> 最大绝对误差最大容忍度 (默认: 0.01)
+  --tol-ratio-dev <f>   平均比值偏离 1.0 的容忍度 (默认: 0.001)
+  --help, -h            显示此帮助信息
+
+判决标准（工业级严格）:
+  1. NMSE < tol_nmse                — 归一化均方误差
+  2. 余弦相似度 > tol_cosine        — 方向一致性
+  3. RMSE < tol_rmse                — 每维度平均误差
+  4. 最大绝对误差 < tol_max_abs_err — 防止 argmax 翻转
+  5. Argmax 必须匹配                — 最终预测一致性
+  6. 平均幅值比值偏离 < tol_ratio_deviation — 检测系统性缩放
+
+输入格式:
+  JSON: 包含数值数组的对象，自动识别 "vector"/"embedding"/"vec"/"emb" 键
+  二进制: 连续 f32 小端字节序，无元数据
+
+示例:
+  zllama-align-cmp --ref ref.json --test test.json
+  zllama-align-cmp --ref a.bin --test b.bin --mode general
+  zllama-align-cmp --ref a.json --test b.json --tol-nmse 1e-5 --tol-cosine 0.99999

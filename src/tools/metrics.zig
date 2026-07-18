@@ -1,9 +1,11 @@
-//! 共享指标计算函数
+//! 共享指标计算函数与 I/O 工具
 //!
-//! 提供 NMSE、余弦相似度等工具间共享的指标计算。
-//! 被 compare_mtmd_vision, compare_mtmd_audio, compare_with_llamacpp 等工具引用。
+//! 提供 NMSE、余弦相似度、二进制文件加载等工具间共享的功能。
+//! 被 compare_mtmd_vision, compare_mtmd_audio, compare_with_llamacpp,
+//! align_cmp 等工具引用。
 
 const std = @import("std");
+const log = std.log.scoped(.tool_metrics);
 
 /// Argmax 匹配结果
 pub const ArgmaxResult = struct {
@@ -86,6 +88,31 @@ pub fn printArgmaxResult(io: std.Io, argmax: ArgmaxResult) !void {
     const status = if (argmax.match) "✅" else "❌";
     const line = try std.fmt.bufPrint(&buf, "  {s} Argmax: ours={d}, ref={d}, match={}\n", .{ status, argmax.ours, argmax.ref, argmax.match });
     try stdout_file.writeStreamingAll(io, line);
+}
+
+/// 从二进制文件加载 f32 向量（小端序）
+/// 返回的切片由调用者通过 allocator.free 释放
+pub fn loadVectorFromBinary(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]f32 {
+    const dir = std.Io.Dir.cwd();
+    const file = try dir.openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    const size = stat.size;
+    if (size % @sizeOf(f32) != 0) {
+        log.err("二进制文件大小 ({d}) 不是 f32 大小 ({d}) 的整数倍", .{ size, @sizeOf(f32) });
+        return error.InvalidBinaryFile;
+    }
+
+    const n = size / @sizeOf(f32);
+    const buf = try allocator.alloc(f32, n);
+    errdefer allocator.free(buf);
+
+    const bytes = std.mem.sliceAsBytes(buf);
+    const nread = try file.readPositionalAll(io, bytes, 0);
+    if (nread != size) return error.UnexpectedEndOfFile;
+
+    return buf;
 }
 
 // ============================================================================
