@@ -54,15 +54,14 @@ pub fn buildNorm(
     }
 
     // C++: if (mw) { cur = ggml_mul(ctx0, cur, mw); cb(cur, "norm_w", il); }
-    if(save) {
+    if (save) {
         std.debug.print("cur type: {}, mw type: {}\n", .{ cur.dataType(), mw.dataType() });
     }
     result = result.mul(ctx, mw);
     if (save) {
         const ne = result.ne();
         const nb = result.nb();
-        std.debug.print("after ggml_mul in build_norm: ne[0, 4] = ({}, {}, {}, {}), nb[0, 4] = ({}, {}, {}, {})",
-            .{ne[0], ne[1], ne[2], ne[3], nb[0], nb[1], nb[2], nb[3]});
+        std.debug.print("after ggml_mul in build_norm: ne[0, 4] = ({}, {}, {}, {}), nb[0, 4] = ({}, {}, {}, {})", .{ ne[0], ne[1], ne[2], ne[3], nb[0], nb[1], nb[2], nb[3] });
 
         result.setName("pre_ln_norm_w");
         ggml.setOutput(result);
@@ -72,6 +71,11 @@ pub fn buildNorm(
     // C++: if (mb) { cur = ggml_add(ctx0, cur, mb); cb(cur, "norm_b", il); }
     if (mb) |b| {
         result = result.add(ctx, b);
+        if (save) {
+            result.setName("pre_ln_norm_b");
+            ggml.setOutput(result);
+            std.debug.print("--->set pre_ln_norm_b\n", .{});
+        }
     }
 
     return result;

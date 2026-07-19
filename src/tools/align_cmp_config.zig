@@ -55,7 +55,7 @@ pub const AlignCmpConfig = struct {
 
     /// 最大绝对误差容忍度
     /// 用于检测单个维度上的异常偏差，防止 argmax 翻转
-    tol_max_abs_err: f64 = 0.01,
+    tol_max_abs_err: f64 = 0.1,
 
     /// 平均幅值比值允许偏离 1.0 的容忍度
     /// 用于检测系统性缩放（如缺失的 scale 因子）

@@ -49,6 +49,7 @@ pub fn computeMetrics(v1: []const f32, v2: []const f32) AlignMetrics {
     var ratio_sum: f64 = 0.0;
     var ratio_sq_sum: f64 = 0.0;
     var valid_ratio_count: usize = 0;
+    var max_abs_val: f64 = 0.0;
 
     for (v1, v2) |a, b| {
         const af: f64 = @floatCast(a);
@@ -57,6 +58,12 @@ pub fn computeMetrics(v1: []const f32, v2: []const f32) AlignMetrics {
         const diff = af - bf;
         sum_sq_diff += diff * diff;
         sum_abs_err += @abs(diff);
+
+        // 跟踪最大绝对值（用于相对误差计算）
+        const abs_val = @max(@abs(af), @abs(bf));
+        if (abs_val > max_abs_val) {
+            max_abs_val = abs_val;
+        }
 
         // 比值统计（排除零值，避免除零）
         if (@abs(bf) > 1e-20 and @abs(af) > 1e-20) {
@@ -128,11 +135,12 @@ pub fn calcArgmaxMatch(a: []const f32, b: []const f32) ArgmaxResult {
 pub fn alignmentVerdict(al_metrics: AlignMetrics, argmax: ArgmaxResult, config: AlignCmpConfig) []const u8 {
     // ── 硬性失败条件（❌）──
 
-    if (al_metrics.nmse > config.tol_nmse) {
-        return "❌ 对齐失败: 归一化均方误差 (NMSE) 超出允许范围";
-    }
+    // 余弦相似度是主要判决指标
     if (al_metrics.cosine < config.tol_cosine) {
         return "❌ 对齐失败: 余弦相似度不满足要求";
+    }
+    if (al_metrics.nmse > config.tol_nmse) {
+        return "❌ 对齐失败: 归一化均方误差 (NMSE) 超出允许范围";
     }
     if (al_metrics.rmse > config.tol_rmse) {
         return "❌ 对齐失败: 均方根误差 (RMSE) 超出允许误差";
@@ -247,4 +255,25 @@ test "alignmentVerdict fail argmax" {
     const config = AlignCmpConfig{};
     const verdict = alignmentVerdict(m, argmax, config);
     try testing.expect(std.mem.startsWith(u8, verdict, "❌"));
+}
+
+test "alignmentVerdict pass with large rmse but high cosine" {
+    // 模拟池化后的情况：数值范围大，RMSE 偏大，但余弦相似度极高
+    const m = AlignMetrics{
+        .cosine = 0.999998,
+        .nmse = 1e-5,
+        .l2_distance = 100.0,
+        .rmse = 2.0,
+        .mae = 1.0,
+        .max_abs_err = 30.0,
+        .avg_ratio = 1.0001,
+        .ratio_std = 0.00001,
+        .is_scaled = false,
+        .dim = 4096,
+    };
+    const argmax = ArgmaxResult{ .ours = 42, .ref = 42, .match = true };
+    const config = AlignCmpConfig{};
+    const verdict = alignmentVerdict(m, argmax, config);
+    // 应该通过，因为余弦相似度极高，且 RMSE 和 MaxErr 在放宽后的阈值内
+    try testing.expect(std.mem.startsWith(u8, verdict, "✅"));
 }

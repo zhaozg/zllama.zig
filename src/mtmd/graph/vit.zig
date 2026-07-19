@@ -104,7 +104,7 @@ pub fn buildVit(
         // C++: ggml_tensor * cur = inpL; // inpL = residual, cur = hidden_states
         var hidden = inpL;
 
-        log.info("layer{} norm_t={}, eps={}",  .{il, norm_t, eps});
+        log.info("layer{} norm_t={}, eps={}", .{ il, norm_t, eps });
 
         // --- Pre-attention norm ---
         // C++: cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
@@ -134,10 +134,8 @@ pub fn buildVit(
                 const nb2: usize = @intCast(qkv.nb()[1]);
                 const nb3: usize = nb2 * @as(usize, @intCast(n_pos));
                 Qcur = qkv.view4d(ctx, d_head, n_head, n_pos, B, row_size, nb2, nb3, 0);
-                Kcur = qkv.view4d(ctx, d_head, n_head_kv, n_pos, B, row_size, nb2, nb3,
-                    ggml.Type.rowSize(qkv.dataType(), n_embd));
-                Vcur = qkv.view4d(ctx, d_head, n_head_kv, n_pos, B, row_size, nb2, nb3,
-                    ggml.Type.rowSize(qkv.dataType(), 2 * n_embd));
+                Kcur = qkv.view4d(ctx, d_head, n_head_kv, n_pos, B, row_size, nb2, nb3, ggml.Type.rowSize(qkv.dataType(), n_embd));
+                Vcur = qkv.view4d(ctx, d_head, n_head_kv, n_pos, B, row_size, nb2, nb3, ggml.Type.rowSize(qkv.dataType(), 2 * n_embd));
 
                 // Q/K norm after split (fused path)
                 if (layer.q_norm) |qn| {
@@ -172,10 +170,12 @@ pub fn buildVit(
                     if (layer.q_norm) |qn| {
                         Qcur = try norm_builder.buildNorm(ctx, Qcur.?, qn, null, norm_t, eps, il_i32);
                         cb(Qcur.?, "Qcur_norm", il_i32);
+                        ggml.setOutput(Qcur.?);
                     }
                     if (layer.k_norm) |kn| {
                         Kcur = try norm_builder.buildNorm(ctx, Kcur.?, kn, null, norm_t, eps, il_i32);
                         cb(Kcur.?, "Kcur_norm", il_i32);
+                        ggml.setOutput(Kcur.?);
                     }
                 }
 
@@ -207,6 +207,10 @@ pub fn buildVit(
                 Kcur = cb_add_pos(ctx, Kcur.?, layer, opts.data);
                 cb(Qcur.?, "Qcur_pos", il_i32);
                 cb(Kcur.?, "Kcur_pos", il_i32);
+                if (il_i32 == 0) {
+                    ggml.setOutput(Qcur.?);
+                    ggml.setOutput(Kcur.?);
+                }
             }
 
             // Vcur RMSNorm (gemma4v specific, controlled by opts)
@@ -214,6 +218,9 @@ pub fn buildVit(
             if (opts.v_norm) {
                 Vcur = Vcur.?.rmsNorm(ctx, opts.v_norm_eps);
                 cb(Vcur.?, "Vcur_normed", il_i32);
+                if (il_i32 == 0) {
+                    ggml.setOutput(Vcur.?);
+                }
             }
 
             // Attention（对应 C++: cur = build_attn(layer.o_w, layer.o_b, Qcur, Kcur, Vcur, opts.attn_mask, kq_scale, il);）
@@ -237,12 +244,18 @@ pub fn buildVit(
                 cb,
             );
             cb(hidden, "attn_out", il_i32);
+            if (il_i32 == 0) {
+                ggml.setOutput(hidden);
+            }
         }
 
         // Layer scale 1 (optional)（对应 C++: if (layer.ls_1_w) { cur = ggml_mul(ctx0, cur, layer.ls_1_w); cb(cur, "attn_out_scaled", il); }）
         if (layer.ls_1_w) |ls1| {
             hidden = hidden.mul(ctx, ls1);
             cb(hidden, "attn_out_scaled", il_i32);
+            if (il_i32 == 0) {
+                ggml.setOutput(hidden);
+            }
         }
 
         // Post-attention norm (optional, e.g. gemma4)
@@ -250,6 +263,9 @@ pub fn buildVit(
         if (layer.attn_post_norm_w) |apn| {
             hidden = try norm_builder.buildNorm(ctx, hidden, apn, null, norm_t, eps, il_i32);
             cb(hidden, "attn_post_normed", il_i32);
+            if (il_i32 == 0) {
+                ggml.setOutput(hidden);
+            }
         }
 
         // Residual 1（对应 C++: cur = ggml_add(ctx0, cur, inpL);）
@@ -258,11 +274,17 @@ pub fn buildVit(
 
         // C++: cb(cur, "ffn_inp", il);
         cb(hidden, "ffn_inp", il_i32);
+        if (il_i32 == 0) {
+            ggml.setOutput(hidden);
+        }
 
         // --- Pre-FFN norm ---
         // C++: cur = build_norm(cur, layer.ln_2_w, layer.ln_2_b, norm_t, eps, il); cb(cur, "ffn_inp_normed", il);
         hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_2_w orelse return error.MissingLN2Weight, layer.ln_2_b, norm_t, eps, il_i32);
         cb(hidden, "ffn_inp_normed", il_i32);
+        if (il_i32 == 0) {
+            ggml.setOutput(hidden);
+        }
 
         // --- FFN ---
         // C++: cur = build_ffn(cur, layer.ff_up_w, layer.ff_up_b, layer.ff_gate_w, layer.ff_gate_b, layer.ff_down_w, layer.ff_down_b, ffn_t, il);
@@ -282,12 +304,18 @@ pub fn buildVit(
             cb,
         );
         cb(hidden, "ffn_out", il_i32);
+        if (il_i32 == 0) {
+            ggml.setOutput(hidden);
+        }
 
         // Post-FFN norm (optional)
         // C++: if (layer.ff_post_norm_w) { cur = build_norm(cur, layer.ff_post_norm_w, nullptr, norm_t, eps, il); cb(cur, "ffn_post_normed", il); }
         if (layer.ff_post_norm_w) |fpn| {
             hidden = try norm_builder.buildNorm(ctx, hidden, fpn, null, norm_t, eps, il_i32);
             cb(hidden, "ffn_post_normed", il_i32);
+            if (il_i32 == 0) {
+                ggml.setOutput(hidden);
+            }
         }
 
         // Layer scale 2 (optional)
@@ -295,17 +323,26 @@ pub fn buildVit(
         if (layer.ls_2_w) |ls2| {
             hidden = hidden.mul(ctx, ls2);
             cb(hidden, "ffn_out_scaled", il_i32);
+            if (il_i32 == 0) {
+                ggml.setOutput(hidden);
+            }
         }
 
         // Residual 2（对应 C++: cur = ggml_add(ctx0, inpL, cur); cb(cur, "layer_out", il);）
         hidden = inpL.add(ctx, hidden);
         cb(hidden, "layer_out", il_i32);
+        if (il_i32 == 0) {
+            ggml.setOutput(hidden);
+        }
 
         // Layer scale out (optional)
         // C++: if (layer.ls_out_w) { cur = ggml_mul(ctx0, cur, layer.ls_out_w); cb(cur, "layer_out_scaled", il); }
         if (layer.ls_out_w) |ls_out| {
             hidden = hidden.mul(ctx, ls_out);
             cb(hidden, "layer_out_scaled", il_i32);
+            if (il_i32 == 0) {
+                ggml.setOutput(hidden);
+            }
         }
 
         inpL = hidden;

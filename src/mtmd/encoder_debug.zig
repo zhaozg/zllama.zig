@@ -1,6 +1,6 @@
 //! Shared encoder debug utilities
 //!
-//! Extracts the common markDebugOutputs / saveDebugTensors patterns
+//! Extracts the common saveDebugTensors patterns
 //! that are duplicated between VisionEncoder and AudioEncoder.
 
 const std = @import("std");
@@ -19,27 +19,6 @@ pub const DebugTensorEntry = struct {
     /// Whether this is an input tensor (true) or output tensor (false, default)
     is_input: bool = false,
 };
-
-/// Mark intermediate tensors with ggml.setOutput() so their data
-/// is preserved after graph computation.
-///
-/// Call this BEFORE Gallocr.allocGraph or ggml_backend_graph_compute.
-///
-/// `log` is the scoped logger returned by `std.log.scoped(...)`.
-/// In Zig 0.16.0, `std.log.scoped()` returns an anonymous struct type,
-/// so we use `anytype` to accept any scoped logger.
-pub fn markDebugOutputs(
-    cgraph: *ggml.CGraph,
-    entries: []const DebugTensorEntry,
-    log: anytype,
-) void {
-    for (entries) |entry| {
-        if (entry.is_input) continue; // Input tensors should not be marked as output
-        debug_mod.markTensorAsOutput(cgraph, entry.tensor_name) catch |err| {
-            log.warn("markDebugOutputs: failed to mark '{s}': {}", .{ entry.tensor_name, err });
-        };
-    }
-}
 
 /// Save intermediate tensors from a computed graph to JSON files.
 ///

@@ -150,10 +150,6 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     }, ectx.n_threads);
     const buft = ggml.backendCpuBufferType();
     var vis_gallocr = try ggml.Gallocr.init(buft);
-    // This must be called BEFORE graph allocation/computation.
-    if (mm_mgr.vision_encoder) |_| {
-        mtmd.vision_mod.VisionEncoder.markDebugOutputs(vision_graph);
-    }
 
     logger.debug("generateWithImage: encodeMedia returned, vision_embeddings ne={any}", .{vision_embeddings.ne()});
     defer vis_gallocr.free();
@@ -275,12 +271,6 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
         .audio_length_sec = @as(f32, @floatFromInt(wav_result.info.num_samples)) / @as(f32, @floatFromInt(wav_result.info.sample_rate)),
     }, ectx.n_threads);
     logger.debug("Audio encoder: graph built, embeddings tensor found", .{});
-
-    // Mark intermediate tensors as outputs so their data is preserved after computation.
-    // This must be called BEFORE graph allocation/computation.
-    if (mm_mgr.audio_encoder) |_| {
-        mtmd.audio_mod.AudioEncoder.markDebugOutputs(audio_graph);
-    }
 
     // Compute the audio graph with a dedicated Gallocr (matching helper.zig pattern).
     logger.debug("Audio encoder: computing graph...", .{});

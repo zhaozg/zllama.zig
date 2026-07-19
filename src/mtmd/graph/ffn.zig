@@ -145,13 +145,13 @@ pub fn buildFFN(
     // C++: if (down) { cur = build_mm(down, cur); }
     var result = if (down) |d| blk: {
         const t = build_mm(ctx, d, activated, data);
-        // C++: cb(cur, "ffn_down", il);  — called BEFORE down_b add
-        if (cb) |cbf| cbf(t, "ffn_down", il);
         break :blk t;
     } else activated;
 
-    // C++: if (down_b) { cur = ggml_add(ctx0, cur, down_b); }
+    // C++: if (down_b) { cb(cur, "ffn_down", il); cur = ggml_add(ctx0, cur, down_b); }
+    // Note: cb("ffn_down") is called ONLY when down_b exists, BEFORE the add.
     if (down_b) |b| {
+        if (cb) |cbf| cbf(result, "ffn_down", il);
         result = result.add(ctx, b);
     }
 

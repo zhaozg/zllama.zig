@@ -12,7 +12,7 @@ const log = std.log.scoped(.audio_encoder);
 pub const AudioEncoderBackend = graph.AudioEncoderBackend;
 
 /// Debug tensor entries: (tensor_name_in_graph, output_filename).
-/// Used by both markDebugOutputs and saveDebugData.
+/// Used by saveDebugData.
 pub const debug_entries = [_]encoder_debug.DebugTensorEntry{
     .{ .tensor_name = "pos_emb", .filename = "zllama_audio_00_pos_emb.json", .is_input = true },
     .{ .tensor_name = "kq_mask", .filename = "zllama_audio_00_kq_mask.json", .is_input = true },
@@ -142,12 +142,6 @@ pub const AudioEncoder = struct {
             0;
         const actual_frames = @min(fc.n_frames, pt_frames);
         return self.backend.estimateOutputTokens(io, actual_frames);
-    }
-
-    /// Mark intermediate tensors with ggml.setOutput() so their data
-    /// is preserved after graph computation. Delegates to shared encoder_debug.
-    pub fn markDebugOutputs(cgraph: *ggml.CGraph) void {
-        encoder_debug.markDebugOutputs(cgraph, &debug_entries, log);
     }
 
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {

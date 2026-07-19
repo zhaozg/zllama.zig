@@ -169,11 +169,11 @@ pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFil
     }
     log.info("Gemma4V: {d} layers loaded", .{n});
 
-    if (w.layers[0].ln_1_w) | t | {
-        try graph.debug.saveTensor(io, alloc, "debug_vision", "zllama_vision_04a_1_layer0_ln_1_w.json",  t);
+    if (w.layers[0].ln_1_w) |t| {
+        try graph.debug.saveTensor(io, alloc, "debug_vision", "zllama_vision_04a_1_layer0_ln_1_w.json", t);
     }
-    if (w.layers[0].ln_1_b) | t | {
-        try graph.debug.saveTensor(io, alloc, "debug_vision", "zllama_vision_04a_2_layer0_ln_1_b.json",  t);
+    if (w.layers[0].ln_1_b) |t| {
+        try graph.debug.saveTensor(io, alloc, "debug_vision", "zllama_vision_04a_2_layer0_ln_1_b.json", t);
     }
 }
 
@@ -563,16 +563,15 @@ pub fn buildGraph(
     //       ggml_set_name(cur, "vit_output");
     //       ggml_set_output(cur);
     // ========================================================================
-    cur = try vit_builder.buildVit(ctx, gf, cur, np, .rms_norm, p.ffn_op,
-        null, // learned_pos_embd — already handled above
+    cur = try vit_builder.buildVit(ctx, gf, cur, np, .rms_norm, p.ffn_op, null, // learned_pos_embd — already handled above
         w, p, addPos, .{
-        .v_norm_eps = p.eps,
-        .kq_scale = 1.0,
-        .v_norm = true,
-        .flash_attn_type = builder.flash_attn_type,
-        .build_mm = buildMMWithClamp,
-        .data = @ptrCast(@constCast(&gemma4v_data)),
-    });
+            .v_norm_eps = p.eps,
+            .kq_scale = 1.0,
+            .v_norm = true,
+            .flash_attn_type = builder.flash_attn_type,
+            .build_mm = buildMMWithClamp,
+            .data = @ptrCast(@constCast(&gemma4v_data)),
+        });
     cur.setName("vit_output");
     ggml.setOutput(cur);
 
