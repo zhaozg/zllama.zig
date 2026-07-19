@@ -186,23 +186,25 @@ pub fn resizeBilinearU8(
 ) ![]u8 {
     const sw: i32 = @intCast(src_w);
     const sh: i32 = @intCast(src_h);
-    const dw: i32 = @intCast(dst_w);
-    const dh: i32 = @intCast(dst_h);
+    var dw: i32 = @intCast(dst_w);
+    var dh: i32 = @intCast(dst_h);
+    if (dw <= 0) dw = 1;
+    if (dh <= 0) dh = 1;
     const out: []u8 = try allocator.alloc(u8, @as(usize, @intCast(dw * dh * 3)));
 
-    const x_ratio: f64 = if (dw > 1) @as(f64, @floatFromInt(sw - 1)) / @as(f64, @floatFromInt(dw - 1)) else 0.0;
-    const y_ratio: f64 = if (dh > 1) @as(f64, @floatFromInt(sh - 1)) / @as(f64, @floatFromInt(dh - 1)) else 0.0;
+    const x_ratio: f32 = if (dw > 1) @as(f32, @floatFromInt(sw - 1)) / @as(f32, @floatFromInt(dw - 1)) else 0.0;
+    const y_ratio: f32 = if (dh > 1) @as(f32, @floatFromInt(sh - 1)) / @as(f32, @floatFromInt(dh - 1)) else 0.0;
 
     for (0..@as(usize, @intCast(dh))) |dy| {
-        const py: f64 = @as(f64, @floatFromInt(@as(i32, @intCast(dy)))) * y_ratio;
+        const py: f32 = @as(f32, @floatFromInt(@as(i32, @intCast(dy)))) * y_ratio;
         const y0: i32 = @min(@as(i32, @intFromFloat(@floor(py))), sh - 1);
         const y1: i32 = @min(y0 + 1, sh - 1);
-        const yf: f64 = py - @floor(py);
+        const yf: f32 = py - @as(f32, @floatFromInt(y0));
         for (0..@as(usize, @intCast(dw))) |dx| {
-            const px: f64 = @as(f64, @floatFromInt(@as(i32, @intCast(dx)))) * x_ratio;
+            const px: f32 = @as(f32, @floatFromInt(@as(i32, @intCast(dx)))) * x_ratio;
             const x0: i32 = @min(@as(i32, @intFromFloat(@floor(px))), sw - 1);
             const x1: i32 = @min(x0 + 1, sw - 1);
-            const xf: f64 = px - @floor(px);
+            const xf: f32 = px - @as(f32, @floatFromInt(x0));
 
             const idx00: usize = @as(usize, @intCast((y0 * sw + x0) * 3));
             const idx01: usize = @as(usize, @intCast((y0 * sw + x1) * 3));
@@ -211,14 +213,16 @@ pub fn resizeBilinearU8(
             const db: usize = (dy * @as(usize, @intCast(dw)) + dx) * 3;
 
             inline for (0..3) |c| {
-                const v00: f64 = @floatFromInt(src[idx00 + c]);
-                const v01: f64 = @floatFromInt(src[idx01 + c]);
-                const v10: f64 = @floatFromInt(src[idx10 + c]);
-                const v11: f64 = @floatFromInt(src[idx11 + c]);
-                const top: f64 = v00 * (1.0 - xf) + v01 * xf;
-                const bot: f64 = v10 * (1.0 - xf) + v11 * xf;
-                const val: f64 = top * (1.0 - yf) + bot * yf;
-                out[db + c] = @intFromFloat(val);
+                const v00: f32 = @floatFromInt(src[idx00 + c]);
+                const v01: f32 = @floatFromInt(src[idx01 + c]);
+                const v10: f32 = @floatFromInt(src[idx10 + c]);
+                const v11: f32 = @floatFromInt(src[idx11 + c]);
+                // Use lerp formula: s + (e - s) * t  (matching C++ lerp)
+                const top: f32 = v00 + (v01 - v00) * xf;
+                const bot: f32 = v10 + (v11 - v10) * xf;
+                // C++ static_cast<uint8_t> truncates (not rounds).
+                // Zig @intFromFloat also truncates for float→int, matching C++ behavior.
+                out[db + c] = @intFromFloat(top + (bot - top) * yf);
             }
         }
     }
