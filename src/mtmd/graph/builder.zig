@@ -172,16 +172,16 @@ pub const GraphBuilder = struct {
     pub fn buildFFN(
         self: *GraphBuilder,
         cur: *ggml.Tensor,
-        up: *ggml.Tensor,
+        up: ?*ggml.Tensor,
         up_b: ?*ggml.Tensor,
         gate: ?*ggml.Tensor,
         gate_b: ?*ggml.Tensor,
-        down: *ggml.Tensor,
+        down: ?*ggml.Tensor,
         down_b: ?*ggml.Tensor,
         type_op: FFNOpType,
-        name: []const u8,
+        il: i32,
     ) !*ggml.Tensor {
-        return ffn_builder.buildFFN(self.ctx0, cur, up, up_b, gate, gate_b, down, down_b, type_op, name, defaultBuildMM, null);
+        return ffn_builder.buildFFN(self.ctx0, cur, up, up_b, gate, gate_b, down, down_b, type_op, il, defaultBuildMM, null, null);
     }
 
     /// 构建注意力层
@@ -211,6 +211,7 @@ pub const GraphBuilder = struct {
             sinks,
             self.flash_attn_type,
             defaultBuildMM,
+            null,
             null,
         );
     }

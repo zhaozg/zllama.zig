@@ -425,6 +425,7 @@ pub fn buildGraph(
                 builder.flash_attn_type,
                 defaultBuildMM,
                 null,
+                null,
             );
 
             attn_out.setName("blk");
@@ -445,15 +446,16 @@ pub fn buildGraph(
             const ffn_out = try graph.buildFFN(
                 ctx,
                 cur,
-                layer.ff_up_w orelse return error.MissingFFNUpWeight,
+                layer.ff_up_w,
                 layer.ff_up_b,
                 layer.ff_gate_w,
                 layer.ff_gate_b,
-                layer.ff_down_w orelse return error.MissingFFNDownWeight,
+                layer.ff_down_w,
                 layer.ff_down_b,
                 .gelu,
-                "blk",
+                @intCast(il),
                 defaultBuildMM,
+                null,
                 null,
             );
             ffn_out.setName("blk");
@@ -482,20 +484,18 @@ pub fn buildGraph(
         embeddings = try graph.buildFFN(
             ctx,
             embeddings,
-            w.mm_0_w.?,
+            w.mm_0_w,
             w.mm_0_b,
             null,
             null,
-            w.mm_1_w.?,
+            w.mm_1_w,
             w.mm_1_b,
             .gelu,
-            "mm_proj",
+            -1,
             defaultBuildMM,
             null,
+            null,
         );
-    } else if (w.mm_input_proj_w != null) {
-        embeddings = embeddings.rmsNorm(ctx, eps);
-        embeddings.setName("mm_norm");
         if (w.mm_soft_emb_norm_w) |sn| {
             embeddings = embeddings.mul(ctx, graph.reshapeForBroadcast(ctx, sn));
             embeddings.setName("mm_norm_scaled");

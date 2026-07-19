@@ -203,6 +203,23 @@ pub fn defaultBuildMM(ctx: *ggml.Context, w: *ggml.Tensor, x: *ggml.Tensor, data
 }
 
 /// 构建 ViT 选项
+/// 回调函数类型，对应 C++ clip_graph::cb(ggml_tensor * cur, const char * name, int il)
+/// 用于设置张量名称（调试/命名用途）
+/// 参数: (tensor, name, layer_index)
+pub const CbFn = *const fn (tensor: *ggml.Tensor, name: [:0]const u8, il: i32) void;
+
+/// 默认 cb 实现：设置张量名称
+pub fn defaultCb(tensor: *ggml.Tensor, name: [:0]const u8, il: i32) void {
+    if (il >= 0) {
+        // 格式: "{name}-{il}"
+        // 使用 setName 直接设置名称（不格式化 il，因为 Zig 的 setName 接受 []const u8）
+        tensor.setName(name);
+    } else {
+        tensor.setName(name);
+    }
+}
+
+/// 构建 ViT 选项
 pub const BuildVitOpts = struct {
     attn_mask: ?*ggml.Tensor = null,
     /// 是否对 V 应用 RMSNorm（gemma4v 需要）

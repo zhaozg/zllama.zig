@@ -10,6 +10,8 @@ const types = @import("types.zig");
 const BuildMMFn = types.BuildMMFn;
 const defaultBuildMM = types.defaultBuildMM;
 const FlashAttnType = types.FlashAttnType;
+const CbFn = types.CbFn;
+const defaultCb = types.defaultCb;
 
 const log = std.log.scoped(.graph_attn);
 
@@ -33,6 +35,7 @@ const log = std.log.scoped(.graph_attn);
 ///   - flash_attn_type: flash attention 类型（.enabled / .disabled / .auto）
 ///   - build_mm: 矩阵乘法回调（对应 C++ clip_graph::build_mm 虚拟函数）
 ///   - data: 模型私有数据指针，传递给 build_mm 回调
+///   - cb: 张量命名回调（可选），对应 C++ clip_graph::cb
 ///
 /// 返回: 注意力输出张量 [n_embd, n_patches * n_batch]
 ///
@@ -52,12 +55,12 @@ pub fn buildAttn(
     flash_attn_type: FlashAttnType,
     build_mm: BuildMMFn,
     data: ?*anyopaque,
+    cb: ?CbFn,
 ) !*ggml.Tensor {
     const d_head = q_cur.ne()[0];
     const n_head = q_cur.ne()[1];
     const n_patches = q_cur.ne()[2];
     const n_batch = q_cur.ne()[3];
-    _ = il;
     std.debug.assert(k_cur.ne()[0] == d_head);
     std.debug.assert(k_cur.ne()[1] == n_head);
     std.debug.assert(k_cur.ne()[2] == n_patches);
@@ -113,8 +116,8 @@ pub fn buildAttn(
         // 非 flash_attn 路径（CLIP_FLASH_ATTN_TYPE_DISABLED）
         // C++: ggml_tensor * v = ggml_permute(ctx0, v_cur, 1, 2, 0, 3);
         //       v = ggml_cont(ctx0, v);
-        const v = v_cur.permute(ctx, 1, 2, 0, 3);
-        const v_cont = ggml.cont(ctx, v);
+        var v = v_cur.permute(ctx, 1, 2, 0, 3);
+        v = ggml.cont(ctx, v);
 
         // C++: ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
         //      // F32 may not needed for vision encoders?
@@ -131,7 +134,7 @@ pub fn buildAttn(
         }
 
         // C++: ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
-        const kqv = ggml.mulMat(ctx, v_cont, kq);
+        const kqv = ggml.mulMat(ctx, v, kq);
 
         // C++: cur = ggml_permute(ctx0, kqv, 0, 2, 1, 3);
         //      cur = ggml_cont_2d(ctx0, cur, cur->ne[0] * cur->ne[1], cur->ne[2] * cur->ne[3]);
@@ -140,7 +143,7 @@ pub fn buildAttn(
     }
 
     // C++: cb(cur, "kqv_out", il);
-    // 调试回调由调用方（vit.zig 的 buildVit）负责
+    if (cb) |cbf| cbf(cur, "kqv_out", il);
 
     // 输出投影（对应 C++: if (wo) { cur = build_mm(wo, cur); }）
     // 使用 build_mm 回调（支持 clamp 等模型特定操作）
@@ -189,7 +192,7 @@ test "buildAttn: basic self-attention (flash)" {
     var gf = try ctx.newGraph();
     defer gf.deinit();
 
-    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, -1, null, .enabled, defaultBuildMM, null);
+    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, -1, null, .enabled, defaultBuildMM, null, null);
     try testing.expectEqual(n_embd, result.ne()[0]);
     try testing.expectEqual(n_patches, result.ne()[1]);
 }
@@ -230,7 +233,7 @@ test "buildAttn: basic self-attention (non-flash)" {
     var gf = try ctx.newGraph();
     defer gf.deinit();
 
-    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, -1, null, .disabled, defaultBuildMM, null);
+    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, -1, null, .disabled, defaultBuildMM, null, null);
     try testing.expectEqual(n_embd, result.ne()[0]);
     try testing.expectEqual(n_patches, result.ne()[1]);
 }

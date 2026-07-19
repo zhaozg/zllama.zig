@@ -138,7 +138,6 @@ pub fn buildVit(
                     ggml.Type.rowSize(qkv.dataType(), n_embd));
                 Vcur = qkv.view4d(ctx, d_head, n_head_kv, n_pos, B, row_size, nb2, nb3,
                     ggml.Type.rowSize(qkv.dataType(), 2 * n_embd));
-                // zig fmt: on
 
                 // Q/K norm after split (fused path)
                 if (layer.q_norm) |qn| {
@@ -151,7 +150,6 @@ pub fn buildVit(
                 }
             } else {
                 // separate q, k, v（对应 C++: Qcur = build_mm(layer.q_w, cur);）
-                // 使用 build_mm 回调（支持 clamp 等模型特定操作）
                 Qcur = opts.build_mm(ctx, layer.q_w orelse return error.MissingQWeight, hidden, opts.data);
                 if (layer.q_b) |qb| {
                     Qcur = Qcur.?.add(ctx, qb);
@@ -168,7 +166,6 @@ pub fn buildVit(
                 }
 
                 // if true, norm must be applied after reshaping to (d_head, n_head, n_pos)
-                // C++: bool norm_per_head = layer.q_norm && layer.q_norm->ne[0] == d_head;
                 const norm_per_head = if (layer.q_norm) |qn| qn.ne()[0] == d_head else false;
 
                 if (!norm_per_head) {
@@ -183,7 +180,6 @@ pub fn buildVit(
                 }
 
                 // Reshape to [d_head, n_head/n_head_kv, n_pos, n_batch]
-                // C++: Qcur = ggml_reshape_4d(ctx0, Qcur, d_head, n_head, n_pos, B);
                 Qcur = Qcur.?.reshape4d(ctx, d_head, n_head, n_pos, B);
                 Kcur = Kcur.?.reshape4d(ctx, d_head, n_head_kv, n_pos, B);
                 Vcur = Vcur.?.reshape4d(ctx, d_head, n_head_kv, n_pos, B);
@@ -236,8 +232,9 @@ pub fn buildVit(
                 @intCast(il),
                 layer.attn_sinks,
                 opts.flash_attn_type,
-                opts.build_mm, // 传递 build_mm 回调
-                opts.data, // 传递模型私有数据
+                opts.build_mm,
+                opts.data,
+                cb,
             );
             cb(hidden, "attn_out", il_i32);
         }
@@ -257,7 +254,7 @@ pub fn buildVit(
 
         // Residual 1（对应 C++: cur = ggml_add(ctx0, cur, inpL);）
         hidden = hidden.add(ctx, inpL);
-        inpL = hidden; // inpL = residual, hidden = hidden_states
+        inpL = hidden;
 
         // C++: cb(cur, "ffn_inp", il);
         cb(hidden, "ffn_inp", il_i32);
@@ -272,18 +269,18 @@ pub fn buildVit(
         hidden = try ffn_builder.buildFFN(
             ctx,
             hidden,
-            layer.ff_up_w orelse return error.MissingFFNUpWeight,
+            layer.ff_up_w,
             layer.ff_up_b,
             layer.ff_gate_w,
             layer.ff_gate_b,
-            layer.ff_down_w orelse return error.MissingFFNDownWeight,
+            layer.ff_down_w,
             layer.ff_down_b,
             ffn_t,
-            "blk",
-            opts.build_mm, // 传递 build_mm 回调
-            opts.data, // 传递模型私有数据
+            @intCast(il),
+            opts.build_mm,
+            opts.data,
+            cb,
         );
-        // C++: cb(cur, "ffn_out", il);
         cb(hidden, "ffn_out", il_i32);
 
         // Post-FFN norm (optional)

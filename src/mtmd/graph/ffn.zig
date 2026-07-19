@@ -10,6 +10,8 @@ const types = @import("types.zig");
 const FFNOpType = types.FFNOpType;
 const BuildMMFn = types.BuildMMFn;
 const defaultBuildMM = types.defaultBuildMM;
+const CbFn = types.CbFn;
+const defaultCb = types.defaultCb;
 
 const log = std.log.scoped(.graph_ffn);
 
@@ -25,15 +27,17 @@ const log = std.log.scoped(.graph_ffn);
 /// 参数:
 ///   - ctx: ggml 上下文
 ///   - cur: 输入张量 [n_embd, n_patches]
-///   - up: up 投影权重 [n_ff, n_embd]
+///   - up: up 投影权重 [n_ff, n_embd]（可选，为 null 时跳过 up 投影）
 ///   - up_b: up 投影偏置 [n_ff]（可选）
 ///   - gate: gate 投影权重 [n_ff, n_embd]（可选，GLU 变体需要）
 ///   - gate_b: gate 投影偏置 [n_ff]（可选）
-///   - down: down 投影权重 [n_embd, n_ff]
+///   - down: down 投影权重 [n_embd, n_ff]（可选，为 null 时跳过 down 投影）
 ///   - down_b: down 投影偏置 [n_embd]（可选）
 ///   - type_op: FFN 激活函数类型
-///   - name: 张量名称前缀（用于调试）
+///   - il: 层索引（用于调试回调，-1 表示不使用）
 ///   - build_mm: 矩阵乘法回调（对应 C++ clip_graph::build_mm 虚拟函数）
+///   - data: 模型私有数据指针，传递给 build_mm 回调
+///   - cb: 张量命名回调（可选），对应 C++ clip_graph::cb
 ///
 /// 返回: FFN 输出张量 [n_embd, n_patches]
 ///
@@ -41,41 +45,54 @@ const log = std.log.scoped(.graph_ffn);
 pub fn buildFFN(
     ctx: *ggml.Context,
     cur: *ggml.Tensor,
-    up: *ggml.Tensor,
+    up: ?*ggml.Tensor,
     up_b: ?*ggml.Tensor,
     gate: ?*ggml.Tensor,
     gate_b: ?*ggml.Tensor,
-    down: *ggml.Tensor,
+    down: ?*ggml.Tensor,
     down_b: ?*ggml.Tensor,
     type_op: FFNOpType,
-    name: []const u8,
+    il: i32,
     build_mm: BuildMMFn,
     data: ?*anyopaque,
+    cb: ?CbFn,
 ) !*ggml.Tensor {
     // C++: ggml_tensor * tmp = up ? build_mm(up, cur) : cur;
     // Up projection: [n_ff, n_embd] @ [n_embd, n_patches] → [n_ff, n_patches]
-    var up_result = build_mm(ctx, up, cur, data);
+    var up_result = if (up) |u| blk: {
+        const t = build_mm(ctx, u, cur, data);
+        // C++: cb(tmp, "ffn_up", il);
+        if (cb) |cbf| cbf(t, "ffn_up", il);
+        break :blk t;
+    } else cur;
 
+    // C++: if (up_b) { tmp = ggml_add(ctx0, tmp, up_b); cb(tmp, "ffn_up_b", il); }
     if (up_b) |b| {
         up_result = up_result.add(ctx, b);
+        if (cb) |cbf| cbf(up_result, "ffn_up_b", il);
     }
 
     // Gate projection (optional, for GLU variants)
-    // C++: if (gate) { cur = build_mm(gate, cur); ... }
+    // C++: if (gate) { cur = build_mm(gate, cur); cb(cur, "ffn_gate", il); ... }
     var gate_result: ?*ggml.Tensor = null;
     if (gate) |g| {
         gate_result = build_mm(ctx, g, cur, data);
+        // C++: cb(cur, "ffn_gate", il);
+        if (cb) |cbf| cbf(gate_result.?, "ffn_gate", il);
+
         if (gate_b) |gb| {
             gate_result = gate_result.?.add(ctx, gb);
+            // C++: cb(cur, "ffn_gate_b", il);
+            if (cb) |cbf| cbf(gate_result.?, "ffn_gate_b", il);
         }
     }
 
     // Activation
-    // C++: switch (type_op) { case FFN_SILU: ... }
+    // C++: switch (type_op) { case FFN_SILU: ... cb(cur, "ffn_swiglu", il); ... }
     const activated = blk: {
         if (gate_result) |g| {
             // GLU variants: use split activation (tensor method)
-            break :blk switch (type_op) {
+            const t = switch (type_op) {
                 .silu => g.swigluSplit(ctx, up_result),
                 .gelu => g.gegluSplit(ctx, up_result),
                 .gelu_erf => g.gegluErfSplit(ctx, up_result),
@@ -85,9 +102,21 @@ pub fn buildFFN(
                     break :blk relu.mul(ctx, relu);
                 },
             };
+            // C++: cb(cur, "ffn_swiglu"/"ffn_geglu"/etc, il);
+            if (cb) |cbf| {
+                const name = switch (type_op) {
+                    .silu => "ffn_swiglu",
+                    .gelu => "ffn_geglu",
+                    .gelu_erf => "ffn_geglu_erf",
+                    .gelu_quick => "ffn_geglu_quick",
+                    .relu_sqr => "ffn_relu_sqr",
+                };
+                cbf(t, name, il);
+            }
+            break :blk t;
         } else {
             // Non-GLU variants
-            break :blk switch (type_op) {
+            const t = switch (type_op) {
                 .silu => up_result.silu(ctx),
                 .gelu => up_result.gelu(ctx),
                 .gelu_erf => up_result.geluErf(ctx),
@@ -97,17 +126,35 @@ pub fn buildFFN(
                     break :blk relu.mul(ctx, relu);
                 },
             };
+            // C++: cb(cur, "ffn_silu"/"ffn_gelu"/etc, il);
+            if (cb) |cbf| {
+                const name = switch (type_op) {
+                    .silu => "ffn_silu",
+                    .gelu => "ffn_gelu",
+                    .gelu_erf => "ffn_gelu_erf",
+                    .gelu_quick => "ffn_gelu_quick",
+                    .relu_sqr => "ffn_relu_sqr",
+                };
+                cbf(t, name, il);
+            }
+            break :blk t;
         }
     };
+
     // Down projection: [n_embd, n_ff] @ [n_ff, n_patches] → [n_embd, n_patches]
     // C++: if (down) { cur = build_mm(down, cur); }
-    var result = build_mm(ctx, down, activated, data);
+    var result = if (down) |d| blk: {
+        const t = build_mm(ctx, d, activated, data);
+        // C++: cb(cur, "ffn_down", il);  — called BEFORE down_b add
+        if (cb) |cbf| cbf(t, "ffn_down", il);
+        break :blk t;
+    } else activated;
 
+    // C++: if (down_b) { cur = ggml_add(ctx0, cur, down_b); }
     if (down_b) |b| {
         result = result.add(ctx, b);
     }
 
-    _ = name; // 保留参数以保持 API 兼容性
     return result;
 }
 
@@ -137,7 +184,7 @@ test "buildFFN: SiLU activation" {
         @memset(buf, 0.1);
         try t.dataSet(f32, buf);
     }
-    const result = try buildFFN(&ctx, cur, up_w, null, null, null, down_w, null, .silu, "test_ffn", defaultBuildMM, null);
+    const result = try buildFFN(&ctx, cur, up_w, null, null, null, down_w, null, .silu, -1, defaultBuildMM, null, null);
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);
     try testing.expectEqual(@as(i64, n_patches), result.ne()[1]);
 }
@@ -170,7 +217,7 @@ test "buildFFN: GELU with gate" {
         @memset(buf, 0.1);
         try t.dataSet(f32, buf);
     }
-    const result = try buildFFN(&ctx, cur, up_w, null, gate_w, null, down_w, null, .gelu, "test_ffn_gate", defaultBuildMM, null);
+    const result = try buildFFN(&ctx, cur, up_w, null, gate_w, null, down_w, null, .gelu, -1, defaultBuildMM, null, null);
     try testing.expectEqual(@as(i64, n_embd), result.ne()[0]);
     try testing.expectEqual(@as(i64, n_patches), result.ne()[1]);
 }

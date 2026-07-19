@@ -537,6 +537,7 @@ pub fn buildGraph(
                 builder.flash_attn_type,
                 defaultBuildMM,
                 null,
+                null,
             );
         }
 
@@ -547,20 +548,19 @@ pub fn buildGraph(
         cur = try graph.buildFFN(
             ctx,
             cur,
-            layer.ff_up_w orelse return error.MissingFFNUpWeight,
+            layer.ff_up_w,
             layer.ff_up_b,
             layer.ff_gate_w,
             layer.ff_gate_b,
-            layer.ff_down_w orelse return error.MissingFFNDownWeight,
+            layer.ff_down_w,
             layer.ff_down_b,
             p.ffn_op,
-            "ffn_out",
+            @intCast(il),
             defaultBuildMM,
+            null,
             null,
         );
 
-        // Reference: cur = ggml_add(ctx0, inpL, cur); (residual 2)
-        cur = inpL.add(ctx, cur);
         // Reference: cur = ggml_add(ctx0, inpL, cur); (residual 2)
         cur = inpL.add(ctx, cur);
         inpL = cur;
@@ -577,15 +577,16 @@ pub fn buildGraph(
             feat = try graph.buildFFN(
                 ctx,
                 feat,
-                layer.deepstack_fc1_w orelse return error.MissingFFNUpWeight,
+                layer.deepstack_fc1_w,
                 layer.deepstack_fc1_b,
                 null,
                 null,
-                layer.deepstack_fc2_w orelse return error.MissingFFNDownWeight,
+                layer.deepstack_fc2_w,
                 layer.deepstack_fc2_b,
                 .gelu,
-                "deepstack_ffn",
+                -1,
                 defaultBuildMM,
+                null,
                 null,
             );
 
@@ -619,15 +620,16 @@ pub fn buildGraph(
     embeddings = try graph.buildFFN(
         ctx,
         embeddings,
-        w.mm_0_w orelse return error.MissingMMWeight,
+        w.mm_0_w,
         w.mm_0_b,
         null,
         null,
-        w.mm_1_w orelse return error.MissingMMWeight,
+        w.mm_1_w,
         w.mm_1_b,
         .gelu,
-        "mm_proj",
+        -1,
         defaultBuildMM,
+        null,
         null,
     );
     embeddings.setName("mm_proj");

@@ -206,8 +206,8 @@ pub const AlignComparator = struct {
             metrics.ratio_std,
             if (metrics.is_scaled) "是 ⚠️" else "否",
             if (argmax.match) "一致" else "不一致",
-            argmax.ref,
             argmax.ours,
+            argmax.ref,
         });
         try stdout_file.writeStreamingAll(io, buf[0..header.len]);
 

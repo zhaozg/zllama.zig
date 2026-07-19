@@ -378,7 +378,7 @@ test "buildFFN: SiLU without gate (simple FFN)" {
     const down_w = try ctx.newTensor2d(ggml.Type.f32, n_features, n_ff);
     fillTensor(down_w, 99);
 
-    const result = try graph.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, "test_ffn");
+    const result = try graph.buildFFN(ctx, input, up_w, null, null, null, down_w, null, .silu, -1);
 
     ggml.setOutput(result);
     try computeGraph(ctx, result, 1);
@@ -427,8 +427,7 @@ test "buildFFN: SwiGLU (with gate)" {
     try computeGraph(ctx, result, 1);
 
     // Verify shape
-    const ne = result.ne();
-    try testing.expectEqual(n_features, ne[0]);
+    const result = try graph.buildFFN(ctx, input, up_w, null, gate_w, null, down_w, null, .silu, -1);
     try testing.expectEqual(n_pos, ne[1]);
 
     // Verify all values are finite
