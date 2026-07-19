@@ -1,15 +1,17 @@
 //! Gemma4V visual encoder graph builder.
 //!
-//! Ref: deps/llama.cpp/tools/mtmd/models/gemma4v.cpp
+//! 1:1 translation of deps/llama.cpp/tools/mtmd/models/gemma4v.cpp
 //!
 //! Pipeline:
-//!   1. scale_bias(inp_raw, 2.0, -1.0)
-//!   2. Conv2D patch embedding (no patch_bias)
-//!   3. 2D position embeddings (pos_x/pos_y lookup tables)
-//!   4. ViT blocks (RMS norm) with 2D RoPE (NEOX ordering)
-//!   5. Pool 2D (avg, kernel=n_merge) + scale(sqrt(n_embd))
-//!   6. Standardization: (hidden - std_bias) * std_scale
-//!   7. Multimodal embedder: rms_norm -> build_mm(mm_input_proj_w)
+//!   1. build_inp_raw() -> 4D [W, H, C, B] f32 tensor, set_input
+//!   2. scale_bias(inp_raw, 2.0, -1.0)  — patches = 2 * (patches - 0.5)
+//!   3. Conv2D patch embedding (no patch_bias)
+//!   4. reshape_3d -> [n_patches, n_embd, B], then cont(transpose) -> [n_embd, n_patches, B]
+//!   5. 2D position embeddings (pos_x/pos_y lookup tables)
+//!   6. ViT blocks (RMS norm) with 2D RoPE (NEOX ordering), V RMSNorm
+//!   7. Pool 2D (avg, kernel=n_merge) + scale(sqrt(n_embd))
+//!   8. Standardization: (hidden - std_bias) * std_scale
+//!   9. Multimodal embedder: rms_norm -> build_mm(mm_input_proj_w) with clamp
 //!
 //! NOTE: gemma4v does NOT use mm_soft_emb_norm_w (that's gemma3 only).
 
@@ -58,51 +60,39 @@ pub fn loadParams(io: std.Io, gf: *const gguf.GGUFFile, p: *VisionHParams) void 
 // ============================================================================
 // Weight Loading
 // ============================================================================
-// Uses weight_loader.loadLayerWeight for layer weights (consistent with gemma4a.zig)
-// and weight_loader.findOrCreateTensor for top-level weights.
-// Both functions handle quantized tensor dequantization automatically.
 
-/// Load a single ViT layer's weights from GGUF using weight_loader.loadLayerWeight.
-/// This is the gemma4v equivalent of gemma4a.zig's loadConformerLayer().
-/// Required weights (attn_q, attn_k, attn_v, attn_out, ffn_up, ffn_gate, ffn_down)
-/// will return error.TensorNotFound if missing.
-/// Optional weights (ln1, ln2, norms) return null if not found.
 fn loadLayer(ctx: *ggml.Context, gf: *const gguf.GGUFFile, prefix: []const u8) !ViTLayerWeights {
     var l = ViTLayerWeights{};
 
-    // Attention weights (required — matching C++ get_tensor without false)
+    // Attention weights (required)
     l.q_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_q.weight");
     l.k_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_k.weight");
     l.v_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_v.weight");
     l.o_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_out.weight");
 
-    // Attention biases (optional — matching C++ get_tensor with false)
-    // Ref: clip.cpp lines 1912-1915
+    // Attention biases (optional)
     l.q_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_q.bias") catch null;
     l.k_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_k.bias") catch null;
     l.v_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_v.bias") catch null;
     l.o_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_out.bias") catch null;
 
-    // FFN weights (required — matching C++ get_tensor without false)
+    // FFN weights (required)
     l.ff_up_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_up.weight");
     l.ff_gate_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_gate.weight");
     l.ff_down_w = try weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_down.weight");
 
-    // FFN biases (optional — matching C++ get_tensor with false)
-    // Ref: clip.cpp lines 1922-1926
+    // FFN biases (optional)
     l.ff_up_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_up.bias") catch null;
     l.ff_gate_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_gate.bias") catch null;
     l.ff_down_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_down.bias") catch null;
 
-    // LayerNorm weights & biases (optional — matching C++ get_tensor with false)
-    // Ref: clip.cpp lines 1904-1905, 1917-1918
+    // LayerNorm weights & biases (optional)
     l.ln_1_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln1.weight") catch null;
     l.ln_1_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln1.bias") catch null;
     l.ln_2_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln2.weight") catch null;
     l.ln_2_b = weight_loader.loadLayerWeight(ctx, gf, prefix, "ln2.bias") catch null;
 
     // Post-attn / post-FFN norms (optional, gemma4-specific)
-    // Ref: clip.cpp lines 1909-1910
     l.attn_post_norm_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_post_norm.weight") catch null;
     l.ff_post_norm_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ffn_post_norm.weight") catch null;
 
@@ -111,10 +101,6 @@ fn loadLayer(ctx: *ggml.Context, gf: *const gguf.GGUFFile, prefix: []const u8) !
     l.q_norm = weight_loader.loadLayerWeight(ctx, gf, prefix, "attn_q_norm.weight") catch null;
 
     // Layer scales (optional, gemma4-specific)
-    // Ref: clip.cpp lines 1906-1908
-    // C++: layer.ls_1_w   = get_tensor(string_format(TN_LS_1,   prefix, il, "weight"), false);
-    //       layer.ls_2_w   = get_tensor(string_format(TN_LS_2,   prefix, il, "weight"), false);
-    //       layer.ls_out_w = get_tensor(string_format(TN_LS_OUT, prefix, il, "weight"), false);
     l.ls_1_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ls1.weight") catch null;
     l.ls_2_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "ls2.weight") catch null;
     l.ls_out_w = weight_loader.loadLayerWeight(ctx, gf, prefix, "out_scale.weight") catch null;
@@ -123,7 +109,6 @@ fn loadLayer(ctx: *ggml.Context, gf: *const gguf.GGUFFile, prefix: []const u8) !
 }
 
 pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFile, ctx: *ggml.Context, w: *VisionEncoderWeights) anyerror!void {
-
     // Load patch embedding weight (required)
     log.debug("Loading patch_embeddings_0 (v.patch_embd.weight)...", .{});
     w.patch_embeddings_0 = try weight_loader.findOrCreateTensor(ctx, gf, "v.patch_embd.weight");
@@ -163,7 +148,6 @@ pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFil
     }
 
     // NOTE: gemma4v does NOT use mm_soft_emb_norm_w (that's gemma3 only)
-    // w.mm_soft_emb_norm_w is intentionally NOT loaded
 
     // Detect ViT layer count from GGUF
     var n: u32 = 0;
@@ -192,16 +176,47 @@ pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFil
         try graph.debug.saveTensor(io, alloc, "debug_vision", "zllama_vision_04a_2_layer0_ln_1_b.json",  t);
     }
 }
+
 pub fn loadClampInfo(io: std.Io, allocator: std.mem.Allocator, gf: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void {
     _ = io;
     var weight_names = std.ArrayList([]const u8).initCapacity(allocator, 0) catch |err| return err;
     defer weight_names.deinit(allocator);
 
+    // C++: for (auto * tensor : tensors_to_load) {
+    //         if (string_ends_with(name, ".weight")) {
+    //             ... load clamp info for all weights ...
+    //         }
+    //       }
+    // In zllama, we need to collect all weight tensor names that could have clamp info.
+    // These include: patch_embd, position_embd, all layer weights (qkv, ff_up, ff_gate, ff_down, ln_1, ln_2, etc.),
+    // and mm_input_proj_w.
+
+    // Add mm_input_proj_w (always has clamp info in gemma4v)
     if (w.mm_input_proj_w) |t| try weight_names.append(allocator, t.getName());
+
+    // Add all layer weights that end with ".weight"
+    for (w.layers) |layer| {
+        if (layer.qkv_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.q_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.k_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.v_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.o_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_up_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_gate_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_down_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ln_1_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ln_2_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.attn_post_norm_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.ff_post_norm_w) |t| try weight_names.append(allocator, t.getName());
+        if (layer.k_norm) |t| try weight_names.append(allocator, t.getName());
+        if (layer.q_norm) |t| try weight_names.append(allocator, t.getName());
+    }
 
     w.clamp_info_map = try graph.clamp.loadClampInfoFromWeightNames(allocator, gf, weight_names.items);
     log.info("Gemma4V clamp info loaded: {d} entries", .{w.clamp_info_map.count()});
 }
+
+// ============================================================================
 // Output Estimate
 // ============================================================================
 
@@ -210,12 +225,12 @@ pub fn estimateOutputTokens(io: std.Io, iw: u32, ih: u32, ps: u32, nm: u32) u32 
     const m: u32 = if (nm == 0) 1 else nm;
     return (iw / ps / m) * (ih / ps / m);
 }
+
 // ============================================================================
 // Gemma4V 模型私有数据
 // ============================================================================
 
 /// Gemma4V 模型私有数据，通过 BuildVitOpts.data 传递给回调函数
-/// 替代之前的模块级全局变量，确保线程安全
 pub const Gemma4VData = struct {
     pos_x: *ggml.Tensor,
     pos_y: *ggml.Tensor,
@@ -225,6 +240,16 @@ pub const Gemma4VData = struct {
 
 /// 2D RoPE callback for ViT blocks.
 /// 1:1 translation of deps/llama.cpp/tools/mtmd/models/gemma4v.cpp add_pos lambda
+///
+/// C++ lambda:
+///   auto add_pos = [&](ggml_tensor * cur, const clip_layer &) {
+///       const int64_t n_dim  = cur->ne[0];
+///       const int64_t n_head = cur->ne[1];
+///       const int64_t n_pos  = cur->ne[2];
+///       // first half: view4d + rope_ext(NEOX)
+///       // second half: view4d + rope_ext(NEOX)
+///       // concat
+///   };
 fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, data: ?*anyopaque) *ggml.Tensor {
     const d = @as(*const Gemma4VData, @ptrCast(@alignCast(data orelse unreachable)));
 
@@ -248,9 +273,11 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, data
     // C++: first = ggml_rope_ext(ctx0, first, pos_x, nullptr,
     //       n_dim/2, GGML_ROPE_TYPE_NEOX, 0, hparams.rope_theta,
     //       1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+    // GGML_ROPE_TYPE_NEOX = 2
     first = first.ropeExt(ctx, d.pos_x, null, @intCast(n_dim_half), 2, // GGML_ROPE_TYPE_NEOX
         0, // n_ctx_orig
-        d.freq_base, 1.0, // freq_scale
+        d.freq_base, // freq_base
+        1.0, // freq_scale
         0.0, // ext_factor
         1.0, // attn_factor
         0.0, // beta_fast
@@ -268,7 +295,8 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, data
     //       1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
     second = second.ropeExt(ctx, d.pos_y, null, @intCast(n_dim_half), 2, // GGML_ROPE_TYPE_NEOX
         0, // n_ctx_orig
-        d.freq_base, 1.0, // freq_scale
+        d.freq_base, // freq_base
+        1.0, // freq_scale
         0.0, // ext_factor
         1.0, // attn_factor
         0.0, // beta_fast
@@ -276,7 +304,6 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, data
     );
 
     // C++: cur = ggml_concat(ctx0, first, second, 0);
-    // C++: return cur;
     return first.concat(ctx, second, 0);
 }
 
@@ -284,9 +311,10 @@ fn addPos(ctx: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, data
 // Graph
 // ============================================================================
 
-const Dim = enum { x, y };
-
-fn posIndices(ctx: *ggml.Context, nx: i32, ny: i32, d: Dim) !*ggml.Tensor {
+/// Create position index tensors for 2D position embeddings.
+/// Corresponds to C++: ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_patches) + set_input
+/// The data is filled with x/y indices for each patch position.
+fn posIndices(ctx: *ggml.Context, nx: i32, ny: i32, comptime d: enum { x, y }) !*ggml.Tensor {
     const n: usize = @intCast(@as(i32, nx * ny));
     const data = try std.heap.page_allocator.alloc(i32, n);
     defer std.heap.page_allocator.free(data);
@@ -320,18 +348,22 @@ fn posIndices(ctx: *ggml.Context, nx: i32, ny: i32, d: Dim) !*ggml.Tensor {
     return t;
 }
 
-/// build_mm callback with clamp support (used for ViT block internal projections)
+/// build_mm callback with clamp support.
 /// Corresponds to C++ clip_graph_gemma4v::build_mm()
-/// data 指向 Gemma4VData（用于获取 clamp_info_map）
+/// data points to Gemma4VData (for clamp_info_map)
 fn buildMMWithClamp(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, data: ?*anyopaque) *ggml.Tensor {
     const d = @as(*const Gemma4VData, @ptrCast(@alignCast(data orelse unreachable)));
     if (d.clamp_info_map.get(wt.getName())) |ci| {
+        // C++: ggml_tensor * clamped = ggml_clamp(ctx0, x, clamp_info.inp_min, clamp_info.inp_max);
+        //       ggml_tensor * out = ggml_mul_mat(ctx0, w, clamped);
+        //       out = ggml_clamp(ctx0, out, clamp_info.out_min, clamp_info.out_max);
         return wt.mulMat(ctx, x.clamp(ctx, ci.inp_min, ci.inp_max)).clamp(ctx, ci.out_min, ci.out_max);
     }
+    // C++: return ggml_mul_mat(ctx0, w, x);
     return wt.mulMat(ctx, x);
 }
 
-/// Direct build_mm with clamp info (used for final mm_input_proj_w projection)
+/// Direct build_mm with clamp info (used for final mm_input_proj_w projection).
 fn buildMMWithClampDirect(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor, cm: *const std.StringHashMap(ClampInfo)) *ggml.Tensor {
     if (cm.get(wt.getName())) |ci| {
         return wt.mulMat(ctx, x.clamp(ctx, ci.inp_min, ci.inp_max)).clamp(ctx, ci.out_min, ci.out_max);
@@ -352,7 +384,6 @@ fn buildMMWithClampDirect(ctx: *ggml.Context, wt: *ggml.Tensor, x: *ggml.Tensor,
 ///
 /// So we need HWC->CHW conversion when filling inp_raw.
 /// Ref: clip.cpp lines 3645-3665 does HWC->CHW conversion.
-/// Ref: llama.cpp clip.cpp lines 3645-3665: set_input_f32("inp_raw", inp_raw)
 fn fillInpRawFromImage(
     ctx: *ggml.Context,
     gf: *ggml.CGraph,
@@ -394,9 +425,20 @@ fn fillInpRawFromImage(
     try inp_raw.dataSet(f32, dst);
 }
 
-/// Build Gemma4V full compute graph (GraphBuilder version)
-/// Receives GraphBuilder, extracts ctx, gf, weights, hparams etc.
-/// Gets image data from builder.img and creates input tensor.
+/// Build Gemma4V full compute graph.
+///
+/// 1:1 translation of deps/llama.cpp/tools/mtmd/models/gemma4v.cpp clip_graph_gemma4v::build()
+///
+/// Pipeline (matching C++ exactly):
+///   1. build_inp_raw() -> 4D [W, H, C, B] f32 tensor, set_input
+///   2. scale_bias(inp_raw, 2.0, -1.0)  — patches = 2 * (patches - 0.5)
+///   3. Conv2D patch embedding (no patch_bias)
+///   4. reshape_3d -> [n_patches, n_embd, B], then cont(transpose) -> [n_embd, n_patches, B]
+///   5. 2D position embeddings (pos_x/pos_y lookup tables)
+///   6. ViT blocks (RMS norm) with 2D RoPE (NEOX ordering), V RMSNorm
+///   7. Pool 2D (avg, kernel=n_merge) + scale(sqrt(n_embd))
+///   8. Standardization: (hidden - std_bias) * std_scale
+///   9. Multimodal embedder: rms_norm -> build_mm(mm_input_proj_w) with clamp
 pub fn buildGraph(
     builder: *GraphBuilder,
 ) !*ggml.CGraph {
@@ -404,51 +446,95 @@ pub fn buildGraph(
     const gf = builder.gf;
     const w = builder.weights;
     const p = builder.hparams;
-    _ = builder.img; // img data is filled after buildGraph returns (see buildGraphFromWeights)
 
     const ps: i32 = @intCast(p.patch_size);
     // Use image_height if set (non-zero), otherwise fall back to image_size (square)
-    // Ref: C++ clip_graph constructor uses img.nx() and img.ny() directly
     const img_h: i32 = if (p.image_height > 0) @intCast(p.image_height) else @intCast(p.image_size);
     const img_w: i32 = @intCast(p.image_size);
     const npx: i32 = @divTrunc(img_w, ps);
     const npy: i32 = @divTrunc(img_h, ps);
     const np: i64 = @as(i64, npx) * @as(i64, npy);
     const ne: i64 = @intCast(p.n_embd);
+    const n_batch: i64 = 1;
 
     log.debug("buildGraph: image_size={d}x{d} patch_size={d} npx={d} npy={d} np={d} ne={d}", .{ img_w, img_h, p.patch_size, npx, npy, np, ne });
-    // 1. Create input tensor (match C++ build_inp_raw: 4D [W, H, C, 1], set_input)
-    //    Graph construction only — data is filled separately after buildGraph returns.
-    //    Ref: llama.cpp clip-graph.h build_inp_raw() creates empty tensor, clip.cpp fills data later.
-    const n_batch: i64 = 1;
+
+    // ========================================================================
+    // Step 1: build_inp_raw() — create input tensor
+    // C++: ggml_tensor * inp_raw = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, img.nx(), img.ny(), channels, n_batch);
+    //       ggml_set_name(inp_raw, "inp_raw");
+    //       ggml_set_input(inp_raw);
+    // ========================================================================
     const inp_raw = try ctx.newTensor4d(ggml.Type.f32, @as(i64, img_w), @as(i64, img_h), 3, n_batch);
     inp_raw.setName("inp_raw");
     ggml.setInput(inp_raw);
 
-    // 2. Scale+bias: patches * 2 - 1
-    //    Ref: gemma4v.cpp: inp_raw = ggml_scale_bias(ctx0, inp_raw, 2.0f, -1.0f);
+    // ========================================================================
+    // Step 2: scale_bias — patches = 2 * (patches - 0.5)
+    // C++: inp_raw = ggml_scale_bias(ctx0, inp_raw, 2.0f, -1.0f);
+    //       ggml_set_name(inp_raw, "inp_raw_scaled");
+    //       ggml_set_output(inp_raw);
+    // ========================================================================
     log.debug("Step 1: scale_bias", .{});
     var cur = inp_raw.scaleBias(ctx, 2.0, -1.0);
     cur.setName("inp_raw_scaled");
     ggml.setOutput(cur);
 
-    // 3. Conv2D patch embedding: ggml_conv_2d(ctx0, patch_embeddings_0, inp_raw_scaled, ps, ps, 0, 0, 1, 1)
-    //    Ref: gemma4v.cpp: inp = ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1);
-    //    Output shape: [n_embd, n_patches_w, n_patches_h, B]
-    //    Then reshape to [n_patches, n_embd, n_batch], then transpose to [n_embd, n_patches, n_batch]
+    log.debug("*** n_patches={} n_embd={} n_batch={} patch_size={}", .{ np, ne, 1, ps });
+
+    // ========================================================================
+    // Step 3: Conv2D patch embedding
+    // C++: inp = ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1);
+    //       ggml_set_name(inp, "inp_conv_2d");
+    //       ggml_set_output(inp);
+    // ========================================================================
     const pe_w = w.patch_embeddings_0 orelse return error.MissingPatchEmbeddings;
     cur = cur.conv2d(ctx, pe_w, ps, ps, 0, 0, 1, 1);
-    cur = cur.reshape3d(ctx, np, ne, 1);
-    cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
-    cur.setName("inp");
+    cur.setName("inp_conv_2d");
     ggml.setOutput(cur);
 
-    // 4. 2D Position embeddings (x/y lookup)
-    //    Create pos_x and pos_y tensors ONCE, reuse for both position embedding and add_pos callback
-    //    Ref: gemma4v.cpp: pos_x = ggml_new_tensor_1d(...); pos_y = ggml_new_tensor_1d(...);
+    // ========================================================================
+    // Step 4: reshape + transpose
+    // C++: inp = ggml_reshape_3d(ctx0, inp, n_patches, n_embd, n_batch);
+    //       ggml_set_name(inp, "inp_reshape_3d");
+    //       ggml_set_output(inp);
+    //       inp = ggml_cont(ctx0, ggml_transpose(ctx0, inp));
+    //       ggml_set_name(inp, "inp_final");
+    //       ggml_set_output(inp);
+    //       // note: no patch bias
+    // ========================================================================
+    cur = cur.reshape3d(ctx, np, ne, 1);
+    cur.setName("inp_reshape_3d");
+    ggml.setOutput(cur);
+    cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
+    cur.setName("inp_final");
+    ggml.setOutput(cur);
+
+    // ========================================================================
+    // Step 5: 2D Position embeddings (x/y lookup)
+    // C++: ggml_tensor * pos_x = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_patches);
+    //       ggml_set_name(pos_x, "pos_x");
+    //       ggml_set_input(pos_x);
+    //       ggml_tensor * pos_y = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_patches);
+    //       ggml_set_name(pos_y, "pos_y");
+    //       ggml_set_input(pos_y);
+    // ========================================================================
     const pos_x = try posIndices(ctx, npx, npy, .x);
     const pos_y = try posIndices(ctx, npx, npy, .y);
 
+    // C++: const int64_t pos_size = model.position_embeddings->ne[1];
+    //       const size_t  nb1      = ggml_row_size(model.position_embeddings->type, n_embd);
+    //       ggml_tensor * tbl_x = ggml_view_2d(ctx0, model.position_embeddings,
+    //                                            n_embd, pos_size, nb1, 0);
+    //       ggml_tensor * tbl_y = ggml_view_2d(ctx0, model.position_embeddings,
+    //                                            n_embd, pos_size, nb1, pos_size * nb1);
+    //       ggml_tensor * emb_x = ggml_get_rows(ctx0, tbl_x, pos_x);
+    //       ggml_tensor * emb_y = ggml_get_rows(ctx0, tbl_y, pos_y);
+    //       inp = ggml_add(ctx0, inp, emb_x);
+    //       inp = ggml_add(ctx0, inp, emb_y);
+    //       cb(inp, "pos_embd", -1);
+    //       ggml_set_output(inp);
+    // ========================================================================
     const pe = w.position_embeddings orelse return error.MissingPositionEmbeddings;
     const psz: i64 = pe.ne()[1];
     const nb: usize = @intCast(ggml.Type.rowSize(pe.dataType(), @intCast(ne)));
@@ -460,8 +546,7 @@ pub fn buildGraph(
     cur.setName("pos_embd");
     ggml.setOutput(cur);
 
-    // Create Gemma4VData struct for passing to callbacks (replaces module-level vars)
-    // Reuses pos_x and pos_y created above (single allocation)
+    // Create Gemma4VData struct for passing to callbacks
     const gemma4v_data = Gemma4VData{
         .pos_x = pos_x,
         .pos_y = pos_y,
@@ -469,8 +554,18 @@ pub fn buildGraph(
         .clamp_info_map = &w.clamp_info_map,
     };
 
-    // 5. ViT blocks with 2D RoPE
-    cur = try vit_builder.buildVit(ctx, gf, cur, np, .rms_norm, p.ffn_op, null, w, p, addPos, .{
+    // ========================================================================
+    // Step 6: ViT blocks with 2D RoPE
+    // C++: kq_scale = 1.0f;
+    //       ggml_tensor * cur = build_vit(inp, n_patches, NORM_TYPE_RMS, hparams.ffn_op,
+    //                                      nullptr, // pos embd is already handled above
+    //                                      add_pos);
+    //       ggml_set_name(cur, "vit_output");
+    //       ggml_set_output(cur);
+    // ========================================================================
+    cur = try vit_builder.buildVit(ctx, gf, cur, np, .rms_norm, p.ffn_op,
+        null, // learned_pos_embd — already handled above
+        w, p, addPos, .{
         .v_norm_eps = p.eps,
         .kq_scale = 1.0,
         .v_norm = true,
@@ -481,7 +576,20 @@ pub fn buildGraph(
     cur.setName("vit_output");
     ggml.setOutput(cur);
 
-    // 6. Pool 2D (avg, kernel=n_merge) + scale
+    // ========================================================================
+    // Step 7: Pool 2D (avg, kernel=n_merge) + scale(sqrt(n_embd))
+    // C++: const int kernel_size = hparams.n_merge;
+    //       GGML_ASSERT(kernel_size > 0);
+    //       cur = ggml_cont_4d(ctx0, ggml_transpose(ctx0, cur), n_patches_x, n_patches_y, n_embd, n_batch);
+    //       cur = ggml_pool_2d(ctx0, cur, GGML_OP_POOL_AVG, kernel_size, kernel_size, kernel_size, kernel_size, 0, 0);
+    //       const int out_x = n_patches_x / kernel_size;
+    //       const int out_y = n_patches_y / kernel_size;
+    //       cur = ggml_reshape_3d(ctx0, cur, out_x * out_y, n_embd, n_batch);
+    //       cur = ggml_cont(ctx0, ggml_transpose(ctx0, cur));
+    //       cur = ggml_scale(ctx0, cur, sqrtf((float)n_embd));
+    //       cb(cur, "pooled", -1);
+    //       ggml_set_output(cur);
+    // ========================================================================
     log.debug("Step 5: pool2d (n_merge={d})", .{p.n_merge});
     const ks: i32 = @intCast(p.n_merge);
     if (ks > 0) {
@@ -496,35 +604,52 @@ pub fn buildGraph(
         ggml.setOutput(cur);
     }
 
-    // 7. Standardization
+    // ========================================================================
+    // Step 8: Standardization
+    // C++: if (model.std_bias && model.std_scale) {
+    //         cur = ggml_sub(ctx0, cur, model.std_bias);
+    //         cur = ggml_mul(ctx0, cur, model.std_scale);
+    //         cb(cur, "std_scaled", -1);
+    //         ggml_set_output(cur);
+    //     }
+    // ========================================================================
     log.debug("Step 6: standardization (std_bias={any} std_scale={any})", .{ w.std_bias != null, w.std_scale != null });
     if (w.std_bias != null and w.std_scale != null) {
         cur = cur.sub(ctx, w.std_bias.?);
-        // std_scale is [n_embd] 1D tensor, use directly (ggml_mul broadcasts)
         cur = cur.mul(ctx, w.std_scale.?);
         cur.setName("std_scaled");
         ggml.setOutput(cur);
     }
 
-    // 8. Multimodal embedder
+    // ========================================================================
+    // Step 9: Multimodal embedder
+    // C++: // Gemma4MultimodalEmbedder
+    //       cur = ggml_rms_norm(ctx0, cur, hparams.eps);
+    //       cur = build_mm(model.mm_input_proj_w, cur);
+    //       cb(cur, "mm_output", -1);
+    //       ggml_set_output(cur);
+    // ========================================================================
     log.debug("Step 7: multimodal embedder", .{});
     cur = cur.rmsNorm(ctx, p.eps);
     // NOTE: gemma4v does NOT use mm_soft_emb_norm_w
-    // Only apply mm_input_proj_w (with optional clamping)
     if (w.mm_input_proj_w) |proj| {
         cur = buildMMWithClampDirect(ctx, proj, cur, &w.clamp_info_map);
     }
     cur.setName("mm_output");
     ggml.setOutput(cur);
 
+    // ========================================================================
+    // C++: ggml_build_forward_expand(gf, cur);
+    //       return gf;
+    // ========================================================================
     log.debug("buildGraph complete", .{});
     gf.buildForwardExpand(cur);
     return gf;
 }
 
-/// Build Gemma4V full compute graph (standalone parameter version)
+/// Build Gemma4V full compute graph (standalone parameter version).
 /// Creates GraphBuilder from standalone parameters, then delegates to buildGraph(builder).
-/// This function serves as the Backend.buildGraph entry point, compatible with existing callers.
+/// This function serves as the Backend.buildGraph entry point.
 pub fn buildGraphFromWeights(
     io: std.Io,
     ctx: *ggml.Context,

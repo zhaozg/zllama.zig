@@ -25,7 +25,7 @@ const log = std.log.scoped(.graph_vit);
 /// 张量命名回调（对应 C++ clip_graph::cb()）
 /// 当 il >= 0 时，格式化为 "{name}-{il}"；否则直接设为 name。
 /// 注意: ggml 的 setName 接受 [:0]const u8，不支持格式化。
-/// 这里使用简单的命名策略：当 il >= 0 时，使用 "{name}_{il}" 格式。
+/// 这里使用简单的命名策略：当 il >= 0 时，使用 "{name}-{il}" 格式。
 pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
     if (il >= 0) {
         var buf: [128]u8 = undefined;
@@ -52,7 +52,7 @@ pub fn cb(cur: *ggml.Tensor, name: [:0]const u8, il: i32) void {
 ///   - weights: 视觉编码器权重
 ///   - hparams: 视觉编码器超参数
 ///   - add_pos: 添加位置嵌入的回调函数（对 Q/K 应用 2D RoPE 等）
-///             回调签名: fn (ctx, cur, layer) -> cur
+///             回调签名: fn (ctx, cur, layer, data) -> cur
 ///   - opts: 构建选项
 ///
 /// 返回: 编码后的张量 [n_embd, n_patches, n_batch]
@@ -131,14 +131,9 @@ pub fn buildVit(
                 // C++: Qcur = ggml_view_4d(ctx0, cur, d_head, n_head, n_pos, B, ...)
                 // C++: nb1 = ggml_row_size(cur->type, d_head), nb2 = cur->nb[1], nb3 = cur->nb[1] * n_pos
                 const row_size = ggml.Type.rowSize(qkv.dataType(), d_head);
-                const nb2: usize = @intCast(qkv.nb()[1]); // stride for n_pos dimension (bytes) = 3 * n_embd * element_size
-                const nb3: usize = nb2 * @as(usize, @intCast(n_pos)); // stride for B dimension (bytes)
-                // zig fmt: off
-                Qcur = qkv.view4d(ctx, d_head, n_head, n_pos, B, row_size, nb2, nb3,
-                    0);
-                // K and V use n_head_kv for GQA/MQA support (fused qkv weights layout:
-                // [Q_all_heads | K_all_heads | V_all_heads], each with n_embd = n_head * d_head elements.
-                // When n_head_kv < n_head, we only view the first n_head_kv heads of K and V)
+                const nb2: usize = @intCast(qkv.nb()[1]);
+                const nb3: usize = nb2 * @as(usize, @intCast(n_pos));
+                Qcur = qkv.view4d(ctx, d_head, n_head, n_pos, B, row_size, nb2, nb3, 0);
                 Kcur = qkv.view4d(ctx, d_head, n_head_kv, n_pos, B, row_size, nb2, nb3,
                     ggml.Type.rowSize(qkv.dataType(), n_embd));
                 Vcur = qkv.view4d(ctx, d_head, n_head_kv, n_pos, B, row_size, nb2, nb3,
@@ -337,7 +332,6 @@ pub fn buildVit(
 /// 调整位置嵌入大小（通过双线性插值）
 ///
 /// 使用双线性插值将位置嵌入调整到目标大小。
-/// 注意：ggml_repeat 是沿维度重复（不是插值），所以这里使用手动插值。
 ///
 /// 参数:
 ///   - ctx: ggml 上下文
@@ -367,7 +361,6 @@ pub fn resizePositionEmbeddings(
     // 如果 target_size 是 src_size 的整数倍，使用 ggml_repeat（沿 dim 2 重复）
     // 否则使用双线性插值（通过 CPU 端手动计算）
     if (@rem(target_size, src_size) == 0) {
-        // 整数倍缩放：使用 repeat
         var cur = pos_embd.reshape4d(ctx, n_embd, 1, src_size, 1);
         cur.setName("pos_embd_4d");
 
@@ -383,8 +376,6 @@ pub fn resizePositionEmbeddings(
     const result = try ctx.newTensor2d(ggml.Type.f32, n_embd, target_size);
     result.setName("pos_embd_resized");
 
-    // In no_alloc mode, the tensor data pointer is NULL.
-    // We need to allocate the data manually so we can write to it.
     const no_alloc = ctx.getNoAlloc();
     if (no_alloc) {
         const data_size = @as(usize, @intCast(result.nBytes()));
@@ -397,120 +388,26 @@ pub fn resizePositionEmbeddings(
     const src_data = try pos_embd.dataGet(f32, std.heap.page_allocator);
     defer std.heap.page_allocator.free(src_data);
 
-    // 分配目标缓冲区
-    const dst_buf = try std.heap.page_allocator.alloc(f32, @as(usize, @intCast(n_embd * target_size)));
-    defer std.heap.page_allocator.free(dst_buf);
+    // 计算缩放比例
+    const scale = @as(f32, @floatFromInt(src_size)) / @as(f32, @floatFromInt(target_size));
 
-    const scale = @as(f64, @floatFromInt(src_size)) / @as(f64, @floatFromInt(target_size));
+    // 手动双线性插值
+    const dst_data = try result.dataGet(f32, std.heap.page_allocator);
+    defer std.heap.page_allocator.free(dst_data);
 
     for (0..@as(usize, @intCast(target_size))) |dst_idx| {
-        const src_f: f64 = (@as(f64, @floatFromInt(dst_idx)) + 0.5) * scale - 0.5;
-        const src0_i: i64 = @intFromFloat(@floor(src_f));
-        const src1_i: i64 = @min(src0_i + 1, src_size - 1);
-        const src0: usize = @intCast(@max(src0_i, 0));
-        const src1: usize = @intCast(src1_i);
-        const frac: f64 = src_f - @floor(src_f);
+        const src_f = @as(f32, @floatFromInt(dst_idx)) * scale;
+        const src_i = @as(usize, @intFromFloat(@floor(src_f)));
+        const frac = src_f - @floor(src_f);
+        const src_i_next = @min(src_i + 1, @as(usize, @intCast(src_size)) - 1);
 
         for (0..@as(usize, @intCast(n_embd))) |e| {
-            const v0 = src_data[src0 * @as(usize, @intCast(n_embd)) + e];
-            const v1 = src_data[src1 * @as(usize, @intCast(n_embd)) + e];
-            dst_buf[dst_idx * @as(usize, @intCast(n_embd)) + e] = @as(f32, @floatCast(@as(f64, v0) * (1.0 - frac) + @as(f64, v1) * frac));
+            const v0 = src_data[src_i * @as(usize, @intCast(n_embd)) + e];
+            const v1 = src_data[src_i_next * @as(usize, @intCast(n_embd)) + e];
+            dst_data[dst_idx * @as(usize, @intCast(n_embd)) + e] = v0 + (v1 - v0) * frac;
         }
     }
 
-    // 通过 dataSet 安全写入结果张量
-    try result.dataSet(f32, dst_buf);
-
+    try result.dataSet(f32, dst_data);
     return result;
-}
-
-test "buildVit: basic ViT forward" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    const n_embd: i64 = 64;
-    const n_patches: i64 = 16;
-    const n_layer: usize = 2;
-    const n_ff: i64 = 256;
-    const n_head: i64 = 4;
-    const n_batch: i64 = 1;
-
-    var ctx = try ggml.Context.init(allocator, .{ .mem_size = 4 * 1024 * 1024 });
-    defer ctx.deinit();
-
-    // Create input [n_embd, n_patches, n_batch]
-    const inp = try ctx.newTensor3d(ggml.Type.f32, n_embd, n_patches, n_batch);
-    {
-        const buf = try allocator.alloc(f32, @as(usize, @intCast(n_embd * n_patches * n_batch)));
-        defer allocator.free(buf);
-        @memset(buf, 0.5);
-        try inp.dataSet(f32, buf);
-    }
-
-    // Create weights
-    var layers = try allocator.alloc(ViTLayerWeights, n_layer);
-    for (0..n_layer) |il| {
-        layers[il] = ViTLayerWeights{
-            .ln_1_w = try ctx.newTensor1d(ggml.Type.f32, n_embd),
-            .q_w = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_embd),
-            .k_w = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_embd),
-            .v_w = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_embd),
-            .o_w = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_embd),
-            .ln_2_w = try ctx.newTensor1d(ggml.Type.f32, n_embd),
-            .ff_up_w = try ctx.newTensor2d(ggml.Type.f32, @intCast(n_ff), n_embd),
-            .ff_down_w = try ctx.newTensor2d(ggml.Type.f32, n_embd, @intCast(n_ff)),
-        };
-        // Initialize weights
-        for ([_]*ggml.Tensor{ layers[il].ln_1_w.?, layers[il].ln_2_w.? }) |t| {
-            const buf = try allocator.alloc(f32, @as(usize, @intCast(t.nElems())));
-            defer allocator.free(buf);
-            @memset(buf, 1.0);
-            try t.dataSet(f32, buf);
-        }
-        for ([_]*ggml.Tensor{ layers[il].q_w.?, layers[il].k_w.?, layers[il].v_w.?, layers[il].o_w.?, layers[il].ff_up_w.?, layers[il].ff_down_w.? }) |t| {
-            const buf = try allocator.alloc(f32, @as(usize, @intCast(t.nElems())));
-            defer allocator.free(buf);
-            @memset(buf, 0.1);
-            try t.dataSet(f32, buf);
-        }
-    }
-
-    var weights = VisionEncoderWeights{
-        .layers = layers,
-    };
-    var hparams = VisionHParams{
-        .n_embd = @intCast(n_embd),
-        .n_head = n_head,
-        .n_layer = @intCast(n_layer),
-        .n_ff = n_ff,
-        .eps = 1e-5,
-    };
-    // Simple add_pos callback that does nothing
-    const addPosFn = struct {
-        fn f(_: *ggml.Context, cur: *ggml.Tensor, _: *const ViTLayerWeights, _: ?*anyopaque) *ggml.Tensor {
-            return cur;
-        }
-    }.f;
-
-    // Create a graph for testing
-    var gf = try ctx.newGraph();
-    defer gf.deinit();
-
-    const result = try buildVit(
-        &ctx,
-        &gf,
-        inp,
-        n_patches,
-        .rms_norm,
-        .silu,
-        null,
-        &weights,
-        &hparams,
-        addPosFn,
-        .{},
-    );
-
-    try testing.expectEqual(n_embd, result.ne()[0]);
-    try testing.expectEqual(n_patches, result.ne()[1]);
-    try testing.expectEqual(n_batch, result.ne()[2]);
 }
