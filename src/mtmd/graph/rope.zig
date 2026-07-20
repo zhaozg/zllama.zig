@@ -40,7 +40,7 @@ pub fn buildRope2D(
     const n_head = cur.ne()[1];
     const n_patches = cur.ne()[2];
     const n_batch = cur.ne()[3];
-    const d_head_half = d_head / 2;
+    const d_head_half = @divExact(d_head, 2);
 
     // 第一半: 使用 pos_a
     const first_half = cur.view4d(

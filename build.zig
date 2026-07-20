@@ -925,6 +925,23 @@ pub fn build(b: *std.Build) void {
         test_vision_step.dependOn(&run_t.step);
     }
 
+    const test_graph_dtypes_step = b.step("test-graph-dtypes", "Run graph dtype (BF16/F16) tests only");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_graph_dtypes.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        mod.addImport("graph", mm_graph_mod);
+        mod.addImport("mtmd", mm_manager_mod);
+        const t = addTestWithRpath(b, "test-graph-dtypes", mod);
+        const run_t = b.addRunArtifact(t);
+        test_graph_dtypes_step.dependOn(&run_t.step);
+    }
+
+
     const test_stb_image_step = b.step("test-stb-image", "Run stb_image integration tests only");
     {
         const mod = b.createModule(.{
