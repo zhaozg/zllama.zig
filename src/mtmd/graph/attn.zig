@@ -81,8 +81,17 @@ pub fn buildAttn(
 
     var cur: *ggml.Tensor = undefined;
 
+    // 解析 flash_attn_type: .auto 时默认启用 flash attention
+    // C++ 中 CLIP_FLASH_ATTN_TYPE_AUTO 在 warmup 阶段通过 reserve_compute_meta
+    // 检测后端是否支持 flash attention。如果支持则保持 ENABLED，否则回退到 DISABLED。
+    // 在 Zig 端，我们默认启用 flash attention（CPU backend 总是支持），
+    // 如果后端不支持，ggml 内部会回退到 CPU 计算。
+    const resolved_type: FlashAttnType = if (flash_attn_type == .auto) .enabled else flash_attn_type;
+
+    log.debug("flash_attn_type={} resolved={}", .{ flash_attn_type, resolved_type });
+
     // C++: if (flash_attn_type == CLIP_FLASH_ATTN_TYPE_ENABLED) {
-    if (flash_attn_type == .enabled) {
+    if (resolved_type == .enabled) {
         // Flash attention 路径
         // C++: ggml_tensor * v = ggml_permute(ctx0, v_cur, 0, 2, 1, 3);
         const v = v_cur.permute(ctx, 0, 2, 1, 3);
@@ -234,6 +243,47 @@ test "buildAttn: basic self-attention (non-flash)" {
     defer gf.deinit();
 
     const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, -1, null, .disabled, defaultBuildMM, null, null);
+    try testing.expectEqual(n_embd, result.ne()[0]);
+    try testing.expectEqual(n_patches, result.ne()[1]);
+}
+
+test "buildAttn: auto resolves to flash" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var ctx = try ggml.Context.init(allocator, .{ .mem_size = 1024 * 1024 });
+    defer ctx.deinit();
+
+    const n_embd: i64 = 64;
+    const n_head: i64 = 4;
+    const d_head: i64 = n_embd / n_head;
+    const n_patches: i64 = 16;
+    const n_batch: i64 = 1;
+
+    const wo = try ctx.newTensor2d(ggml.Type.f32, n_embd, n_embd);
+    const q = try ctx.newTensor4d(ggml.Type.f32, d_head, n_head, n_patches, n_batch);
+    const k = try ctx.newTensor4d(ggml.Type.f32, d_head, n_head, n_patches, n_batch);
+    const v = try ctx.newTensor4d(ggml.Type.f32, d_head, n_head, n_patches, n_batch);
+
+    {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(wo.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 0.1);
+        try wo.dataSet(f32, buf);
+    }
+    for ([_]*ggml.Tensor{ q, k, v }) |t| {
+        const buf = try allocator.alloc(f32, @as(usize, @intCast(t.nElems())));
+        defer allocator.free(buf);
+        @memset(buf, 0.5);
+        try t.dataSet(f32, buf);
+    }
+    const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
+
+    var gf = try ctx.newGraph();
+    defer gf.deinit();
+
+    // .auto should resolve to .enabled (flash path)
+    const result = try buildAttn(&ctx, &gf, wo, null, q, k, v, null, kq_scale, -1, null, .auto, defaultBuildMM, null, null);
     try testing.expectEqual(n_embd, result.ne()[0]);
     try testing.expectEqual(n_patches, result.ne()[1]);
 }

@@ -51,7 +51,7 @@ pub const GraphBuilder = struct {
     /// 批处理大小（默认 1）
     n_batch: u32 = 1,
     /// Flash attention 类型
-    flash_attn_type: FlashAttnType = .disabled,
+    flash_attn_type: FlashAttnType = .auto,
     /// 调试张量注册表
     debug_registry: debug_mod.DebugTensorRegistry = .{},
 
