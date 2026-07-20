@@ -55,14 +55,21 @@ const debug_entries = [_]encoder_debug.DebugTensorEntry{
 
     .{ .tensor_name = "kqv_out-0", .filename = "zllama_vision_04c1_layer_kqv_out.json" },
     .{ .tensor_name = "attn_out-0", .filename = "zllama_vision_04c2_layer_attn_out.json" },
-    .{ .tensor_name = "ffn_inp-0", .filename = "zllama_vision_04d_layer_ffn_inp.json" },
+    .{ .tensor_name = "ffn_inp-0",        .filename = "zllama_vision_04d1_layer_ffn_inp.json" },
+    .{ .tensor_name = "ffn_inp_normed-0", .filename = "zllama_vision_04d2_layer_ffn_inp_normed.json" },
     .{ .tensor_name = "ffn_out-0", .filename = "zllama_vision_04e_layer_ffn_out.json" },
     .{ .tensor_name = "layer_out-0", .filename = "zllama_vision_04f1_layer_layer_out.json" },
     .{ .tensor_name = "layer_out_scaled-0", .filename = "zllama_vision_04f1_layer_layer_out.json" },
 
     .{ .tensor_name = "out_scaled", .filename = "zllama_vision_04g_out_scaled.json" },
     .{ .tensor_name = "vit_output", .filename = "zllama_vision_04z_vit_output.json" },
-    .{ .tensor_name = "pooled", .filename = "zllama_vision_05_pooled.json" },
+
+    .{ .tensor_name = "pooled_cont_4d",     .filename = "zllama_vision_05a_pooled-cont-4d.json"},
+    .{ .tensor_name = "pooled_pool_2d",     .filename = "zllama_vision_05b_pooled-pool-2d.json"},
+    .{ .tensor_name = "pooled_reshape_3d",  .filename = "zllama_vision_05c_pooled-reshape-3d.json"},
+    .{ .tensor_name = "pooled_cont",        .filename = "zllama_vision_05d_pooled-cont.json"},
+    .{ .tensor_name = "pooled",             .filename = "zllama_vision_05z_pooled.json"},
+
     .{ .tensor_name = "std_scaled", .filename = "zllama_vision_06_std_scaled.json" },
     .{ .tensor_name = "mm_output", .filename = "zllama_vision_07_mm_output.json" },
 };

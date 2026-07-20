@@ -453,9 +453,9 @@ pub fn buildGraph(
     const img_w: i32 = @intCast(p.image_size);
     const npx: i32 = @divTrunc(img_w, ps);
     const npy: i32 = @divTrunc(img_h, ps);
-    const np: i64 = @as(i64, npx) * @as(i64, npy);
-    const ne: i64 = @intCast(p.n_embd);
-    const n_batch: i64 = 1;
+    const np: i32 = npx * npy;
+    const ne: i32 = @intCast(p.n_embd);
+    const n_batch: i32 = 1;
 
     log.debug("buildGraph: image_size={d}x{d} patch_size={d} npx={d} npy={d} np={d} ne={d}", .{ img_w, img_h, p.patch_size, npx, npy, np, ne });
 
@@ -593,11 +593,26 @@ pub fn buildGraph(
     const ks: i32 = @intCast(p.n_merge);
     if (ks > 0) {
         cur = ggml.cont4d(ctx, ggml.transpose(ctx, cur), npx, npy, ne, 1);
+
+        cur.setName("pooled_cont_4d");
+        ggml.setOutput(cur);
+
         cur = cur.pool2d(ctx, @intCast(@intFromEnum(ggml.PoolOp.avg)), ks, ks, ks, ks, 0.0, 0.0);
+
+        cur.setName("pooled_pool_2d");
+        ggml.setOutput(cur);
+
         const ox: i64 = @divTrunc(npx, ks);
         const oy: i64 = @divTrunc(npy, ks);
         cur = cur.reshape3d(ctx, ox * oy, ne, 1);
+
+        cur.setName("pooled_reshape_3d");
+        ggml.setOutput(cur);
         cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
+
+        cur.setName("pooled_cont");
+        ggml.setOutput(cur);
+
         cur = cur.scale(ctx, @sqrt(@as(f32, @floatFromInt(ne))));
         cur.setName("pooled");
         ggml.setOutput(cur);
