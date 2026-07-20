@@ -186,6 +186,10 @@ pub const Tensor = opaque {
     pub fn cont4d(self: *Tensor, ctx: *anyopaque, ne0: i64, ne1: i64, ne2: i64, ne3: i64) *Tensor {
         return wrap(c.ggml_cont_4d(@ptrCast(ctx), @ptrCast(@alignCast(self)), ne0, ne1, ne2, ne3));
     }
+    pub fn cont3d(self: *Tensor, ctx: *anyopaque, ne0: i64, ne1: i64, ne2: i64) *Tensor {
+        return wrap(c.ggml_cont_3d(@ptrCast(ctx), @ptrCast(@alignCast(self)), ne0, ne1, ne2));
+    }
+
     pub fn pad(self: *Tensor, ctx: *anyopaque, p0: i32, p1: i32, p2: i32, p3: i32) *Tensor {
         return wrap(c.ggml_pad(@ptrCast(ctx), @ptrCast(@alignCast(self)), p0, p1, p2, p3));
     }

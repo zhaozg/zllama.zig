@@ -196,6 +196,10 @@ pub fn reshape2d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_reshape_2d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1)));
 }
 
+pub fn cont3d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, ne2: i64) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_cont_3d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, ne2)));
+}
+
 pub fn reshape3d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, ne2: i64) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_reshape_3d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, ne2)));
 }

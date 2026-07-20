@@ -43,9 +43,13 @@ pub const backend = graph.VisionEncoderBackend{
 
 pub fn loadParams(io: std.Io, gguf_file: *const gguf.GGUFFile, params: *graph.VisionHParams) void {
     _ = io;
-    _ = gguf_file;
-    _ = params;
-    // Qwen3VL 参数已由 encoder.zig 从 clip.vision.* 前缀加载
+    // Qwen3VL: n_merge 来自 clip.vision.spatial_merge_size，默认 2
+    // 参考: llama.cpp clip.cpp line 1553
+    params.n_merge = 2;
+    if (gguf_file.getU32("clip.vision.spatial_merge_size")) |v| {
+        params.n_merge = v;
+    }
+    log.info("Qwen3VL: n_merge={d}\n", .{params.n_merge});
 }
 
 pub fn loadClampInfo(
@@ -257,16 +261,16 @@ pub fn buildGraph(
     const p = builder.hparams;
     const img = builder.img;
 
-    const n_embd: i64 = @intCast(p.n_embd);
-    const n_head: i64 = @intCast(p.n_head);
+    const n_embd: i32 = @intCast(p.n_embd);
+    const n_head: i32 = @intCast(p.n_head);
     const d_head = @divExact(n_embd, n_head);
     const img_width: u32 = p.image_size;
     const img_height: u32 = p.image_size;
     const patch_size: i32 = @intCast(p.patch_size);
-    const n_patches_x: i64 = @divTrunc(@as(i64, @intCast(img_width)), patch_size);
-    const n_patches_y: i64 = @divTrunc(@as(i64, @intCast(img_height)), patch_size);
-    const n_patches: i64 = n_patches_x * n_patches_y;
-    const n_batch: i64 = 1;
+    const n_patches_x: i32 = @divTrunc(@as(i32, @intCast(img_width)), patch_size);
+    const n_patches_y: i32 = @divTrunc(@as(i32, @intCast(img_height)), patch_size);
+    const n_patches: i32 = n_patches_x * n_patches_y;
+    const n_batch: i32 = 1;
     const eps = p.eps;
     const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
 
@@ -275,14 +279,14 @@ pub fn buildGraph(
 
     // Reference: int mrope_sections[4] = {d_head/4, d_head/4, d_head/4, d_head/4};
     const mrope_sections = [_]i32{
-        @intCast(@divExact(d_head, @as(i64, 4))),
-        @intCast(@divExact(d_head, @as(i64, 4))),
-        @intCast(@divExact(d_head, @as(i64, 4))),
-        @intCast(@divExact(d_head, @as(i64, 4))),
+        @intCast(@divExact(d_head, 4)),
+        @intCast(@divExact(d_head, 4)),
+        @intCast(@divExact(d_head, 4)),
+        @intCast(@divExact(d_head, 4)),
     };
 
     // Reference: const int merge_factor = hparams.n_merge > 0 ? hparams.n_merge * hparams.n_merge : 4;
-    const merge_factor: i64 = if (p.n_merge > 0) @intCast(p.n_merge * p.n_merge) else 4;
+    const merge_factor: i32 = if (p.n_merge > 0) @intCast(p.n_merge * p.n_merge) else 4;
 
     log.info("Qwen3VL graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, merge_factor={d}\n", .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, merge_factor });
 
@@ -334,7 +338,6 @@ pub fn buildGraph(
         }
 
         // Reference: ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1)
-
         // Reference: ggml_conv_2d(ctx0, model.patch_embeddings_1, inp_raw, patch_size, patch_size, 0, 0, 1, 1)
         // Reference: ggml_add(ctx0, conv0, conv1)
         const pe0 = w.patch_embeddings_0 orelse return error.MissingPatchEmbedding;
@@ -357,9 +360,6 @@ pub fn buildGraph(
     // 2. Spatial merge
     // Reference: ggml_permute(ctx0, inp, 1, 2, 0, 3) -> [w, h, c, b] -> [c, w, h, b]
     // ============================================================================
-    // 2. Spatial merge
-    // Reference: ggml_permute(ctx0, inp, 1, 2, 0, 3) -> [w, h, c, b] -> [c, w, h, b]
-    // ============================================================================
     {
         inp = inp.permute(ctx, 1, 2, 0, 3).cont(ctx);
         inp.setName("spatial_permuted");
@@ -370,19 +370,6 @@ pub fn buildGraph(
 
         // Reference: ggml_reshape_4d(ctx0, inp, n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2))
         inp = inp.reshape4d(ctx, n_embd * 2, @divTrunc(n_patches_x, @as(i64, 2)), 2, n_batch * @divTrunc(n_patches_y, @as(i64, 2)));
-        inp.setName("spatial_reshaped_2");
-
-        // Reference: ggml_permute(ctx0, inp, 0, 2, 1, 3)
-        inp = inp.permute(ctx, 0, 2, 1, 3).cont(ctx);
-        inp.setName("spatial_permuted_2");
-
-        // Reference: ggml_cont_3d(ctx0, inp, n_embd, n_patches_x * n_patches_y, batch_size)
-        inp = ggml.cont(ctx, inp).reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
-        inp.setName("spatial_merged");
-        inp.setName("spatial_reshaped_1");
-
-        // Reference: ggml_reshape_4d(ctx0, inp, n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2))
-        inp = inp.reshape4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), 2, n_batch * @divExact(n_patches_y, @as(i64, 2)));
         inp.setName("spatial_reshaped_2");
 
         // Reference: ggml_permute(ctx0, inp, 0, 2, 1, 3)
@@ -465,6 +452,7 @@ pub fn buildGraph(
             data[i * 4 + 3] = pi;
         }
     }
+
     // ============================================================================
     // 6. Pre-LN (optional)
     // Reference: if (model.pre_ln_w) { inpL = build_norm(inpL, model.pre_ln_w, model.pre_ln_b, norm_t, eps, -1); }
@@ -541,7 +529,17 @@ pub fn buildGraph(
             );
         }
 
-        cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, -1);
+        // Reference: re-add the layer input, e.g., residual
+        // cur = ggml_add(ctx0, cur, inpL);
+        cur = cur.add(ctx, inpL);
+        cur.setName("attn_residual");
+
+        // Reference: inpL = cur; (inpL = residual, cur = hidden_states)
+        inpL = cur;
+
+        // Reference: layernorm2
+        // cur = build_norm(cur, layer.ln_2_w, layer.ln_2_b, norm_t, eps, il);
+        cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, @intCast(il));
 
         // Reference: ffn
         // build_ffn(cur, layer.ff_up_w, layer.ff_up_b, layer.ff_gate_w, layer.ff_gate_b, layer.ff_down_w, layer.ff_down_b, hparams.ffn_op, il)
@@ -561,9 +559,10 @@ pub fn buildGraph(
             null,
         );
 
-        // Reference: cur = ggml_add(ctx0, inpL, cur); (residual 2)
+        // Reference: residual 2
+        // cur = ggml_add(ctx0, inpL, cur);
         cur = inpL.add(ctx, cur);
-        inpL = cur;
+        cur.setName("layer_out");
 
         // Reference: Deepstack feature extraction
         // if (layer.has_deepstack()) { ... }
@@ -591,7 +590,6 @@ pub fn buildGraph(
             );
 
             // Reference: concat along feature dimension
-            // Reference: concat along feature dimension
             if (deepstack_features) |dsf| {
                 deepstack_features = dsf.concat(ctx, feat, 0);
                 deepstack_features.?.setName("deepstack_concat");
@@ -599,6 +597,8 @@ pub fn buildGraph(
                 deepstack_features = feat;
             }
         }
+
+        inpL = cur;
     }
 
     // ============================================================================

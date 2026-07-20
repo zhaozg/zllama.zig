@@ -110,6 +110,8 @@ pub const dequantizeTensor = @import("ops.zig").dequantizeTensor;
 pub const cont2d = @import("ops.zig").cont2d;
 pub const cont4d = @import("ops.zig").cont4d;
 pub const reshape2d = @import("ops.zig").reshape2d;
+pub const cont3d = @import("ops.zig").cont3d;
+
 pub const reshape3d = @import("ops.zig").reshape3d;
 pub const reshape4d = @import("ops.zig").reshape4d;
 pub const repeat = @import("ops.zig").repeat;

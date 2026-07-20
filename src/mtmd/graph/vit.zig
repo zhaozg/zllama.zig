@@ -382,7 +382,6 @@ pub fn resizePositionEmbeddings(
     target_size: i64,
     interpolation_mode: u32,
 ) !*ggml.Tensor {
-    _ = interpolation_mode;
     const n_embd = pos_embd.ne()[0];
     const src_size = pos_embd.ne()[1];
 
@@ -392,56 +391,38 @@ pub fn resizePositionEmbeddings(
         return pos_embd;
     }
 
-    // 如果 target_size 是 src_size 的整数倍，使用 ggml_repeat（沿 dim 2 重复）
-    // 否则使用双线性插值（通过 CPU 端手动计算）
-    if (@rem(target_size, src_size) == 0) {
-        var cur = pos_embd.reshape4d(ctx, n_embd, 1, src_size, 1);
-        cur.setName("pos_embd_4d");
+    // Reference: clip.cpp clip_graph::resize_position_embeddings()
+    // Uses ggml_interpolate for 2D interpolation of position embeddings.
+    //
+    // The position embedding is stored as [n_embd, n_per_side*n_per_side].
+    // We reshape to [n_embd, n_per_side, n_per_side], permute to [n_per_side, n_per_side, n_embd],
+    // interpolate to [width, height, n_embd], permute back to [n_embd, width, height],
+    // and cont_2d to [n_embd, width*height].
 
-        const repeated = try ctx.newTensor4d(ggml.Type.f32, n_embd, 1, target_size, 1);
-        cur = ggml.repeat(ctx, cur, repeated);
-        cur.setName("pos_embd_upscaled");
+    const n_per_side: i64 = @intFromFloat(@sqrt(@as(f64, @floatFromInt(src_size))));
+    const width: i64 = @intFromFloat(@sqrt(@as(f64, @floatFromInt(target_size))));
+    const height = width;
 
-        cur = cur.reshape2d(ctx, n_embd, target_size);
-        cur.setName("pos_embd_resized");
-        return cur;
-    }
-    // 创建目标张量
-    const result = try ctx.newTensor2d(ggml.Type.f32, n_embd, target_size);
-    result.setName("pos_embd_resized");
+    // Reshape to 3D: [n_embd, n_per_side, n_per_side]
+    var cur = pos_embd.reshape3d(ctx, n_embd, n_per_side, n_per_side);
+    cur.setName("pos_embd_3d");
 
-    const no_alloc = ctx.getNoAlloc();
-    if (no_alloc) {
-        const data_size = @as(usize, @intCast(result.nBytes()));
-        const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
-        @memset(buf, 0);
-        result.setDataPtr(buf);
-    }
+    // Permute: [n_embd, n_per_side, n_per_side] -> [n_per_side, n_per_side, n_embd]
+    cur = cur.permute(ctx, 2, 0, 1, 3);
+    cur.setName("pos_embd_permuted");
 
-    // 使用 dataGet 安全读取源张量数据
-    const src_data = try pos_embd.dataGet(f32, std.heap.page_allocator);
-    defer std.heap.page_allocator.free(src_data);
+    // Interpolate: [n_per_side, n_per_side, n_embd] -> [width, height, n_embd]
+    cur = ggml.interpolate(ctx, cur, width, height, n_embd, 1, interpolation_mode);
+    cur.setName("pos_embd_interpolated");
 
-    // 计算缩放比例
-    const scale = @as(f32, @floatFromInt(src_size)) / @as(f32, @floatFromInt(target_size));
+    // Permute back: [width, height, n_embd] -> [n_embd, width, height]
+    cur = cur.permute(ctx, 1, 2, 0, 3);
+    cur.setName("pos_embd_permuted_back");
 
-    // 手动双线性插值
-    const dst_data = try result.dataGet(f32, std.heap.page_allocator);
-    defer std.heap.page_allocator.free(dst_data);
+    // Contiguous 2D: [n_embd, width, height] -> [n_embd, width*height]
+    cur = ggml.cont2d(ctx, cur, n_embd, width * height);
+    cur.setName("pos_embd_resized");
 
-    for (0..@as(usize, @intCast(target_size))) |dst_idx| {
-        const src_f = @as(f32, @floatFromInt(dst_idx)) * scale;
-        const src_i = @as(usize, @intFromFloat(@floor(src_f)));
-        const frac = src_f - @floor(src_f);
-        const src_i_next = @min(src_i + 1, @as(usize, @intCast(src_size)) - 1);
-
-        for (0..@as(usize, @intCast(n_embd))) |e| {
-            const v0 = src_data[src_i * @as(usize, @intCast(n_embd)) + e];
-            const v1 = src_data[src_i_next * @as(usize, @intCast(n_embd)) + e];
-            dst_data[dst_idx * @as(usize, @intCast(n_embd)) + e] = v0 + (v1 - v0) * frac;
-        }
-    }
-
-    try result.dataSet(f32, dst_data);
-    return result;
+    return cur;
 }
+

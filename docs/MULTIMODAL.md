@@ -649,6 +649,11 @@ zig-out/bin/zllama -m ~/.cache/models/gemma-4-E2B-it-Q4_K_M.gguf \
 - 每阶段的 KV cache 长度
 - 每阶段的执行时间
 
+### 已验证内容
+
+- src/mtmd/graph/models/gemma4a.zig
+- src/mtmd/graph/models/gemma4v.zig
+
 ---
 
 ## 附录：llama.cpp mtmd 关键设计决策
