@@ -1,6 +1,6 @@
-//! 音频处理流水线编排器
+//! 音频 Mel 频谱计算
 //!
-//! 串联各处理阶段，从 WAV 文件到 Mel 频谱特征。
+//! 从 PCM F32 音频样本计算 Mel 频谱特征。
 //! 匹配 llama.cpp mtmd_audio_preprocessor_gemma4a 的精确逻辑。
 //!
 //! 参考: llama.cpp mtmd-audio.cpp (mtmd_audio_preprocessor_gemma4a)
@@ -19,7 +19,7 @@ const encoder = @import("encoder.zig");
 const postprocess = @import("postprocess.zig");
 const debug = @import("debug");
 
-const log = std.log.scoped(.audio_pipeline);
+const log = std.log.scoped(.audio_mel_spectrogram);
 
 /// 从 PCM F32 音频样本计算 Mel 频谱（不经过文件加载）
 /// 匹配 llama.cpp mtmd_audio_preprocessor_gemma4a::preprocess() 的精确逻辑：
@@ -120,7 +120,7 @@ pub fn processPcmSamples(
         // 对每帧：FFT → 幅度谱 → Mel 滤波 → 对数变换
         //
         // 注意：由于 Zig 回调无法捕获外部变量，我们使用一个包装结构体
-        // 来传递 pipeline 上下文给回调函数。
+        // 来传递 mel_spectrogram 上下文给回调函数。
         const Context = struct {
             fft: *fft_mod.AccelFFT,
             fb: []const f32,
@@ -177,7 +177,7 @@ pub fn processPcmSamples(
         offset += chunk_samples;
     }
 
-    log.info("Audio pipeline: {d} frames x {d} mel bins, sr={d}Hz (gemma4a exact match)", .{
+    log.info("Mel spectrogram: {d} frames x {d} mel bins, sr={d}Hz (gemma4a exact match)", .{
         total_frames, params.n_mel_bins, params.sample_rate,
     });
 

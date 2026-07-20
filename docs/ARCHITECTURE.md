@@ -197,10 +197,10 @@ AudioEncoderBackend {
 | 视觉预处理 | `vision/preprocess.zig` | `normalizeToTensor()`：RGB → 归一化 → ggml Tensor |
 | 视觉配置 | `vision/config.zig` | `VisionEncoderParams` |
 | 视觉权重 | `vision/loader.zig` | 从 GGUF 加载视觉权重张量 |
-| 视觉流水线 | `vision/pipeline.zig` | 编码+后处理编排 |
+| 视觉后处理 | `vision/postprocess.zig` | 标准化 + 投影到 LLM 空间 |
 | 音频编码器 | `audio/encoder.zig` | `AudioEncoder`：WAV 输入 → Mel 谱 → Conformer 编码 |
 | 音频预处理 | `audio/framing.zig` / `audio/mel.zig` / `audio/log_transform.zig` | 分帧 → Mel 滤波器组 → log |
-| 音频流水线 | `audio/pipeline.zig` | `processPcmSamples()`：PCM → Mel 谱 |
+| 音频 Mel 频谱 | `audio/mel_spectrogram.zig` | `processPcmSamples()`：PCM → Mel 谱 |
 | 通用预处理 | `preprocess.zig` | 图像 resize / 归一化模式 |
 | Token 化 | `tokenize.zig` | 文本+媒体标记混合 tokenize |
 

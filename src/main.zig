@@ -44,9 +44,7 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
     .{ .scope = .multimodal, .level = .info },
 
     .{ .scope = .audio_encoder, .level = .info },
-    .{ .scope = .audio_pipeline, .level = .info },
-    .{ .scope = .vision_encoder, .level = .info },
-    .{ .scope = .vision_pipeline, .level = .info },
+    .{ .scope = .audio_mel_spectrogram, .level = .info },
 
     .{ .scope = .gemma4, .level = .info },
     .{ .scope = .core_weight_loader, .level = .info },

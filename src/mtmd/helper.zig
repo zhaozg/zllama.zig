@@ -144,7 +144,7 @@ pub fn evalChunks(
                         const nm: u32 = if (ctx.mm_manager.audio_encoder) |*e| e.params.n_mel_bins else 128;
                         const audio_cfg = mtmd.audio_mod.config;
                         const pp = audio_cfg.AudioPreprocessParams.fromAudioEncoder(nm);
-                        const processed = try mtmd.audio_mod.pipeline.processPcmSamples(io, allocator, f32_samples, sr, pp);
+                        const processed = try mtmd.audio_mod.mel_spectrogram.processPcmSamples(io, allocator, f32_samples, sr, pp);
                         mel_f32 = processed.data;
                         mel_bins = processed.n_mel_bins;
                         mel_frames = processed.n_frames;

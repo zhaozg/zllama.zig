@@ -10,7 +10,6 @@
 //! - preprocess.zig: 图像预处理（归一化等）
 //! - encoder.zig: ViT 编码器框架
 //! - postprocess.zig: 后处理（标准化、投影等）
-//! - pipeline.zig: 流水线编排器
 //!
 //! 模型特定实现下沉到 src/mtmd/graph/models/ 中，
 //! 通过 VisionEncoderBackend 分发。
@@ -24,7 +23,6 @@ pub const loader = @import("loader.zig");
 pub const preprocess = @import("preprocess");
 pub const postprocess = @import("postprocess.zig");
 pub const encoder = @import("encoder.zig");
-pub const pipeline = @import("pipeline.zig");
 
 // ============================================================================
 // 便捷类型别名（保持向后兼容）
@@ -35,7 +33,6 @@ pub const EncoderType = config.EncoderType;
 pub const FfnOp = config.FfnOp;
 
 pub const VisionEncoder = encoder.VisionEncoder;
-pub const VisionPipeline = pipeline.VisionPipeline;
 pub const NormalizeMode = preprocess.NormalizeMode;
 
 /// 视觉编码器后端接口（重新导出自 graph 模块）

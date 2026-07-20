@@ -3,7 +3,7 @@
 基于与[音频处理](./mtmd-audio-flow.md)相同的设计原则，为 `zllama.zig` 的图像处理流水线设计一份完整的模块化规划。
 
 `llama.cpp` 的图像处理正是通过 `libmtmd` 库和 `clip.cpp` 编码器来完成的，
-其核心流程与“加载 → 预处理 → 编码 → 投影 → 替换”逻辑链完全一致。
+其核心流程与"加载 → 预处理 → 编码 → 投影 → 替换"逻辑链完全一致。
 
 下面我将你的阶段与 `llama.cpp` 的源码进行逐一比对：
 
@@ -20,7 +20,7 @@
 ### 💡 关键发现与补充
 
 *   **核心处理单元**：`llama.cpp` 的图像处理核心是 **`clip.cpp`**，它负责从加载 `mmproj` 文件到执行 ViT 编码器的全部工作。
-*   **Gemma 4 的特殊性**：需要留意的是，Gemma 4 采用了“无编码器 (encoder-free)”设计。对于这种模型，你规划的 **阶段 3 至 6** 可能会被简化为一个或多个**轻量级投影层**。但整体流水线的阶段划分和概念仍然是适用的。
+*   **Gemma 4 的特殊性**：需要留意的是，Gemma 4 采用了"无编码器 (encoder-free)"设计。对于这种模型，你规划的 **阶段 3 至 6** 可能会被简化为一个或多个**轻量级投影层**。但整体流水线的阶段划分和概念仍然是适用的。
 *   **数据格式**：`llama.cpp` 内部使用 `clip_image_u8`（uint8）和 `clip_image_f32`（float32）两种图像数据结构，这与你规划中提到的数据类型一致。
 *   **动态分辨率**：部分模型（如 Qwen2-VL）支持动态分辨率，这可能会引入额外的图像分块（tiling）或调整大小步骤。
 
@@ -34,17 +34,13 @@
 ```
 src/mtmd/vision/
 ├── mod.zig            # 公开 API 和模块入口
-├── pipeline.zig       # 流水线编排器，串联各阶段
 ├── config.zig         # 所有配置参数（尺寸、归一化、分块等）
 ├── loader.zig         # 图像文件加载与解码（调用 stb_image）
 ├── preprocess.zig     # 预处理：尺寸调整、归一化、通道转换
-├── patch_embed.zig    # 图像分块（Patch Embedding）
-├── position_embed.zig # 位置编码（可选，如 ViT 的位置编码）
 ├── encoder.zig        # ViT 编码器（调用 GGML 或直接实现）
 ├── postprocess.zig    # 后处理（如投影到模型空间）
 ├── types.zig          # 阶段间传递的数据结构
 └── test/              # 单元测试与 golden 测试
-    ├── test_pipeline.zig
     └── golden/        # 存放参考输出（二进制）
 ```
 

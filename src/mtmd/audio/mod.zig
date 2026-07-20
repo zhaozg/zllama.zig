@@ -12,7 +12,7 @@
 //! - log_transform.zig: 对数变换
 //! - encoder.zig: Conformer 编码器
 //! - postprocess.zig: 后处理（softcapping 等）
-//! - pipeline.zig: 流水线编排器
+//! - mel_spectrogram.zig: Mel 频谱计算
 
 const std = @import("std");
 const ggml = @import("ggml");
@@ -25,7 +25,7 @@ pub const mel = @import("mel.zig");
 pub const log_transform = @import("log_transform.zig");
 pub const encoder = @import("encoder.zig");
 pub const postprocess = @import("postprocess.zig");
-pub const pipeline = @import("pipeline.zig");
+pub const mel_spectrogram = @import("mel_spectrogram.zig");
 
 // ============================================================================
 // 便捷类型别名（保持向后兼容）
@@ -59,8 +59,8 @@ pub fn getBackend(name: []const u8) ?*const AudioEncoderBackend {
 // ============================================================================
 
 pub const loadWav = loader.loadWav;
-pub const computeMelSpectrogram = pipeline.processPcmSamples;
-pub const melToTensor = pipeline.melToTensor;
+pub const computeMelSpectrogram = mel_spectrogram.processPcmSamples;
+pub const melToTensor = mel_spectrogram.melToTensor;
 
 /// Gemma4UA 专用预处理：直接将原始 PCM 样本分帧，不做 FFT/Mel 频谱
 /// 参考: llama.cpp mtmd_audio_preprocessor_gemma4ua::preprocess()
