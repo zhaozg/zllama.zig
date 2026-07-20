@@ -55,11 +55,24 @@ pub const AlignCmpConfig = struct {
 
     /// 最大绝对误差容忍度
     /// 用于检测单个维度上的异常偏差，防止 argmax 翻转
-    tol_max_abs_err: f64 = 0.1,
+    tol_max_abs_err: f64 = 0.01,
+
+    /// 相对最大绝对误差容忍度（尺度自适应）
+    /// rel_max_err = max_abs_err / max(abs(ref), eps)
+    /// 推荐: < 1e-4（适用于任意数据尺度）
+    tol_rel_max_err: f64 = 1e-4,
 
     /// 平均幅值比值允许偏离 1.0 的容忍度
     /// 用于检测系统性缩放（如缺失的 scale 因子）
     tol_ratio_deviation: f64 = 0.001,
+
+    /// 离群点占比容忍度（异常点数量 / 总维度）
+    /// 用于判断 MaxErr 高是否由个别野点引起
+    /// 推荐: < 0.001（0.1%）
+    tol_outlier_ratio: f64 = 0.001,
+
+    /// 离群点判定倍数：abs(error) > outlier_sigma * RMSE 视为离群点
+    outlier_sigma: f64 = 3.0,
 };
 
 // ============================================================================
@@ -80,6 +93,15 @@ pub const AlignMetrics = struct {
     mae: f64,
     /// 最大绝对误差 (MaxAbsErr) — 检测异常离群点
     max_abs_err: f64,
+    /// 相对最大绝对误差（尺度自适应）
+    /// rel_max_err = max_abs_err / max(abs(ref), eps)
+    rel_max_err: f64,
+    /// 参考向量最大绝对值（用于相对误差计算）
+    ref_max_abs: f64,
+    /// 离群点数量（abs(error) > outlier_sigma * RMSE）
+    outlier_count: usize,
+    /// 离群点占比（outlier_count / dim）
+    outlier_ratio: f64,
     /// 平均幅值比值 (A/B)
     avg_ratio: f64,
     /// 幅值比值的标准差

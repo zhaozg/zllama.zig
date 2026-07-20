@@ -1,20 +1,26 @@
 //! 向量对齐比较工具 — 算法对齐验证专用版（工业级严格）
 //!
 //! 用于比较两个推理引擎对同一数据处理结果的数值对齐程度。
-//! 支持多指标综合验证：余弦相似度 + NMSE + RMSE + 最大绝对误差 + Argmax 匹配，
-//! 自动检测线性缩放/偏置，并输出通过/失败判决。
+//! 支持多指标综合验证：余弦相似度 + NMSE + RMSE + 相对 MaxErr + Argmax 匹配，
+//! 自动检测线性缩放/偏置、离群点分布，并输出通过/警告/失败判决。
 //!
 //! 判决标准（工业级严格，适合 FP16/BF16 CUDA 内核验证）:
 //!   - NMSE < 1e-4  （归一化均方误差）
 //!   - 余弦相似度 > 0.9999
+//!   - 相对 MaxErr < 1e-4（尺度自适应）
 //!   - RMSE < 0.001  （每维度平均误差）
-//!   - 最大绝对误差 < 0.01
 //!   - Argmax 必须匹配
 //!   - 平均幅值比值偏离 < 0.001（检测系统性缩放）
 //!
 //! 用法:
 //!   zllama-align-cmp --ref ref.json --test test.json
 //!   zllama-align-cmp --ref ref.bin --test test.bin --key data.emb
+//!   zllama-align-cmp --ref a.json --test b.json --mode alignment --tol-nmse 1e-4
+//!
+//! 输入格式:
+//!   - JSON: 包含数值数组的对象，自动识别 "vector"/"embedding"/"vec"/"emb" 键，
+//!           或通过 --key 指定点分隔路径 (如 "data.emb")
+//!   - 二进制: 连续 f32 小端字节序，无元数据
 //!   zllama-align-cmp --ref a.json --test b.json --mode alignment --tol-nmse 1e-4
 //!
 //! 输入格式:
@@ -30,12 +36,49 @@ const core_mod = @import("align_cmp_core.zig");
 const AlignCmpConfig = config_mod.AlignCmpConfig;
 const AlignMetrics = config_mod.AlignMetrics;
 const CompareMode = config_mod.CompareMode;
+const alignmentVerdict = core_mod.alignmentVerdict;
+
 const ArgmaxResult = config_mod.ArgmaxResult;
 const computeMetrics = core_mod.computeMetrics;
 const calcArgmaxMatch = core_mod.calcArgmaxMatch;
-const alignmentVerdict = core_mod.alignmentVerdict;
-
 const log = std.log.scoped(.tool_align_cmp);
+
+/// MaxErr 分级：基于相对最大绝对误差的精度等级（尺度自适应）
+/// 使用 rel_max_err = max_abs_err / max(abs(ref), eps) 进行分级，
+/// 确保评级在不同数据尺度下具有可比性。
+const MaxErrGrade = enum {
+    perfect,
+    good,
+    pass,
+    fail,
+
+    fn label(self: MaxErrGrade) []const u8 {
+        return switch (self) {
+            .perfect => "完美",
+            .good => "良好",
+            .pass => "需核查",
+            .fail => "离群点超标",
+        };
+    }
+
+    fn emoji(self: MaxErrGrade) []const u8 {
+        return switch (self) {
+            .perfect => "✅",
+            .good => "☑️",
+            .pass => "⚠️",
+            .fail => "❌",
+        };
+    }
+};
+
+/// 根据相对最大绝对误差返回精度等级（尺度自适应）
+/// rel_max_err = max_abs_err / max(abs(ref), eps)
+fn gradeMaxErr(rel_max_err: f64) MaxErrGrade {
+    if (rel_max_err < 1e-5) return .perfect;
+    if (rel_max_err < 1e-4) return .good;
+    if (rel_max_err < 1e-3) return .pass;
+    return .fail;
+}
 
 // ============================================================================
 // 比较器
@@ -170,24 +213,27 @@ pub const AlignComparator = struct {
         return error.JsonKeyNotFound;
     }
 
-    /// 打印详细报告
+    // 打印详细报告
     fn printReport(self: *AlignComparator, io: std.Io, metrics: AlignMetrics, argmax: ArgmaxResult) !void {
-        const stdout_file = std.Io.File.stdout();
         var buf: [4096]u8 = undefined;
+        const stdout_file = std.Io.File.stdout();
 
         const header = try std.fmt.bufPrint(&buf,
             \\参考文件: {s}
             \\测试文件: {s}
             \\向量维度: {d}
             \\------------------------------------------------------------
-            \\归一化均方误差 (NMSE) : {d:.10}
-            \\余弦相似度 (Cos)      : {d:.10}
+            \\归一化均方误差 (NMSE) : {d:.8}
+            \\余弦相似度 (Cos)      : {d:.8}
             \\欧氏距离 (L2)         : {d:.8}
             \\均方根误差 (RMSE)     : {d:.8}   (每维度平均误差)
             \\平均绝对误差 (MAE)    : {d:.8}
-            \\最大绝对误差 (MaxErr) : {d:.8}   (检测异常离群点)
-            \\平均幅值比值 (A/B)    : {d:.6}
-            \\比值标准差 (Std)      : {d:.6}
+            \\最大绝对误差 (MaxErr) : {d:.8}
+            \\相对最大误差 (Rel)    : {d:.8}  {s} {s}
+            \\参考最大幅值          : {d:.4}
+            \\(离群点) 数量/占比    : {d} / {d:.4}%
+            \\平均幅值比值 (A/B)    : {d:.8}
+            \\比值标准差 (Std)      : {d:.8}
             \\疑似线性缩放          : {s}
             \\Argmax 匹配           : {s} (参考索引 {d}, 测试索引 {d})
             \\------------------------------------------------------------
@@ -202,6 +248,12 @@ pub const AlignComparator = struct {
             metrics.rmse,
             metrics.mae,
             metrics.max_abs_err,
+            metrics.rel_max_err,
+            gradeMaxErr(metrics.rel_max_err).emoji(),
+            gradeMaxErr(metrics.rel_max_err).label(),
+            metrics.ref_max_abs,
+            metrics.outlier_count,
+            metrics.outlier_ratio,
             metrics.avg_ratio,
             metrics.ratio_std,
             if (metrics.is_scaled) "是 ⚠️" else "否",
@@ -222,10 +274,6 @@ pub const AlignComparator = struct {
         }
     }
 };
-
-// ============================================================================
-// JSON 工具
-// ============================================================================
 
 /// 从 JSON 数组提取 f32 切片
 fn extractF32Array(allocator: std.mem.Allocator, arr: std.json.Array) ![]f32 {
