@@ -232,9 +232,97 @@ if (os == .linux) {
 - **现状**：Metal 后端在 bundle 模式下暂不可用；x86_64 上使用 Accelerate 框架已足够
 - **未来方向**：aarch64 macOS 上可预编译 Metal 后端为 `.a` 再链接
 
+### 坑位 4：`ggml_gallocr_needs_realloc` 警告
+
+- **现象**：测试运行时输出 `ggml_gallocr_needs_realloc: graph has different number of nodes`
+- **原因**：`ggml_gallocr_alloc_graph` 在检测到图结构变化时会自动重新分配缓冲区。这是 ggml 后端的正常行为，不是错误
+- **影响**：不影响测试结果，但会导致测试输出包含警告信息
+- **处理**：在测试中可忽略此警告。如果测试因此失败，检查图构建是否正确（节点数是否一致）
+
 ---
 
-## 🧪 验证清单
+## 🧪 测试体系
+
+### 测试步骤
+
+`build.zig` 中定义了多个测试步骤：
+
+```bash
+# 运行所有测试
+zig build test
+
+# 运行 ggml 绑定专项测试（14 个子测试）
+zig build test-ggml
+
+# 运行特定子测试
+zig build test-ggml-conv
+zig build test-ggml-quantize-fns
+zig build test-ggml-dup
+zig build test-ggml-arange
+zig build test-ggml-cont
+zig build test-ggml-customop
+zig build test-ggml-interpolate
+zig build test-ggml-pad-reflect-1d
+zig build test-ggml-pool
+zig build test-ggml-rel-pos
+zig build test-ggml-roll
+zig build test-ggml-timestep-embedding
+zig build test-ggml-gguf
+```
+
+### test-ggml 步骤结构
+
+`test-ggml` 步骤聚合了 14 个子测试，覆盖以下 ggml 绑定功能：
+
+| 子测试 | 覆盖内容 | 测试数 |
+|--------|---------|--------|
+| test-ggml-arange | `arange` 等差数列操作 | 2 |
+| test-ggml-cont | `cont` 连续化操作 | 2 |
+| test-ggml-dup | `dup` 复制操作（跨类型、view） | 3 |
+| test-ggml-customop | 自定义算子（mapCustom1/2/3） | 2 |
+| test-ggml-interpolate | 插值操作 | 2 |
+| test-ggml-pad-reflect-1d | 反射填充 | 2 |
+| test-ggml-pool | 池化操作 | 2 |
+| test-ggml-rel-pos | 相对位置编码 | 2 |
+| test-ggml-roll | 滚动操作 | 2 |
+| test-ggml-timestep-embedding | 时间步嵌入 | 2 |
+| test-ggml-gguf | GGUF 绑定 | 2 |
+| test-ggml-conv | 卷积操作（conv1d, conv2d, conv1d_dw, conv_transpose 等） | 9 |
+| test-ggml-quantize-fns | 量化函数（往返精度、类型特征表、反量化） | 21 |
+| **总计** | | **~53** |
+
+### 测试文件位置
+
+所有 ggml 绑定测试位于 `src/tests/` 目录下：
+
+```
+src/tests/
+├── test_ggml_arange.zig
+├── test_ggml_cont.zig
+├── test_ggml_dup.zig
+├── test_ggml_customop.zig
+├── test_ggml_interpolate.zig
+├── test_ggml_pad_reflect_1d.zig
+├── test_ggml_pool.zig
+├── test_ggml_rel_pos.zig
+├── test_ggml_roll.zig
+├── test_ggml_timestep_embedding.zig
+├── test_ggml_gguf.zig
+├── test_ggml_conv.zig          # 新增：卷积算子测试
+└── test_ggml_quantize_fns.zig  # 新增：量化函数测试
+```
+
+### 测试设计原则
+
+1. **独立可运行**：每个测试文件通过 `build.zig` 中的独立步骤运行，不依赖 `test_runner.zig`
+2. **使用 ggml 模块**：通过 `@import("ggml")` 导入，不直接调用 C API
+3. **验证数值正确性**：对已知输入验证输出值，而非仅检查形状
+4. **处理平台差异**：对可能因平台/后端不同而失败的操作使用 `error.SkipZigTest`
+5. **内存安全**：使用 `defer` 确保 Context 释放
+
+---
+
+## ✅ 验证清单
 
 ```bash
 # 1. 系统库模式构建
@@ -247,12 +335,15 @@ zig build -Dbundle-ggml
 zig build test
 zig build -Dbundle-ggml test
 
-# 4. 三模型推理验证（两种模式各一遍）
+# 4. ggml 绑定专项测试
+zig build test-ggml
+
+# 5. 三模型推理验证（两种模式各一遍）
 for model in tinyllama Llama-3.2 Qwen3.5; do
     zig-out/bin/zllama -n 5 --model ~/.cache/models/${model}*.gguf 你好
 done
 
-# 5. Benchmark 模式
+# 6. Benchmark 模式
 zig-out/bin/zllama --benchmark -n 20 --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M.gguf 你好
 ```
 
@@ -269,3 +360,5 @@ zig-out/bin/zllama --benchmark -n 20 --model ~/.cache/models/Qwen3.5-0.8B-Q4_K_M
 | `ggml_graph_nbytes` 的 `void*` 算术是否仍存在 | `deps/ggml/src/ggml.c` |
 | 新增子目录（如 ggml-cpu/arch/xxx） | `build.zig` 的 include / 源文件路径 |
 | CMakeLists.txt 中新增的宏定义 | `build.zig` `addCMacro` |
+| 新增 ggml C API 是否需要在 Zig 中绑定 | `src/ggml/ops.zig` + `src/ggml/mod.zig` |
+| 新增 ggml 操作是否需要测试覆盖 | `src/tests/test_ggml_*.zig` + `build.zig` |
