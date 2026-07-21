@@ -1463,6 +1463,22 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         });
     }
 
+    // ---- 添加 BLAS 后端源文件 ----
+    // ggml-backend-reg.cpp 中引用 ggml_backend_blas_reg()，
+    // 因此必须在 GGML_USE_BLAS=1 时编译 ggml-blas.cpp。
+    {
+        const blas_dir = src_dir ++ "/ggml-blas";
+        lib_mod.addIncludePath(b.path(blas_dir));
+        const blas_flags: []const []const u8 = if (target.result.os.tag.isDarwin())
+            &.{ "-std=gnu++17", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-missing-braces", "-DGGML_BLAS_USE_ACCELERATE" }
+        else
+            cpp_base_flags;
+        lib_mod.addCSourceFile(.{
+            .file = b.path(blas_dir ++ "/ggml-blas.cpp"),
+            .flags = blas_flags,
+        });
+    }
+
     // ---- 添加 CPU 后端 C 文件（含架构优化标志） ----
     inline for (.{ "ggml-cpu.c", "quants.c" }) |file| {
         lib_mod.addCSourceFile(.{
@@ -1510,6 +1526,14 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
             lib_mod.addIncludePath(b.path(arch_dir));
             lib_mod.addCSourceFile(.{
                 .file = b.path(arch_dir ++ "/cpu-feats.cpp"),
+                .flags = cpp_base_flags,
+            });
+            lib_mod.addCSourceFile(.{
+                .file = b.path(arch_dir ++ "/quants.c"),
+                .flags = c_base_flags,
+            });
+            lib_mod.addCSourceFile(.{
+                .file = b.path(arch_dir ++ "/repack.cpp"),
                 .flags = cpp_base_flags,
             });
         },
