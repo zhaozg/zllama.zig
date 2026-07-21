@@ -490,8 +490,6 @@ pub fn buildGraph(
     // ========================================================================
     const pe_w = w.patch_embeddings_0 orelse return error.MissingPatchEmbeddings;
     cur = cur.conv2d(ctx, pe_w, ps, ps, 0, 0, 1, 1);
-    cur.setName("inp_conv_2d");
-    ggml.setOutput(cur);
 
     // ========================================================================
     // Step 4: reshape + transpose
@@ -504,8 +502,6 @@ pub fn buildGraph(
     //       // note: no patch bias
     // ========================================================================
     cur = cur.reshape3d(ctx, np, ne, 1);
-    cur.setName("inp_reshape_3d");
-    ggml.setOutput(cur);
     cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
     cur.setName("inp_final");
     ggml.setOutput(cur);
@@ -632,7 +628,6 @@ pub fn buildGraph(
         cur = cur.sub(ctx, w.std_bias.?);
         cur = cur.mul(ctx, w.std_scale.?);
         cur.setName("std_scaled");
-        ggml.setOutput(cur);
     }
 
     // ========================================================================
