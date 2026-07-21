@@ -50,19 +50,18 @@ pub const EngineContext = struct {
     gallocr: *ggml.Gallocr,
 };
 
-pub const ImageGenResult = struct {};
-
-/// 计算动态分辨率的目标尺寸。
-/// 对于支持动态分辨率的模型（如 Qwen3VL），使用 calcSizePreservedRatio；
-/// 对于固定尺寸模型（如 Gemma4），直接使用 image_size。
-fn computeTargetSize(
-    enc: *const mtmd.vision_mod.VisionEncoder,
+/// 计算动态分辨率的目标尺寸，并在 VisionEncoder params 中设置 user_max_pixels。
+/// 返回的实际尺寸仅用于日志记录（实际缩放由 VisionEncoder.encode 内部处理）。
+fn computeAndSetTargetSize(
+    enc: *mtmd.vision_mod.VisionEncoder,
     src_width: u32,
     src_height: u32,
+    user_max_pixels: u32,
 ) preprocess.Size2D {
+    if (user_max_pixels > 0) {
+        enc.setUserMaxPixels(user_max_pixels);
+    }
     const p = &enc.params;
-    // 如果设置了 min_pixels 和 max_pixels，使用动态分辨率
-    // 优先使用用户指定的 max_pixels（用于内存控制）
     const effective_max_pixels = if (p.user_max_pixels > 0) p.user_max_pixels else p.image_max_pixels;
     if (p.image_min_pixels > 0 and effective_max_pixels > 0) {
         const align_size = p.patch_size * p.n_merge;
@@ -81,8 +80,6 @@ fn computeTargetSize(
             return result;
         }
     }
-
-    // 回退：固定正方形缩放
     logger.info("Fixed resize: {d}x{d} -> {d}x{d}", .{ src_width, src_height, p.image_size, p.image_size });
     return .{ .width = p.image_size, .height = p.image_size };
 }
@@ -117,17 +114,15 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     var raw_img = try loadImageRaw(ectx.allocator, io, image_path);
     defer raw_img.deinit();
 
-    logger.debug("generateWithImage: Step 1 - loadImageRaw done: {d}x{d}", .{ raw_img.width, raw_img.height });
-    // 步骤 2: 计算目标尺寸（动态分辨率或固定正方形）
-    // 如果用户指定了 image_max_pixels，覆盖 GGUF 默认值
-    if (ectx.image_max_pixels > 0) {
-        if (mm_mgr.vision_encoder) |*enc| {
-            enc.setUserMaxPixels(ectx.image_max_pixels);
-        }
-    }
-    logger.debug("generateWithImage: Step 2 - computeTargetSize", .{});
-    const enc = mm_mgr.vision_encoder.?;
-    _ = computeTargetSize(&enc, raw_img.width, raw_img.height);
+    // 步骤 2: 计算目标尺寸（动态分辨率或固定正方形），并传递 user_max_pixels 给 encoder
+    logger.debug("generateWithImage: Step 2 - computeAndSetTargetSize", .{});
+    var enc = mm_mgr.vision_encoder.?;
+    const target_size = computeAndSetTargetSize(&enc, raw_img.width, raw_img.height, ectx.image_max_pixels);
+    logger.debug("generateWithImage: target size = {d}x{d}", .{ target_size.width, target_size.height });
+
+    // 步骤 3: 直接传递原始图像给 encodeMedia，由 encode 中的 resizeAndNormalize 处理缩放
+    // （使用与 llama.cpp 一致的坐标映射）
+    logger.debug("generateWithImage: Step 3 - passing raw image to encodeMedia ({d}x{d})", .{ raw_img.width, raw_img.height });
 
     // 步骤 3: 直接传递原始图像给 encodeMedia，由 encode 中的 resizeAndNormalize 处理缩放
     // （使用与 llama.cpp 一致的坐标映射）

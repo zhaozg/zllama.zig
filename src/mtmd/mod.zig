@@ -164,6 +164,10 @@ pub const InputChunks = struct {
         for (self.entries.items) |*chunk| {
             if (chunk.tokens_text) |t| self.allocator.free(t);
             if (chunk.mel_data) |m| self.allocator.free(m);
+            // Free raw_pixels allocated by resizeToU8 in addImageChunk (tokenize.zig)
+            if (chunk.tokens_image) |*img| {
+                if (img.raw_pixels) |rp| self.allocator.free(@constCast(rp));
+            }
         }
         self.entries.clearAndFree(self.allocator);
     }

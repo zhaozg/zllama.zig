@@ -465,27 +465,51 @@ pub const Gemma4Graph = struct {
                     .causal = causal,
                     .cache_start_abs = cache_start_abs,
                 }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
-
                 attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
             } else {
-                // Non-causal (media) pass: shared KV layers cannot read from cache
-                // because the KV layer's K/V was not cached. Use a zero attention output
-                // as a placeholder (the shared layers don't contribute to media encoding).
-                log.debug("Shared KV layer {d} in non-causal pass: using zero attention", .{il});
-                attn_out = try ctx.newTensor2d(.f32, n_head * head_dim, n_tokens_i64);
-                // In no_alloc mode, manually allocate data for the zero tensor
-                if (ctx.getNoAlloc()) {
-                    const data_size = @as(usize, @intCast(attn_out.nBytes()));
-                    const buf = @as([*]u8, @ptrCast(std.c.malloc(data_size) orelse return error.OutOfMemory))[0..data_size];
-                    @memset(buf, 0);
-                    attn_out.setDataPtr(buf);
-                } else {
-                    const n_elems = @as(usize, @intCast(attn_out.nElems()));
-                    const buf = try std.heap.page_allocator.alloc(f32, n_elems);
-                    defer std.heap.page_allocator.free(buf);
-                    @memset(buf, 0);
-                    try attn_out.dataSet(f32, buf);
+                // Non-causal (media) pass: read K/V from cache (written by the
+                // corresponding KV layer).  The KV layer has already computed and
+                // cached its K/V by this point (layers are processed in order).
+                // This mirrors the causal path above, but passes causal=false
+                // to the attention function.  (ref: llama.cpp gemma4.cpp: the
+                // "else" branch for non-KV layers does not special-case causal.)
+                const kv_layer_idx = findKVLayer(p, il);
+                const cache = kv_cache_mgr orelse @panic("Shared KV layer requires KV cache");
+                const k_cache = cache.getKView(ctx, kv_layer_idx);
+                const v_cache = cache.getVView(ctx, kv_layer_idx);
+                const head_dim_k_cache: i64 = k_cache.ne()[0];
+                const n_kv_head_cache: i64 = k_cache.ne()[1];
+
+                var n_head_eff = n_head;
+                var q_use = q;
+                if (head_dim != head_dim_k_cache) {
+                    n_head_eff = @divExact(n_head * head_dim, head_dim_k_cache);
+                    q_use = ggml.reshape3d(ctx, q, head_dim_k_cache, n_head_eff, n_tokens_i64);
                 }
+
+                const cache_len: i64 = k_cache.ne()[2];
+                const cache_start_abs: i64 = if (layer_is_swa) blk: {
+                    const current_len = cache.currentLen();
+                    if (current_len > cache_len) {
+                        break :blk @as(i64, @intCast(current_len)) - cache_len;
+                    }
+                    break :blk 0;
+                } else 0;
+
+                attn_out = attention.scaledDotProductAttention(ctx, q_use, k_cache, v_cache, .{
+                    .n_head = n_head_eff,
+                    .n_kv_head = n_kv_head_cache,
+                    .head_dim = head_dim_k_cache,
+                    .n_tokens = n_tokens_i64,
+                    .cache_len = cache_len,
+                    .start_pos = start_pos,
+                    .scale_factor = p.f_attention_scale,
+                    .attn_logit_softcap = p.attn_logit_softcapping,
+                    .causal = false,
+                    .cache_start_abs = cache_start_abs,
+                }, if (layer_is_swa) @as(i64, @intCast(p.n_swa)) else null);
+
+                attn_out = ggml.reshape2d(ctx, attn_out, n_head * head_dim, n_tokens_i64);
             }
         }
 

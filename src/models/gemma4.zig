@@ -232,37 +232,13 @@ pub const Gemma4Model = struct {
         embd_offset: i32,
         causal: bool,
     ) !*ggml.Tensor {
-        // —— 音频嵌入诊断 ——
-        {
-            const eo_data = try embd_override.dataGet(f32, std.heap.page_allocator);
-            defer std.heap.page_allocator.free(eo_data);
-            const n_total: usize = @as(usize, @intCast(embd_override.ne()[0] * embd_override.ne()[1]));
-            const n_preview: usize = @min(n_total, 8);
-            var all_zero = true;
-            var has_nan = false;
-            for (eo_data[0..n_total]) |v| {
-                if (v != 0.0) all_zero = false;
-                if (std.math.isNan(v)) has_nan = true;
-            }
-            log.debug("mediaForward: ne=[{d},{d}] start_pos={d} n_tokens={d} causal={}", .{
-                embd_override.ne()[0], embd_override.ne()[1], start_pos, n_tokens, causal,
-            });
-            log.debug("  embed preview[0..{d}]: {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}", .{
-                @min(n_preview, @as(usize, 8)),
-                eo_data[0],
-                if (n_total > 1) eo_data[1] else @as(f32, 0),
-                if (n_total > 2) eo_data[2] else @as(f32, 0),
-                if (n_total > 3) eo_data[3] else @as(f32, 0),
-                if (n_total > 4) eo_data[4] else @as(f32, 0),
-                if (n_total > 5) eo_data[5] else @as(f32, 0),
-                if (n_total > 6) eo_data[6] else @as(f32, 0),
-                if (n_total > 7) eo_data[7] else @as(f32, 0),
-            });
-            log.debug("  all_zero={} has_nan={}", .{ all_zero, has_nan });
-            if (all_zero) log.warn("  ⚠ embd_override is ALL ZEROS!", .{});
-            if (has_nan) log.warn("  ⚠ embd_override contains NaN!", .{});
-        }
+        log.debug("mediaForward: ne=[{d},{d}] start_pos={d} n_tokens={d} causal={}", .{
+            embd_override.ne()[0], embd_override.ne()[1], start_pos, n_tokens, causal,
+        });
 
+        // embd_offset is unused here because the embedding override is already
+        // sliced to the correct chunk by the caller (threeStagePrefill).
+        // Position encoding uses start_pos for the chunk's absolute position.
         _ = embd_offset;
         var g = gemma4_graph.Gemma4Graph{
             .ctx = ctx,

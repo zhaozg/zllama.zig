@@ -71,16 +71,16 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chun
             pw = ns.width;
             ph = ns.height;
         }
+        // TODO: avoid double-resize — enc.encode() in evalChunks also calls
+        // resizeAndNormalize. For now we resize here so raw_pixels dimensions
+        // match nx/ny (required by enc.encode expected_len check).
         const res = try preprocess.resizeToU8(al, rd, bm.nx, bm.ny, pw, ph);
         pd = res.data;
     }
-    var nt: u32 = 0;
-    const nx: u32 = pw;
-    const ny: u32 = ph;
     if (ctx.mm_manager.vision_encoder) |*enc| {
-        nt = enc.estimateOutputTokens(io, pw, ph);
+        _ = enc.estimateOutputTokens(io, pw, ph);
     }
-    try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = nx, .ny = ny, .pos = ctx.pos_type, .image_idx = nia.*, .id = bm.id, .raw_pixels = pd, .patch_count = 1 }, .id = bm.id });
+    try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = pw, .ny = ph, .pos = ctx.pos_type, .image_idx = nia.*, .id = bm.id, .raw_pixels = pd, .patch_count = 1 }, .id = bm.id });
     if (ctx.img_end.len > 0) try addTextChunk(ctx, al, chunks, ctx.img_end, true);
     nia.* += 1;
 }
