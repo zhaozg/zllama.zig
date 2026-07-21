@@ -504,9 +504,9 @@ pub fn buildGraph(
             // Reference: M-RoPE
             // ggml_rope_multi(ctx0, Qcur, positions, nullptr, d_head/2, mrope_sections, GGML_ROPE_TYPE_VISION, 32768, 10000, 1, 0, 1, 32, 1)
             const rope_type_vision: i32 = 24; // GGML_ROPE_TYPE_VISION
-            Qcur = ggml.ropeMulti(ctx, Qcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, rope_type_vision, 32768, 10000, 1, 0, 1, 32, 1);
+            Qcur = ggml.ropeMulti(ctx, Qcur, positions, null, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, rope_type_vision, 32768, 10000, 1, 0, 1, 32, 1);
             Qcur.setName("Qcur_rope");
-            Kcur = ggml.ropeMulti(ctx, Kcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, rope_type_vision, 32768, 10000, 1, 0, 1, 32, 1);
+            Kcur = ggml.ropeMulti(ctx, Kcur, positions, null, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, rope_type_vision, 32768, 10000, 1, 0, 1, 32, 1);
             Kcur.setName("Kcur_rope");
 
             // Reference: cur = build_attn(layer.o_w, layer.o_b, Qcur, Kcur, Vcur, nullptr, kq_scale, il);

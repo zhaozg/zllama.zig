@@ -215,8 +215,8 @@ pub const Qwen3VLModel = struct {
             }
 
             // RoPE with multi sections — reference: ggml_rope_multi on Qcur and Kcur
-            q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, 40, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-            k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, 40, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            q = ggml.ropeMulti(ctx, q, pos_tensor, null, @intCast(rope_dim), &rope_sections, 40, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            k = ggml.ropeMulti(ctx, k, pos_tensor, null, @intCast(rope_dim), &rope_sections, 40, 0, p.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
 
             // KV Cache: setKv expects [head_dim, n_kv_head, n_tokens]
             if (kv_cache_mgr) |cache| {

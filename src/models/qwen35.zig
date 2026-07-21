@@ -304,8 +304,8 @@ pub const QwenModel = struct {
 
             const pos_tensor = rope.buildMultiPositionTensor(ctx, @intCast(n_tokens_i64), self.start_pos);
             const rope_sections = [4]i32{ 11, 11, 10, 0 };
-            q = ggml.ropeMulti(ctx, q, pos_tensor, @intCast(rope_dim), &rope_sections, 40, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
-            k = ggml.ropeMulti(ctx, k, pos_tensor, @intCast(rope_dim), &rope_sections, 40, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            q = ggml.ropeMulti(ctx, q, pos_tensor, null, @intCast(rope_dim), &rope_sections, 40, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
+            k = ggml.ropeMulti(ctx, k, pos_tensor, null, @intCast(rope_dim), &rope_sections, 40, 0, p.base.rope_theta, 1.0, 0.0, 1.0, 0.0, 0.0);
 
             if (self.kv_cache_mgr) |cache| {
                 cache.setKv(ctx, gf, layer_idx, k, v, @intCast(n_tokens_i64));

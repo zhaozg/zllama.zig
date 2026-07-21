@@ -404,9 +404,10 @@ pub fn buildGraph(
             Vcur.setName("blk");
 
             // M-RoPE (GGML_ROPE_TYPE_VISION = 24)
-            Qcur = ggml.ropeMulti(ctx, Qcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 24, 32768, 10000, 1, 0, 1, 32, 1);
+            Qcur = ggml.ropeMulti(ctx, Qcur, positions, null, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 24, 32768, 10000, 1, 0, 1, 32, 1);
             Qcur.setName("blk");
-            Kcur = ggml.ropeMulti(ctx, Kcur, positions, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 24, 32768, 10000, 1, 0, 1, 32, 1);
+            Kcur = ggml.ropeMulti(ctx, Kcur, positions, null, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 24, 32768, 10000, 1, 0, 1, 32, 1);
+            Kcur = ggml.ropeMulti(ctx, Kcur, positions, null, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, 24, 32768, 10000, 1, 0, 1, 32, 1);
             Kcur.setName("blk");
 
             const attn_mask: ?*ggml.Tensor = if (full_attn) null else window_mask;
