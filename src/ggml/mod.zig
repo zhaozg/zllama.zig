@@ -121,7 +121,17 @@ pub const concat = @import("ops.zig").concat;
 pub const getRows = @import("ops.zig").getRows;
 pub const dupTensor = @import("ops.zig").dupTensor;
 pub const conv1d = @import("ops.zig").conv1d;
+pub const conv1dPh = @import("ops.zig").conv1dPh;
+pub const conv1dDw = @import("ops.zig").conv1dDw;
+pub const conv1dDwPh = @import("ops.zig").conv1dDwPh;
+pub const convTranspose1d = @import("ops.zig").convTranspose1d;
+pub const conv2d = @import("ops.zig").conv2d;
+pub const conv2dSkP0 = @import("ops.zig").conv2dSkP0;
+pub const conv2dS1Ph = @import("ops.zig").conv2dS1Ph;
+pub const conv2dDw = @import("ops.zig").conv2dDw;
+pub const convTranspose2dP0 = @import("ops.zig").convTranspose2dP0;
 pub const ssmConv = @import("ops.zig").ssmConv;
+
 pub const ssmScan = @import("ops.zig").ssmScan;
 pub const sumRows = @import("ops.zig").sumRows;
 pub const setOutput = @import("ops.zig").setOutput;

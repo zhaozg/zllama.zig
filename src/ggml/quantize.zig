@@ -100,8 +100,10 @@ pub fn quantizeTensor(
 /// 等价于 ggml_row_size(type, n_per_row) * nrows。
 pub fn quantizedSize(typ: Type, nrows: i64, n_per_row: i64) usize {
     const row_size = c.ggml_row_size(@intFromEnum(typ), n_per_row);
-    return @as(usize, @intCast(row_size * nrows));
+    return @as(usize, @intCast(row_size)) * @as(usize, @intCast(nrows));
 }
+
+
 
 // ============================================================================
 // 测试

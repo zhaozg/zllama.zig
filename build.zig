@@ -941,7 +941,6 @@ pub fn build(b: *std.Build) void {
         test_graph_dtypes_step.dependOn(&run_t.step);
     }
 
-
     const test_stb_image_step = b.step("test-stb-image", "Run stb_image integration tests only");
     {
         const mod = b.createModule(.{
@@ -979,10 +978,169 @@ pub fn build(b: *std.Build) void {
         test_compare_logits_step.dependOn(&run_t.step);
     }
 
+    const test_ggml_step = b.step("test-ggml", "Run ggml binding tests (arange, cont, dup, conv, pool, roll, etc.)");
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_arange.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-arange", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_cont.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-cont", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_dup.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-dup", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_customop.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-customop", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_interpolate.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-interpolate", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_pad_reflect_1d.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-pad-reflect-1d", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_pool.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-pool", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_rel_pos.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-rel-pos", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_roll.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-roll", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_timestep_embedding.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-timestep-embedding", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_gguf.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-gguf", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_conv.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-conv", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+    {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/test_ggml_quantize_fns.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("ggml", ggml_mod);
+        const t = addTestWithRpath(b, "test-ggml-quantize-fns", mod);
+        const run_t = b.addRunArtifact(t);
+        test_ggml_step.dependOn(&run_t.step);
+    }
+
     // ======================================================================
     // 工具可执行文件
     // ======================================================================
     {
+
         const mod = b.createModule(.{
             .root_source_file = b.path("src/tools/dump_graph.zig"),
             .target = target,

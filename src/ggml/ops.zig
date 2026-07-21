@@ -237,13 +237,47 @@ pub fn dupTensor(ctx: *Context, src: *Tensor) *Tensor {
 // ============================================================================
 // 卷积与 SSM 操作
 // ============================================================================
+pub fn ssmConv(ctx: *Context, sx: *Tensor, kernel: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_ssm_conv(@ptrCast(ctx), @ptrCast(@alignCast(sx)), @ptrCast(@alignCast(kernel)))));
+}
 
 pub fn conv1d(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, p0: i32, d0: i32) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_conv_1d(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, p0, d0)));
 }
 
-pub fn ssmConv(ctx: *Context, sx: *Tensor, kernel: *Tensor) *Tensor {
-    return @as(*Tensor, @ptrCast(c.ggml_ssm_conv(@ptrCast(ctx), @ptrCast(@alignCast(sx)), @ptrCast(@alignCast(kernel)))));
+pub fn conv1dPh(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, d0: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_1d_ph(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, d0)));
+}
+
+pub fn conv1dDw(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, p0: i32, d0: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_1d_dw(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, p0, d0)));
+}
+
+pub fn conv1dDwPh(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, d0: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_1d_dw_ph(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, d0)));
+}
+
+pub fn convTranspose1d(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, p0: i32, d0: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_transpose_1d(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, p0, d0)));
+}
+
+pub fn conv2d(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, s1: i32, p0: i32, p1: i32, d0: i32, d1: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_2d(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, s1, p0, p1, d0, d1)));
+}
+
+pub fn conv2dSkP0(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_2d_sk_p0(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn conv2dS1Ph(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_2d_s1_ph(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn conv2dDw(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, s1: i32, p0: i32, p1: i32, d0: i32, d1: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_2d_dw(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, s1, p0, p1, d0, d1)));
+}
+pub fn convTranspose2dP0(ctx: *Context, a: *Tensor, b: *Tensor, stride: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_transpose_2d_p0(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), stride)));
 }
 
 pub fn ssmScan(ctx: *Context, s: *Tensor, x: *Tensor, dt: *Tensor, A: *Tensor, B: *Tensor, C: *Tensor, ids: *Tensor) *Tensor {
@@ -253,6 +287,7 @@ pub fn ssmScan(ctx: *Context, s: *Tensor, x: *Tensor, dt: *Tensor, A: *Tensor, B
 pub fn gatedDeltaNet(ctx: *Context, q: *Tensor, k: *Tensor, v: *Tensor, g: *Tensor, beta: *Tensor, state: *Tensor, K: i64) *Tensor {
     return @as(*Tensor, @ptrCast(c.ggml_gated_delta_net(@ptrCast(ctx), @ptrCast(@alignCast(q)), @ptrCast(@alignCast(k)), @ptrCast(@alignCast(v)), @ptrCast(@alignCast(g)), @ptrCast(@alignCast(beta)), @ptrCast(@alignCast(state)), K)));
 }
+
 
 // ============================================================================
 // Flash Attention
