@@ -54,7 +54,7 @@ pub const backendCpuSetNThreads = @import("backend.zig").backendCpuSetNThreads;
 pub const backendGraphCompute = @import("backend.zig").backendGraphCompute;
 pub const backendTensorGet = @import("backend.zig").backendTensorGet;
 pub const loadBackends = @import("backend.zig").loadBackends;
-pub const setInput = @import("backend.zig").setInput;
+pub const setInput = @import("backend.zig").setInput;  // 来自 backend.zig
 pub const backendBuftIsHost = @import("backend.zig").backendBuftIsHost;
 pub const backendTensorSet = @import("backend.zig").backendTensorSet;
 pub const DeviceType = @import("backend.zig").DeviceType;
@@ -70,86 +70,203 @@ pub const ThreadPool = @import("threadpool.zig").ThreadPool;
 
 pub const gguf = @import("gguf.zig");
 
-pub const mulMat = @import("ops.zig").mulMat;
-pub const mulMatSetPrec = @import("ops.zig").mulMatSetPrec;
-pub const flashAttnExtSetPrec = @import("ops.zig").flashAttnExtSetPrec;
-pub const mul = @import("ops.zig").mul;
-pub const flashAttnExtAddSinks = @import("ops.zig").flashAttnExtAddSinks;
-pub const softMaxAddSinks = @import("ops.zig").softMaxAddSinks;
+// ============================================================================
+// 计算图操作（ops.zig）
+// ============================================================================
 
-pub const add = @import("ops.zig").add;
-pub const neg = @import("ops.zig").neg;
-pub const exp = @import("ops.zig").exp;
-pub const cpy = @import("ops.zig").cpy;
-pub const cast = @import("ops.zig").cast;
-pub const rmsNorm = @import("ops.zig").rmsNorm;
-pub const l2Norm = @import("ops.zig").l2Norm;
-pub const ropeExt = @import("ops.zig").ropeExt;
-pub const ropeMulti = @import("ops.zig").ropeMulti;
-pub const scale = @import("ops.zig").scale;
-pub const softMax = @import("ops.zig").softMax;
-pub const softMaxExt = @import("ops.zig").softMaxExt;
-pub const flashAttnExt = @import("ops.zig").flashAttnExt;
-pub const diagMaskInf = @import("ops.zig").diagMaskInf;
-pub const silu = @import("ops.zig").silu;
-pub const gelu = @import("ops.zig").gelu;
-pub const geluErf = @import("ops.zig").geluErf;
-pub const geluQuick = @import("ops.zig").geluQuick;
-pub const sqr = @import("ops.zig").sqr;
-pub const tanh = @import("ops.zig").tanh;
-pub const relu = @import("ops.zig").relu;
-pub const sigmoid = @import("ops.zig").sigmoid;
-pub const softplus = @import("ops.zig").softplus;
-pub const permute = @import("ops.zig").permute;
-pub const cont = @import("ops.zig").cont;
-pub const gatedDeltaNet = @import("ops.zig").gatedDeltaNet;
-pub const clamp = @import("ops.zig").clamp;
-pub const dequantizeRow = @import("ops.zig").dequantizeRow;
-pub const dequantizeTensor = @import("ops.zig").dequantizeTensor;
+const ops = @import("ops.zig");
 
-pub const cont2d = @import("ops.zig").cont2d;
-pub const cont4d = @import("ops.zig").cont4d;
-pub const reshape2d = @import("ops.zig").reshape2d;
-pub const cont3d = @import("ops.zig").cont3d;
+// 矩阵运算
+pub const mulMat = ops.mulMat;
+pub const mulMatSetPrec = ops.mulMatSetPrec;
+pub const mulMatId = ops.mulMatId;
+pub const outProd = ops.outProd;
+pub const mul = ops.mul;
+pub const add = ops.add;
+pub const addInplace = ops.addInplace;
+pub const addId = ops.addId;
+pub const addCast = ops.addCast;
+pub const sub = ops.sub;
+pub const subInplace = ops.subInplace;
+pub const div = ops.div;
+pub const divInplace = ops.divInplace;
+pub const neg = ops.neg;
+pub const negInplace = ops.negInplace;
+pub const exp = ops.exp;
+pub const expInplace = ops.expInplace;
+pub const sqrt = ops.sqrt;
+pub const log = ops.log;
+pub const abs = ops.abs;
+pub const sin = ops.sin;
+pub const cos = ops.cos;
+pub const cpy = ops.cpy;
+pub const cast = ops.cast;
 
-pub const reshape3d = @import("ops.zig").reshape3d;
-pub const reshape4d = @import("ops.zig").reshape4d;
-pub const repeat = @import("ops.zig").repeat;
-pub const repeat4d = @import("ops.zig").repeat4d;
-pub const transpose = @import("ops.zig").transpose;
-pub const concat = @import("ops.zig").concat;
-pub const getRows = @import("ops.zig").getRows;
-pub const dupTensor = @import("ops.zig").dupTensor;
-pub const conv1d = @import("ops.zig").conv1d;
-pub const conv1dPh = @import("ops.zig").conv1dPh;
-pub const conv1dDw = @import("ops.zig").conv1dDw;
-pub const conv1dDwPh = @import("ops.zig").conv1dDwPh;
-pub const convTranspose1d = @import("ops.zig").convTranspose1d;
-pub const conv2d = @import("ops.zig").conv2d;
-pub const conv2dSkP0 = @import("ops.zig").conv2dSkP0;
-pub const conv2dS1Ph = @import("ops.zig").conv2dS1Ph;
-pub const conv2dDw = @import("ops.zig").conv2dDw;
-pub const convTranspose2dP0 = @import("ops.zig").convTranspose2dP0;
-pub const ssmConv = @import("ops.zig").ssmConv;
+// 归一化与激活
+pub const rmsNorm = ops.rmsNorm;
+pub const rmsNormInplace = ops.rmsNormInplace;
+pub const norm = ops.norm;
+pub const normInplace = ops.normInplace;
+pub const groupNorm = ops.groupNorm;
+pub const l2Norm = ops.l2Norm;
+pub const ropeExt = ops.ropeExt;
+pub const ropeExtInplace = ops.ropeExtInplace;
+pub const rope = ops.rope;
+pub const ropeInplace = ops.ropeInplace;
+pub const ropeMulti = ops.ropeMulti;
+pub const scale = ops.scale;
+pub const scaleInplace = ops.scaleInplace;
+pub const scaleBias = ops.scaleBias;
+pub const scaleBiasInplace = ops.scaleBiasInplace;
+pub const softMax = ops.softMax;
+pub const softMaxInplace = ops.softMaxInplace;
+pub const softMaxExt = ops.softMaxExt;
+pub const softMaxExtInplace = ops.softMaxExtInplace;
+pub const flashAttnExt = ops.flashAttnExt;
+pub const flashAttnExtSetPrec = ops.flashAttnExtSetPrec;
+pub const flashAttnExtAddSinks = ops.flashAttnExtAddSinks;
+pub const softMaxAddSinks = ops.softMaxAddSinks;
+pub const diagMaskInf = ops.diagMaskInf;
+pub const diagMaskInfInplace = ops.diagMaskInfInplace;
+pub const diagMaskZero = ops.diagMaskZero;
+pub const silu = ops.silu;
+pub const siluInplace = ops.siluInplace;
+pub const sigmoid = ops.sigmoid;
+pub const sigmoidInplace = ops.sigmoidInplace;
+pub const softplus = ops.softplus;
+pub const softplusInplace = ops.softplusInplace;
+pub const gelu = ops.gelu;
+pub const geluInplace = ops.geluInplace;
+pub const geluErf = ops.geluErf;
+pub const geluQuick = ops.geluQuick;
+pub const sqr = ops.sqr;
+pub const sqrInplace = ops.sqrInplace;
+pub const tanh = ops.tanh;
+pub const tanhInplace = ops.tanhInplace;
+pub const relu = ops.relu;
+pub const reluInplace = ops.reluInplace;
+pub const step = ops.step;
+pub const elu = ops.elu;
+pub const leakyRelu = ops.leakyRelu;
+pub const hardsigmoid = ops.hardsigmoid;
+pub const hardswish = ops.hardswish;
+pub const clamp = ops.clamp;
 
-pub const ssmScan = @import("ops.zig").ssmScan;
-pub const sumRows = @import("ops.zig").sumRows;
-pub const setOutput = @import("ops.zig").setOutput;
+// GLU 变体
+pub const swigluSplit = ops.swigluSplit;
+pub const swiglu = ops.swiglu;
+pub const gegluSplit = ops.gegluSplit;
+pub const geglu = ops.geglu;
+pub const gegluErfSplit = ops.gegluErfSplit;
+pub const gegluQuickSplit = ops.gegluQuickSplit;
+pub const regluSplit = ops.regluSplit;
+pub const reglu = ops.reglu;
+pub const gluSplit = ops.gluSplit;
+pub const glu = ops.glu;
+pub const xielu = ops.xielu;
 
-pub const arange = @import("ops.zig").arange;
-pub const fill = @import("ops.zig").fill;
-pub const interpolate = @import("ops.zig").interpolate;
-pub const padReflect1d = @import("ops.zig").padReflect1d;
-pub const roll = @import("ops.zig").roll;
-pub const timestepEmbedding = @import("ops.zig").timestepEmbedding;
-pub const pool1d = @import("ops.zig").pool1d;
-pub const getRelPos = @import("ops.zig").getRelPos;
-pub const addRelPos = @import("ops.zig").addRelPos;
-pub const addRelPosInplace = @import("ops.zig").addRelPosInplace;
-pub const mapCustom1 = @import("ops.zig").mapCustom1;
-pub const mapCustom2 = @import("ops.zig").mapCustom2;
-pub const mapCustom3 = @import("ops.zig").mapCustom3;
-pub const custom4d = @import("ops.zig").custom4d;
+// 张量操作
+pub const permute = ops.permute;
+pub const cont = ops.cont;
+pub const cont1d = ops.cont1d;
+pub const cont2d = ops.cont2d;
+pub const cont3d = ops.cont3d;
+pub const cont4d = ops.cont4d;
+pub const reshape = ops.reshape;
+pub const reshape1d = ops.reshape1d;
+pub const reshape2d = ops.reshape2d;
+pub const reshape3d = ops.reshape3d;
+pub const reshape4d = ops.reshape4d;
+pub const repeat = ops.repeat;
+pub const repeat4d = ops.repeat4d;
+pub const repeatBack = ops.repeatBack;
+pub const transpose = ops.transpose;
+pub const concat = ops.concat;
+pub const getRows = ops.getRows;
+pub const setRows = ops.setRows;
+pub const dupTensor = ops.dupTensor;
+pub const diag = ops.diag;
+pub const tri = ops.tri;
+
+// 卷积与 SSM
+pub const ssmConv = ops.ssmConv;
+pub const ssmScan = ops.ssmScan;
+pub const gatedDeltaNet = ops.gatedDeltaNet;
+pub const conv1d = ops.conv1d;
+pub const conv1dPh = ops.conv1dPh;
+pub const conv1dDw = ops.conv1dDw;
+pub const conv1dDwPh = ops.conv1dDwPh;
+pub const convTranspose1d = ops.convTranspose1d;
+pub const conv2d = ops.conv2d;
+pub const conv2dSkP0 = ops.conv2dSkP0;
+pub const conv2dS1Ph = ops.conv2dS1Ph;
+pub const conv2dDw = ops.conv2dDw;
+pub const conv2dDirect = ops.conv2dDirect;
+pub const convTranspose2dP0 = ops.convTranspose2dP0;
+pub const im2col = ops.im2col;
+
+// 输出/输入设置（setInput 来自 backend.zig）
+pub const setOutput = ops.setOutput;
+pub const setParam = ops.setParam;
+
+// 归约操作
+pub const sumRows = ops.sumRows;
+pub const sum = ops.sum;
+pub const cumsum = ops.cumsum;
+pub const mean = ops.mean;
+pub const argmax = ops.argmax;
+pub const topK = ops.topK;
+
+// 张量生成与填充
+pub const arange = ops.arange;
+pub const fill = ops.fill;
+pub const set = ops.set;
+pub const set1d = ops.set1d;
+pub const set2d = ops.set2d;
+
+// 插值与缩放
+pub const interpolate = ops.interpolate;
+pub const upscale = ops.upscale;
+pub const upscaleExt = ops.upscaleExt;
+
+// 填充操作
+pub const pad = ops.pad;
+pub const padExt = ops.padExt;
+pub const padCircular = ops.padCircular;
+pub const padExtCircular = ops.padExtCircular;
+pub const padReflect1d = ops.padReflect1d;
+
+// 滚动
+pub const roll = ops.roll;
+
+// 时间步嵌入
+pub const timestepEmbedding = ops.timestepEmbedding;
+
+// 池化
+pub const pool1d = ops.pool1d;
+pub const pool2d = ops.pool2d;
+
+// 相对位置编码
+pub const getRelPos = ops.getRelPos;
+pub const addRelPos = ops.addRelPos;
+pub const addRelPosInplace = ops.addRelPosInplace;
+
+// 自定义算子
+pub const mapCustom1 = ops.mapCustom1;
+pub const mapCustom1Inplace = ops.mapCustom1Inplace;
+pub const mapCustom2 = ops.mapCustom2;
+pub const mapCustom2Inplace = ops.mapCustom2Inplace;
+pub const mapCustom3 = ops.mapCustom3;
+pub const mapCustom3Inplace = ops.mapCustom3Inplace;
+pub const custom4d = ops.custom4d;
+pub const customInplace = ops.customInplace;
+
+// 图构建辅助
+pub const buildForwardSelect = ops.buildForwardSelect;
+
+// 量化/反量化
+pub const dequantizeRow = ops.dequantizeRow;
+pub const dequantizeTensor = ops.dequantizeTensor;
 
 // ============================================================================
 // 量化 API
