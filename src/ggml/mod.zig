@@ -384,8 +384,9 @@ pub const quantizeTensor = quantize.quantizeTensor;
 pub const quantizedSize = quantize.quantizedSize;
 
 pub const version = @import("utils.zig").version;
+pub const logicalCpuCount = @import("utils.zig").logicalCpuCount;
+pub const physicalCpuCount = @import("utils.zig").physicalCpuCount;
 pub const cpuNThreads = @import("utils.zig").cpuNThreads;
-pub const CpuFeatures = @import("utils.zig").CpuFeatures;
 pub const recommendedThreads = @import("utils.zig").recommendedThreads;
 pub const LogLevel = @import("utils.zig").LogLevel;
 pub const logSet = @import("utils.zig").logSet;

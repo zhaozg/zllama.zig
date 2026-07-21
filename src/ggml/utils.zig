@@ -3,6 +3,7 @@
 //! 提供 ggml 版本信息、CPU 特性检测等工具函数。
 
 const std = @import("std");
+const builtin = @import("builtin");
 const cmod = @import("c.zig");
 const c = cmod.c;
 
@@ -15,9 +16,30 @@ pub fn version() [:0]const u8 {
     return std.mem.sliceTo(c.ggml_version(), 0);
 }
 
-/// 获取 CPU 核心数（推荐线程数）
-pub fn cpuNThreads() i32 {
+/// 获取逻辑 CPU 核心数（含超线程）
+pub fn logicalCpuCount() i32 {
     return @as(i32, @intCast(std.Thread.getCpuCount() catch 4));
+}
+
+/// 获取物理 CPU 核心数（排除超线程）
+/// 在 macOS 上通过 sysctl hw.physicalcpu 获取真实物理核心数，
+/// 其他平台回退到 logicalCpuCount()。
+pub fn physicalCpuCount() i32 {
+    if (builtin.os.tag == .macos) {
+        var count: c_int = 0;
+        var count_len: usize = @sizeOf(c_int);
+        const name: [:0]const u8 = "hw.physicalcpu";
+        const rc = std.posix.system.sysctlbyname(name, &count, &count_len, null, 0);
+        if (std.posix.errno(rc) == .SUCCESS and count > 0) {
+            return @intCast(count);
+        }
+    }
+    return logicalCpuCount();
+}
+
+/// 向后兼容别名：逻辑 CPU 核心数
+pub fn cpuNThreads() i32 {
+    return logicalCpuCount();
 }
 
 // ============================================================================
@@ -76,9 +98,10 @@ pub const CpuFeatures = struct {
     }
 };
 
-/// 计算推荐线程数（物理核心数的 2/3 ~ 3/4）
+/// 计算推荐线程数（物理核心数的 3/4，最少 1）
+/// 利用物理核心避免超线程竞争，为系统预留余量。
 pub fn recommendedThreads() i32 {
-    const n = cpuNThreads();
+    const n = physicalCpuCount();
     if (n <= 4) return n;
     return @max(1, @divTrunc(n * 3, 4));
 }

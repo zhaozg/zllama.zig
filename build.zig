@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
         ggml_mod.addIncludePath(b.path("deps/ggml/src")); // 内部实现: ggml-impl.h, ggml-common.h, ggml-backend-impl.h, ggml-threading.h
         ggml_mod.addIncludePath(b.path("deps/ggml/src/ggml-cpu")); // CPU 后端内部: ggml-cpu-impl.h, traits.h, quants.h 等
         ggml_mod.addCMacro("GGML_USE_CPU", "1");
+        ggml_mod.addCMacro("GGML_USE_BLAS", "1");
         if (no_galloc_realloc) {
             ggml_mod.addCMacro("GGML_SCHED_NO_REALLOC", "1");
         }
@@ -57,7 +58,6 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         ggml_mod.linkFramework("Foundation", .{});
         ggml_mod.linkFramework("Accelerate", .{});
-        ggml_mod.addCMacro("GGML_USE_ACCELERATE", "1");
     }
 
     // ======================================================================
@@ -1401,6 +1401,7 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
 
     // 宏定义
     lib_mod.addCMacro("GGML_USE_CPU", "1");
+    lib_mod.addCMacro("GGML_USE_BLAS", "1");
     lib_mod.addCMacro("GGML_SCHED_MAX_COPIES", "4");
     lib_mod.addCMacro("GGML_VERSION", "\"0.15.2\"");
     lib_mod.addCMacro("GGML_COMMIT", "\"707321c4\"");
@@ -1426,9 +1427,6 @@ fn buildGgmlFromSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .macos, .ios, .tvos, .watchos => {
             lib_mod.linkFramework("Foundation", .{});
             lib_mod.linkFramework("Accelerate", .{});
-            lib_mod.addCMacro("GGML_USE_ACCELERATE", "1");
-            lib_mod.addCMacro("ACCELERATE_NEW_LAPACK", "1");
-            lib_mod.addCMacro("ACCELERATE_LAPACK_ILP64", "1");
             lib_mod.addCMacro("_DARWIN_C_SOURCE", "1");
             lib_mod.addCMacro("_XOPEN_SOURCE", "600");
         },
