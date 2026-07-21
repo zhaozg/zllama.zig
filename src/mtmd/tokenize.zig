@@ -71,16 +71,15 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chun
             pw = ns.width;
             ph = ns.height;
         }
-        // TODO: avoid double-resize — enc.encode() in evalChunks also calls
-        // resizeAndNormalize. For now we resize here so raw_pixels dimensions
-        // match nx/ny (required by enc.encode expected_len check).
         const res = try preprocess.resizeToU8(al, rd, bm.nx, bm.ny, pw, ph);
         pd = res.data;
     }
+    // Estimate encoder output token count (symmetric with addAudioChunk).
+    var n_tokens: u32 = 0;
     if (ctx.mm_manager.vision_encoder) |*enc| {
-        _ = enc.estimateOutputTokens(io, pw, ph);
+        n_tokens = enc.estimateOutputTokens(io, pw, ph);
     }
-    try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = pw, .ny = ph, .pos = ctx.pos_type, .image_idx = nia.*, .id = bm.id, .raw_pixels = pd, .patch_count = 1 }, .id = bm.id });
+    try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = pw, .ny = ph, .n_tokens = n_tokens, .pos = ctx.pos_type, .image_idx = nia.*, .id = bm.id, .raw_pixels = pd }, .id = bm.id });
     if (ctx.img_end.len > 0) try addTextChunk(ctx, al, chunks, ctx.img_end, true);
     nia.* += 1;
 }
@@ -88,7 +87,7 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chun
 fn addAudioChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chunks: *mtmd.InputChunks, bm: mtmd.Bitmap) !void {
     if (!ctx.supportAudio()) return error.AudioNotSupported;
     if (ctx.aud_beg.len > 0) try addTextChunk(ctx, al, chunks, ctx.aud_beg, true);
-    // Store raw audio data; Mel computation happens in evalChunks.
+    // Estimate encoder output token count (symmetric with addImageChunk).
     var n_tokens: u32 = 0;
     if (ctx.mm_manager.audio_encoder) |*enc| {
         n_tokens = enc.estimateOutputTokens(io, @as(f32, @floatFromInt(@max(bm.nx, 1))) / @as(f32, @floatFromInt(@max(@as(u32, @intCast(ctx.caps.audio_sample_rate)), 1))));

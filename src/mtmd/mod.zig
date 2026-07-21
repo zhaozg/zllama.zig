@@ -86,16 +86,24 @@ pub const Bitmap = struct {
 };
 
 pub const ImageTokens = struct {
+    /// Pixel width of the preprocessed image (for encoding).
     nx: u32 = 0,
+    /// Pixel height of the preprocessed image (for encoding).
     ny: u32 = 0,
+    /// Actual encoder output token count (set by estimateOutputTokens).
+    /// When > 0, nTokens() returns this value instead of computing from nx/ny.
+    n_tokens: u32 = 0,
     pos: PosType = .normal,
     image_idx: u32 = 0,
     id: ?[]const u8 = null,
     /// Preprocessed image pixel data (RGB u8, owned by caller)
     raw_pixels: ?[]const u8 = null,
-    patch_count: u32 = 0,
 
     pub fn nTokens(self: ImageTokens) u32 {
+        if (self.n_tokens > 0) return self.n_tokens;
+        // Fallback: compute from pixel dimensions (legacy path).
+        // This is incorrect when nx/ny are pixel dimensions != token grid,
+        // but works because evalChunks gets actual n_tokens from encoder output.
         return switch (self.pos) {
             .hunyuanvl => (self.nx + 1) * self.ny + 2,
             else => self.nx * self.ny,
@@ -108,7 +116,6 @@ pub const ImageTokens = struct {
         return self.raw_pixels;
     }
 };
-
 pub const InputChunk = struct {
     chunk_type: ChunkType,
     tokens_text: ?[]const i32 = null,
