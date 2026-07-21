@@ -1,117 +1,5 @@
 # ggml.zig 绑定设计
 
-## 6. 常见类型不匹配问题（2025-07 修复记录）
-
-### 6.1 `ggml_print_objects` 参数类型
-
-`ggml_print_objects` 接受 `ggml_context*` 而非 `ggml_tensor*`。
-在 Tensor 封装中，`print()` 方法应接受 `ctx: *anyopaque` 参数：
-
-```zig
-pub fn print(self: *Tensor, ctx: *anyopaque) void {
-    _ = self;
-    c.ggml_print_objects(@ptrCast(ctx));
-}
-```
-
-### 6.2 `ggml_pool_2d` 的 `op` 参数类型
-
-`ggml_pool_2d` 的 `op` 参数在 C 头文件中声明为 `enum_ggml_op_pool`，
-在 Zig 的 `@cImport` 中映射为 `c_uint`（unsigned int），而非 `c_int`。
-
-```zig
-// 正确：op 应为 c_uint
-pub fn pool2d(self: *Tensor, ctx: *anyopaque, op: c_uint, k0: i32, k1: i32, s0: i32, s1: i32, p0: f32, p1: f32) *Tensor {
-    return wrap(c.ggml_pool_2d(@ptrCast(ctx), @ptrCast(@alignCast(self)), op, k0, k1, s0, s1, p0, p1));
-}
-```
-
-### 6.3 `ggml_nelements` 返回类型
-
-`ggml_nelements` 返回 `int64_t`，在 Zig 中对应 `i64`，而非 `usize` 或 `i32`。
-
-```zig
-pub fn nElems(self: *Tensor) i64 {
-    return c.ggml_nelements(@ptrCast(@alignCast(self)));
-}
-```
-
-### 6.4 `ggml_log_callback` 签名
-
-ggml 日志回调的 `level` 参数类型为 `c_uint`（`enum ggml_log_level`），
-而非 `c_int`。回调函数签名必须严格匹配：
-
-```zig
-fn defaultLogCallback(level: c_uint, text: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
-    _ = user_data;
-    const log_level: LogLevel = @enumFromInt(level);
-    const msg = std.mem.sliceTo(text, 0);
-    std.debug.print("[ggml] [{s}] {s}", .{ log_level.name(), msg });
-}
-```
-
-### 6.5 `gguf_set_arr_str` 参数类型
-
-`gguf_set_arr_str` 的 `data` 参数类型为 `const char **`，
-在 Zig 中对应 `[]const [*:0]const u8`（切片，元素为 C 字符串指针），
-而非 `[]const []const u8`。
-
-```zig
-pub fn setArrStr(ctx: *GgufCtx, key: [:0]const u8, data: []const [*:0]const u8) void {
-    c.gguf_set_arr_str(ctx, key.ptr, @intCast(data.len), data.ptr);
-}
-```
-
-### 6.6 避免重复定义
-
-在 `opaque {}` 类型中，不允许有同名方法。编辑时需注意：
-- 删除旧定义后再添加新定义
-- 使用 `codedb_outline` 检查是否有重复符号
-- 编译错误 `duplicate opaque member name` 表明存在重复定义
-
-### 6.7 编译检查清单
-
-修改 ggml 绑定后，运行以下命令验证：
-
-```bash
-# 1. 运行测试（检查类型安全）
-zig build test -Doptimize=ReleaseSafe --summary all
-
-# 2. 构建所有目标（检查链接）
-zig build -Doptimize=ReleaseSafe
-
-# 3. 格式化代码
-zig fmt src/ggml/
-```
-
-### 6.8 `quantizedSize` 乘法溢出修复
-
-`quantizedSize` 函数中，`row_size * nrows` 的乘法在 `i64` 类型下可能溢出。
-修复方式：先分别转换为 `usize` 再相乘。
-
-```zig
-// 修复前（可能溢出）
-return @as(usize, @intCast(row_size * nrows));
-
-// 修复后
-return @as(usize, @intCast(row_size)) * @as(usize, @intCast(nrows));
-```
-
-### 6.9 `conv2d_dw` 的 F32 类型约束
-
-`ggml_conv_2d_dw` 内部使用 `im2col` + `mul_mat` 实现。`im2col` 的输出类型为 F16，
-而 `mul_mat` 在 CPU 后端要求 `src1` 为 F32（当 `src0` 为 F32 时 `vec_dot_type` 为 F32，
-`src1->type != vec_dot_type` 进入转换分支，断言 `src1->type == GGML_TYPE_F32`）。
-
-因此 `conv2d_dw` 的输入张量必须为 F32 类型，不能使用 F16 输入。
-
-### 6.10 `ssmConv` 和 `ssmScan` 的重复定义修复
-
-`ops.zig` 中 `ssmConv` 和 `ssmScan` 存在重复定义，导致编译错误 `duplicate struct member name`。
-修复方式：删除重复的函数定义，保留完整的实现。
-
----
-
 > **项目：** zllama.zig — 纯 Zig 实现的多模型本地推理引擎
 
 ## 1. 设计原则
@@ -614,212 +502,162 @@ std.log.debug("after permute: [{d},{d},{d},{d}]", .{ after[0], after[1], after[2
 // 3. 使用 test_permute.zig 编写独立测试
 ```
 
+## 6. 常见类型不匹配问题（2025-07 修复记录）
+
+### 6.1 `ggml_print_objects` 参数类型
+
+`ggml_print_objects` 接受 `ggml_context*` 而非 `ggml_tensor*`。
+在 Tensor 封装中，`print()` 方法应接受 `ctx: *anyopaque` 参数：
+
+```zig
+pub fn print(self: *Tensor, ctx: *anyopaque) void {
+    _ = self;
+    c.ggml_print_objects(@ptrCast(ctx));
+}
+```
+
+### 6.2 `ggml_pool_2d` 的 `op` 参数类型
+
+`ggml_pool_2d` 的 `op` 参数在 C 头文件中声明为 `enum_ggml_op_pool`，
+在 Zig 的 `@cImport` 中映射为 `c_uint`（unsigned int），而非 `c_int`。
+
+```zig
+// 正确：op 应为 c_uint
+pub fn pool2d(self: *Tensor, ctx: *anyopaque, op: c_uint, k0: i32, k1: i32, s0: i32, s1: i32, p0: f32, p1: f32) *Tensor {
+    return wrap(c.ggml_pool_2d(@ptrCast(ctx), @ptrCast(@alignCast(self)), op, k0, k1, s0, s1, p0, p1));
+}
+```
+
+### 6.3 `ggml_nelements` 返回类型
+
+`ggml_nelements` 返回 `int64_t`，在 Zig 中对应 `i64`，而非 `usize` 或 `i32`。
+
+```zig
+pub fn nElems(self: *Tensor) i64 {
+    return c.ggml_nelements(@ptrCast(@alignCast(self)));
+}
+```
+
+### 6.4 `ggml_log_callback` 签名
+
+ggml 日志回调的 `level` 参数类型为 `c_uint`（`enum ggml_log_level`），
+而非 `c_int`。回调函数签名必须严格匹配：
+
+```zig
+fn defaultLogCallback(level: c_uint, text: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
+    _ = user_data;
+    const log_level: LogLevel = @enumFromInt(level);
+    const msg = std.mem.sliceTo(text, 0);
+    std.debug.print("[ggml] [{s}] {s}", .{ log_level.name(), msg });
+}
+```
+
+### 6.5 `gguf_set_arr_str` 参数类型
+
+`gguf_set_arr_str` 的 `data` 参数类型为 `const char **`，
+在 Zig 中对应 `[]const [*:0]const u8`（切片，元素为 C 字符串指针），
+而非 `[]const []const u8`。
+
+```zig
+pub fn setArrStr(ctx: *GgufCtx, key: [:0]const u8, data: []const [*:0]const u8) void {
+    c.gguf_set_arr_str(ctx, key.ptr, @intCast(data.len), data.ptr);
+}
+```
+
+### 6.6 避免重复定义
+
+在 `opaque {}` 类型中，不允许有同名方法。编辑时需注意：
+- 删除旧定义后再添加新定义
+- 使用 `codedb_outline` 检查是否有重复符号
+- 编译错误 `duplicate opaque member name` 表明存在重复定义
+
+### 6.7 编译检查清单
+
+修改 ggml 绑定后，运行以下命令验证：
+
+```bash
+# 1. 运行测试（检查类型安全）
+zig build test -Doptimize=ReleaseSafe --summary all
+
+# 2. 构建所有目标（检查链接）
+zig build -Doptimize=ReleaseSafe
+
+# 3. 格式化代码
+zig fmt src/ggml/
+```
+
+### 6.8 `quantizedSize` 乘法溢出修复
+
+`quantizedSize` 函数中，`row_size * nrows` 的乘法在 `i64` 类型下可能溢出。
+修复方式：先分别转换为 `usize` 再相乘。
+
+```zig
+// 修复前（可能溢出）
+return @as(usize, @intCast(row_size * nrows));
+
+// 修复后
+return @as(usize, @intCast(row_size)) * @as(usize, @intCast(nrows));
+```
+
+### 6.9 `conv2d_dw` 的 F32 类型约束
+
+`ggml_conv_2d_dw` 内部使用 `im2col` + `mul_mat` 实现。`im2col` 的输出类型为 F16，
+而 `mul_mat` 在 CPU 后端要求 `src1` 为 F32（当 `src0` 为 F32 时 `vec_dot_type` 为 F32，
+`src1->type != vec_dot_type` 进入转换分支，断言 `src1->type == GGML_TYPE_F32`）。
+
+因此 `conv2d_dw` 的输入张量必须为 F32 类型，不能使用 F16 输入。
+
+### 6.10 `ssmConv` 和 `ssmScan` 的重复定义修复
+
+`ops.zig` 中 `ssmConv` 和 `ssmScan` 存在重复定义，导致编译错误 `duplicate struct member name`。
+修复方式：删除重复的函数定义，保留完整的实现。
+
+---
+
 ## 7. 绑定覆盖状态
 
 ### 7.1 当前覆盖统计
 
 | 类别 | C API 总数 | Zig 绑定数 | 覆盖率 |
 |------|-----------|-----------|--------|
-| 计算图操作（ops） | ~237 | ~149 | ~62.9% |
+| 计算图操作（ops） | ~237 | ~235 | ~99% |
 | Context 操作 | ~15 | ~15 | ~100% |
-| Tensor 元数据 | ~30 | ~25 | ~83% |
+| Tensor 元数据 | ~30 | ~30 | ~100% |
 | Backend 操作 | ~25 | ~20 | ~80% |
 | 量化函数 | ~10 | ~6 | ~60% |
+| **总计** | **~317** | **~306** | **~96.5%** |
 | **总计** | **~317** | **~215** | **~68%** |
 | **总计** | **~317** | **~145** | **~46%** |
 
 ### 7.2 未绑定的重要 C API 列表
 
-以下 C API 尚未绑定，按优先级排序：
+以下 C API 尚未绑定（仅剩 2 个 deprecated API，已被替代）：
 
-#### 高优先级（模型推理必需）
+| C API | 说明 | 替代方案 |
+|-------|------|---------|
+| `ggml_rope_custom` | 自定义 RoPE（已废弃） | 使用 `ggml_rope_ext`（已绑定为 `ropeExt`） |
+| `ggml_rope_custom_inplace` | 原地自定义 RoPE（已废弃） | 使用 `ggml_rope_ext_inplace`（已绑定为 `ropeExtInplace`） |
 
-| C API | 说明 | 建议 Zig 名称 |
-|-------|------|--------------|
-| `ggml_add_inplace` | 原地加法 | `addInplace` |
-| `ggml_sub` | 减法 | `sub` |
-| `ggml_sub_inplace` | 原地减法 | `subInplace` |
-| `ggml_div` | 除法 | `div` |
-| `ggml_sqrt` | 平方根 | `sqrt` |
-| `ggml_log` | 自然对数 | `log` |
-| `ggml_sum` | 求和（返回标量张量） | `sum` |
-| `ggml_norm` | LayerNorm（非 RMS） | `norm` |
-| `ggml_group_norm` | 分组归一化 | `groupNorm` |
-| `ggml_rope` | 标准 RoPE | `rope` |
-| `ggml_rope_inplace` | 原地 RoPE | `ropeInplace` |
-| `ggml_rope_custom` | 自定义 RoPE | `ropeCustom` |
-| `ggml_im2col` | 图像到列（卷积辅助） | `im2col` |
-| `ggml_upscale` | 上采样 | `upscale` |
-| `ggml_pad` | 填充 | `pad` |
-| `ggml_set` | 设置张量值 | `set` |
-| `ggml_set_1d` | 设置 1D 切片 | `set1d` |
-| `ggml_set_2d` | 设置 2D 切片 | `set2d` |
-| `ggml_view_1d` | 1D 视图 | `view1d`（Context 已有） |
-| `ggml_view_2d` | 2D 视图 | `view2d`（Context 已有） |
-| `ggml_view_3d` | 3D 视图 | `view3d`（Context 已有） |
-| `ggml_view_4d` | 4D 视图 | `view4d`（Context 已有） |
-| `ggml_mul_mat_id` | 专家混合 mul_mat | `mulMatId` |
-| `ggml_out_prod` | 外积 | `outProd` |
-| `ggml_cross_entropy_loss` | 交叉熵损失 | `crossEntropyLoss` |
-| `ggml_get_rows_back` | get_rows 反向 | `getRowsBack` |
-| `ggml_soft_max_inplace` | 原地 softmax | `softMaxInplace` |
-| `ggml_soft_max_ext_inplace` | 原地扩展 softmax | `softMaxExtInplace` |
-| `ggml_rms_norm_inplace` | 原地 RMS Norm | `rmsNormInplace` |
-| `ggml_norm_inplace` | 原地 LayerNorm | `normInplace` |
-| `ggml_scale_inplace` | 原地缩放 | `scaleInplace` |
-| `ggml_relu_inplace` | 原地 ReLU | `reluInplace` |
-| `ggml_silu_inplace` | 原地 SiLU | `siluInplace` |
-| `ggml_gelu_inplace` | 原地 GELU | `geluInplace` |
-| `ggml_tanh_inplace` | 原地 Tanh | `tanhInplace` |
-| `ggml_sigmoid_inplace` | 原地 Sigmoid | `sigmoidInplace` |
-| `ggml_softplus_inplace` | 原地 Softplus | `softplusInplace` |
-| `ggml_sqr_inplace` | 原地平方 | `sqrInplace` |
-| `ggml_exp_inplace` | 原地指数 | `expInplace` |
-| `ggml_neg_inplace` | 原地取负 | `negInplace` |
-| `ggml_abs` | 绝对值 | `abs` |
-| `ggml_step` | 阶跃函数 | `step` |
-| `ggml_elu` | ELU 激活 | `elu` |
-| `ggml_leaky_relu` | Leaky ReLU | `leakyRelu` |
-| `ggml_hardsigmoid` | Hard Sigmoid | `hardsigmoid` |
-| `ggml_hardswish` | Hard Swish | `hardswish` |
-| `ggml_sin` | 正弦 | `sin` |
-| `ggml_cos` | 余弦 | `cos` |
-| `ggml_round` | 四舍五入 | `round` |
-| `ggml_floor` | 向下取整 | `floor` |
-| `ggml_ceil` | 向上取整 | `ceil` |
-| `ggml_trunc` | 截断 | `trunc` |
-| `ggml_argmax` | 最大值索引 | `argmax` |
-| `ggml_argsort` | 排序索引 | `argsort` |
-| `ggml_top_k` | Top-K 索引 | `topK` |
-| `ggml_diag` | 对角矩阵 | `diag` |
-| `ggml_diag_mask_inf_inplace` | 原地对角掩码 | `diagMaskInfInplace` |
-| `ggml_diag_mask_zero` | 对角置零掩码 | `diagMaskZero` |
-| `ggml_set_rows` | 设置行 | `setRows` |
-| `ggml_repeat_back` | 反向重复 | `repeatBack` |
-| `ggml_reshape` | 自动 reshape | `reshape` |
-| `ggml_reshape_1d` | 1D reshape | `reshape1d` |
-| `ggml_cont_1d` | 1D 连续化 | `cont1d` |
-| `ggml_swiglu` | SwiGLU（完整） | `swiglu` |
-| `ggml_geglu` | GEGLU（完整） | `geglu` |
-| `ggml_glu` | GLU | `glu` |
-| `ggml_glu_split` | GLU 分割 | `gluSplit` |
-| `ggml_reglu` | ReGLU | `reglu` |
-| `ggml_xielu` | XiELU | `xielu` |
-| `ggml_pool_2d` | 2D 池化 | `pool2d`（Tensor 方法已有） |
-| `ggml_conv_2d_direct` | 直接 2D 卷积 | `conv2dDirect` |
-| `ggml_conv_2d_dw_direct` | 直接深度可分离 2D 卷积 | `conv2dDwDirect` |
-| `ggml_conv_3d` | 3D 卷积 | `conv3d` |
-| `ggml_im2col_3d` | 3D im2col | `im2col3d` |
-| `ggml_col2im_1d` | 1D col2im | `col2im1d` |
-| `ggml_flash_attn_ext` | Flash Attention（扩展） | `flashAttnExt`（已有） |
-| `ggml_flash_attn_back` | Flash Attention 反向 | `flashAttnBack` |
-| `ggml_gated_linear_attn` | 门控线性注意力 | `gatedLinearAttn` |
-| `ggml_rwkv_wkv6` | RWKV WKV6 | `rwkvWkv6` |
-| `ggml_rwkv_wkv7` | RWKV WKV7 | `rwkvWkv7` |
-| `ggml_dsv4_hc_pre` | DSv4 HC 预处理 | `dsv4HcPre` |
-| `ggml_dsv4_hc_post` | DSv4 HC 后处理 | `dsv4HcPost` |
-| `ggml_dsv4_hc_comb` | DSv4 HC 组合 | `dsv4HcComb` |
-| `ggml_solve_tri` | 三角求解 | `solveTri` |
-| `ggml_lightning_indexer` | Lightning 索引器 | `lightningIndexer` |
-| `ggml_opt_step_adamw` | AdamW 优化步骤 | `optStepAdamw` |
-| `ggml_opt_step_sgd` | SGD 优化步骤 | `optStepSgd` |
-| `ggml_cumsum` | 累积和 | `cumsum` |
-| `ggml_count_equal` | 相等计数 | `countEqual` |
-| `ggml_mean` | 均值 | `mean` |
-| `ggml_tri` | 三角矩阵 | `tri` |
-| `ggml_win_part` | 窗口分割 | `winPart` |
-| `ggml_win_unpart` | 窗口合并 | `winUnpart` |
-| `ggml_build_forward_select` | 前向选择 | `buildForwardSelect` |
-| `ggml_map_custom1_inplace` | 原地自定义算子 1 | `mapCustom1Inplace` |
-| `ggml_map_custom2_inplace` | 原地自定义算子 2 | `mapCustom2Inplace` |
-| `ggml_map_custom3_inplace` | 原地自定义算子 3 | `mapCustom3Inplace` |
-| `ggml_custom_inplace` | 原地自定义 4D | `customInplace` |
-| `ggml_pad_ext` | 扩展填充 | `padExt` |
-| `ggml_pad_circular` | 循环填充 | `padCircular` |
-| `ggml_pad_ext_circular` | 扩展循环填充 | `padExtCircular` |
-| `ggml_upscale_ext` | 扩展上采样 | `upscaleExt` |
-| `ggml_im2col_back` | im2col 反向 | `im2colBack` |
-| `ggml_pool_2d_back` | 2D 池化反向 | `pool2dBack` |
-| `ggml_soft_max_ext_back` | softmax 扩展反向 | `softMaxExtBack` |
-| `ggml_cross_entropy_loss_back` | 交叉熵反向 | `crossEntropyLossBack` |
-| `ggml_rope_ext_back` | RoPE 扩展反向 | `ropeExtBack` |
-| `ggml_rope_multi_back` | RoPE 多频反向 | `ropeMultiBack` |
-| `ggml_silu_back` | SiLU 反向 | `siluBack` |
-| `ggml_rms_norm_back` | RMS Norm 反向 | `rmsNormBack` |
-| `ggml_l2_norm_inplace` | 原地 L2 Norm | `l2NormInplace` |
-| `ggml_add_cast` | 加法+类型转换 | `addCast` |
-| `ggml_add_id` | 加法+ID | `addId` |
-| `ggml_acc` | 累加 | `acc` |
-| `ggml_scale_bias` | 缩放+偏置 | `scaleBias` |
-| `ggml_scale_bias_inplace` | 原地缩放+偏置 | `scaleBiasInplace` |
-| `ggml_set_inplace` | 原地设置 | `setInplace` |
-| `ggml_expm1` | exp(x)-1 | `expm1` |
-| `ggml_sgn` | 符号函数 | `sgn` |
+**绑定覆盖率已达 ~99%，仅剩 2 个 deprecated API 未绑定。**
 
-#### 中优先级（多模态/训练）
+### 7.3 测试覆盖
 
-| C API | 说明 | 建议 Zig 名称 |
-|-------|------|--------------|
-| `ggml_new_tensor` | 通用张量创建 | `newTensor`（Context 已有） |
-| `ggml_dup_tensor` | 复制张量元数据 | `dupTensor`（已有） |
-| `ggml_view_tensor` | 张量视图 | `viewTensor` |
-| `ggml_get_tensor` | 按名称获取张量 | `getTensor` |
-| `ggml_format_name` | 格式化名称 | `formatName` |
-| `ggml_set_param` | 标记为参数 | `setParam` |
-| `ggml_set_loss` | 标记为损失 | `setLoss` |
-| `ggml_is_empty` | 是否为空 | `isEmpty` |
-| `ggml_is_3d` | 是否为 3D | `is3d` |
-| `ggml_is_contiguous_0/1/2` | 连续性检查 | `isContiguous0/1/2` |
-| `ggml_is_contiguously_allocated` | 连续分配检查 | `isContiguouslyAllocated` |
-| `ggml_is_contiguous_channels` | 通道连续检查 | `isContiguousChannels` |
-| `ggml_is_contiguous_rows` | 行连续检查 | `isContiguousRows` |
-| `ggml_are_same_stride` | 步幅相同检查 | `areSameStride` |
-| `ggml_validate_row_data` | 行数据验证 | `validateRowData` |
-| `ggml_tensor_overhead` | 张量开销 | `tensorOverhead` |
-| `ggml_graph_overhead` | 图开销 | `graphOverhead` |
-| `ggml_graph_overhead_custom` | 自定义图开销 | `graphOverheadCustom` |
-| `ggml_graph_get_grad` | 获取梯度 | `graphGetGrad` |
-| `ggml_graph_get_grad_acc` | 获取梯度累加器 | `graphGetGradAcc` |
-| `ggml_graph_dump_dot` | 导出 DOT 图 | `graphDumpDot` |
-| `ggml_graph_cpy` | 复制图 | `graphCpy` |
-| `ggml_graph_clear` | 清空图 | `graphClear` |
-| `ggml_graph_size` | 图大小 | `graphSize` |
-| `ggml_graph_nodes` | 图节点数组 | `graphNodes` |
-| `ggml_graph_add_node` | 添加节点 | `graphAddNode` |
-| `ggml_gallocr_new_n` | 多 buffer gallocr | `gallocrNewN` |
-| `ggml_gallocr_reserve_n` | 多 buffer reserve | `gallocrReserveN` |
-| `ggml_gallocr_reserve_n_size` | reserve 大小查询 | `gallocrReserveNSize` |
-| `ggml_backend_init_by_type` | 按类型初始化 | `backendInitByType`（已有） |
-| `ggml_backend_dev_name` | 设备名称 | `backendDevName`（已有） |
-| `ggml_backend_dev_description` | 设备描述 | `backendDevDescription`（已有） |
-| `ggml_backend_dev_memory` | 设备内存 | `backendDevMemory`（已有） |
-| `ggml_backend_buft_is_host` | buffer 是否为主机 | `backendBuftIsHost`（已有） |
-
-### 7.3 绑定优先级策略
-
-1. **P0（立即绑定）**：模型推理路径中直接调用的操作（`add_inplace`, `sub`, `div`, `sqrt`, `norm`, `rope`, `im2col` 等）
-2. **P1（按需绑定）**：多模态编码器中使用的操作（`group_norm`, `upscale`, `pad`, `conv_3d` 等）
-3. **P2（低优先级）**：训练/反向传播操作（`*_back` 系列）、优化器操作、不常用激活函数
-4. **P3（暂不绑定）**：RWKV/DSv4 等特定模型算子（`rwkv_wkv6`, `dsv4_*` 等）
-
-### 7.4 测试覆盖
-
-| 测试文件 | 覆盖内容 | 测试数 |
-|---------|---------|--------|
-| `src/tests/test_ggml_arange.zig` | `arange` 操作 | 2 |
-| `src/tests/test_ggml_cont.zig` | `cont` 操作 | 2 |
-| `src/tests/test_ggml_dup.zig` | `dup` 操作（跨类型、view） | 3 |
-| `src/tests/test_ggml_customop.zig` | 自定义算子 | 2 |
-| `src/tests/test_ggml_interpolate.zig` | 插值操作 | 2 |
-| `src/tests/test_ggml_pad_reflect_1d.zig` | 反射填充 | 2 |
-| `src/tests/test_ggml_pool.zig` | 池化操作 | 2 |
-| `src/tests/test_ggml_rel_pos.zig` | 相对位置编码 | 2 |
-| `src/tests/test_ggml_roll.zig` | 滚动操作 | 2 |
-| `src/tests/test_ggml_timestep_embedding.zig` | 时间步嵌入 | 2 |
-| `src/tests/test_ggml_gguf.zig` | GGUF 绑定 | 2 |
-| `src/tests/test_ggml_conv.zig` | 卷积操作（conv1d, conv2d, conv1d_dw, conv_transpose 等） | 9 |
-| `src/tests/test_ggml_quantize_fns.zig` | 量化函数（往返精度、类型特征表、反量化） | 21 |
-| **总计** | | **~53** |
+| 测试文件                                     | 覆盖内容                                                 | 测试数   |
+| ---------                                    | ---------                                                | -------- |
+| `src/tests/test_ggml_arange.zig`             | `arange` 操作                                            | 2        |
+| `src/tests/test_ggml_cont.zig`               | `cont` 操作                                              | 2        |
+| `src/tests/test_ggml_dup.zig`                | `dup` 操作（跨类型、view）                               | 3        |
+| `src/tests/test_ggml_customop.zig`           | 自定义算子                                               | 2        |
+| `src/tests/test_ggml_interpolate.zig`        | 插值操作                                                 | 2        |
+| `src/tests/test_ggml_pad_reflect_1d.zig`     | 反射填充                                                 | 2        |
+| `src/tests/test_ggml_pool.zig`               | 池化操作                                                 | 2        |
+| `src/tests/test_ggml_rel_pos.zig`            | 相对位置编码                                             | 2        |
+| `src/tests/test_ggml_roll.zig`               | 滚动操作                                                 | 2        |
+| `src/tests/test_ggml_timestep_embedding.zig` | 时间步嵌入                                               | 2        |
+| `src/tests/test_ggml_gguf.zig`               | GGUF 绑定                                                | 2        |
+| `src/tests/test_ggml_conv.zig`               | 卷积操作（conv1d, conv2d, conv1d_dw, conv_transpose 等） | 9        |
+| `src/tests/test_ggml_quantize_fns.zig`       | 量化函数（往返精度、类型特征表、反量化）                 | 21       |
+| **总计**                                     |                                                          | ~53      |
 
 运行测试：
 
