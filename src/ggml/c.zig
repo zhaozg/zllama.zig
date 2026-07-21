@@ -138,6 +138,51 @@ pub const ScaleFlag = enum(c_uint) {
     antialias = c.GGML_SCALE_FLAG_ANTIALIAS,
 };
 
+/// ggml 一元操作枚举
+pub const UnaryOp = enum(c_uint) {
+    abs = c.GGML_UNARY_OP_ABS,
+    sgn = c.GGML_UNARY_OP_SGN,
+    neg = c.GGML_UNARY_OP_NEG,
+    step = c.GGML_UNARY_OP_STEP,
+    tanh = c.GGML_UNARY_OP_TANH,
+    elu = c.GGML_UNARY_OP_ELU,
+    relu = c.GGML_UNARY_OP_RELU,
+    sigmoid = c.GGML_UNARY_OP_SIGMOID,
+    gelu = c.GGML_UNARY_OP_GELU,
+    gelu_quick = c.GGML_UNARY_OP_GELU_QUICK,
+    silu = c.GGML_UNARY_OP_SILU,
+    hardsigmoid = c.GGML_UNARY_OP_HARDSIGMOID,
+    hardswish = c.GGML_UNARY_OP_HARDSWISH,
+    exp = c.GGML_UNARY_OP_EXP,
+    expm1 = c.GGML_UNARY_OP_EXPM1,
+    softplus = c.GGML_UNARY_OP_SOFTPLUS,
+    gelu_erf = c.GGML_UNARY_OP_GELU_ERF,
+    xielu = c.GGML_UNARY_OP_XIELU,
+    floor = c.GGML_UNARY_OP_FLOOR,
+    ceil = c.GGML_UNARY_OP_CEIL,
+    round = c.GGML_UNARY_OP_ROUND,
+    trunc = c.GGML_UNARY_OP_TRUNC,
+    count = c.GGML_UNARY_OP_COUNT,
+};
+
+/// ggml GLU 操作枚举
+pub const GluOp = enum(c_uint) {
+    reglu = c.GGML_GLU_OP_REGLU,
+    geglu = c.GGML_GLU_OP_GEGLU,
+    swiglu = c.GGML_GLU_OP_SWIGLU,
+    swiglu_oai = c.GGML_GLU_OP_SWIGLU_OAI,
+    geglu_erf = c.GGML_GLU_OP_GEGLU_ERF,
+    geglu_quick = c.GGML_GLU_OP_GEGLU_QUICK,
+    count = c.GGML_GLU_OP_COUNT,
+};
+
+/// ggml 排序顺序枚举
+pub const SortOrder = enum(c_uint) {
+    asc = c.GGML_SORT_ORDER_ASC,
+    desc = c.GGML_SORT_ORDER_DESC,
+};
+
+/// 最大任务数（-1 表示使用最大可用任务数）
 /// 最大任务数（-1 表示使用最大可用任务数）
 pub const n_tasks_max: i32 = -1;
 

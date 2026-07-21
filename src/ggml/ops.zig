@@ -187,8 +187,9 @@ pub fn ropeInplace(ctx: *Context, a: *Tensor, pos: *Tensor, n_dims: i32, mode: i
     return @as(*Tensor, @ptrCast(c.ggml_rope_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pos)), n_dims, mode)));
 }
 
-pub fn ropeMulti(ctx: *Context, a: *Tensor, pos: *Tensor, n_dims: i32, sections: *const [4]i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
-    return @as(*Tensor, @ptrCast(c.ggml_rope_multi(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pos)), null, n_dims, @ptrCast(@constCast(sections)), mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)));
+pub fn ropeMulti(ctx: *Context, a: *Tensor, pos: *Tensor, freq_factors: ?*Tensor, n_dims: i32, sections: *const [4]i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
+    const ff = if (freq_factors) |f| @as(?*c.struct_ggml_tensor, @ptrCast(@alignCast(f))) else null;
+    return @as(*Tensor, @ptrCast(c.ggml_rope_multi(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pos)), ff, n_dims, @ptrCast(@constCast(sections)), mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)));
 }
 
 pub fn scale(ctx: *Context, a: *Tensor, s: f32) *Tensor {
@@ -834,18 +835,14 @@ pub fn custom4d(ctx: *Context, typ: Type, ne0: i64, ne1: i64, ne2: i64, ne3: i64
 }
 
 /// 自定义 4D 算子（原地）
-pub fn customInplace(ctx: *Context, typ: Type, ne0: i64, ne1: i64, ne2: i64, ne3: i64, args: []const *Tensor, fun: c.ggml_custom_op_t, n_tasks: i32, userdata: ?*anyopaque) *Tensor {
+pub fn customInplace(ctx: *Context, a: *Tensor, args: []const *Tensor, fun: c.ggml_custom_op_t, n_tasks: i32, userdata: ?*anyopaque) *Tensor {
     var c_args: [16][*c]c.struct_ggml_tensor = undefined;
     for (args, 0..) |arg, i| {
         c_args[i] = @ptrCast(@alignCast(arg));
     }
     return @as(*Tensor, @ptrCast(c.ggml_custom_inplace(
         @ptrCast(ctx),
-        @intFromEnum(typ),
-        ne0,
-        ne1,
-        ne2,
-        ne3,
+        @ptrCast(@alignCast(a)),
         @ptrCast(&c_args),
         @intCast(args.len),
         fun,
@@ -855,11 +852,418 @@ pub fn customInplace(ctx: *Context, typ: Type, ne0: i64, ne1: i64, ne2: i64, ne3
 }
 
 // ============================================================================
+// 张量创建与视图
+// ============================================================================
+
+/// newTensor: 创建新张量（指定维度数）
+pub fn newTensor(ctx: *Context, typ: Type, n_dims: i32, ne: *const [4]i64) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_new_tensor(@ptrCast(ctx), @intFromEnum(typ), n_dims, @ptrCast(ne))));
+}
+
+pub fn newTensor1d(ctx: *Context, typ: Type, ne0: i64) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_new_tensor_1d(@ptrCast(ctx), @intFromEnum(typ), ne0)));
+}
+
+pub fn newTensor2d(ctx: *Context, typ: Type, ne0: i64, ne1: i64) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_new_tensor_2d(@ptrCast(ctx), @intFromEnum(typ), ne0, ne1)));
+}
+
+pub fn newTensor3d(ctx: *Context, typ: Type, ne0: i64, ne1: i64, ne2: i64) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_new_tensor_3d(@ptrCast(ctx), @intFromEnum(typ), ne0, ne1, ne2)));
+}
+
+pub fn newTensor4d(ctx: *Context, typ: Type, ne0: i64, ne1: i64, ne2: i64, ne3: i64) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_new_tensor_4d(@ptrCast(ctx), @intFromEnum(typ), ne0, ne1, ne2, ne3)));
+}
+
+/// view1d: 创建 1D 视图
+pub fn view1d(ctx: *Context, a: *Tensor, ne0: i64, offset: usize) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_view_1d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, offset)));
+}
+
+/// view2d: 创建 2D 视图
+pub fn view2d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, nb1: usize, offset: usize) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_view_2d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, nb1, offset)));
+}
+
+/// view3d: 创建 3D 视图
+pub fn view3d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, ne2: i64, nb1: usize, nb2: usize, offset: usize) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_view_3d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, ne2, nb1, nb2, offset)));
+}
+
+/// view4d: 创建 4D 视图
+pub fn view4d(ctx: *Context, a: *Tensor, ne0: i64, ne1: i64, ne2: i64, ne3: i64, nb1: usize, nb2: usize, nb3: usize, offset: usize) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_view_4d(@ptrCast(ctx), @ptrCast(@alignCast(a)), ne0, ne1, ne2, ne3, nb1, nb2, nb3, offset)));
+}
+
+// ============================================================================
+// 一元操作（通用）
+// ============================================================================
+
+/// unary: 通用一元操作
+pub fn unary(ctx: *Context, a: *Tensor, op: cmod.UnaryOp) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_unary(@ptrCast(ctx), @ptrCast(@alignCast(a)), @intFromEnum(op))));
+}
+
+pub fn unaryInplace(ctx: *Context, a: *Tensor, op: cmod.UnaryOp) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_unary_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @intFromEnum(op))));
+}
+
+// ============================================================================
+// 缺失的原地操作
+// ============================================================================
+
+pub fn absInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_abs_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn sgn(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_sgn(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn sgnInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_sgn_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn sqrtInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_sqrt_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn logInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_log_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn expm1(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_expm1(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn expm1Inplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_expm1_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn sinInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_sin_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn cosInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_cos_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn stepInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_step_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn eluInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_elu_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn mulInplace(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_mul_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn fillInplace(ctx: *Context, a: *Tensor, val: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_fill_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), val)));
+}
+
+pub fn floor(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_floor(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn floorInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_floor_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn ceil(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_ceil(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn ceilInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_ceil_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn round(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_round(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn roundInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_round_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn trunc(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_trunc(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn truncInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_trunc_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn diagMaskZeroInplace(ctx: *Context, a: *Tensor, n_past: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_diag_mask_zero_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), n_past)));
+}
+
+pub fn geluErfInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_gelu_erf_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn geluQuickInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_gelu_quick_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn groupNormInplace(ctx: *Context, a: *Tensor, n_groups: i32, eps: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_group_norm_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), n_groups, eps)));
+}
+
+pub fn l2NormInplace(ctx: *Context, a: *Tensor, eps: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_l2_norm_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), eps)));
+}
+
+pub fn setInplace(ctx: *Context, a: *Tensor, b: *Tensor, nb1: usize, nb2: usize, nb3: usize, offset: usize) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_set_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), nb1, nb2, nb3, offset)));
+}
+
+pub fn set1dInplace(ctx: *Context, a: *Tensor, b: *Tensor, offset: usize) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_set_1d_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), offset)));
+}
+
+pub fn set2dInplace(ctx: *Context, a: *Tensor, b: *Tensor, nb1: usize, offset: usize) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_set_2d_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), nb1, offset)));
+}
+
+pub fn dup(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_dup(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn dupInplace(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_dup_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn add1(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_add1(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn add1Inplace(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_add1_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn acc(ctx: *Context, a: *Tensor, b: *Tensor, nb1: usize, nb2: usize, nb3: usize, offset: usize) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_acc(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), nb1, nb2, nb3, offset)));
+}
+
+pub fn accInplace(ctx: *Context, a: *Tensor, b: *Tensor, nb1: usize, nb2: usize, nb3: usize, offset: usize) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_acc_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), nb1, nb2, nb3, offset)));
+}
+
+pub fn countEqual(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_count_equal(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn argsort(ctx: *Context, a: *Tensor, order: cmod.SortOrder) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_argsort(@ptrCast(ctx), @ptrCast(@alignCast(a)), @intFromEnum(order))));
+}
+
+pub fn argsortTopK(ctx: *Context, a: *Tensor, k: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_argsort_top_k(@ptrCast(ctx), @ptrCast(@alignCast(a)), k)));
+}
+
+pub fn crossEntropyLoss(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_cross_entropy_loss(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn crossEntropyLossBack(ctx: *Context, a: *Tensor, b: *Tensor, c2: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_cross_entropy_loss_back(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), @ptrCast(@alignCast(c2)))));
+}
+
+pub fn siluBack(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_silu_back(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn rmsNormBack(ctx: *Context, a: *Tensor, b: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_rms_norm_back(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)))));
+}
+
+pub fn getRowsBack(ctx: *Context, a: *Tensor, b: *Tensor, c2: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_get_rows_back(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), @ptrCast(@alignCast(c2)))));
+}
+
+pub fn softMaxExtBack(ctx: *Context, a: *Tensor, b: *Tensor, scale_val: f32, max_bias: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_soft_max_ext_back(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), scale_val, max_bias)));
+}
+
+pub fn softMaxExtBackInplace(ctx: *Context, a: *Tensor, b: *Tensor, scale_val: f32, max_bias: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_soft_max_ext_back_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), scale_val, max_bias)));
+}
+
+pub fn flashAttnBack(ctx: *Context, q: *Tensor, k: *Tensor, v: *Tensor, d: *Tensor, masked: bool) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_flash_attn_back(@ptrCast(ctx), @ptrCast(@alignCast(q)), @ptrCast(@alignCast(k)), @ptrCast(@alignCast(v)), @ptrCast(@alignCast(d)), masked)));
+}
+
+pub fn ropeExtBack(ctx: *Context, a: *Tensor, pos: *Tensor, freq_factors: ?*Tensor, n_dims: i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
+    const ff = if (freq_factors) |f| @as(?*c.struct_ggml_tensor, @ptrCast(@alignCast(f))) else null;
+    return @as(*Tensor, @ptrCast(c.ggml_rope_ext_back(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pos)), ff, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)));
+}
+
+pub fn ropeMultiBack(ctx: *Context, a: *Tensor, pos: *Tensor, freq_factors: ?*Tensor, n_dims: i32, sections: *const [4]i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
+    const ff = if (freq_factors) |f| @as(?*c.struct_ggml_tensor, @ptrCast(@alignCast(f))) else null;
+    return @as(*Tensor, @ptrCast(c.ggml_rope_multi_back(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pos)), ff, n_dims, @ptrCast(@constCast(sections)), mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)));
+}
+
+pub fn ropeMultiInplace(ctx: *Context, a: *Tensor, pos: *Tensor, freq_factors: ?*Tensor, n_dims: i32, sections: *const [4]i32, mode: i32, n_ctx_orig: i32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) *Tensor {
+    const ff = if (freq_factors) |f| @as(?*c.struct_ggml_tensor, @ptrCast(@alignCast(f))) else null;
+    return @as(*Tensor, @ptrCast(c.ggml_rope_multi_inplace(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(pos)), ff, n_dims, @ptrCast(@constCast(sections)), mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow)));
+}
+
+pub fn im2colBack(ctx: *Context, a: *Tensor, b: *Tensor, ne: *const [4]i64, s0: i32, s1: i32, p0: i32, p1: i32, d0: i32, d1: i32, is_2d: bool) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_im2col_back(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), @ptrCast(ne), s0, s1, p0, p1, d0, d1, is_2d)));
+}
+
+pub fn col2im1d(ctx: *Context, a: *Tensor, s0: i32, oc: i32, p0: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_col2im_1d(@ptrCast(ctx), @ptrCast(@alignCast(a)), s0, oc, p0)));
+}
+
+pub fn im2col3d(ctx: *Context, a: *Tensor, b: *Tensor, ic: i64, s0: i32, s1: i32, s2: i32, p0: i32, p1: i32, p2: i32, d0: i32, d1: i32, d2: i32, dst_type: Type) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_im2col_3d(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), ic, s0, s1, s2, p0, p1, p2, d0, d1, d2, @intFromEnum(dst_type))));
+}
+
+pub fn conv3d(ctx: *Context, a: *Tensor, b: *Tensor, ic: i64, s0: i32, s1: i32, s2: i32, p0: i32, p1: i32, p2: i32, d0: i32, d1: i32, d2: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_3d(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), ic, s0, s1, s2, p0, p1, p2, d0, d1, d2)));
+}
+
+pub fn conv3dDirect(ctx: *Context, a: *Tensor, b: *Tensor, s0: i32, s1: i32, s2: i32, p0: i32, p1: i32, p2: i32, d0: i32, d1: i32, d2: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_3d_direct(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), s0, s1, s2, p0, p1, p2, d0, d1, d2)));
+}
+
+pub fn conv2dDwDirect(ctx: *Context, a: *Tensor, b: *Tensor, stride0: i32, stride1: i32, pad0: i32, pad1: i32, dilation0: i32, dilation1: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_conv_2d_dw_direct(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), stride0, stride1, pad0, pad1, dilation0, dilation1)));
+}
+
+pub fn pool2dBack(ctx: *Context, a: *Tensor, af: *Tensor, op: c_uint, k0: i32, k1: i32, s0: i32, s1: i32, p0: f32, p1: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_pool_2d_back(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(af)), @intCast(op), k0, k1, s0, s1, p0, p1)));
+}
+
+pub fn winPart(ctx: *Context, a: *Tensor, w: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_win_part(@ptrCast(ctx), @ptrCast(@alignCast(a)), w)));
+}
+
+pub fn winUnpart(ctx: *Context, a: *Tensor, w0: i32, h0: i32, w: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_win_unpart(@ptrCast(ctx), @ptrCast(@alignCast(a)), w0, h0, w)));
+}
+
+pub fn solveTri(ctx: *Context, a: *Tensor, b: *Tensor, left: bool, lower: bool, uni: bool) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_solve_tri(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), left, lower, uni)));
+}
+
+pub fn lightningIndexer(ctx: *Context, q: *Tensor, k: *Tensor, weights: *Tensor, mask: ?*Tensor) *Tensor {
+    const m = if (mask) |mm| @as(?*c.struct_ggml_tensor, @ptrCast(@alignCast(mm))) else null;
+    return @as(*Tensor, @ptrCast(c.ggml_lightning_indexer(@ptrCast(ctx), @ptrCast(@alignCast(q)), @ptrCast(@alignCast(k)), @ptrCast(@alignCast(weights)), m)));
+}
+
+pub fn gatedLinearAttn(ctx: *Context, k: *Tensor, v: *Tensor, q: *Tensor, g: *Tensor, state: *Tensor, scale_val: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_gated_linear_attn(@ptrCast(ctx), @ptrCast(@alignCast(k)), @ptrCast(@alignCast(v)), @ptrCast(@alignCast(q)), @ptrCast(@alignCast(g)), @ptrCast(@alignCast(state)), scale_val)));
+}
+
+pub fn rwkvWkv6(ctx: *Context, k: *Tensor, v: *Tensor, r: *Tensor, tf: *Tensor, td: *Tensor, state: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_rwkv_wkv6(@ptrCast(ctx), @ptrCast(@alignCast(k)), @ptrCast(@alignCast(v)), @ptrCast(@alignCast(r)), @ptrCast(@alignCast(tf)), @ptrCast(@alignCast(td)), @ptrCast(@alignCast(state)))));
+}
+
+pub fn rwkvWkv7(ctx: *Context, r: *Tensor, w: *Tensor, k: *Tensor, v: *Tensor, a: *Tensor, b: *Tensor, state: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_rwkv_wkv7(@ptrCast(ctx), @ptrCast(@alignCast(r)), @ptrCast(@alignCast(w)), @ptrCast(@alignCast(k)), @ptrCast(@alignCast(v)), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), @ptrCast(@alignCast(state)))));
+}
+
+pub fn dsv4HcPre(ctx: *Context, x: *Tensor, weights: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_dsv4_hc_pre(@ptrCast(ctx), @ptrCast(@alignCast(x)), @ptrCast(@alignCast(weights)))));
+}
+
+pub fn dsv4HcPost(ctx: *Context, x: *Tensor, residual: *Tensor, post: *Tensor, comb: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_dsv4_hc_post(@ptrCast(ctx), @ptrCast(@alignCast(x)), @ptrCast(@alignCast(residual)), @ptrCast(@alignCast(post)), @ptrCast(@alignCast(comb)))));
+}
+
+pub fn dsv4HcComb(ctx: *Context, mixes: *Tensor, scale_val: *Tensor, base: *Tensor, eps: f32, n_iter: i32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_dsv4_hc_comb(@ptrCast(ctx), @ptrCast(@alignCast(mixes)), @ptrCast(@alignCast(scale_val)), @ptrCast(@alignCast(base)), eps, n_iter)));
+}
+
+pub fn optStepAdamw(ctx: *Context, a: *Tensor, grad: *Tensor, m: *Tensor, v: *Tensor, params: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_opt_step_adamw(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(grad)), @ptrCast(@alignCast(m)), @ptrCast(@alignCast(v)), @ptrCast(@alignCast(params)))));
+}
+
+pub fn optStepSgd(ctx: *Context, a: *Tensor, grad: *Tensor, params: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_opt_step_sgd(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(grad)), @ptrCast(@alignCast(params)))));
+}
+
+pub fn gegluErf(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_geglu_erf(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn gegluQuick(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_geglu_quick(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn gegluSwapped(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_geglu_swapped(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn regluSwapped(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_reglu_swapped(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn swigluSwapped(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_swiglu_swapped(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn swigluOai(ctx: *Context, a: *Tensor, b: *Tensor, alpha: f32, limit: f32) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_swiglu_oai(@ptrCast(ctx), @ptrCast(@alignCast(a)), @ptrCast(@alignCast(b)), alpha, limit)));
+}
+
+pub fn gegluErfSwapped(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_geglu_erf_swapped(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn gegluQuickSwapped(ctx: *Context, a: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_geglu_quick_swapped(@ptrCast(ctx), @ptrCast(@alignCast(a)))));
+}
+
+pub fn newBuffer(ctx: *Context, nbytes: usize) *anyopaque {
+    return @as(*anyopaque, @ptrCast(c.ggml_new_buffer(@ptrCast(ctx), nbytes)));
+}
+
+pub fn viewTensor(ctx: *Context, src: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_view_tensor(@ptrCast(ctx), @ptrCast(@alignCast(src)))));
+}
+
+pub fn getFirstTensor(ctx: *const Context) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_get_first_tensor(@ptrCast(ctx))));
+}
+
+pub fn getNextTensor(ctx: *const Context, tensor: *Tensor) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_get_next_tensor(@ptrCast(ctx), @ptrCast(@alignCast(tensor)))));
+}
+
+pub fn getTensor(ctx: *Context, name: [*:0]const u8) *Tensor {
+    return @as(*Tensor, @ptrCast(c.ggml_get_tensor(@ptrCast(ctx), name)));
+}
+
+pub fn unravelIndex(tensor: *const Tensor, idx: i64, @"i0": *i64, @"i1": *i64, @"i2": *i64, @"i3": *i64) void {
+    c.ggml_unravel_index(@ptrCast(@alignCast(tensor)), idx, @"i0", @"i1", @"i2", @"i3");
+}
+
+pub fn getUnaryOp(tensor: *const Tensor) cmod.UnaryOp {
+    return @as(cmod.UnaryOp, @enumFromInt(c.ggml_get_unary_op(@ptrCast(@alignCast(tensor)))));
+}
+
+pub fn getGluOp(tensor: *const Tensor) cmod.GluOp {
+    return @as(cmod.GluOp, @enumFromInt(c.ggml_get_glu_op(@ptrCast(@alignCast(tensor)))));
+}
+
+pub fn ropeYarnCorrDims(n_dims: i32, n_ctx_orig: i32, freq_base: f32, beta_fast: f32, beta_slow: f32) [2]f32 {
+    var dims: [2]f32 = undefined;
+    c.ggml_rope_yarn_corr_dims(n_dims, n_ctx_orig, freq_base, beta_fast, beta_slow, &dims);
+    return dims;
+}
+
+// ============================================================================
 // 图构建辅助
 // ============================================================================
 
 /// buildForwardSelect: 从多个输入张量中选择一个作为前向传播的输入
-/// 用于多模态模型中根据输入类型（token/embedding）选择路径
 pub fn buildForwardSelect(cgraph: *anyopaque, tensors: []const *Tensor, idx: i32) *Tensor {
     var c_tensors: [64][*c]c.struct_ggml_tensor = undefined;
     for (tensors, 0..) |t, i| {
