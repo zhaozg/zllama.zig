@@ -7,10 +7,15 @@
 可选参数:
   --key <路径>          JSON 向量路径，如 "data.emb" (点分隔)
   --mode <模式>         比较模式: general | alignment (默认: alignment)
+  --output <格式>       输出格式: human | ai (默认: human)
+                        human — 人类可读，带装饰线和 emoji
+                        ai    — KEY=VALUE 紧凑格式，适合脚本/AI 解析
   --tol-nmse <f>        归一化均方误差最大容忍度 (默认: 1e-4)
   --tol-cosine <f>      余弦相似度最低要求 (默认: 0.9999)
   --tol-rmse <f>        均方根误差最大容忍度 (默认: 0.001)
   --tol-max-abs-err <f> 最大绝对误差最大容忍度 (默认: 0.01)
+  --tol-rel-max-err <f> 相对最大绝对误差容忍度 (默认: 1e-4)
+  --tol-outlier-ratio <f> 离群点占比容忍度 (默认: 0.001 = 0.1%)
   --tol-ratio-dev <f>   平均比值偏离 1.0 的容忍度 (默认: 0.001)
   --help, -h            显示此帮助信息
 
@@ -18,7 +23,7 @@
   1. NMSE < tol_nmse                — 归一化均方误差
   2. 余弦相似度 > tol_cosine        — 方向一致性
   3. RMSE < tol_rmse                — 每维度平均误差
-  4. 最大绝对误差 < tol_max_abs_err — 防止 argmax 翻转
+  4. 相对 MaxErr < tol_rel_max_err  — 尺度自适应的最大误差（含离群点降级）
   5. Argmax 必须匹配                — 最终预测一致性
   6. 平均幅值比值偏离 < tol_ratio_deviation — 检测系统性缩放
 
@@ -27,6 +32,10 @@
   二进制: 连续 f32 小端字节序，无元数据
 
 示例:
+  # 人类可读输出
   zllama-align-cmp --ref ref.json --test test.json
-  zllama-align-cmp --ref a.bin --test b.bin --mode general
-  zllama-align-cmp --ref a.json --test b.json --tol-nmse 1e-5 --tol-cosine 0.99999
+  # AI 紧凑输出（适合 grep/awk 解析）
+  zllama-align-cmp --ref a.json --test b.json --output ai
+  # 视觉编码器对齐（放宽 ggml 精度差异导致的误差阈值）
+  zllama-align-cmp --ref llama_vision.json --test zllama_vision.json \
+    --output ai --tol-rel-max-err 5e-4 --tol-outlier-ratio 0.02 --tol-rmse 0.02

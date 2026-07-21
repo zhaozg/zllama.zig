@@ -18,6 +18,14 @@ pub const CompareMode = enum {
     alignment,
 };
 
+/// 输出格式
+pub const OutputFormat = enum {
+    /// 人类可读：带装饰线、emoji、中文标签
+    human,
+    /// AI/机器可读：紧凑的 KEY=VALUE 格式，无 emoji，适合脚本解析
+    ai,
+};
+
 // ============================================================================
 // 配置
 // ============================================================================
@@ -37,6 +45,8 @@ pub const AlignCmpConfig = struct {
     key: ?[]const u8 = null,
     /// 比较模式
     mode: CompareMode = .alignment,
+    /// 输出格式
+    output_format: OutputFormat = .human,
 
     // ── 指标阈值（工业级严格） ──
 

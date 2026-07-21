@@ -36,6 +36,7 @@ const core_mod = @import("align_cmp_core.zig");
 const AlignCmpConfig = config_mod.AlignCmpConfig;
 const AlignMetrics = config_mod.AlignMetrics;
 const CompareMode = config_mod.CompareMode;
+const OutputFormat = config_mod.OutputFormat;
 const alignmentVerdict = core_mod.alignmentVerdict;
 
 const ArgmaxResult = config_mod.ArgmaxResult;
@@ -113,16 +114,43 @@ pub const AlignComparator = struct {
 
         // 4. 输出报告
         const stdout_file = std.Io.File.stdout();
-        try stdout_file.writeStreamingAll(io, "============================================================\n");
-        try self.printReport(io, metrics, argmax);
-        try stdout_file.writeStreamingAll(io, "============================================================\n");
+        switch (self.config.output_format) {
+            .human => {
+                try stdout_file.writeStreamingAll(io, "============================================================\n");
+                try self.printReportHuman(io, metrics, argmax);
+                try stdout_file.writeStreamingAll(io, "============================================================\n");
+            },
+            .ai => {
+                try self.printReportAI(io, metrics, argmax);
+            },
+        }
 
         // 5. 判决
         var pass: bool = true;
         if (self.config.mode == .alignment) {
             const verdict = alignmentVerdict(metrics, argmax, self.config);
-            try stdout_file.writeStreamingAll(io, verdict);
-            try stdout_file.writeStreamingAll(io, "\n");
+            if (self.config.output_format == .ai) {
+                const pass_code: u8 = if (std.mem.indexOf(u8, verdict, "❌") != null) @as(u8, 0) else @as(u8, 1);
+                var num_buf: [4]u8 = undefined;
+                const pass_str = try std.fmt.bufPrint(&num_buf, "{d}", .{pass_code});
+                try stdout_file.writeStreamingAll(io, "PASS=");
+                try stdout_file.writeStreamingAll(io, pass_str);
+                try stdout_file.writeStreamingAll(io, "\n");
+                const verdict_clean = if (std.mem.startsWith(u8, verdict, "✅ "))
+                    verdict["✅ ".len..]
+                else if (std.mem.startsWith(u8, verdict, "⚠️ "))
+                    verdict["⚠️ ".len..]
+                else if (std.mem.startsWith(u8, verdict, "❌ "))
+                    verdict["❌ ".len..]
+                else
+                    verdict;
+                try stdout_file.writeStreamingAll(io, "VERDICT=");
+                try stdout_file.writeStreamingAll(io, verdict_clean);
+                try stdout_file.writeStreamingAll(io, "\n");
+            } else {
+                try stdout_file.writeStreamingAll(io, verdict);
+                try stdout_file.writeStreamingAll(io, "\n");
+            }
 
             // 仅 ❌ 表示失败；⚠️ 是信息性警告
             if (std.mem.indexOf(u8, verdict, "❌") != null) {
@@ -213,8 +241,8 @@ pub const AlignComparator = struct {
         return error.JsonKeyNotFound;
     }
 
-    // 打印详细报告
-    fn printReport(self: *AlignComparator, io: std.Io, metrics: AlignMetrics, argmax: ArgmaxResult) !void {
+    // 打印人类可读报告
+    fn printReportHuman(self: *AlignComparator, io: std.Io, metrics: AlignMetrics, argmax: ArgmaxResult) !void {
         var buf: [4096]u8 = undefined;
         const stdout_file = std.Io.File.stdout();
 
@@ -273,6 +301,57 @@ pub const AlignComparator = struct {
             try stdout_file.writeStreamingAll(io, grade);
         }
     }
+
+    // 打印 AI/机器可读报告（紧凑 KEY=VALUE 格式，适合脚本解析）
+    fn printReportAI(self: *AlignComparator, io: std.Io, metrics: AlignMetrics, argmax: ArgmaxResult) !void {
+        var buf: [2048]u8 = undefined;
+        const stdout_file = std.Io.File.stdout();
+
+        const report = try std.fmt.bufPrint(&buf,
+            "FILE_REF={s}\n" ++
+                "FILE_TEST={s}\n" ++
+                "DIM={d}\n" ++
+                "L2={d:.8}\n" ++
+                "RMSE={d:.8}\n" ++
+                "MAE={d:.8}\n" ++
+                "NMSE={d:.8}\n" ++
+                "COSINE={d:.8}\n" ++
+                "MAX_ABS_ERR={d:.8}\n" ++
+                "REL_MAX_ERR={d:.8}\n" ++
+                "REF_MAX_ABS={d:.4}\n" ++
+                "OUTLIER_COUNT={d}\n" ++
+                "OUTLIER_RATIO={d:.8}\n" ++
+                "AVG_RATIO={d:.8}\n" ++
+                "RATIO_STD={d:.8}\n" ++
+                "IS_SCALED={d}\n" ++
+                "ARGMAX_MATCH={d}\n" ++
+                "ARGMAX_REF={d}\n" ++
+                "ARGMAX_TEST={d}\n",
+            .{
+                self.config.ref_path,
+                self.config.test_path,
+                metrics.dim,
+                metrics.l2_distance,
+                metrics.rmse,
+                metrics.mae,
+                metrics.nmse,
+                metrics.cosine,
+                metrics.max_abs_err,
+                metrics.rel_max_err,
+                metrics.ref_max_abs,
+                metrics.outlier_count,
+                metrics.outlier_ratio,
+                metrics.avg_ratio,
+                metrics.ratio_std,
+                @intFromBool(metrics.is_scaled),
+                @intFromBool(argmax.match),
+                argmax.ours,
+                argmax.ref,
+            },
+        );
+        try stdout_file.writeStreamingAll(io, buf[0..report.len]);
+    }
+
 };
 
 /// 从 JSON 数组提取 f32 切片
@@ -312,10 +391,13 @@ const cli_flags = [_]CliFlag{
     .{ .name = "--test", .kind = .string },
     .{ .name = "--key", .kind = .string },
     .{ .name = "--mode", .kind = .string },
+    .{ .name = "--output", .kind = .string },
     .{ .name = "--tol-nmse", .kind = .f64 },
     .{ .name = "--tol-cosine", .kind = .f64 },
     .{ .name = "--tol-rmse", .kind = .f64 },
     .{ .name = "--tol-max-abs-err", .kind = .f64 },
+    .{ .name = "--tol-rel-max-err", .kind = .f64 },
+    .{ .name = "--tol-outlier-ratio", .kind = .f64 },
     .{ .name = "--tol-ratio-dev", .kind = .f64 },
 };
 
@@ -350,6 +432,11 @@ fn parseArgs(allocator: std.mem.Allocator, args_iter: *std.process.Args.Iterator
                 log.err("无效的 mode: {s} (可选: general, alignment)", .{val});
                 return error.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, flag.name, "--output")) {
+            config.output_format = std.meta.stringToEnum(OutputFormat, val) orelse {
+                log.err("无效的 output: {s} (可选: human, ai)", .{val});
+                return error.InvalidArgument;
+            };
         } else if (std.mem.eql(u8, flag.name, "--tol-nmse")) {
             config.tol_nmse = try parseF64(val, "tol-nmse");
         } else if (std.mem.eql(u8, flag.name, "--tol-cosine")) {
@@ -358,6 +445,10 @@ fn parseArgs(allocator: std.mem.Allocator, args_iter: *std.process.Args.Iterator
             config.tol_rmse = try parseF64(val, "tol-rmse");
         } else if (std.mem.eql(u8, flag.name, "--tol-max-abs-err")) {
             config.tol_max_abs_err = try parseF64(val, "tol-max-abs-err");
+        } else if (std.mem.eql(u8, flag.name, "--tol-rel-max-err")) {
+            config.tol_rel_max_err = try parseF64(val, "tol-rel-max-err");
+        } else if (std.mem.eql(u8, flag.name, "--tol-outlier-ratio")) {
+            config.tol_outlier_ratio = try parseF64(val, "tol-outlier-ratio");
         } else if (std.mem.eql(u8, flag.name, "--tol-ratio-dev")) {
             config.tol_ratio_deviation = try parseF64(val, "tol-ratio-dev");
         }
