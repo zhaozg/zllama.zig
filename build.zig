@@ -526,6 +526,15 @@ pub fn build(b: *std.Build) void {
 
     mm_manager_mod.addImport("graph", mm_graph_mod);
 
+    const debug_save_chunks_mod = b.createModule(.{
+        .root_source_file = b.path("src/mtmd/debug_save_chunks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    debug_save_chunks_mod.addImport("mm", mm_manager_mod);
+    mm_manager_mod.addImport("debug_save_chunks", debug_save_chunks_mod);
+
     const mm_preprocess_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/preprocess.zig"),
         .target = target,

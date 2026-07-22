@@ -188,9 +188,21 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
 
     logger.info("formatted_prompt: {s}", .{formatted_prompt});
 
-    var expanded = try tokenizeWithMediaPlaceholders(ectx, formatted_prompt, image_token_id, @intCast(n_vision_tokens), .image);
+    var expanded: chat_template.TokenizedSegments = undefined;
+    if (ectx.mtmd_context) |mtmd_ctx| {
+        // Use mtmd.tokenize.tokenize when MtmdContext is available.
+        // Replace placeholders with media marker so mtmd.tokenize can parse them.
+        const media_marker = mtmd_ctx.media_marker;
+        const marker_replaced = try replacePlaceholdersWithMarker(ectx.allocator, formatted_prompt, media_marker);
+        defer ectx.allocator.free(marker_replaced);
+        const bitmap = mtmd.Bitmap.initPlaceholderImage(@intCast(raw_img.width), @intCast(raw_img.height));
+        var chunks = try mtmd.tokenize.tokenize(mtmd_ctx, io, ectx.allocator, .{ .text = marker_replaced, .add_special = false, .parse_special = true }, &.{bitmap});
+        defer chunks.deinit();
+        expanded = try inputChunksToTokenizedSegments(ectx.allocator, &chunks, image_token_id, .image);
+    } else {
+        expanded = try tokenizeWithMediaPlaceholders(ectx, formatted_prompt, image_token_id, @intCast(n_vision_tokens), .image);
+    }
     defer expanded.deinit();
-
     try multimodalPrefillUnified(ectx, io, &expanded, image_token_id, @intCast(n_vision_tokens), vision_embeddings, max_tokens, formatted_prompt, @tagName(ectx.arch));
     logger.debug("generateWithImage: DONE", .{});
 }
@@ -318,12 +330,24 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
 
     logger.info("formatted_prompt: {s}", .{formatted_prompt});
 
-    var expanded = try tokenizeWithMediaPlaceholders(ectx, formatted_prompt, audio_token_id, @intCast(n_audio_tokens), .audio);
+    logger.info("formatted_prompt: {s}", .{formatted_prompt});
+
+    var expanded: chat_template.TokenizedSegments = undefined;
+    if (ectx.mtmd_context) |mtmd_ctx| {
+        // Use mtmd.tokenize.tokenize when MtmdContext is available.
+        const media_marker = mtmd_ctx.media_marker;
+        const marker_replaced = try replacePlaceholdersWithMarker(ectx.allocator, formatted_prompt, media_marker);
+        defer ectx.allocator.free(marker_replaced);
+        const bitmap = mtmd.Bitmap.initPlaceholderAudio(@intCast(wav_result.info.num_samples));
+        var chunks = try mtmd.tokenize.tokenize(mtmd_ctx, io, ectx.allocator, .{ .text = marker_replaced, .add_special = false, .parse_special = true }, &.{bitmap});
+        defer chunks.deinit();
+        expanded = try inputChunksToTokenizedSegments(ectx.allocator, &chunks, audio_token_id, .audio);
+    } else {
+        expanded = try tokenizeWithMediaPlaceholders(ectx, formatted_prompt, audio_token_id, @intCast(n_audio_tokens), .audio);
+    }
     defer expanded.deinit();
     try multimodalPrefillUnified(ectx, io, &expanded, audio_token_id, @intCast(n_audio_tokens), audio_embeddings, max_tokens, formatted_prompt, "Audio");
 }
-
-/// Unified three-stage multimodal prefill + decode (all architectures via vtable).
 fn multimodalPrefillUnified(
     ectx: *EngineContext,
     io: std.Io,
@@ -335,8 +359,8 @@ fn multimodalPrefillUnified(
     prompt_text: ?[]const u8,
     label: []const u8,
 ) !void {
-    const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
     const media_offset: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else 0;
+    const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
     const media_count: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_count else @intCast(n_media_tokens);
     const prefix_tokens = if (media_offset > 0) expanded.tokens.items[0..media_offset] else &[_]u32{};
     const suffix_start: u32 = media_offset + media_count;
@@ -562,4 +586,124 @@ pub fn tokenizeWithMediaPlaceholders(
         .offsets = try offsets.toOwnedSlice(ectx.allocator),
         .allocator = ectx.allocator,
     };
+}
+
+/// Convert InputChunks to TokenizedSegments for use with multimodalPrefillUnified.
+fn inputChunksToTokenizedSegments(
+    allocator: std.mem.Allocator,
+    chunks: *const mtmd.InputChunks,
+    media_token_id: u32,
+    media_type: chat_template.MediaType,
+) !chat_template.TokenizedSegments {
+    var tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
+    errdefer tokens.deinit(allocator);
+    var offsets = std.ArrayListUnmanaged(chat_template.PlaceholderInfo){ .items = &.{}, .capacity = 0 };
+    errdefer offsets.deinit(allocator);
+
+    for (chunks.entries.items) |*chunk| {
+        switch (chunk.chunk_type) {
+            .text => {
+                const text_tokens = chunk.tokens_text orelse &.{};
+                for (text_tokens) |t| {
+                    try tokens.append(allocator, @intCast(t));
+                }
+            },
+            .image => {
+                if (media_type == .image) {
+                    const n_tokens = chunk.nTokens();
+                    try offsets.append(allocator, .{
+                        .start = 0,
+                        .length = 0,
+                        .media_type = .image,
+                        .token_count = n_tokens,
+                        .token_offset = @intCast(tokens.items.len),
+                    });
+                    for (0..n_tokens) |_| {
+                        try tokens.append(allocator, media_token_id);
+                    }
+                }
+            },
+            .audio => {
+                if (media_type == .audio) {
+                    const n_tokens = chunk.tokens_audio_n;
+                    try offsets.append(allocator, .{
+                        .start = 0,
+                        .length = 0,
+                        .media_type = .audio,
+                        .token_count = n_tokens,
+                        .token_offset = @intCast(tokens.items.len),
+                    });
+                    for (0..n_tokens) |_| {
+                        try tokens.append(allocator, media_token_id);
+                    }
+                }
+            },
+        }
+    }
+
+    return chat_template.TokenizedSegments{
+        .tokens = tokens,
+        .offsets = try offsets.toOwnedSlice(allocator),
+        .allocator = allocator,
+    };
+}
+
+/// Replace image/audio placeholders in formatted_prompt with the given media_marker.
+fn replacePlaceholdersWithMarker(allocator: std.mem.Allocator, prompt: []const u8, marker: []const u8) ![]u8 {
+    const Span = struct { start: usize, end: usize };
+    var positions = std.ArrayListUnmanaged(Span){ .items = &.{}, .capacity = 0 };
+    defer positions.deinit(allocator);
+
+    var pos: usize = 0;
+    while (pos < prompt.len) {
+        if (std.mem.indexOfPos(u8, prompt, pos, "<|image|>")) |idx| {
+            try positions.append(allocator, .{ .start = idx, .end = idx + "<|image|>".len });
+            pos = idx + "<|image|>".len;
+        } else if (std.mem.indexOfPos(u8, prompt, pos, "<image>")) |idx| {
+            try positions.append(allocator, .{ .start = idx, .end = idx + "<image>".len });
+            pos = idx + "<image>".len;
+        } else if (std.mem.indexOfPos(u8, prompt, pos, "<|audio|>")) |idx| {
+            try positions.append(allocator, .{ .start = idx, .end = idx + "<|audio|>".len });
+            pos = idx + "<|audio|>".len;
+        } else if (std.mem.indexOfPos(u8, prompt, pos, "<audio>")) |idx| {
+            try positions.append(allocator, .{ .start = idx, .end = idx + "<audio>".len });
+            pos = idx + "<audio>".len;
+        } else {
+            break;
+        }
+    }
+
+    if (positions.items.len == 0) {
+        return allocator.dupe(u8, prompt);
+    }
+
+    var total_len: usize = prompt.len;
+    for (positions.items) |p| {
+        const placeholder_len = p.end - p.start;
+        if (marker.len > placeholder_len) {
+            total_len += marker.len - placeholder_len;
+        } else {
+            total_len -= placeholder_len - marker.len;
+        }
+    }
+
+    var result = try allocator.alloc(u8, total_len);
+    var write_pos: usize = 0;
+    var read_pos: usize = 0;
+
+    for (positions.items) |p| {
+        const segment_len = p.start - read_pos;
+        @memcpy(result[write_pos..][0..segment_len], prompt[read_pos..][0..segment_len]);
+        write_pos += segment_len;
+        @memcpy(result[write_pos..][0..marker.len], marker);
+        write_pos += marker.len;
+        read_pos = p.end;
+    }
+
+    const remaining = prompt.len - read_pos;
+    if (remaining > 0) {
+        @memcpy(result[write_pos..][0..remaining], prompt[read_pos..]);
+    }
+
+    return result;
 }

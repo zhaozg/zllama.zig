@@ -22,6 +22,8 @@ pub const audio_mod = audio;
 pub const vision_mod = vision;
 pub const helper = @import("helper");
 pub const tokenize = @import("tokenize");
+pub const debug_save_chunks = @import("debug_save_chunks");
+
 pub const graph_mod = graph;
 
 // ============================================================================
@@ -95,6 +97,8 @@ pub const ImageTokens = struct {
     n_tokens: u32 = 0,
     pos: PosType = .normal,
     image_idx: u32 = 0,
+    /// Temporal merge factor (for qwen-vl style temporal merge, default 1).
+    n_temporal_merge: u32 = 1,
     id: ?[]const u8 = null,
     /// Preprocessed image pixel data (RGB u8, owned by caller)
     raw_pixels: ?[]const u8 = null,
