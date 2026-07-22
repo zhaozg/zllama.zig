@@ -152,9 +152,6 @@
 ---
 
 ## 6. 改进方案（分阶段实施）
-
-### 6.1 已完成 ✅
-
 | 措施 | 位置 | 说明 |
 |------|------|------|
 | **measureGraph 封装** | `src/ggml/graph.zig` | 使用 `ggml_gallocr_reserve` + `get_buffer_size` 精确测量 |
@@ -167,11 +164,11 @@
 
 ### 6.2 待实施（P1 — 短期）
 
-| 措施 | 优先级 | 说明 |
-|------|--------|------|
-| **Gallocr 跨 Pass 复用优化** | P1 | 当前 prefill 每个 Pass 都调用 `gallocr.reserve()` + `allocGraph()`，可优化为预规划一次后复用 |
-| **Prefill 输入数据生命周期管理** | P1 | `setDataPtr` 传入的 buffer 在 context 释放后悬空，需确保 gallocr compute 完成前数据有效 |
-| **mediaPass 中 n_threads 参数未使用** | P1 | `graph.compute(n_threads)` 已使用，但 `_ = params` 表明 params 未使用，可考虑移除 |
+| 措施 | 优先级 | 说明 | 任务状态 |
+|------|--------|------| -------- |
+| **Gallocr 跨 Pass 复用优化** | P1 | 移除冗余的 gallocr.reserve() 调用，allocGraph 内部自动调用 reserve | ✅ 已完成 |
+| **Prefill 输入数据生命周期管理** | P1 | 添加生命周期文档注释，说明 setDataPtr + defer free 安全性 | ✅ 已完成 |
+| **mediaPass 中 n_threads 参数未使用** | P1 | 移除未使用的 params 参数 | ✅ 已完成 |
 
 ### 6.3 长期优化（P2 — 系统级弹性）
 
@@ -284,8 +281,8 @@ pub fn threeStagePrefill(
 | **P1** | 实现 `TempContextPool` | ✅ 已完成 |
 | **P1** | 改进 `IncContext.resetFull()` | ✅ 已完成 |
 | **P1** | `ggml/context.zig` `usage()` 辅助函数 | ✅ 已完成 |
-| **P1** | Gallocr 跨 Pass 复用优化 | ⬜ 待实施 |
-| **P1** | Prefill 输入数据生命周期管理 | ⬜ 待实施 |
+| **P1** | Gallocr 跨 Pass 复用优化 | ✅ 已完成 |
+| **P1** | Prefill 输入数据生命周期管理 | ✅ 已完成 |
 | **P2** | 可增长 Context 包装 | ⬜ 长期 |
 | **P2** | 自适应阈值与监控 | ⬜ 长期 |
 
