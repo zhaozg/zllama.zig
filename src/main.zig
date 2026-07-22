@@ -51,7 +51,7 @@ pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_comm
 
     .{ .scope = .weight_loader, .level = .info },
     .{ .scope = .graph_model_gemma4a, .level = .info },
-    .{ .scope = .graph_model_gemma4v, .level = .debug },
+    .{ .scope = .graph_model_gemma4v, .level = .info },
     .{ .scope = .graph_model_gemma4ua, .level = .info },
     .{ .scope = .graph_model_gemma4uv, .level = .info },
 } };

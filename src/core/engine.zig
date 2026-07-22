@@ -97,7 +97,7 @@ pub const InferenceEngine = struct {
     arch: model_if.Architecture,
     model: model_if.ModelInstance,
     params: model_if.ModelParams,
-    tok: tokenizer.Tokenizer,
+    tok: *tokenizer.Tokenizer,
     sampler_state: sampler.Sampler,
     kv_cache_mgr: kv_cache.KVCache,
     n_threads: i32,
@@ -112,7 +112,7 @@ pub const InferenceEngine = struct {
     /// Gallocr（计算图内存分配器，所有权上移自 engine_common.computeGraph）
     gallocr: *ggml.Gallocr,
 
-    mm_manager: ?mtmd.MultiModalManager = null,
+    mm_manager: ?*mtmd.MultiModalManager = null,
     mtmd_context: ?*mtmd.MtmdContext = null,
     capabilities: model_if.ModelCapabilities = .{},
 
@@ -185,7 +185,8 @@ pub const InferenceEngine = struct {
         }
 
         var capabilities = registry.detectCapabilities(&gguf_file, arch);
-        var tok = try tokenizer.Tokenizer.init(&gguf_file, allocator);
+        var tok = try allocator.create(tokenizer.Tokenizer);
+        tok.* = try tokenizer.Tokenizer.init(&gguf_file, allocator);
         errdefer tok.deinit();
         logger.info("Tokenizer: {d} tokens", .{tok.vocabSize()});
 
@@ -240,18 +241,21 @@ pub const InferenceEngine = struct {
         const gallocr = try ggml.Gallocr.init(buft);
         errdefer gallocr.free();
 
-        var mm_manager: ?mtmd.MultiModalManager = null;
+        var mm_manager: ?*mtmd.MultiModalManager = null;
         var mtmd_context: ?*mtmd.MtmdContext = null;
         if (cli_args.mmproj_path.len > 0) {
-            mm_manager = try loadMMProj(io, allocator, cli_args.mmproj_path, &capabilities);
+            const mm_val = try loadMMProj(io, allocator, cli_args.mmproj_path, &capabilities);
+            const mm_ptr = try allocator.create(mtmd.MultiModalManager);
+            mm_ptr.* = mm_val;
+            mm_manager = mm_ptr;
             logger.info("Multimodal encoder loaded from: {s}", .{cli_args.mmproj_path});
             if (capabilities.has_vision or capabilities.has_audio) {
                 logger.info("Multi-modal: yes", .{});
                 if (capabilities.has_vision) logger.info("  Vision: yes ({s})", .{capabilities.vision_encoder_type});
                 if (capabilities.has_audio) logger.info("  Audio : yes ({s}, {d} Hz)", .{ capabilities.audio_encoder_type, capabilities.audio_sample_rate });
             }
-            if (mm_manager) |*mgr| {
-                mtmd_context = try mtmd.MtmdContext.init(allocator, mgr, @intCast(params.n_embd), mtmd.contextParamsDefault(), &tok);
+            if (mm_manager) |mgr| {
+                mtmd_context = try mtmd.MtmdContext.init(allocator, mgr, @intCast(params.n_embd), mtmd.contextParamsDefault(), tok);
                 logger.info("MtmdContext initialized for multimodal processing", .{});
             }
         } else if (capabilities.has_vision or capabilities.has_audio) {
@@ -325,8 +329,9 @@ pub const InferenceEngine = struct {
         if (self.mtmd_context) |ctx| {
             ctx.deinit();
         }
-        if (self.mm_manager) |*m| {
+        if (self.mm_manager) |m| {
             m.deinit();
+            self.allocator.destroy(m);
         }
         self.inc_ctx.deinit();
         self.ctx_graph.deinit();
@@ -341,6 +346,7 @@ pub const InferenceEngine = struct {
             self.allocator.free(self.gguf_data);
         }
         self.tok.deinit();
+        self.allocator.destroy(self.tok);
         self.kv_cache_mgr.deinit(self.allocator);
         if (self.chat_template_source) |src| {
             switch (src) {
@@ -473,7 +479,7 @@ pub const InferenceEngine = struct {
         defer self.allocator.free(prefill.logits);
 
         if (self.verbose_prompt) {
-            try verbose_mod.printVerbosePrompt(io, self.allocator, &self.tok, formatted_prompt, input_tokens.items, prefill.logits, null);
+            try verbose_mod.printVerbosePrompt(io, self.allocator, self.tok, formatted_prompt, input_tokens.items, prefill.logits, null);
         }
 
         const first_token = sampler.Sampler.sampleGreedyFromLogits(prefill.logits);
@@ -486,7 +492,7 @@ pub const InferenceEngine = struct {
             io,
             self.model,
             &self.params,
-            &self.tok,
+            self.tok,
             &self.kv_cache_mgr,
             &self.inc_ctx,
             self.n_threads,
@@ -523,7 +529,7 @@ pub const InferenceEngine = struct {
     // ========================================================================
 
     pub fn generateEmbedding(self: *InferenceEngine, io: std.Io, prompt: []const u8) ![]f32 {
-        return embedding_mod.generateEmbedding(self.allocator, io, self.model, &self.params, &self.tok, self.ctx_graph, self.n_threads, prompt);
+        return embedding_mod.generateEmbedding(self.allocator, io, self.model, &self.params, self.tok, self.ctx_graph, self.n_threads, prompt);
     }
 
     // ========================================================================
@@ -609,7 +615,7 @@ pub const InferenceEngine = struct {
                 io,
                 self.model,
                 &self.params,
-                &self.tok,
+                self.tok,
                 &self.kv_cache_mgr,
                 &self.inc_ctx,
                 self.n_threads,
@@ -678,14 +684,14 @@ pub const InferenceEngine = struct {
             .arch = self.arch,
             .model = self.model,
             .params = self.params,
-            .tok = self.tok,
+            .tok = self.tok.*,
             .kv_cache_mgr = &self.kv_cache_mgr,
             .n_threads = self.n_threads,
             .verbose_prompt = self.verbose_prompt,
             .benchmark = self.benchmark,
             .inc_ctx = &self.inc_ctx,
             .gallocr = self.gallocr,
-            .mm_manager = if (self.mm_manager) |*m| m else null,
+            .mm_manager = if (self.mm_manager) |m| m else null,
             .mtmd_context = self.mtmd_context,
             .capabilities = self.capabilities,
             .chat_template_source = self.chat_template_source,

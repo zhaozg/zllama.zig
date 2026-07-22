@@ -256,25 +256,27 @@ pub fn mediaPass(
         // 生命周期：setDataPtr 传入的 buffer 在 gallocr.allocGraph 后不再被引用，
         // 因此 defer allocator.free(buf) 在块结束时安全释放。
         const embd_tensor = try ctx.newTensor2d(.f32, n_embd_val, cur_chunk_size);
-        {
+        const embd_buf = blk: {
             const src_bytes = chunk_embd_data.len * @sizeOf(f32);
             const buf = try allocator.alloc(u8, src_bytes);
-            defer allocator.free(buf);
             @memcpy(buf, std.mem.sliceAsBytes(chunk_embd_data));
             embd_tensor.setDataPtr(buf);
-        }
+            break :blk buf;
+        };
+        defer allocator.free(embd_buf);
         embd_tensor.setName("mp_embd");
 
         // 创建输入 token 张量（占位符）
         const input = try ctx.newTensor1d(.i32, cur_chunk_size);
-        {
+        const input_buf = blk: {
             const buf_size = @as(usize, @intCast(cur_chunk_size)) * @sizeOf(i32);
             const buf = try allocator.alloc(u8, buf_size);
-            defer allocator.free(buf);
             const slice = @as([*]i32, @ptrCast(@alignCast(buf.ptr)))[0..@as(usize, @intCast(cur_chunk_size))];
             @memset(slice, @as(i32, @intCast(media_token_id)));
             input.setDataPtr(buf);
-        }
+            break :blk buf;
+        };
+        defer allocator.free(input_buf);
 
         var graph = try ggml.CGraph.initReserved(ctx, 16384);
         _ = try model_instance.buildMM(
@@ -297,25 +299,27 @@ pub fn mediaPass(
 
             // 重新创建嵌入张量
             const embd_tensor2 = try ctx.newTensor2d(.f32, n_embd_val, cur_chunk_size);
-            {
+            const embd_buf2 = blk: {
                 const src_bytes = chunk_embd_data.len * @sizeOf(f32);
                 const buf = try allocator.alloc(u8, src_bytes);
-                defer allocator.free(buf);
                 @memcpy(buf, std.mem.sliceAsBytes(chunk_embd_data));
                 embd_tensor2.setDataPtr(buf);
-            }
+                break :blk buf;
+            };
+            defer allocator.free(embd_buf2);
             embd_tensor2.setName("mp_embd");
 
             // 重新创建输入 token 张量
             const input2 = try ctx.newTensor1d(.i32, cur_chunk_size);
-            {
+            const input_buf2 = blk: {
                 const buf_size = @as(usize, @intCast(cur_chunk_size)) * @sizeOf(i32);
                 const buf = try allocator.alloc(u8, buf_size);
-                defer allocator.free(buf);
                 const slice = @as([*]i32, @ptrCast(@alignCast(buf.ptr)))[0..@as(usize, @intCast(cur_chunk_size))];
                 @memset(slice, @as(i32, @intCast(media_token_id)));
                 input2.setDataPtr(buf);
-            }
+                break :blk buf;
+            };
+            defer allocator.free(input_buf2);
 
             graph = try ggml.CGraph.initReserved(ctx, 16384);
             _ = try model_instance.buildMM(
