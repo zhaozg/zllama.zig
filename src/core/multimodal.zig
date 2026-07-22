@@ -140,7 +140,10 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     if (raw_img.width == 0 or raw_img.height == 0) return error.EmptyImage;
 
     // 使用 no_alloc = true 模式创建视觉编码器上下文。
-    var vision_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
+    // 使用 no_alloc = true 模式创建视觉编码器上下文。
+    // 512 MB 用于元数据（no_alloc 模式下张量数据由 Gallocr 管理）。
+    // P0: 从 256MB 增加到 512MB 以解决 Gemma4 E2B 大视觉图的 OutOfMemory 问题。
+    var vision_ctx = try ggml.Context.initNoAlloc(512 * 1024 * 1024);
     defer vision_ctx.deinit();
     const vision_graph = try ggml.CGraph.initReserved(vision_ctx, 32768);
     logger.debug("generateWithImage: Step 4 - creating vision_ctx and calling encodeMedia...", .{});
