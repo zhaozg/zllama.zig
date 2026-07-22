@@ -1,7 +1,7 @@
 //! ggml_cgraph 封装
 //!
 //! 提供 ggml_cgraph 的类型安全 Zig 封装。
-//! 新增：measureGraph — 计算图内存测量（docs/MEMMGT.md §4.2.1）
+//! 新增：measureGraph — 计算图内存测量（docs/MEM.md §1.3）
 
 const std = @import("std");
 const cmod = @import("c.zig");
@@ -115,7 +115,7 @@ pub const CGraph = opaque {
 };
 
 // ============================================================================
-// 计算图内存测量（docs/MEMMGT.md §4.2.1）
+    // 计算图内存测量（docs/MEM.md §1.3）
 // ============================================================================
 
 /// 测量计算图所需的内存大小（字节）。

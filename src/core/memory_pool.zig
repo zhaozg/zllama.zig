@@ -1,4 +1,4 @@
-//! 临时 Context 池管理（docs/MEMMGT.md §4.2.3）
+//! 临时 Context 池管理（docs/MEM.md §7.2）
 //!
 //! 管理一组可变大小的 ggml_context，按需取用，支持 reset 和 free。
 //! 用于分离持久 context（权重、KV Cache）与临时 context（中间激活）。

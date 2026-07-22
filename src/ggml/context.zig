@@ -145,7 +145,7 @@ pub const Context = opaque {
         )));
     }
 
-    /// 获取 context 的内存使用详情（docs/MEMMGT.md §4.2）
+    /// 获取 context 的内存使用详情（docs/MEM.md §7）
     /// 返回已用内存和总内存的元组
     pub fn usage(self: *Context) struct { used: usize, total: usize, ratio: f64 } {
         const used = self.usedMem();

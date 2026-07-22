@@ -333,5 +333,5 @@ main.zig
 | `docs/GGML_BINDING.md` | ggml C API 绑定设计规范 |
 | `docs/MTMD.md` | 多模态模块详细设计（含使用指南） |
 | `docs/HOW_TO_ADD_NEW_MODEL.md` | 新增模型详细指南 |
-| `docs/MEMMGT.md` | 内存管理详解 |
+| `docs/MEM.md` | 内存管理详解 |
 | `docs/TEST.md` | 测试体系 |
