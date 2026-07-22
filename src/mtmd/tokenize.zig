@@ -29,7 +29,32 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, io: std.Io, allocator: std.mem.Allocator
         }
     }
     if (i_bm != bitmaps.len) return error.MarkerBitmapMismatch;
-    try debug_save_chunks(io, allocator, "debug_vision", "zllama_vision_mtmd_input_chunks.txt", text.text, &chunks);
+
+    // Add BOS token if add_special is true and vocab has add_bos.
+    // Matches llama.cpp behavior: mtmd_tokenizer::tokenize() adds BOS after all chunks are built.
+    if (text.add_special) {
+        if (ctx.tok) |tok| {
+            if (tok.vocab.getAddBos()) {
+                const bos_token: i32 = @intCast(tok.vocab.tokenBos());
+                if (chunks.entries.items.len > 0 and chunks.entries.items[0].chunk_type == .text) {
+                    const first = &chunks.entries.items[0];
+                    const old = first.tokens_text orelse &.{};
+                    const m = try allocator.alloc(i32, old.len + 1);
+                    m[0] = bos_token;
+                    @memcpy(m[1..], old);
+                    if (first.tokens_text) |t| allocator.free(t);
+                    first.tokens_text = m;
+                } else {
+                    const o = try allocator.dupe(i32, &.{bos_token});
+                    try chunks.entries.insert(allocator, 0, .{ .chunk_type = .text, .tokens_text = o });
+                }
+            }
+        }
+    }
+
+    if (@import("builtin").is_test) {} else {
+        try debug_save_chunks(io, allocator, "debug_vision", "zllama_vision_mtmd_input_chunks.txt", text.text, &chunks);
+    }
     return chunks;
 }
 
