@@ -331,8 +331,7 @@ main.zig
 |------|------|
 | `AGENTS.md` | AI 编程入口、设计哲学、决策矩阵 |
 | `docs/GGML_BINDING.md` | ggml C API 绑定设计规范 |
-| `docs/MTMD_ARCHITECTURE.md` | 多模态模块详细设计 |
-| `docs/MULTIMODAL.md` | 多模态使用指南 |
+| `docs/MTMD.md` | 多模态模块详细设计（含使用指南） |
 | `docs/HOW_TO_ADD_NEW_MODEL.md` | 新增模型详细指南 |
 | `docs/MEMMGT.md` | 内存管理详解 |
 | `docs/TEST.md` | 测试体系 |
