@@ -123,6 +123,187 @@ pub const TokenizedSegments = struct {
         self.tokens.deinit(self.allocator);
         self.allocator.free(self.offsets);
     }
+
+    /// 将 TokenizedSegments 的调试数据输出为文件，保存后可进行对比分析。
+    ///
+    /// 输出格式为结构化文本，包含：
+    ///   - 头部元数据（总 token 数、占位符数量、token ID 值）
+    ///   - 原始格式化字符串
+    ///   - 每个占位符的详细信息（类型、位置、展开 token 数）
+    ///   - 完整的 token 序列（每行 16 个 token，十六进制和十进制双列）
+    ///   - 占位符在 token 序列中的区间标注
+    ///
+    /// 文件路径建议使用 `.txt` 后缀，例如 `tokenized_segments_debug.txt`。
+    ///
+    /// @param file_path 输出文件路径
+    /// @param formatted 原始格式化字符串（模板渲染后的文本，含占位符标记）
+    /// @param image_token_id 图像占位符对应的 token ID
+    /// @param audio_token_id 音频占位符对应的 token ID
+    pub fn dumpToFile(
+        self: *const TokenizedSegments,
+        file_path: []const u8,
+        formatted: []const u8,
+        image_token_id: u32,
+        audio_token_id: u32,
+    ) !void {
+        const allocator = self.allocator;
+        var buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        defer buf.deinit(allocator);
+
+        const writer = buf.writer(allocator);
+
+        // ── 头部元数据 ──
+        try writer.print(
+            \\============================================================
+            \\  TokenizedSegments Debug Dump
+            \\============================================================
+            \\  total_tokens:     {d}
+            \\  placeholder_cnt:  {d}
+            \\  image_token_id:   {d} (0x{x:0>8})
+            \\  audio_token_id:   {d} (0x{x:0>8})
+            \\
+            \\
+        , .{
+            self.tokens.items.len,
+            self.offsets.len,
+            image_token_id, image_token_id,
+            audio_token_id, audio_token_id,
+        });
+
+        // ── 原始格式化字符串 ──
+        try writer.print(
+            \\============================================================
+            \\  Formatted String (raw)
+            \\============================================================
+            \\  {s}
+            \\
+            \\
+        , .{formatted});
+
+        // ── 占位符信息 ──
+        try writer.print(
+            \\============================================================
+            \\  Placeholder Offsets
+            \\============================================================
+            \\  idx  type   str_pos     str_end     tok_offset   tok_count
+            \\  ---  ----   --------    --------    ----------   ---------
+            \\
+        );
+        for (self.offsets, 0..) |ph, i| {
+            const media_label = switch (ph.media_type) {
+                .image => "image",
+                .audio => "audio",
+            };
+            try writer.print("  {d:>3}  {s:>5}  {d:>10}  {d:>10}  {d:>10}  {d:>9}\n", .{
+                i,
+                media_label,
+                ph.start,
+                ph.start + ph.length,
+                ph.token_offset,
+                ph.token_count,
+            });
+        }
+        try writer.print("\n", .{});
+
+        // ── Token 序列（带占位符区间标注） ──
+        try writer.print(
+            \\============================================================
+            \\  Token Sequence (hex | dec)
+            \\============================================================
+            \\  Format: [index] 0xHEX (DEC)  [annotation]
+            \\
+            \\
+        , .{});
+
+        const tokens_per_line: usize = 16;
+        const tokens_slice = self.tokens.items;
+
+        // 构建占位符区间查找表：token_offset → placeholder_index
+        // 用于在 token 序列中标注占位符区间
+        var ph_ranges = std.ArrayListUnmanaged(struct { start: u32, end: u32, idx: usize, media_type: types.MediaType }){ .items = &.{}, .capacity = 0 };
+        defer ph_ranges.deinit(allocator);
+        for (self.offsets, 0..) |ph, ph_idx| {
+            try ph_ranges.append(allocator, .{
+                .start = ph.token_offset,
+                .end = ph.token_offset + ph.token_count,
+                .idx = ph_idx,
+                .media_type = ph.media_type,
+            });
+        }
+
+        var line_buf: [tokens_per_line]u32 = undefined;
+        var idx: usize = 0;
+        while (idx < tokens_slice.len) : (idx += tokens_per_line) {
+            const remaining = tokens_slice.len - idx;
+            const line_len = @min(remaining, tokens_per_line);
+            @memcpy(line_buf[0..line_len], tokens_slice[idx..][0..line_len]);
+
+            // 行首索引
+            try writer.print("  [{d:>6}]", .{idx});
+
+            // token 值（十六进制）
+            for (0..line_len) |j| {
+                try writer.print(" 0x{x:0>8}", .{line_buf[j]});
+            }
+            try writer.print("\n", .{});
+
+            // 第二行：十进制
+            try writer.print("           ", .{});
+            for (0..line_len) |j| {
+                try writer.print(" {d:>10}", .{line_buf[j]});
+            }
+            try writer.print("\n", .{});
+
+            // 第三行：占位符区间标注
+            try writer.print("           ", .{});
+            for (0..line_len) |j| {
+                const abs_idx = idx + j;
+                var annotation: u8 = ' ';
+                for (ph_ranges.items) |range| {
+                    if (abs_idx >= range.start and abs_idx < range.end) {
+                        annotation = switch (range.media_type) {
+                            .image => 'I',
+                            .audio => 'A',
+                        };
+                        break;
+                    }
+                }
+                try writer.print("     {c}     ", .{annotation});
+            }
+            try writer.print("\n\n", .{});
+        }
+
+        // ── 占位符区间汇总 ──
+        try writer.print(
+            \\============================================================
+            \\  Placeholder Token Ranges (summary)
+            \\============================================================
+            \\
+        );
+        for (self.offsets, 0..) |ph, ph_idx| {
+            const media_label = switch (ph.media_type) {
+                .image => "image",
+                .audio => "audio",
+            };
+            const end_idx = ph.token_offset + ph.token_count;
+            try writer.print("  [{d}] {s}: tokens[{d}..{d})  count={d}\n", .{
+                ph_idx,
+                media_label,
+                ph.token_offset,
+                end_idx,
+                ph.token_count,
+            });
+        }
+        try writer.print("\n", .{});
+
+        // ── 写入文件 ──
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.createFile(file_path, .{ .read = false });
+        defer file.close();
+
+        try file.writeAll(buf.items);
+        log.debug("dumpToFile: wrote {d} bytes to {s}", .{ buf.items.len, file_path });
+    }
 };
 
 /// 将模板渲染后的字符串分段 tokenize，同时展开占位符。
@@ -591,4 +772,98 @@ test "tokenizeWithPlaceholders: two placeholders with text" {
     try testing.expectEqual(@as(u32, 'T'), result.tokens.items[5]); // T2 starts
     try testing.expectEqual(@as(u32, 258881), result.tokens.items[7]); // audio placeholder
     try testing.expectEqual(@as(u32, 'T'), result.tokens.items[9]); // T3 starts
+}
+
+test "TokenizedSegments.dumpToFile: basic" {
+    const text = "Hello <|image|> world";
+    // 模拟 tokenizer
+    const tokenizer_fn = struct {
+        fn tokenize(_ctx: ?*anyopaque, text_seg: []const u8, alloc: std.mem.Allocator) ![]u32 {
+            _ = _ctx;
+            var tokens = try alloc.alloc(u32, text_seg.len);
+            for (text_seg, 0..) |c, i| {
+                tokens[i] = @intCast(c);
+            }
+            return tokens;
+        }
+    }.tokenize;
+
+    var result = try tokenizeWithPlaceholders(
+        testing.allocator,
+        text,
+        null,
+        &tokenizer_fn,
+        258880,
+        258881,
+        4,
+        2,
+    );
+    defer result.deinit();
+
+    // 写入临时文件
+    const tmp_path = "/tmp/zllama_test_tokenized_segments_dump.txt";
+    try result.dumpToFile(tmp_path, text, 258880, 258881);
+
+    // 读取并验证文件内容
+    const cwd = std.Io.Dir.cwd();
+    var file = try cwd.openFile(tmp_path, .{ .read = true });
+    defer file.close();
+
+    const content = try file.readToEndAlloc(testing.allocator, 1024 * 64);
+    defer testing.allocator.free(content);
+
+    // 验证关键信息存在
+    try testing.expect(std.mem.indexOf(u8, content, "TokenizedSegments Debug Dump") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "total_tokens:") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "placeholder_cnt:  1") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "Hello <|image|> world") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "image") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "0x0003F280") != null); // 258880 in hex
+    try testing.expect(std.mem.indexOf(u8, content, "Placeholder Token Ranges") != null);
+
+    // 清理
+    cwd.deleteFile(tmp_path) catch {};
+}
+
+test "TokenizedSegments.dumpToFile: multiple placeholders" {
+    const text = "A<|image|>B<|audio|>C";
+    const tokenizer_fn = struct {
+        fn tokenize(_ctx: ?*anyopaque, text_seg: []const u8, alloc: std.mem.Allocator) ![]u32 {
+            _ = _ctx;
+            var tokens = try alloc.alloc(u32, text_seg.len);
+            for (text_seg, 0..) |c, i| {
+                tokens[i] = @intCast(c);
+            }
+            return tokens;
+        }
+    }.tokenize;
+
+    var result = try tokenizeWithPlaceholders(
+        testing.allocator,
+        text,
+        null,
+        &tokenizer_fn,
+        258880,
+        258881,
+        3,
+        2,
+    );
+    defer result.deinit();
+
+    const tmp_path = "/tmp/zllama_test_multi_placeholder_dump.txt";
+    try result.dumpToFile(tmp_path, text, 258880, 258881);
+
+    const cwd = std.Io.Dir.cwd();
+    var file = try cwd.openFile(tmp_path, .{ .read = true });
+    defer file.close();
+
+    const content = try file.readToEndAlloc(testing.allocator, 1024 * 64);
+    defer testing.allocator.free(content);
+
+    // 验证两个占位符的信息都存在
+    try testing.expect(std.mem.indexOf(u8, content, "placeholder_cnt:  2") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "tokens[1..4)") != null); // image: offset=1, count=3
+    try testing.expect(std.mem.indexOf(u8, content, "tokens[5..7)") != null); // audio: offset=5, count=2
+
+    cwd.deleteFile(tmp_path) catch {};
 }

@@ -165,6 +165,7 @@ pub const Gemma4Graph = struct {
         const pos_tensor = rope.buildPositionTensor(self.ctx, @intCast(n_tokens), start_pos);
 
         var g = Self.init(self.ctx, self.gf, p, w, scaled, pos_tensor);
+        // Use null for per-layer embedding (matching llama.cpp multimodal path).
         return try g.transformerForward(n_tokens_i64, start_pos, kv_cache_mgr, null, false);
     }
 

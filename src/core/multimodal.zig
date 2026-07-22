@@ -124,10 +124,6 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     // （使用与 llama.cpp 一致的坐标映射）
     logger.debug("generateWithImage: Step 3 - passing raw image to encodeMedia ({d}x{d})", .{ raw_img.width, raw_img.height });
 
-    // 步骤 3: 直接传递原始图像给 encodeMedia，由 encode 中的 resizeAndNormalize 处理缩放
-    // （使用与 llama.cpp 一致的坐标映射）
-    logger.debug("generateWithImage: Step 3 - passing raw image to encodeMedia ({d}x{d})", .{ raw_img.width, raw_img.height });
-
     if (raw_img.width == 0 or raw_img.height == 0) return error.EmptyImage;
 
     // 使用 no_alloc = true 模式创建视觉编码器上下文。
@@ -160,6 +156,15 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
     const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
     logger.debug("Vision encoder output: shape=[{d}, {d}]", .{ n_embd_val, n_vision_tokens });
+
+    {
+        const vision_data = try vision_embeddings.dataGet(f32, ectx.allocator);
+        defer ectx.allocator.free(vision_data);
+        debug.saveData(io, "debug_vision", "zllama_vision_embeddings.json", "vision_embeddings", vision_data) catch |err| {
+            logger.info("Save vision embeddings data fail: {}", .{err});
+        };
+    }
+
     if (ectx.arch == .qwen3vl) {
         logger.debug("  Qwen3VL: allowing encoder dim {d}", .{n_embd_val});
     } else if (n_embd_val != @as(usize, @intCast(ectx.params.n_embd))) {
