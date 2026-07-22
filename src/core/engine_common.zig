@@ -292,7 +292,6 @@ pub const ComputeResult = struct {
 /// 调用者必须在 computeGraph 返回前完成所有必要的张量数据拷贝，
 /// 因为 gallocr 可能在后续 reset 中释放内存。
 pub fn computeGraph(graph: *ggml.CGraph, n_threads: i32, gallocr: *ggml.Gallocr) !ComputeResult {
-    if (!gallocr.reserve(graph)) return error.GraphReserveFailed;
     if (!gallocr.allocGraph(graph)) return error.GraphAllocFailed;
 
     const cpu = try ggml.backendCpuInit();
@@ -305,7 +304,6 @@ pub fn computeGraph(graph: *ggml.CGraph, n_threads: i32, gallocr: *ggml.Gallocr)
 
 /// Execute a ggml compute graph on a specific backend.
 pub fn computeGraphOnBackend(graph: *ggml.CGraph, backend: *ggml.Backend, gallocr: *ggml.Gallocr) !ComputeResult {
-    if (!gallocr.reserve(graph)) return error.GraphReserveFailed;
     if (!gallocr.allocGraph(graph)) return error.GraphAllocFailed;
     if (!ggml.backendGraphCompute(backend, graph)) return error.ComputeFailed;
     return ComputeResult{ .needs_reset = false };

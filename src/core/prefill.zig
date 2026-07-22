@@ -14,6 +14,19 @@
 //! - Gallocr 由调用者传入（所有权上移），跨 Pass 复用。
 //! - 输入张量数据使用 Zig 分配器管理，避免裸 malloc/free。
 //!
+//! 输入数据生命周期（P1 优化说明）：
+//! - textPass: 使用 no_alloc=false 模式，张量数据由 ggml_context 内部管理。
+//!   gallocr.allocGraph 会重新分配 tensor.data 指针到 gallocr 管理的缓冲区，
+//!   因此 context 释放后数据仍然有效（由 gallocr 持有）。
+//! - mediaPass: 使用 setDataPtr 传入 Zig 分配器管理的 buffer。
+//!   gallocr.allocGraph 会重新分配 tensor.data 指针，因此 setDataPtr 的 buffer
+//!   在 allocGraph 后不再被引用。defer allocator.free(buf) 在块结束时安全释放。
+//!
+//! Gallocr 跨 Pass 复用（P1 优化说明）：
+//! - gallocr.allocGraph 内部会调用 ggml_gallocr_needs_realloc 检查图结构是否变化，
+//!   若需要则自动调用 ggml_gallocr_reserve。因此调用者无需在 allocGraph 前手动 reserve。
+//! - 参考 ggml-alloc.c: ggml_gallocr_alloc_graph 实现。
+//!
 //! 参考：deps/llama.cpp/tools/mtmd/mtmd-helper.cpp (mtmd_helper_decode_image_chunk)
 //!       deps/llama.cpp/tools/mtmd/mtmd.cpp (mtmd_batch_encode_impl)
 
@@ -92,6 +105,12 @@ fn measureAndSize(graph: *ggml.CGraph, buft: *ggml.BackendBufferType, label: []c
 ///   - want_logits: 是否返回 logits（仅最后一个 token）
 ///
 /// 返回：如果 want_logits=true，返回最后一个 token 的 logits；否则返回 null。
+///
+/// 生命周期说明：
+/// - 使用 no_alloc=false 模式创建临时 ggml_context，张量数据由 context 内部管理。
+/// - gallocr.allocGraph 会重新分配 tensor.data 指针到 gallocr 管理的缓冲区，
+///   因此 context 释放后数据仍然有效。
+/// - allocGraph 内部自动调用 reserve（若图结构变化），调用者无需手动 reserve。
 pub fn textPass(
     model_instance: model.ModelInstance,
     kv_cache_mgr: *kv_cache.KVCache,
@@ -148,11 +167,7 @@ pub fn textPass(
         ctx.setNoAlloc(true);
     }
 
-    // 使用传入的 gallocr
-    if (!gallocr.reserve(graph)) {
-        log.err("Graph reserve failed: text pass", .{});
-        return error.GraphReserveFailed;
-    }
+    // allocGraph 内部自动调用 reserve（若图结构变化），无需手动 reserve
     if (!gallocr.allocGraph(graph)) {
         log.err("Graph alloc failed: text pass", .{});
         return error.GraphAllocFailed;
@@ -193,6 +208,17 @@ pub fn textPass(
 ///   - media_embeddings: 预计算的媒体嵌入 [n_embd * media_count]
 ///   - embd_dim: 嵌入维度
 ///   - start_pos: 起始位置
+///   - n_threads: CPU 线程数
+///   - allocator: 内存分配器
+///   - gallocr: Gallocr 实例（所有权上移，跨 Pass 复用）
+///   - chunk_size: 分块大小（<=0 时使用默认值 256）
+///
+/// 生命周期说明：
+/// - 使用 setDataPtr 传入 Zig 分配器管理的 buffer 作为输入张量数据。
+/// - gallocr.allocGraph 会重新分配 tensor.data 指针到 gallocr 管理的缓冲区，
+///   因此 setDataPtr 的 buffer 在 allocGraph 后不再被引用。
+/// - defer allocator.free(buf) 在块结束时安全释放，不会影响计算。
+/// - allocGraph 内部自动调用 reserve（若图结构变化），调用者无需手动 reserve。
 pub fn mediaPass(
     model_instance: model.ModelInstance,
     kv_cache_mgr: *kv_cache.KVCache,
@@ -201,13 +227,11 @@ pub fn mediaPass(
     media_embeddings: []const f32,
     embd_dim: u32,
     start_pos: i32,
-    params: *const model.ModelParams,
     n_threads: i32,
     allocator: std.mem.Allocator,
     gallocr: *ggml.Gallocr,
     chunk_size: i32,
 ) !void {
-    _ = params;
     const n_media: i32 = media_count;
     if (n_media <= 0) return;
     const kv_cache_ptr: ?*kv_cache.KVCache = kv_cache_mgr;
@@ -229,6 +253,8 @@ pub fn mediaPass(
         defer ctx.deinit();
 
         // 创建嵌入张量 — 使用 Zig 分配器管理数据，避免裸 malloc
+        // 生命周期：setDataPtr 传入的 buffer 在 gallocr.allocGraph 后不再被引用，
+        // 因此 defer allocator.free(buf) 在块结束时安全释放。
         const embd_tensor = try ctx.newTensor2d(.f32, n_embd_val, cur_chunk_size);
         {
             const src_bytes = chunk_embd_data.len * @sizeOf(f32);
@@ -305,11 +331,7 @@ pub fn mediaPass(
             );
         }
 
-        // 使用传入的 gallocr
-        if (!gallocr.reserve(graph)) {
-            log.err("Graph reserve failed: media pass chunk {d}", .{chunk_start});
-            return error.GraphReserveFailed;
-        }
+        // allocGraph 内部自动调用 reserve（若图结构变化），无需手动 reserve
         if (!gallocr.allocGraph(graph)) {
             log.err("Graph alloc failed: media pass chunk {d}", .{chunk_start});
             return error.GraphAllocFailed;
@@ -412,7 +434,6 @@ pub fn threeStagePrefill(
             media_embeddings_data,
             media_embd_dim,
             prefix_len,
-            params,
             n_threads,
             allocator,
             gallocr,
