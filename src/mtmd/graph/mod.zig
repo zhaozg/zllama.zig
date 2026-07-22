@@ -74,6 +74,10 @@ pub const VisionEncoderBackend = struct {
     /// 接收独立参数，内部创建 GraphBuilder 后委托给模型的具体 buildGraph
     buildGraph: *const fn (io: std.Io, ctx: *ggml.Context, gf: *ggml.CGraph, w: *const VisionEncoderWeights, p: *const VisionHParams, image_tensor: *ggml.Tensor) anyerror!*ggml.CGraph,
     estimateOutputTokens: *const fn (io: std.Io, img_width: u32, img_height: u32, patch_size: u32, n_merge: u32) u32,
+    /// Number of frames to merge temporally (for Qwen-VL style temporal merge).
+    /// 1 = no merging, 2 = merge pairs of frames.
+    /// Matches llama.cpp clip_model_n_temporal_merge().
+    n_temporal_merge: ?u32 = null,
 };
 
 /// 音频编码器后端接口

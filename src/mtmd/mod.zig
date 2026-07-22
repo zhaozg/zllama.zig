@@ -117,6 +117,13 @@ pub const Bitmap = struct {
     pub fn nBytes(self: Bitmap) usize {
         return if (self.data) |d| d.len else 0;
     }
+    /// Check if this bitmap can be temporally merged with another.
+    /// Matches llama.cpp mtmd_bitmap::can_merge_with().
+    /// [QWEN_VIDEO] can (temporal) merge if both are images with same size.
+    pub fn canMergeWith(self: Bitmap, other: Bitmap) bool {
+        return !self.is_audio and !other.is_audio and self.nx == other.nx and self.ny == other.ny;
+    }
+
     pub fn deinit(self: *Bitmap) void {
         if (self.allocator) |a| {
             if (self.data) |d| a.free(d);

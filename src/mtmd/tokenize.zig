@@ -48,6 +48,13 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, io: std.Io, allocator: std.mem.Allocator
                     try chunks.entries.insert(allocator, 0, .{ .chunk_type = .text, .tokens_text = o });
                 }
             }
+
+            // Add EOS token if add_special is true and vocab has add_eos.
+            // Matches llama.cpp mtmd_tokenizer::tokenize() lines 991-994.
+            if (tok.vocab.getAddEos()) {
+                const eos_token: i32 = @intCast(tok.vocab.tokenEos());
+                try addTextTokens(allocator, &chunks, &.{eos_token});
+            }
         }
     }
 
@@ -64,16 +71,23 @@ fn addTextChunk(ctx: *mtmd.MtmdContext, al: std.mem.Allocator, chunks: *mtmd.Inp
         for (e.items) |t| try toks.append(al, @intCast(t));
     } else for (txt) |c| try toks.append(al, @intCast(c));
     if (toks.items.len == 0) return;
+    try addTextTokens(al, chunks, toks.items);
+}
+
+/// Add raw tokens to chunks, merging with last text chunk if possible.
+/// Matches llama.cpp mtmd_tokenizer::add_text(tokens).
+fn addTextTokens(al: std.mem.Allocator, chunks: *mtmd.InputChunks, tokens: []const i32) !void {
+    if (tokens.len == 0) return;
     if (chunks.entries.items.len > 0 and chunks.entries.items[chunks.entries.items.len - 1].chunk_type == .text) {
         const last = &chunks.entries.items[chunks.entries.items.len - 1];
         const old = last.tokens_text orelse &.{};
-        const m = try al.alloc(i32, old.len + toks.items.len);
+        const m = try al.alloc(i32, old.len + tokens.len);
         @memcpy(m[0..old.len], old);
-        @memcpy(m[old.len..], toks.items);
+        @memcpy(m[old.len..], tokens);
         if (last.tokens_text) |t| al.free(t);
         last.tokens_text = m;
     } else {
-        const o = try al.dupe(i32, toks.items);
+        const o = try al.dupe(i32, tokens);
         try chunks.append(.{ .chunk_type = .text, .tokens_text = o });
     }
 }
@@ -118,7 +132,14 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chun
             grid_ny = 1;
         }
     }
-    try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = grid_nx, .ny = grid_ny, .n_tokens = n_tokens, .pos = ctx.pos_type, .image_idx = nia.*, .id = bm.id, .raw_pixels = pd }, .id = bm.id });
+    // Set n_temporal_merge from model capability.
+    // Matches C++: image_tokens->n_temporal_merge = clip_model_n_temporal_merge(ctx->ctx_v);
+    const n_merge_frames: u32 = if (ctx.mm_manager.vision_encoder) |*enc|
+        if (enc.backend.n_temporal_merge) |ntm| ntm else 1
+    else
+        1;
+
+    try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = grid_nx, .ny = grid_ny, .n_tokens = n_tokens, .pos = ctx.pos_type, .image_idx = nia.*, .n_temporal_merge = n_merge_frames, .id = bm.id, .raw_pixels = pd }, .id = bm.id });
     if (ctx.img_end.len > 0) try addTextChunk(ctx, al, chunks, ctx.img_end, true);
     nia.* += 1;
 }
