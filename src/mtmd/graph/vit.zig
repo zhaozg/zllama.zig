@@ -97,8 +97,6 @@ pub fn buildVit(
     }
     cb(inpL, "pre_ln", -1);
 
-    const ck: i32 = 3;
-
     // 3. ViT blocks（对应 C++: for (int il = 0; il < n_layer; il++)）
     for (weights.layers, 0..) |*layer, il| {
         const il_i32: i32 = @intCast(il);
@@ -111,7 +109,6 @@ pub fn buildVit(
         //       cb(cur, "layer_inp_normed", il);
         hidden = try norm_builder.buildNorm(ctx, hidden, layer.ln_1_w orelse return error.MissingLN1Weight, layer.ln_1_b, norm_t, eps, il_i32);
         cb(hidden, "layer_inp_normed", il_i32);
-        if (ck == il_i32) { ggml.setOutput(hidden); }
 
         // --- Self-attention ---
         {
@@ -236,7 +233,6 @@ pub fn buildVit(
                 cb,
             );
             cb(hidden, "attn_out", il_i32);
-            if (ck == il_i32) { ggml.setOutput(hidden); }
         }
 
         // Layer scale 1 (optional)（对应 C++: if (layer.ls_1_w) { cur = ggml_mul(ctx0, cur, layer.ls_1_w); cb(cur, "attn_out_scaled", il); }）
@@ -250,7 +246,6 @@ pub fn buildVit(
         if (layer.attn_post_norm_w) |apn| {
             hidden = try norm_builder.buildNorm(ctx, hidden, apn, null, norm_t, eps, il_i32);
             cb(hidden, "attn_post_normed", il_i32);
-            if (ck == il_i32) { ggml.setOutput(hidden); }
         }
 
         // Residual 1（对应 C++: cur = ggml_add(ctx0, cur, inpL);）
@@ -289,7 +284,6 @@ pub fn buildVit(
         if (layer.ff_post_norm_w) |fpn| {
             hidden = try norm_builder.buildNorm(ctx, hidden, fpn, null, norm_t, eps, il_i32);
             cb(hidden, "ffn_post_normed", il_i32);
-            if (ck == il_i32) { ggml.setOutput(hidden); }
         }
 
         // Layer scale 2 (optional)
@@ -302,26 +296,16 @@ pub fn buildVit(
         // Residual 2（对应 C++: cur = ggml_add(ctx0, inpL, cur); cb(cur, "layer_out", il);）
         hidden = inpL.add(ctx, hidden);
         cb(hidden, "layer_out", il_i32);
-        // if (il_i32 == 0)
-        {
-            ggml.setOutput(hidden);
-        }
 
         // Layer scale out (optional)
         // C++: if (layer.ls_out_w) { cur = ggml_mul(ctx0, cur, layer.ls_out_w); cb(cur, "layer_out_scaled", il); }
         if (layer.ls_out_w) |ls_out| {
             hidden = hidden.mul(ctx, ls_out);
             cb(hidden, "layer_out_scaled", il_i32);
-            if (il_i32 == 0) {
-                ggml.setOutput(hidden);
-            }
         }
 
         inpL = hidden;
     }
-
-    inpL.setName("vit_out_scaled");
-    ggml.setOutput(inpL);
 
     // 4. Post-LN (optional)（对应 C++: if (model.post_ln_w) { inpL = build_norm(inpL, model.post_ln_w, model.post_ln_b, norm_t, eps, -1); }）
     if (weights.post_ln_w) |poln_w| {

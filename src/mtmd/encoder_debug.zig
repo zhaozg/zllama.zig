@@ -20,35 +20,6 @@ pub const DebugTensorEntry = struct {
     is_input: bool = false,
 };
 
-/// Save intermediate tensors from a computed graph to JSON files.
-///
-/// Uses the debug module's saveTensorFromGraph to write each entry.
-/// For input tensors (is_input=true), reads data directly from the tensor's data pointer
-/// using the correct element type. For output tensors, reads f32 data from the graph.
-/// Errors are logged but do not propagate (best-effort save).
-///
-/// `log` is the scoped logger returned by `std.log.scoped(...)`.
-pub fn saveDebugTensors(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    subdir: []const u8,
-    entries: []const DebugTensorEntry,
-    cgraph: *ggml.CGraph,
-    log: anytype,
-) void {
-    for (entries) |entry| {
-        if (entry.is_input) {
-            // For input tensors, read data directly from the tensor's data pointer.
-            // These tensors have data set via setDataPtr and may not be f32 type.
-            saveInputTensor(io, allocator, subdir, entry.filename, entry.tensor_name, cgraph, log);
-        } else {
-            debug_mod.saveTensorFromGraph(io, allocator, subdir, entry.filename, entry.tensor_name, cgraph) catch |err| {
-                log.warn("saveDebugData: failed to save '{s}': {}", .{ entry.filename, err });
-            };
-        }
-    }
-}
-
 /// Save an input tensor's data to a JSON file.
 /// Input tensors may have non-f32 types (e.g., i32 for position indices).
 /// This function reads the raw data and converts to f32 for JSON output.

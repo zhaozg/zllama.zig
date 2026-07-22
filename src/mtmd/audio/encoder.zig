@@ -11,32 +11,6 @@ const encoder_debug = @import("encoder_debug");
 const log = std.log.scoped(.audio_encoder);
 pub const AudioEncoderBackend = graph.AudioEncoderBackend;
 
-/// Debug tensor entries: (tensor_name_in_graph, output_filename).
-/// Used by saveDebugData.
-pub const debug_entries = [_]encoder_debug.DebugTensorEntry{
-    .{ .tensor_name = "pos_emb", .filename = "zllama_audio_00_pos_emb.json", .is_input = true },
-    .{ .tensor_name = "kq_mask", .filename = "zllama_audio_00_kq_mask.json", .is_input = true },
-    .{ .tensor_name = "debug_audio_04_encoder_input", .filename = "zllama_audio_04_mel_input.json" },
-    .{ .tensor_name = "debug_audio_conv2d_0_output", .filename = "zllama_audio_05_conv2d_0_output.json" },
-    .{ .tensor_name = "debug_audio_conv2d_1_output", .filename = "zllama_audio_06_conv2d_1_output.json" },
-    .{ .tensor_name = "debug_audio_after_cont", .filename = "zllama_audio_07_after_cont.json" },
-    .{ .tensor_name = "debug_audio_flatten_output", .filename = "zllama_audio_08_flatten_output.json" },
-    .{ .tensor_name = "debug_audio_input_proj_output", .filename = "zllama_audio_09_input_proj_output.json" },
-    .{ .tensor_name = "debug_audio_half_step_1_output", .filename = "zllama_audio_10_layer0_half_step_1_output.json" },
-    .{ .tensor_name = "debug_audio_self_attention_with_RPE_output", .filename = "zllama_audio_11_layer0_self_attention_with_RPE_output.json" },
-    .{ .tensor_name = "debug_audio_conv_build_normal_output", .filename = "zllama_audio_12_conv_build_normal_output.json" },
-    .{ .tensor_name = "debug_audio_conv_glu_output", .filename = "zllama_audio_13_conv_pw1_glu_output.json" },
-    .{ .tensor_name = "debug_audio_conv_dw_output", .filename = "zllama_audio_14_conv_dw_output.json" },
-    .{ .tensor_name = "debug_audio_conv_dw_norm_silu_output", .filename = "zllama_audio_15_conv_dw_norm_silu_output.json" },
-    .{ .tensor_name = "debug_audio_convolution_output", .filename = "zllama_audio_16_layer0_convolution_output.json" },
-    .{ .tensor_name = "debug_audio_half_step_2_output", .filename = "zllama_audio_17_layer0_half_step_2_output.json" },
-    .{ .tensor_name = "debug_audio_layer_0_norm_output", .filename = "zllama_audio_18_layer0_norm_output.json" },
-    .{ .tensor_name = "debug_audio_conformer_blocks_output", .filename = "zllama_audio_19_conformer_blocks_output.json" },
-    .{ .tensor_name = "mm_norm", .filename = "zllama_audio_90_mm_norm.json" },
-    .{ .tensor_name = "mm_norm_scaled", .filename = "zllama_audio_91_mm_norm_scaled.json" },
-    .{ .tensor_name = "mm_proj", .filename = "zllama_audio_92_mm_proj.json" },
-};
-
 pub const AudioEncoder = struct {
     params: config_mod.AudioEncoderParams,
     weights: graph.VisionEncoderWeights,
@@ -99,7 +73,7 @@ pub const AudioEncoder = struct {
         _ = try self.backend.buildGraph(io, ctx, cgraph, &self.weights, &vparams, mel_tensor, &self.weights.clamp_info_map);
 
         // Return the output tensor by name; caller must compute before reading data.
-        return cgraph.getTensor("mm_proj") orelse return error.TensorNotFound;
+        return cgraph.getTensor("mm_output") orelse return error.TensorNotFound;
     }
 
     /// Encode raw Mel data by creating a tensor first.
@@ -147,20 +121,5 @@ pub const AudioEncoder = struct {
     pub fn deinit(self: *AudioEncoder, allocator: std.mem.Allocator) void {
         self.weights.clamp_info_map.deinit();
         allocator.free(self.weights.layers);
-    }
-
-    /// Save debug data for audio encoder alignment analysis with llama.cpp.
-    /// Uses shared encoder_debug.saveDebugTensors for graph tensors.
-    pub fn saveDebugData(self: *const AudioEncoder, io: std.Io, allocator: std.mem.Allocator, cgraph: *ggml.CGraph) void {
-        const subdir = "debug_audio";
-        encoder_debug.saveDebugTensors(io, allocator, subdir, &debug_entries, cgraph, log);
-
-        // Save weight tensors (only if available — gemma4ua may not have sscp_conv_w)
-        const debug = @import("debug");
-        if (self.weights.sscp_conv_w[0]) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_0_weight.json", t) catch {};
-        if (self.weights.sscp_conv_w[1]) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_conv1d_1_weight.json", t) catch {};
-        if (self.weights.sscp_inp_proj_w) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_input_proj_weight.json", t) catch {};
-        if (self.weights.audio_out_proj_w) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_out_proj_weight.json", t) catch {};
-        if (self.weights.mm_input_proj_w) |t| debug.saveTensor(io, allocator, subdir, "zllama_audio_00_mm_input_proj_weight.json", t) catch {};
     }
 };

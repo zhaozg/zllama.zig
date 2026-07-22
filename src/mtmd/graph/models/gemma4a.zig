@@ -124,8 +124,6 @@ pub fn buildGraphEx(
     // Transpose to frame-major layout [n_mel, n_frames, 1, 1]
     cur = ggml.transpose(ctx, cur);
     cur = ggml.cont(ctx, cur);
-    cur.setName("debug_audio_04_encoder_input");
-    ggml.setOutput(cur);
 
     // 2. Subsampling Conv2D (2 layers, stride=2, padding=1)
     for (0..2) |i| {
@@ -145,27 +143,14 @@ pub fn buildGraphEx(
             }
 
             cur = cur.relu(ctx);
-
-            // Debug output for each conv layer (matching C++)
-            if (i == 0) {
-                cur.setName("debug_audio_conv2d_0_output");
-                ggml.setOutput(cur);
-            } else {
-                cur.setName("debug_audio_conv2d_1_output");
-                ggml.setOutput(cur);
-            }
         }
     }
 
     // 3. Flatten: [freq, time, ch, 1] -> [ch*freq, time]
     cur = cur.permute(ctx, 1, 2, 0, 3).cont(ctx);
-    cur.setName("debug_audio_after_cont");
-    ggml.setOutput(cur);
 
     const flat_dim0 = cur.ne()[0] * cur.ne()[1];
     cur = cur.reshape2d(ctx, flat_dim0, cur.ne()[2]);
-    cur.setName("debug_audio_flatten_output");
-    ggml.setOutput(cur);
 
     log.debug("sscp_inp_proj_w={any}, sscp_inp_proj_b={any}", .{ w.sscp_inp_proj_w, w.sscp_inp_proj_b });
     // 4. Input projection to Conformer embedding dim
@@ -175,8 +160,6 @@ pub fn buildGraphEx(
             cur = cur.add(ctx, proj_b);
         }
     }
-    cur.setName("debug_audio_input_proj_output");
-    ggml.setOutput(cur);
 
     const n_pos = cur.ne()[1];
 
@@ -221,10 +204,6 @@ pub fn buildGraphEx(
                 cur = try graph.buildNorm(ctx, cur, post_norm, null, .rms_norm, norm_eps, il_i32);
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
-        }
-        if (il == 0) {
-            residual.setName("debug_audio_half_step_1_output");
-            ggml.setOutput(residual);
         }
 
         // Chunked local self-attention with RPE
@@ -328,10 +307,6 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, x);
         }
-        if (il == 0) {
-            residual.setName("debug_audio_self_attention_with_RPE_output");
-            ggml.setOutput(residual);
-        }
 
         // Convolution Module (GLU + depthwise conv)
         // conv_pw1: [n_embd, n_pos] -> [intermediate, n_pos] (intermediate=2*n_embd for GLU)
@@ -352,10 +327,6 @@ pub fn buildGraphEx(
             var x_conv = buildMMWithClamp(ctx, layer.conv_pw1_w.?, cur, clamp_map);
             // x_conv shape: [intermediate=2048, n_pos]
 
-            if (il == 0) {
-                cur.setName("debug_audio_conv_build_normal_output");
-                ggml.setOutput(cur);
-            }
             // GLU gate: split intermediate dim in half
             // GLU
             // {
@@ -379,11 +350,6 @@ pub fn buildGraphEx(
                 // x_conv shape: [n_pos, 1024]
             }
 
-            if (il == 0) {
-                x_conv.setName("debug_audio_conv_glu_output");
-                ggml.setOutput(x_conv);
-            }
-
             // Causal depthwise Conv1D via ggml_ssm_conv (pad+roll for left-only padding).
             // C++ (gemma4a.cpp:278-283):
             //   x = ggml_pad(ctx0, x, 4, 0, 0, 0);
@@ -397,11 +363,6 @@ pub fn buildGraphEx(
             x_conv = x_conv.ssmConv(ctx, layer.conv_dw_w.?);
             if (layer.conv_dw_b) |dw_b| {
                 x_conv = x_conv.add(ctx, dw_b);
-            }
-
-            if (il == 0) {
-                x_conv.setName("debug_audio_conv_dw_output");
-                ggml.setOutput(x_conv);
             }
 
             // C++ (gemma4a.cpp:286-288):
@@ -418,11 +379,6 @@ pub fn buildGraphEx(
             // x_conv shape after ssmConv: [d_inner=1024, n_t=n_pos, 1] = [1024, n_pos]
             // This is already in [d_gate, n_pos] layout, no need to transpose back
 
-            if (il == 0) {
-                x_conv.setName("debug_audio_conv_dw_norm_silu_output");
-                ggml.setOutput(x_conv);
-            }
-
             // conv_pw2: project back to n_embd (1024 -> 1024)
             // C++ (gemma4a.cpp:291): x = build_mm(layer.conv_pw2_w, x);
             // NOTE: gemma4a.cpp does NOT add conv_pw2_b here (unlike conformer.cpp)
@@ -430,10 +386,6 @@ pub fn buildGraphEx(
             // x_conv shape: [1024, n_pos] = [n_embd, n_pos] — matches residual
 
             residual = residual.add(ctx, x_conv);
-        }
-        if (il == 0) {
-            residual.setName("debug_audio_convolution_output");
-            ggml.setOutput(residual);
         }
 
         // FFN 2 (half-step) — with clamp, matching C++ clip_graph_gemma4a::build_mm
@@ -445,26 +397,13 @@ pub fn buildGraphEx(
             }
             residual = residual.add(ctx, cur.scale(ctx, res_weight));
         }
-        if (il == 0) {
-            residual.setName("debug_audio_half_step_2_output");
-            ggml.setOutput(residual);
-        }
 
         // Layer output norm
         cur = if (layer.ln_2_w) |ln2|
             try graph.buildNorm(ctx, residual, ln2, null, .rms_norm, norm_eps, il_i32)
         else
             residual;
-
-        if (il == 0 and layer.ln_2_w != null) {
-            cur.setName("debug_audio_layer_0_norm_output");
-            ggml.setOutput(cur);
-        }
     }
-
-    // Always name and mark conformer blocks output (matching C++)
-    cur.setName("debug_audio_conformer_blocks_output");
-    ggml.setOutput(cur);
 
     // 7. Output projection
     if (w.audio_out_proj_w) |out_w| {
@@ -476,18 +415,14 @@ pub fn buildGraphEx(
 
     // 8. Multimodal embedder
     cur = cur.rmsNorm(ctx, norm_eps);
-    cur.setName("mm_norm");
-    ggml.setOutput(cur);
     if (w.mm_soft_emb_norm_w) |sn_w| {
         cur = cur.mul(ctx, sn_w);
-        cur.setName("mm_norm_scaled");
-        ggml.setOutput(cur);
     }
     if (w.mm_input_proj_w) |proj_w| {
         cur = buildMMWithClamp(ctx, proj_w, cur, clamp_map);
-        cur.setName("mm_proj");
-        ggml.setOutput(cur);
     }
+    cur.setName("mm_output");
+    ggml.setOutput(cur);
 
     gf.buildForwardExpand(cur);
 

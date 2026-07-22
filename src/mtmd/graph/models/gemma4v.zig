@@ -168,13 +168,7 @@ pub fn loadWeights(io: std.Io, alloc: std.mem.Allocator, gf: *const gguf.GGUFFil
         log.debug("  -> ViT layer {d}/{d} loaded successfully", .{ il + 1, n });
     }
     log.info("Gemma4V: {d} layers loaded", .{n});
-
-    if (w.layers[0].ln_1_w) |t| {
-        try graph.debug.saveTensor(io, alloc, "debug_vision", "zllama_vision_04a_1_layer0_ln_1_w.json", t);
-    }
-    if (w.layers[0].ln_1_b) |t| {
-        try graph.debug.saveTensor(io, alloc, "debug_vision", "zllama_vision_04a_2_layer0_ln_1_b.json", t);
-    }
+    _ = io;
 }
 
 pub fn loadClampInfo(io: std.Io, allocator: std.mem.Allocator, gf: *const gguf.GGUFFile, w: *VisionEncoderWeights) anyerror!void {
@@ -421,7 +415,6 @@ fn fillInpRawFromImage(
         }
     }
 
-    std.debug.print("inp_raw: {} {} {} {}\n", .{ dst[0], dst[1], dst[2], dst[3] });
     try inp_raw.dataSet(f32, dst);
 }
 
@@ -475,12 +468,7 @@ pub fn buildGraph(
     //       ggml_set_name(inp_raw, "inp_raw_scaled");
     //       ggml_set_output(inp_raw);
     // ========================================================================
-    log.debug("Step 1: scale_bias", .{});
     var cur = inp_raw.scaleBias(ctx, 2.0, -1.0);
-    cur.setName("inp_raw_scaled");
-    ggml.setOutput(cur);
-
-    log.debug("*** n_patches={} n_embd={} n_batch={} patch_size={}", .{ np, ne, 1, ps });
 
     // ========================================================================
     // Step 3: Conv2D patch embedding
@@ -503,8 +491,6 @@ pub fn buildGraph(
     // ========================================================================
     cur = cur.reshape3d(ctx, np, ne, 1);
     cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
-    cur.setName("inp_final");
-    ggml.setOutput(cur);
 
     // ========================================================================
     // Step 5: 2D Position embeddings (x/y lookup)
@@ -536,11 +522,8 @@ pub fn buildGraph(
     const nb: usize = @intCast(ggml.Type.rowSize(pe.dataType(), @intCast(ne)));
     const tx = pe.view2d(ctx, ne, psz, nb, 0);
     const ty = pe.view2d(ctx, ne, psz, nb, @as(usize, @intCast(psz)) * nb);
-    log.debug("Step 3: position embeddings (psz={d})", .{psz});
     cur = cur.add(ctx, ggml.getRows(ctx, tx, pos_x));
     cur = cur.add(ctx, ggml.getRows(ctx, ty, pos_y));
-    cur.setName("pos_embd");
-    ggml.setOutput(cur);
 
     // Create Gemma4VData struct for passing to callbacks
     const gemma4v_data = Gemma4VData{
@@ -568,8 +551,6 @@ pub fn buildGraph(
             .build_mm = buildMMWithClamp,
             .data = @ptrCast(@constCast(&gemma4v_data)),
         });
-    cur.setName("vit_output");
-    ggml.setOutput(cur);
 
     // ========================================================================
     // Step 7: Pool 2D (avg, kernel=n_merge) + scale(sqrt(n_embd))
@@ -585,33 +566,18 @@ pub fn buildGraph(
     //       cb(cur, "pooled", -1);
     //       ggml_set_output(cur);
     // ========================================================================
-    log.debug("Step 5: pool2d (n_merge={d})", .{p.n_merge});
     const ks: i32 = @intCast(p.n_merge);
     if (ks > 0) {
         cur = ggml.cont4d(ctx, ggml.transpose(ctx, cur), npx, npy, ne, 1);
-
-        cur.setName("pooled_cont_4d");
-        ggml.setOutput(cur);
-
         cur = cur.pool2d(ctx, @intCast(@intFromEnum(ggml.PoolOp.avg)), ks, ks, ks, ks, 0.0, 0.0);
 
-        cur.setName("pooled_pool_2d");
-        ggml.setOutput(cur);
 
         const ox: i64 = @divTrunc(npx, ks);
         const oy: i64 = @divTrunc(npy, ks);
         cur = cur.reshape3d(ctx, ox * oy, ne, 1);
-
-        cur.setName("pooled_reshape_3d");
-        ggml.setOutput(cur);
         cur = ggml.cont(ctx, ggml.transpose(ctx, cur));
 
-        cur.setName("pooled_cont");
-        ggml.setOutput(cur);
-
         cur = cur.scale(ctx, @sqrt(@as(f32, @floatFromInt(ne))));
-        cur.setName("pooled");
-        ggml.setOutput(cur);
     }
 
     // ========================================================================
@@ -623,7 +589,6 @@ pub fn buildGraph(
     //         ggml_set_output(cur);
     //     }
     // ========================================================================
-    log.debug("Step 6: standardization (std_bias={any} std_scale={any})", .{ w.std_bias != null, w.std_scale != null });
     if (w.std_bias != null and w.std_scale != null) {
         cur = cur.sub(ctx, w.std_bias.?);
         cur = cur.mul(ctx, w.std_scale.?);
@@ -638,7 +603,6 @@ pub fn buildGraph(
     //       cb(cur, "mm_output", -1);
     //       ggml_set_output(cur);
     // ========================================================================
-    log.debug("Step 7: multimodal embedder", .{});
     cur = cur.rmsNorm(ctx, p.eps);
     // NOTE: gemma4v does NOT use mm_soft_emb_norm_w
     if (w.mm_input_proj_w) |proj| {

@@ -16,59 +16,6 @@ const VisionEncoderWeights = types.VisionEncoderWeights;
 const log = std.log.scoped(.vision_encoder);
 
 pub const VisionEncoderBackend = graph.VisionEncoderBackend;
-/// Debug tensor entries: (tensor_name_in_graph, output_filename).
-///   1. inp_raw_scaled  — input after scale+bias (patches * 2 - 1)
-///   2. inp             — after Conv2D patch embedding
-///   3. pos_embd        — after adding 2D position embeddings
-///   4. vit_output      — after ViT blocks (with 2D RoPE)
-///   5. pooled          — after Pool 2D (avg, kernel=n_merge) + scale(sqrt(n_embd))
-///   6. std_scaled      — after standardization: (hidden - std_bias) * std_scale
-///   7. projected       — after multimodal embedder (rms_norm + mm_input_proj)
-///   8. mm_output       — final output tensor
-///
-const debug_entries = [_]encoder_debug.DebugTensorEntry{
-    .{ .tensor_name = "inp_raw", .filename = "zllama_vision_00_inp_raw.json", .is_input = true },
-    .{ .tensor_name = "inp_raw_scaled", .filename = "zllama_vision_01_inp_raw_scaled.json" },
-    .{ .tensor_name = "inp_final", .filename = "zllama_vision_02z_inp_final.json" },
-    .{ .tensor_name = "pos_embd", .filename = "zllama_vision_03_pos_embd.json" },
-    .{ .tensor_name = "pre_ln", .filename = "zllama_vision_04a0_pre_ln.json" },
-
-    .{ .tensor_name = "layer_out-0",        .filename = "zllama_vision_04d_layer_0_out.json" },
-    .{ .tensor_name = "layer_out-1",        .filename = "zllama_vision_04d_layer_1_out.json" },
-    .{ .tensor_name = "layer_out-2",        .filename = "zllama_vision_04d_layer_2_out.json" },
-
-    .{ .tensor_name = "layer_inp_normed-3", .filename = "zllama_vision_04d_layer_3_a_layer_inp_normed.json"},
-    .{ .tensor_name = "attn_out-3",         .filename = "zllama_vision_04d_layer_3_g_attn_out.json"},
-    .{ .tensor_name = "attn_post_normed-3", .filename = "zllama_vision_04d_layer_3_k_attn_post_normed.json"},
-    .{ .tensor_name = "ffn_post_normed-3",  .filename = "zllama_vision_04d_layer_3_n_ffn_post_normed.json"},
-
-    .{ .tensor_name = "layer_out-3",        .filename = "zllama_vision_04d_layer_3_out.json" },
-    .{ .tensor_name = "layer_out-4",        .filename = "zllama_vision_04d_layer_4_out.json" },
-    .{ .tensor_name = "layer_out-5",        .filename = "zllama_vision_04d_layer_5_out.json" },
-    .{ .tensor_name = "layer_out-6",        .filename = "zllama_vision_04d_layer_6_out.json" },
-    .{ .tensor_name = "layer_out-7",        .filename = "zllama_vision_04d_layer_7_out.json" },
-    .{ .tensor_name = "layer_out-8",        .filename = "zllama_vision_04d_layer_8_out.json" },
-    .{ .tensor_name = "layer_out-9",        .filename = "zllama_vision_04d_layer_9_out.json" },
-    .{ .tensor_name = "layer_out-10",       .filename = "zllama_vision_04d_layer_a_out.json" },
-    .{ .tensor_name = "layer_out-11",       .filename = "zllama_vision_04d_layer_b_out.json" },
-    .{ .tensor_name = "layer_out-12",       .filename = "zllama_vision_04d_layer_c_out.json" },
-    .{ .tensor_name = "layer_out-13",       .filename = "zllama_vision_04d_layer_d_out.json" },
-    .{ .tensor_name = "layer_out-14",       .filename = "zllama_vision_04d_layer_e_out.json" },
-    .{ .tensor_name = "layer_out-15",       .filename = "zllama_vision_04d_layer_f_out.json" },
-
-    .{ .tensor_name = "layer_out_scaled-0", .filename = "zllama_vision_04e_layer_out_scaled.json" },
-
-    .{ .tensor_name = "vit_out_scaled", .filename = "zllama_vision_04g_vit_out_scaled.json" },
-    .{ .tensor_name = "vit_output", .filename = "zllama_vision_04z_vit_output.json" },
-
-    .{ .tensor_name = "pooled_cont_4d",     .filename = "zllama_vision_05a_pooled-cont-4d.json"},
-    .{ .tensor_name = "pooled_pool_2d",     .filename = "zllama_vision_05b_pooled-pool-2d.json"},
-    .{ .tensor_name = "pooled_reshape_3d",  .filename = "zllama_vision_05c_pooled-reshape-3d.json"},
-    .{ .tensor_name = "pooled_cont",        .filename = "zllama_vision_05d_pooled-cont.json"},
-    .{ .tensor_name = "pooled",             .filename = "zllama_vision_05z_pooled.json"},
-
-    .{ .tensor_name = "mm_output", .filename = "zllama_vision_07_mm_output.json" },
-};
 
 pub const VisionEncoder = struct {
     params: VisionEncoderParams,
@@ -303,19 +250,6 @@ pub const VisionEncoder = struct {
     pub fn deinit(self: *VisionEncoder, allocator: std.mem.Allocator) void {
         self.weights.clamp_info_map.deinit();
         allocator.free(self.weights.layers);
-    }
-
-    /// under a "debug_vision" subdirectory. The saved tensors correspond to key stages
-    /// of the Gemma4V vision encoder pipeline:
-    ///
-    /// Additionally, weight tensors (patch_embeddings, position_embeddings,
-    /// Save debug data for vision encoder alignment analysis with llama.cpp.
-    /// Uses shared encoder_debug.saveDebugTensors for graph tensors.
-    pub fn saveDebugData(self: *const VisionEncoder, io: std.Io, allocator: std.mem.Allocator, cgraph: *ggml.CGraph) void {
-        _ = self;
-        const subdir = "debug_vision";
-
-        encoder_debug.saveDebugTensors(io, allocator, subdir, &debug_entries, cgraph, log);
     }
 };
 

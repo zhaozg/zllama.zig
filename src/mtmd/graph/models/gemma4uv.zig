@@ -416,7 +416,6 @@ pub fn buildGraph(
     // We use buildMMWithClamp for safety; if no clamp info exists it falls through to plain mul_mat.
     if (w.mm_input_proj_w) |proj_w| {
         cur = buildMMWithClamp(ctx, proj_w, cur, &w.clamp_info_map);
-        cur.setName("mm_proj");
     }
 
     cur.setName("mm_output");

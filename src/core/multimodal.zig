@@ -162,22 +162,10 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
 
     vision_ctx.setNoAlloc(true);
 
-    if (mm_mgr.vision_encoder) |encoder| {
-        encoder.saveDebugData(io, ectx.allocator, vision_graph);
-    }
-
     logger.debug("generateWithImage: Step 5 - computing vision graph...", .{});
     const n_vision_tokens: i32 = @intCast(vision_embeddings.ne()[1]);
     const n_embd_val: usize = @intCast(vision_embeddings.ne()[0]);
     logger.debug("Vision encoder output: shape=[{d}, {d}]", .{ n_embd_val, n_vision_tokens });
-
-    {
-        const vision_data = try vision_embeddings.dataGet(f32, ectx.allocator);
-        defer ectx.allocator.free(vision_data);
-        debug.saveData(io, "debug_vision", "zllama_vision_embeddings.json", "vision_embeddings", vision_data) catch |err| {
-            logger.info("Save vision embeddings data fail: {}", .{err});
-        };
-    }
 
     if (ectx.arch == .qwen3vl) {
         logger.debug("  Qwen3VL: allowing encoder dim {d}", .{n_embd_val});
@@ -239,10 +227,6 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     defer ectx.allocator.free(wav_result.samples);
     if (wav_result.samples.len == 0) return error.EmptyAudio;
 
-    debug.saveData(io, "debug_audio", "zllama_audio_01_samples.json", "audio_mel", wav_result.samples) catch |err| {
-        logger.info("Save audio mel data fail: {}", .{err});
-    };
-
     const is_gemma4ua = mm_mgr.audio_encoder != null and
         std.mem.eql(u8, ectx.capabilities.audio_encoder_type, "gemma4ua");
 
@@ -259,18 +243,10 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
         logger.info("Gemma4UA preprocessing: frame_size={d}, samples={d}", .{ frame_size, wav_result.samples.len });
         mel = try mtmd.audio_mod.processRawWaveform(ectx.allocator, wav_result.samples, frame_size);
         mel_owned = true;
-
-        debug.saveData(io, "debug_audio", "zllama_audio_02_raw_waveform.json", "audio_raw", mel.data) catch |err| {
-            logger.info("Save audio raw waveform data fail: {}", .{err});
-        };
     } else {
         const preprocess_params = mtmd.audio_mod.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else mtmd.audio_mod.AUDIO_N_MEL_BINS);
         mel = try mtmd.audio_mod.computeMelSpectrogram(io, ectx.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
         mel_owned = true;
-
-        debug.saveData(io, "debug_audio", "zllama_audio_02_mel_conformer.json", "audio_mel", mel.data) catch |err| {
-            logger.info("Save audio mel data fail: {}", .{err});
-        };
     }
     defer if (mel_owned) mel.deinit();
 
@@ -304,22 +280,8 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
 
     audio_ctx.setNoAlloc(true);
 
-    debug.saveTensorFromGraph(io, ectx.allocator, "debug_audio", "zllama_audio_encoder_input.json", "debug_audio_encoder_input", audio_graph) catch |err| {
-        logger.info("Save audio debug_audio_encoder_input data fail: {}", .{err});
-    };
-    if (mm_mgr.audio_encoder) |enc| {
-        enc.saveDebugData(io, ectx.allocator, audio_graph);
-    }
     const n_audio_tokens: i32 = @intCast(audio_embeddings.ne()[1]);
     const n_embd_val: usize = @intCast(audio_embeddings.ne()[0]);
-
-    {
-        const audio_data = try audio_embeddings.dataGet(f32, ectx.allocator);
-        defer ectx.allocator.free(audio_data);
-        debug.saveData(io, "debug_audio", "zllama_audio_embeddings.json", "audio_embeddings", audio_data) catch |err| {
-            logger.info("Save audio embeddings data fail: {}", .{err});
-        };
-    }
 
     logger.debug("Audio encoder output: shape=[{d}, {d}]", .{ n_embd_val, n_audio_tokens });
     if (n_embd_val != @as(usize, @intCast(ectx.params.n_embd))) {
