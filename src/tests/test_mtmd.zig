@@ -1,4 +1,6 @@
 //! Tests for the mtmd multi-modal module
+//!
+//! 所有 mtmd 功能通过公共 API（mtmd.*）访问，不直接访问内部子模块。
 const std = @import("std");
 const testing = std.testing;
 const model = @import("model");
@@ -40,7 +42,8 @@ test "Caps: default" {
 test "DecoderPos: normal" {
     const img = mtmd.ImageTokens{ .nx = 3, .ny = 1, .pos = .normal };
     var positions: [3]mtmd.DecoderPos = undefined;
-    mtmd.helper.imageGetDecoderPos(img, 10, &positions);
+    // 通过 mtmd 公共 API 访问 imageGetDecoderPos
+    mtmd.imageGetDecoderPos(img, 10, &positions);
     try testing.expectEqual(@as(u32, 10), positions[0].t);
 }
 
@@ -48,7 +51,8 @@ test "tokenize: text only" {
     var tc = try createTestContext(testing.allocator);
     defer tc.deinit();
     const input = mtmd.InputText{ .text = "Hello", .add_special = false };
-    var chunks = try mtmd.tokenize.tokenize(tc.ctx, undefined, testing.allocator, input, &.{});
+    // 通过 mtmd 公共 API 访问 tokenize
+    var chunks = try mtmd.tokenize(tc.ctx, undefined, testing.allocator, input, &.{});
     defer chunks.deinit();
     try testing.expectEqual(@as(usize, 1), chunks.size());
 }
@@ -57,14 +61,14 @@ test "tokenize: marker mismatch" {
     var tc = try createTestContext(testing.allocator);
     defer tc.deinit();
     const input = mtmd.InputText{ .text = "<__media__>", .add_special = false };
-    try testing.expectError(error.MarkerBitmapMismatch, mtmd.tokenize.tokenize(tc.ctx, undefined, testing.allocator, input, &.{}));
+    try testing.expectError(error.MarkerBitmapMismatch, mtmd.tokenize(tc.ctx, undefined, testing.allocator, input, &.{}));
 }
 
 test "tokenize: image marker" {
     var tc = try createTestContext(testing.allocator);
     defer tc.deinit();
     const input = mtmd.InputText{ .text = "Look: <__media__>", .add_special = false };
-    var chunks = try mtmd.tokenize.tokenize(tc.ctx, undefined, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderImage(224, 224)});
+    var chunks = try mtmd.tokenize(tc.ctx, undefined, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderImage(224, 224)});
     defer chunks.deinit();
     try testing.expect(chunks.size() >= 2);
 }
@@ -73,7 +77,7 @@ test "tokenize: audio marker" {
     var tc = try createTestContextAudio(testing.allocator);
     defer tc.deinit();
     const input = mtmd.InputText{ .text = "Listen: <__media__>", .add_special = false };
-    var chunks = try mtmd.tokenize.tokenize(tc.ctx, undefined, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderAudio(16000)});
+    var chunks = try mtmd.tokenize(tc.ctx, undefined, testing.allocator, input, &.{mtmd.Bitmap.initPlaceholderAudio(16000)});
     defer chunks.deinit();
     try testing.expect(chunks.size() >= 2);
 }

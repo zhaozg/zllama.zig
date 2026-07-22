@@ -560,6 +560,11 @@ pub fn build(b: *std.Build) void {
     mm_vision_mod.addImport("preprocess", mm_preprocess_mod);
 
     // mtmd 子模块（helper 和 tokenize 通过 mm 模块导入 mod.zig）
+    //
+    // 注意：helper.zig 不再依赖 engine_common（L6 层）。
+    // evalChunks 通过 computeGraphFn 回调参数接收 ggml 计算图执行能力，
+    // 由调用者（L6/L7 层）注入 computeGraph 实现。
+    // 这样设计保持了 DAG 约束的完整性（L5 不依赖 L6）。
     {
         const helper_mod = b.createModule(.{
             .root_source_file = b.path("src/mtmd/helper.zig"),
@@ -571,7 +576,8 @@ pub fn build(b: *std.Build) void {
         helper_mod.addImport("mm", mm_manager_mod);
         helper_mod.addImport("preprocess", mm_preprocess_mod);
         helper_mod.addImport("stb_image", stb_image_mod);
-        helper_mod.addImport("engine_common", engine_common_mod);
+        // helper.zig 不再依赖 engine_common（L6 层）
+        // computeGraph 能力通过 evalChunks 的 computeGraphFn 回调注入
         mm_manager_mod.addImport("helper", helper_mod);
         mm_audio_mod.addImport("helper", helper_mod);
     }
@@ -587,6 +593,7 @@ pub fn build(b: *std.Build) void {
         tokenize_mod.addImport("tokenizer", tokenizer_mod);
         tokenize_mod.addImport("mm", mm_manager_mod);
         tokenize_mod.addImport("preprocess", mm_preprocess_mod);
+        tokenize_mod.addImport("debug_save_chunks", debug_save_chunks_mod);
         mm_manager_mod.addImport("tokenize", tokenize_mod);
     }
 

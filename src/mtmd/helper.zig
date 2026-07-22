@@ -3,6 +3,13 @@
 //! Utility functions for evaluating chunks, loading media from files,
 //! getting decoder positions for M-RoPE.
 //!
+//! ## 设计说明
+//!
+//! 本模块位于 L5 层，不依赖 L6 层（引擎层）。
+//! `evalChunks` 函数通过 `computeGraphFn` 回调参数接收 ggml 计算图执行能力，
+//! 由调用者（L6/L7 层）注入 `computeGraph` 实现。
+//! 这样设计消除了对 engine_common 的直接依赖，保持了 DAG 约束的完整性。
+//!
 //! Reference: deps/llama.cpp/tools/mtmd/mtmd-helper.h
 
 const std = @import("std");
@@ -10,12 +17,6 @@ const ggml = @import("ggml");
 const mtmd = @import("mm");
 const preprocess = @import("preprocess");
 const stb_image = @import("stb_image");
-// NOTE: helper.zig (L5) imports engine_common (L6). This is an intentional exception
-// to the L5→L6 constraint: computeGraph is the fundamental ggml graph execution
-// primitive, and encoder graphs must be computed in the L4/L5 layer before the
-// caller at L6/L7 can read the output tensors. Without this, every caller would
-// need to inline the Gallocr+compute logic.
-const engine_common = @import("engine_common");
 
 const log = std.log.scoped(.mtmd_helper);
 
@@ -24,9 +25,13 @@ const log = std.log.scoped(.mtmd_helper);
 // ============================================================================
 
 /// Evaluate all chunks in sequence.
+///
 /// - Text: call decodeTextFn(tokens, n_past) → new n_past
 /// - Image/audio: encode via encoder → extract embeddings →
 ///   call decodeMediaFn(embeddings, n_embd, n_tokens, n_past, non_causal) → new n_past
+///
+/// `computeGraphFn` 是用于执行 ggml 计算图的回调函数，由调用者注入。
+/// 签名: fn (cgraph: *ggml.CGraph, n_threads: i32) anyerror!void
 pub fn evalChunks(
     ctx: *mtmd.MtmdContext,
     io: std.Io,
@@ -36,6 +41,7 @@ pub fn evalChunks(
     n_threads: i32,
     decodeTextFn: anytype,
     decodeMediaFn: anytype,
+    computeGraphFn: anytype,
 ) !u32 {
     var cur_n_past = n_past;
     var idx: usize = 0;
@@ -90,13 +96,10 @@ pub fn evalChunks(
 
                         log.debug("evalChunks: encode returned, out_tensor ne={any}", .{out_tensor.ne()});
 
-                        // Compute the vision graph
+                        // Compute the vision graph via injected callback
                         log.debug("evalChunks: computing vision graph...", .{});
                         compute_ctx.setNoAlloc(false);
-                        const buft = ggml.backendCpuBufferType();
-                        var gallocr = try ggml.Gallocr.init(buft);
-                        defer gallocr.free();
-                        _ = try engine_common.computeGraph(cgraph, n_threads, gallocr);
+                        try computeGraphFn(cgraph, n_threads);
                         log.debug("evalChunks: vision graph computed successfully", .{});
 
                         const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
@@ -157,12 +160,9 @@ pub fn evalChunks(
 
                     const out_tensor = try enc.encodeRaw(io, compute_ctx, cgraph, mel_f32.?, mel_bins, mel_frames, n_threads);
 
-                    // Compute the audio graph
+                    // Compute the audio graph via injected callback
                     compute_ctx.setNoAlloc(false);
-                    const buft = ggml.backendCpuBufferType();
-                    var gallocr = try ggml.Gallocr.init(buft);
-                    defer gallocr.free();
-                    _ = try engine_common.computeGraph(cgraph, n_threads, gallocr);
+                    try computeGraphFn(cgraph, n_threads);
 
                     const n_embd_out: usize = @intCast(out_tensor.ne()[0]);
                     const n_tokens_out: usize = @intCast(out_tensor.ne()[1]);

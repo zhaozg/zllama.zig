@@ -1,9 +1,43 @@
 //! mtmd — Multi-modal decoding module
 //!
-//! 高层多模态上下文，包装 MultiModalManager 并提供：
-//! - 媒体标记管理（<|image|> / <|audio|> 等）
-//! - Chunk 化输入处理（text / image / audio 混合）
-//! - 能力检测与查询
+//! 多模态功能组件的**暴露面与集成接口**。
+//!
+//! 本模块作为 mtmd 功能组件的公共门面（Facade），对外提供明确、必要的集成接口。
+//! 外部模块（如 src/core/multimodal.zig、src/core/engine.zig、src/core/loader.zig）
+//! 应**仅通过本模块的公共 API** 与 mtmd 交互，不得直接访问 mtmd 内部子模块。
+//!
+//! ## 设计原则
+//!
+//! - **接口收敛**：只暴露必要的公共类型和函数，内部实现细节对外部不可见。
+//! - **分层清晰**：本模块位于 L5 层，依赖 L0-L4 层，不依赖 L6 层（引擎层）。
+//! - **职责单一**：本模块负责多模态编码器的生命周期管理、媒体标记解析、chunk 化输入处理。
+//!   引擎层的多模态编排逻辑（prefill、decode 循环）在 src/core/multimodal.zig 中实现。
+//!
+//! ## 公共 API 概览
+//!
+//! ### 核心类型
+//! - `MultiModalManager` — 多模态管理器，管理视觉/音频编码器的生命周期
+//! - `MtmdContext` — 多模态上下文，提供媒体标记解析、chunk 化输入处理
+//! - `InputChunks` / `InputChunk` — 输入数据块（text/image/audio 混合）
+//! - `Bitmap` / `ImageTokens` — 图像/音频数据表示
+//! - `ChunkType` / `PosType` / `DecoderPos` — 枚举类型
+//! - `ContextParams` / `Caps` — 配置参数
+//! - `MediaInput` / `MediaType` — 多模态输入类型
+//!
+//! ### 核心函数
+//! - `MultiModalManager.detectFromGGUF()` — 从 GGUF 元数据检测多模态能力
+//! - `MultiModalManager.init()` — 初始化多模态管理器
+//! - `MultiModalManager.encodeMedia()` — 编码单个多模态输入
+//! - `MtmdContext.init()` — 初始化多模态上下文
+//! - `MtmdContext.initFromPath()` — 从 mmproj 文件路径初始化
+//! - `tokenize()` — 按媒体标记分割文本并生成 InputChunks
+//! - `evalChunks()` — 评估所有 chunks（编码媒体 + 解码文本）
+//! - `getCapFromFile()` — 从 mmproj 文件获取能力信息
+//!
+//! ### 子模块（通过本模块重新导出）
+//! - `preprocess` — 图像预处理（resize、归一化等）
+//! - `vision` — 视觉编码器模块
+//! - `audio` — 音频编码器模块
 //!
 //! Reference: deps/llama.cpp/tools/mtmd/mtmd.h
 
@@ -18,13 +52,18 @@ const graph = @import("graph");
 
 const log = std.log.scoped(.mtmd);
 
-pub const audio_mod = audio;
-pub const vision_mod = vision;
-pub const helper = @import("helper");
-pub const tokenize = @import("tokenize");
-pub const debug_save_chunks = @import("debug_save_chunks");
+// ============================================================================
+// 子模块重新导出（公共 API）
+// ============================================================================
 
-pub const graph_mod = graph;
+/// 图像预处理模块（resize、归一化、动态分辨率计算等）
+pub const preprocess = @import("preprocess");
+
+/// 视觉编码器模块（VisionEncoder、VisionEncoderBackend 等）
+pub const vision_mod = vision;
+
+/// 音频编码器模块（AudioEncoder、AudioEncoderBackend 等）
+pub const audio_mod = audio;
 
 // ============================================================================
 // 基础类型定义
@@ -105,9 +144,6 @@ pub const ImageTokens = struct {
 
     pub fn nTokens(self: ImageTokens) u32 {
         if (self.n_tokens > 0) return self.n_tokens;
-        // Fallback: compute from pixel dimensions (legacy path).
-        // This is incorrect when nx/ny are pixel dimensions != token grid,
-        // but works because evalChunks gets actual n_tokens from encoder output.
         return switch (self.pos) {
             .hunyuanvl => (self.nx + 1) * self.ny + 2,
             else => self.nx * self.ny,
@@ -175,7 +211,6 @@ pub const InputChunks = struct {
         for (self.entries.items) |*chunk| {
             if (chunk.tokens_text) |t| self.allocator.free(t);
             if (chunk.mel_data) |m| self.allocator.free(m);
-            // Free raw_pixels allocated by resizeToU8 in addImageChunk (tokenize.zig)
             if (chunk.tokens_image) |*img| {
                 if (img.raw_pixels) |rp| self.allocator.free(@constCast(rp));
             }
@@ -247,7 +282,6 @@ pub const MultiModalManager = struct {
         const has_vision_meta = gf.getBool("clip.has_vision_encoder") orelse false;
         const has_audio_meta = gf.getBool("clip.has_audio_encoder") orelse false;
 
-        // 读取 projector_type（通用键，或模态特定键）
         const proj_type = gf.getString("clip.projector_type") orelse "";
         const vision_proj_type = gf.getString("clip.vision.projector_type") orelse
             gf.getString("gemma4.vision.projector_type") orelse "";
@@ -258,18 +292,15 @@ pub const MultiModalManager = struct {
         // 2. 视觉编码器检测
         // ====================================================================
         if (has_vision_meta) {
-            // 元数据明确声明有视觉编码器
             caps.has_vision = true;
             if (vision_proj_type.len > 0) {
                 caps.vision_encoder_type = vision_proj_type;
             } else if (proj_type.len > 0) {
                 caps.vision_encoder_type = proj_type;
             } else {
-                // 元数据中缺少 projector_type 键 — 回退到张量名启发式检测
                 caps.vision_encoder_type = detectVisionEncoderByTensors(gf);
             }
         } else {
-            // 回退：通过张量名称启发式检测（向后兼容旧 GGUF 文件）
             if (gf.findTensor("v.patch_embd.weight") != null or
                 gf.findTensor("v.position_embd.weight") != null or
                 gf.findTensor("mm.soft_emb_norm.weight") != null)
@@ -283,7 +314,6 @@ pub const MultiModalManager = struct {
         // 3. 音频编码器检测
         // ====================================================================
         if (has_audio_meta) {
-            // 元数据明确声明有音频编码器
             caps.has_audio = true;
             if (audio_proj_type.len > 0) {
                 caps.audio_encoder_type = audio_proj_type;
@@ -295,7 +325,6 @@ pub const MultiModalManager = struct {
             caps.audio_sample_rate = 16000;
             if (gf.getU32("gemma4.audio.sample_rate")) |v| caps.audio_sample_rate = @intCast(v);
         } else {
-            // 回退：通过张量名称启发式检测
             if (gf.findTensor("a.conv1d.0.weight") != null or
                 gf.findTensor("a.input_projection.weight") != null or
                 gf.findTensor("a.pre_encode.out.weight") != null or
@@ -309,8 +338,6 @@ pub const MultiModalManager = struct {
                 !caps.has_vision and
                 gf.findTensor("a.conv1d.0.weight") == null)
             {
-                // Gemma4UA: 只有 mm.input_projection.weight，没有 vision 或 conformer 张量
-                // 注意：只有当 has_vision 为 false 时才触发，避免与视觉编码器的 mm.input_projection.weight 冲突
                 caps.has_audio = true;
                 caps.audio_encoder_type = "gemma4ua";
                 caps.audio_sample_rate = 16000;
@@ -344,12 +371,6 @@ pub const MultiModalManager = struct {
         return caps;
     }
 
-    /// 通过张量名启发式检测视觉编码器类型
-    /// 按特异性从高到低匹配：
-    /// - gemma4uv: v.patch_norm.1.weight / patch_norm_1.weight（无 ViT blocks）
-    /// - qwen2vl:  v.patch_embd_1.weight（双 patch embedding，qwen2vl 特有）
-    /// - qwen3vl:  v.blk.0.attn_qkv.weight（fused QKV）
-    /// - gemma4v:  v.std_bias / v.std_scale / v.blk.0.attn_q.weight（分离 Q/K/V + 标准化参数）
     fn detectVisionEncoderByTensors(gf: *const gguf.GGUFFile) []const u8 {
         if (gf.findTensor("v.patch_norm.1.weight") != null or
             gf.findTensor("patch_norm_1.weight") != null)
@@ -362,13 +383,11 @@ pub const MultiModalManager = struct {
         if (gf.findTensor("v.blk.0.attn_qkv.weight") != null) {
             return "qwen3vl";
         }
-        // gemma4v 有标准化参数（std_bias/std_scale），qwen2vl 没有
         if (gf.findTensor("v.std_bias") != null or
             gf.findTensor("v.std_scale") != null)
         {
             return "gemma4v";
         }
-        // 分离 Q/K/V 权重，无 std_bias — 默认为 gemma4v
         if (gf.findTensor("v.blk.0.attn_q.weight") != null) {
             return "gemma4v";
         }
@@ -491,11 +510,9 @@ pub const MultiModalManager = struct {
 
 fn resolveImageMarkers(caps: *const model.ModelCapabilities) struct { beg: []const u8, end: []const u8 } {
     if (!caps.has_vision) return .{ .beg = "", .end = "" };
-    // Use dynamically configured special tokens if set; fall back to legacy defaults
     if (caps.special_tokens.img_beg.len > 0 and caps.special_tokens.img_end.len > 0) {
         return .{ .beg = caps.special_tokens.img_beg, .end = caps.special_tokens.img_end };
     }
-    // Legacy fallback (backward-compatible)
     if (std.mem.eql(u8, caps.vision_encoder_type, "gemma4v") or
         std.mem.eql(u8, caps.vision_encoder_type, "gemma4uv"))
         return .{ .beg = "<|image>", .end = "<image|>" };
@@ -507,7 +524,6 @@ fn resolveImageMarkers(caps: *const model.ModelCapabilities) struct { beg: []con
 
 fn resolveAudioMarkers(caps: *const model.ModelCapabilities) struct { beg: []const u8, end: []const u8 } {
     if (!caps.has_audio) return .{ .beg = "", .end = "" };
-    // Use dynamically configured special tokens if set; fall back to legacy defaults
     if (caps.special_tokens.aud_beg.len > 0 and caps.special_tokens.aud_end.len > 0) {
         return .{ .beg = caps.special_tokens.aud_beg, .end = caps.special_tokens.aud_end };
     }
@@ -635,3 +651,30 @@ pub fn getCapFromFile(allocator: std.mem.Allocator, mmproj_path: []const u8, io:
     const caps = MultiModalManager.detectFromGGUF(&gf);
     return .{ .inp_vision = caps.has_vision, .inp_audio = caps.has_audio };
 }
+
+// ============================================================================
+// 高层集成函数
+// ============================================================================
+
+/// 按媒体标记分割文本并生成 InputChunks。
+/// 这是 mtmd 模块对外提供的核心 tokenize 函数。
+/// 内部委托给 mtmd/tokenize.zig 实现。
+pub const tokenize = @import("tokenize").tokenize;
+
+/// 评估所有 chunks（编码媒体 + 解码文本）。
+/// 这是 mtmd 模块对外提供的核心 chunk 评估函数。
+/// 内部委托给 mtmd/helper.zig 实现。
+///
+/// 注意：此函数接收 `computeGraphFn` 回调参数，用于执行 ggml 计算图。
+/// 这样设计是为了消除 helper.zig 对 L6 层（engine_common）的直接依赖，
+/// 由调用者（L6/L7 层）注入 computeGraph 实现。
+pub const evalChunks = @import("helper").evalChunks;
+
+/// 获取图像解码器位置（用于 M-RoPE）。
+pub const imageGetDecoderPos = @import("helper").imageGetDecoderPos;
+
+/// 从文件加载 Bitmap（图像或音频）。
+pub const bitmapInitFromFile = @import("helper").bitmapInitFromFile;
+
+/// 从缓冲区加载 Bitmap（图像或音频）。
+pub const bitmapInitFromBuf = @import("helper").bitmapInitFromBuf;

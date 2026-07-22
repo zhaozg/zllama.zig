@@ -1,8 +1,24 @@
 //! Multimodal generation — vision + audio inference pipelines.
 //!
-//! Extracted from engine.zig (refact.md §1) to keep files ≤600 lines.
-//! Contains generateWithImage, generateWithAudio, multimodalPrefillUnified,
-//! and tokenizeWithMediaPlaceholders.
+//! 引擎层的多模态编排器，通过 mtmd 模块的公共接口集成。
+//!
+//! ## 设计说明
+//!
+//! 本模块位于 L6 层（引擎层），负责多模态推理的编排逻辑：
+//! - 图像/音频加载与预处理
+//! - 编码器图构建与计算
+//! - 三阶段 prefill（prefix + media + suffix）
+//! - decode 循环
+//!
+//! 本模块**通过 mtmd 模块的公共 API** 与多模态编码器交互：
+//! - `mtmd.MultiModalManager` — 编码器生命周期管理
+//! - `mtmd.MtmdContext` — 媒体标记解析、chunk 化输入处理
+//! - `mtmd.preprocess` — 图像预处理
+//! - `mtmd.audio_mod` — 音频预处理
+//! - `mtmd.tokenize` — 按媒体标记分割文本
+//! - `mtmd.evalChunks` — 评估所有 chunks
+//!
+//! 本模块**不直接访问** mtmd 内部子模块（如 mtmd/helper.zig、mtmd/tokenize.zig 等）。
 //!
 //! Reference: llama.cpp llama_mmd.h / gemma4.cpp / qwen3vl.cpp
 
@@ -21,8 +37,6 @@ const prefill_mod = @import("prefill");
 const decode_mod = @import("decode");
 const verbose_mod = @import("verbose");
 const graph_context = @import("graph_context");
-
-const audio_mod = mtmd.audio_mod;
 
 const logger = std.log.scoped(.core_multimodal);
 
@@ -121,14 +135,11 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     logger.debug("generateWithImage: target size = {d}x{d}", .{ target_size.width, target_size.height });
 
     // 步骤 3: 直接传递原始图像给 encodeMedia，由 encode 中的 resizeAndNormalize 处理缩放
-    // （使用与 llama.cpp 一致的坐标映射）
     logger.debug("generateWithImage: Step 3 - passing raw image to encodeMedia ({d}x{d})", .{ raw_img.width, raw_img.height });
 
     if (raw_img.width == 0 or raw_img.height == 0) return error.EmptyImage;
 
     // 使用 no_alloc = true 模式创建视觉编码器上下文。
-    // 张量数据由 gallocr 在 computeGraph 中分配，context 仅存储元数据。
-    // 输入张量的数据由 normalizeToTensor 在 no_alloc 模式下手动分配。
     var vision_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
     defer vision_ctx.deinit();
     const vision_graph = try ggml.CGraph.initReserved(vision_ctx, 32768);
@@ -190,13 +201,12 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
 
     var expanded: chat_template.TokenizedSegments = undefined;
     if (ectx.mtmd_context) |mtmd_ctx| {
-        // Use mtmd.tokenize.tokenize when MtmdContext is available.
-        // Replace placeholders with media marker so mtmd.tokenize can parse them.
+        // Use mtmd.tokenize when MtmdContext is available.
         const media_marker = mtmd_ctx.media_marker;
         const marker_replaced = try replacePlaceholdersWithMarker(ectx.allocator, formatted_prompt, media_marker);
         defer ectx.allocator.free(marker_replaced);
         const bitmap = mtmd.Bitmap.initPlaceholderImage(@intCast(raw_img.width), @intCast(raw_img.height));
-        var chunks = try mtmd.tokenize.tokenize(mtmd_ctx, io, ectx.allocator, .{ .text = marker_replaced, .add_special = false, .parse_special = true }, &.{bitmap});
+        var chunks = try mtmd.tokenize(mtmd_ctx, io, ectx.allocator, .{ .text = marker_replaced, .add_special = false, .parse_special = true }, &.{bitmap});
         defer chunks.deinit();
         expanded = try inputChunksToTokenizedSegments(ectx.allocator, &chunks, image_token_id, .image);
     } else {
@@ -220,7 +230,9 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     if (ectx.mtmd_context) |ctx| {
         logger.info("Audio markers from MtmdContext: '{s}' / '{s}'", .{ ctx.aud_beg, ctx.aud_end });
     }
-    const wav_result = try audio_mod.loadWav(ectx.allocator, io, audio_path);
+
+    // 通过 mtmd.audio_mod 公共接口加载 WAV 文件
+    const wav_result = try mtmd.audio_mod.loadWav(ectx.allocator, io, audio_path);
     defer ectx.allocator.free(wav_result.samples);
     if (wav_result.samples.len == 0) return error.EmptyAudio;
 
@@ -231,28 +243,26 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     const is_gemma4ua = mm_mgr.audio_encoder != null and
         std.mem.eql(u8, ectx.capabilities.audio_encoder_type, "gemma4ua");
 
-    var mel: audio_mod.types.ProcessedAudio = undefined;
+    var mel: mtmd.audio_mod.types.ProcessedAudio = undefined;
     var mel_owned = false;
 
     if (is_gemma4ua) {
         // Gemma4UA 预处理：直接把原始 PCM 样本分帧，不做 FFT/Mel 频谱
-        // 参考: llama.cpp mtmd_audio_preprocessor_gemma4ua::preprocess()
-        // frame_size 从 mm.a.input_projection.weight->ne[0] 推断
         const frame_size: u32 = if (mm_mgr.audio_encoder) |enc|
             @intCast(enc.weights.mm_input_proj_w.?.ne()[0])
         else
             return error.AudioEncoderNotAvailable;
 
         logger.info("Gemma4UA preprocessing: frame_size={d}, samples={d}", .{ frame_size, wav_result.samples.len });
-        mel = try audio_mod.processRawWaveform(ectx.allocator, wav_result.samples, frame_size);
+        mel = try mtmd.audio_mod.processRawWaveform(ectx.allocator, wav_result.samples, frame_size);
         mel_owned = true;
 
         debug.saveData(io, "debug_audio", "zllama_audio_02_raw_waveform.json", "audio_raw", mel.data) catch |err| {
             logger.info("Save audio raw waveform data fail: {}", .{err});
         };
     } else {
-        const preprocess_params = audio_mod.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else audio_mod.AUDIO_N_MEL_BINS);
-        mel = try audio_mod.computeMelSpectrogram(io, ectx.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
+        const preprocess_params = mtmd.audio_mod.AudioPreprocessParams.fromAudioEncoder(if (mm_mgr.audio_encoder) |enc| enc.params.n_mel_bins else mtmd.audio_mod.AUDIO_N_MEL_BINS);
+        mel = try mtmd.audio_mod.computeMelSpectrogram(io, ectx.allocator, wav_result.samples, wav_result.info.sample_rate, preprocess_params);
         mel_owned = true;
 
         debug.saveData(io, "debug_audio", "zllama_audio_02_mel_conformer.json", "audio_mel", mel.data) catch |err| {
@@ -261,9 +271,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     }
     defer if (mel_owned) mel.deinit();
 
-    // 使用独立的 ggml context 构建音频编码器图，避免与主 LLM context 冲突。
-    // 视觉路径 (generateWithImage) 也使用独立 context，这是相同的模式。
-    // 张量数据由 gallocr 在 computeGraph 中分配，context 仅存储元数据。
+    // 使用独立的 ggml context 构建音频编码器图
     var audio_ctx = try ggml.Context.initNoAlloc(256 * 1024 * 1024);
     defer audio_ctx.deinit();
 
@@ -271,7 +279,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
 
     const audio_graph = try ggml.CGraph.initReserved(audio_ctx, 32768);
 
-    const mel_tensor = try audio_mod.melToTensor(audio_ctx, mel.data, mel.n_frames, mel.n_mel_bins);
+    const mel_tensor = try mtmd.audio_mod.melToTensor(audio_ctx, mel.data, mel.n_frames, mel.n_mel_bins);
     logger.debug("Audio encoder: mel tensor created, shape=[{d},{d}]", .{ mel_tensor.ne()[0], mel_tensor.ne()[1] });
 
     const audio_embeddings = try mm_mgr.encodeMedia(io, audio_ctx, audio_graph, .{
@@ -284,7 +292,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     }, ectx.n_threads);
     logger.debug("Audio encoder: graph built, embeddings tensor found", .{});
 
-    // Compute the audio graph with a dedicated Gallocr (matching helper.zig pattern).
+    // Compute the audio graph with a dedicated Gallocr
     logger.debug("Audio encoder: computing graph...", .{});
     const audio_buft = ggml.backendCpuBufferType();
     var audio_gallocr = try ggml.Gallocr.init(audio_buft);
@@ -330,16 +338,14 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
 
     logger.info("formatted_prompt: {s}", .{formatted_prompt});
 
-    logger.info("formatted_prompt: {s}", .{formatted_prompt});
-
     var expanded: chat_template.TokenizedSegments = undefined;
     if (ectx.mtmd_context) |mtmd_ctx| {
-        // Use mtmd.tokenize.tokenize when MtmdContext is available.
+        // Use mtmd.tokenize when MtmdContext is available.
         const media_marker = mtmd_ctx.media_marker;
         const marker_replaced = try replacePlaceholdersWithMarker(ectx.allocator, formatted_prompt, media_marker);
         defer ectx.allocator.free(marker_replaced);
         const bitmap = mtmd.Bitmap.initPlaceholderAudio(@intCast(wav_result.info.num_samples));
-        var chunks = try mtmd.tokenize.tokenize(mtmd_ctx, io, ectx.allocator, .{ .text = marker_replaced, .add_special = false, .parse_special = true }, &.{bitmap});
+        var chunks = try mtmd.tokenize(mtmd_ctx, io, ectx.allocator, .{ .text = marker_replaced, .add_special = false, .parse_special = true }, &.{bitmap});
         defer chunks.deinit();
         expanded = try inputChunksToTokenizedSegments(ectx.allocator, &chunks, audio_token_id, .audio);
     } else {
@@ -348,6 +354,7 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     defer expanded.deinit();
     try multimodalPrefillUnified(ectx, io, &expanded, audio_token_id, @intCast(n_audio_tokens), audio_embeddings, max_tokens, formatted_prompt, "Audio");
 }
+
 fn multimodalPrefillUnified(
     ectx: *EngineContext,
     io: std.Io,
@@ -483,10 +490,6 @@ fn applyChatTemplateWithMedia(ectx: *EngineContext, user_prompt: []const u8, med
     var tmpl = try chat_template.resolve(ectx.allocator, source, ectx.arch, model_name, !ectx.no_jinja);
     defer tmpl.deinit(ectx.allocator);
 
-    // Prepend the media placeholder to the content so it's available for
-    // both Jinja template rendering (where media info is not passed separately)
-    // and preset template rendering (where appendMediaContent will skip adding
-    // the marker if it's already present, avoiding double placeholders).
     const effective_prompt = try chat_template.ensurePlaceholderInContent(user_prompt, media.type, ectx.allocator, null);
     const needs_free = effective_prompt.ptr != user_prompt.ptr;
     defer if (needs_free) ectx.allocator.free(effective_prompt);

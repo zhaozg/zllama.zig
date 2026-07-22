@@ -4,7 +4,6 @@ const std = @import("std");
 const tokenizer = @import("tokenizer");
 const mtmd = @import("mm");
 const preprocess = @import("preprocess");
-const debug_save_chunks = mtmd.debug_save_chunks.saveInputChunks;
 
 const log = std.log.scoped(.mtmd_tokenize);
 
@@ -52,7 +51,6 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, io: std.Io, allocator: std.mem.Allocator
         }
     }
 
-    try debug_save_chunks(io, allocator, "debug_vision", "zllama_vision_mtmd_input_chunks.txt", text.text, &chunks);
     return chunks;
 }
 
