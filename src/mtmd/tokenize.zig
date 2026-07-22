@@ -52,9 +52,7 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, io: std.Io, allocator: std.mem.Allocator
         }
     }
 
-    if (@import("builtin").is_test) {} else {
-        try debug_save_chunks(io, allocator, "debug_vision", "zllama_vision_mtmd_input_chunks.txt", text.text, &chunks);
-    }
+    try debug_save_chunks(io, allocator, "debug_vision", "zllama_vision_mtmd_input_chunks.txt", text.text, &chunks);
     return chunks;
 }
 
@@ -102,12 +100,27 @@ fn addImageChunk(ctx: *mtmd.MtmdContext, io: std.Io, al: std.mem.Allocator, chun
         const res = try preprocess.resizeToU8(al, rd, bm.nx, bm.ny, pw, ph);
         pd = res.data;
     }
-    // Estimate encoder output token count (symmetric with addAudioChunk).
+    // Estimate encoder output token count and token grid dimensions.
+    // Matches llama.cpp mtmd_tokenizer::add_media() logic:
+    //   - For M-RoPE models (qwen2vl/qwen3vl): nx = patches_x/2, ny = patches_y/2
+    //   - For other models: nx = n_tokens, ny = 1
     var n_tokens: u32 = 0;
+    var grid_nx: u32 = 0;
+    var grid_ny: u32 = 0;
     if (ctx.mm_manager.vision_encoder) |*enc| {
         n_tokens = enc.estimateOutputTokens(io, pw, ph);
+        if (ctx.pos_type == .mrope) {
+            const ps = enc.params.patch_size;
+            const patches_x = (pw + ps - 1) / ps;
+            const patches_y = (ph + ps - 1) / ps;
+            grid_nx = patches_x / 2;
+            grid_ny = patches_y / 2;
+        } else {
+            grid_nx = n_tokens;
+            grid_ny = 1;
+        }
     }
-    try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = pw, .ny = ph, .n_tokens = n_tokens, .pos = ctx.pos_type, .image_idx = nia.*, .id = bm.id, .raw_pixels = pd }, .id = bm.id });
+    try chunks.append(.{ .chunk_type = .image, .tokens_image = .{ .nx = grid_nx, .ny = grid_ny, .n_tokens = n_tokens, .pos = ctx.pos_type, .image_idx = nia.*, .id = bm.id, .raw_pixels = pd }, .id = bm.id });
     if (ctx.img_end.len > 0) try addTextChunk(ctx, al, chunks, ctx.img_end, true);
     nia.* += 1;
 }
