@@ -30,16 +30,16 @@
 | 消除运行时 `realloc` | **P1** ✅ | 缓存高频使用的图结构（如 Prefill 图），彻底消灭 `ggml_gallocr_needs_realloc` |
 | 多后端统一接口 | **P1** ✅ | `Backend` 接口只暴露 `execGraph()`、`allocTensor()`、`copyToDevice()` |
 
-### 阶段 2：多模态完善（进行中 🔄）
+### 阶段 2：多模态完善（已完成 ✅）
 
 | 任务 | 优先级 | 说明 |
 |------|--------|------|
-| Gemma 4 E2B 端到端推理 | **P0** | 视觉 + 音频 + 文本三模态联合推理已验证 |
-| 三阶段 Prefill 稳定性 | **P0** | prefix → media(non-causal) → suffix 各阶段独立 context |
-| 视觉编码器 Backend 注册 | **P0** | gemma4v, gemma4uv, qwen2vl, qwen3vl |
-| 音频编码器 Backend 注册 | **P0** | gemma4a, gemma4ua |
-| M-RoPE 位置计算分发 | **P1** | 通过 `PosType` 枚举分发到 `imageGetDecoderPos()` |
-| 多模态 tokenize | **P1** | 文本+媒体标记混合 tokenize |
+| Gemma 4 E2B 端到端推理 | **P0** ✅ | 视觉 + 音频 + 文本三模态联合推理已验证 |
+| 三阶段 Prefill 稳定性 | **P0** ✅ | prefix → media(non-causal) → suffix 各阶段独立 context |
+| 视觉编码器 Backend 注册 | **P0** ✅ | gemma4v, gemma4uv, qwen2vl, qwen3vl |
+| 音频编码器 Backend 注册 | **P0** ✅ | gemma4a, gemma4ua |
+| M-RoPE 位置计算分发 | **P1** ✅ | 通过 `PosType` 枚举分发到 `imageGetDecoderPos()` |
+| 多模态 tokenize | **P1** ✅ | 文本+媒体标记混合 tokenize |
 
 ### 阶段 3：性能优化（计划中 📋）
 
