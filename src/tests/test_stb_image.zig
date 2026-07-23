@@ -550,6 +550,11 @@ test "full pipeline: load PNG -> resize -> normalize (standard mean/std)" {
     );
 
     const tensor = result.tensor;
+    // resizeAndNormalize 在 no_alloc 模式下会为 tensor 分配数据缓冲区，
+    // 该缓冲区由调用者负责释放。测试完成后需要手动释放。
+    const tensor_data_buf = tensor.dataBytes();
+    defer testing.allocator.free(tensor_data_buf);
+
     const data = try tensor.dataGet(f32, testing.allocator);
     defer testing.allocator.free(data);
     try testing.expect(data[0] > 0.5); // R 通道应为正
@@ -644,6 +649,11 @@ test "load real A.png from base64" {
     );
 
     const tensor = result.tensor;
+    // resizeAndNormalize 在 no_alloc 模式下会为 tensor 分配数据缓冲区，
+    // 该缓冲区由调用者负责释放。测试完成后需要手动释放。
+    const tensor_data_buf = tensor.dataBytes();
+    defer testing.allocator.free(tensor_data_buf);
+
     const data = try tensor.dataGet(f32, testing.allocator);
     defer testing.allocator.free(data);
 

@@ -57,7 +57,7 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, io: std.Io, allocator: std.mem.Allocator
         if (std.mem.eql(u8, part, marker)) n_markers += 1;
     }
     if (n_markers != bitmaps.len) {
-        log.err("number of media markers in text ({d}) does not match number of bitmaps ({d})", .{ n_markers, bitmaps.len });
+        log.warn("number of media markers in text ({d}) does not match number of bitmaps ({d})", .{ n_markers, bitmaps.len });
         return error.MarkerBitmapMismatch;
     }
 

@@ -500,6 +500,11 @@ test "resizeAndNormalize: basic" {
     try std.testing.expectEqual(@as(u32, 48), result.new_height);
 
     const tensor = result.tensor;
+    // resizeAndNormalize 在 no_alloc 模式下会为 tensor 分配数据缓冲区，
+    // 该缓冲区由调用者负责释放。测试完成后需要手动释放。
+    const tensor_data_buf = tensor.dataBytes();
+    defer allocator.free(tensor_data_buf);
+
     const data = try tensor.dataGet(f32, allocator);
     defer allocator.free(data);
 
