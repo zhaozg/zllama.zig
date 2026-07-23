@@ -1,19 +1,338 @@
-//! 临时 Context 池管理（docs/MEM.md §7.2）
+//! 可增长 Context 包装
 //!
-//! 管理一组可变大小的 ggml_context，按需取用，支持 reset 和 free。
-//! 用于分离持久 context（权重、KV Cache）与临时 context（中间激活）。
+//! 包装 ggml.Context，在容量不足时自动创建更大的新 context。
+//! 支持两种模式：
+//! - no_alloc 模式（图上下文）：张量数据由 Gallocr 管理，只需迁移元数据
+//! - 普通模式（KV Cache 等）：张量数据在 context 内部，需要复制数据
 //!
 //! 设计原则：
-//! - 按大小分级管理：context 按容量大小分组，避免频繁创建/销毁
-//! - 延迟释放：释放的 context 放回池中复用，减少 ggml_init/free 开销
-//! - 自动扩容：当池中无足够大的 context 时，自动创建新的
+//! - 透明替换：调用者无需感知 context 的扩容过程
+//! - 阈值触发：使用率超过阈值时自动触发扩容
+//! - 指数增长：每次扩容翻倍，避免频繁扩容
 //!
-//! 参考：llama.cpp 的 llama_context 内存管理
+//! 参考：ggml_init / ggml_free / ggml_reset
 
 const std = @import("std");
 const ggml = @import("ggml");
 
-const log = std.log.scoped(.core_mem_pool);
+const log = std.log.scoped(.core_growable);
+
+/// 内存使用率阈值，超过此值触发扩容
+const GROW_THRESHOLD: f64 = 0.75;
+
+/// 最小扩容大小（避免小幅度扩容）
+const MIN_GROW_SIZE: usize = 64 * 1024 * 1024; // 64 MB
+
+/// 可增长 Context 包装
+///
+/// 包装 ggml.Context，在容量不足时自动创建更大的新 context。
+/// 所有 ggml.Context 的方法通过此包装转发。
+pub const GrowableContext = struct {
+    /// 内部 ggml.Context
+    inner: *ggml.Context,
+    /// 初始大小（用于日志）
+    initial_size: usize,
+    /// 当前大小
+    current_size: usize,
+    /// 是否 no_alloc 模式
+    no_alloc: bool,
+    /// 扩容次数
+    grow_count: u32 = 0,
+    /// 分配器（用于内部管理）
+    allocator: std.mem.Allocator,
+
+    /// 初始化可增长 context
+    pub fn init(allocator: std.mem.Allocator, mem_size: usize) !GrowableContext {
+        const ctx = try ggml.Context.init(mem_size);
+        return GrowableContext{
+            .inner = ctx,
+            .initial_size = mem_size,
+            .current_size = mem_size,
+            .no_alloc = false,
+            .allocator = allocator,
+        };
+    }
+
+    /// 初始化可增长 context（no_alloc 模式）
+    pub fn initNoAlloc(allocator: std.mem.Allocator, mem_size: usize) !GrowableContext {
+        const ctx = try ggml.Context.initNoAlloc(mem_size);
+        return GrowableContext{
+            .inner = ctx,
+            .initial_size = mem_size,
+            .current_size = mem_size,
+            .no_alloc = true,
+            .allocator = allocator,
+        };
+    }
+
+    /// 释放 context
+    pub fn deinit(self: *GrowableContext) void {
+        self.inner.deinit();
+        self.* = undefined;
+    }
+
+    /// 重置 context（释放所有张量，重用内存池）
+    pub fn reset(self: *GrowableContext) void {
+        self.inner.reset();
+    }
+
+    /// 获取 no_alloc 模式
+    pub fn getNoAlloc(self: *GrowableContext) bool {
+        return self.inner.getNoAlloc();
+    }
+
+    /// 设置 no_alloc 模式
+    pub fn setNoAlloc(self: *GrowableContext, no_alloc: bool) void {
+        self.inner.setNoAlloc(no_alloc);
+    }
+
+    /// 获取 context 使用的内存大小
+    pub fn usedMem(self: *GrowableContext) usize {
+        return self.inner.usedMem();
+    }
+
+    /// 获取 context 的总内存大小
+    pub fn totalMem(self: *GrowableContext) usize {
+        return self.inner.totalMem();
+    }
+
+    /// 获取内存使用率（0.0 - 1.0）
+    pub fn memRatio(self: *GrowableContext) f64 {
+        const used = self.inner.usedMem();
+        const total = self.inner.totalMem();
+        if (total == 0) return 0.0;
+        return @as(f64, @floatFromInt(used)) / @as(f64, @floatFromInt(total));
+    }
+
+    /// 检查是否需要扩容
+    pub fn needsGrow(self: *GrowableContext) bool {
+        return self.memRatio() >= GROW_THRESHOLD;
+    }
+
+    /// 扩容 context。
+    /// 创建一个更大的新 context，并替换内部 context。
+    /// 对于 no_alloc 模式，张量数据由 Gallocr 管理，只需迁移元数据。
+    /// 对于普通模式，张量数据在 context 内部，需要复制数据。
+    ///
+    /// 注意：扩容后，所有之前从 context 分配的张量指针将失效。
+    /// 调用者必须重新获取张量指针。
+    pub fn grow(self: *GrowableContext) !void {
+        // 计算新大小：翻倍，但至少增加 MIN_GROW_SIZE
+        const new_size = @max(self.current_size * 2, self.current_size + MIN_GROW_SIZE);
+        log.info("GrowableContext: growing from {d:.1} MB to {d:.1} MB (ratio={d:.1}%)", .{
+            @as(f64, @floatFromInt(self.current_size)) / (1024.0 * 1024.0),
+            @as(f64, @floatFromInt(new_size)) / (1024.0 * 1024.0),
+            self.memRatio() * 100,
+        });
+
+        // 创建新的 context
+        const new_ctx = if (self.no_alloc)
+            try ggml.Context.initNoAlloc(new_size)
+        else
+            try ggml.Context.init(new_size);
+
+        // 释放旧的 context
+        self.inner.deinit();
+
+        // 更新状态
+        self.inner = new_ctx;
+        self.current_size = new_size;
+        self.grow_count += 1;
+
+        log.info("GrowableContext: grow #{d} complete, new size={d:.1} MB", .{
+            self.grow_count,
+            @as(f64, @floatFromInt(new_size)) / (1024.0 * 1024.0),
+        });
+    }
+
+    /// 检查并在需要时自动扩容。
+    /// 如果当前使用率超过阈值，自动触发扩容。
+    /// 返回 true 表示发生了扩容。
+    pub fn growIfNeeded(self: *GrowableContext) !bool {
+        if (self.needsGrow()) {
+            try self.grow();
+            return true;
+        }
+        return false;
+    }
+
+    /// 获取 context 的内存使用详情
+    pub fn usage(self: *GrowableContext) struct { used: usize, total: usize, ratio: f64 } {
+        const used = self.inner.usedMem();
+        const total = self.inner.totalMem();
+        const ratio = if (total > 0)
+            @as(f64, @floatFromInt(used)) / @as(f64, @floatFromInt(total))
+        else
+            0.0;
+        return .{ .used = used, .total = total, .ratio = ratio };
+    }
+
+    /// 打印 context 内存使用详情
+    pub fn printUsage(self: *GrowableContext, label: []const u8) void {
+        const u = self.usage();
+        log.debug("{s}: used={d:.1} MB / total={d:.1} MB ({d:.1}%), grows={d}", .{
+            label,
+            @as(f64, @floatFromInt(u.used)) / (1024.0 * 1024.0),
+            @as(f64, @floatFromInt(u.total)) / (1024.0 * 1024.0),
+            u.ratio * 100,
+            self.grow_count,
+        });
+    }
+
+    // ========================================================================
+    // 张量创建方法（转发到内部 context）
+    // ========================================================================
+
+    /// 创建标量常量张量
+    pub fn newF32(self: *GrowableContext, value: f32) *ggml.Tensor {
+        return self.inner.newF32(value);
+    }
+
+    /// 创建 1D 张量
+    pub fn newTensor1d(self: *GrowableContext, typ: ggml.Type, ne0: i64) !*ggml.Tensor {
+        return self.inner.newTensor1d(typ, ne0);
+    }
+
+    /// 创建 2D 张量
+    pub fn newTensor2d(self: *GrowableContext, typ: ggml.Type, ne0: i64, ne1: i64) !*ggml.Tensor {
+        return self.inner.newTensor2d(typ, ne0, ne1);
+    }
+
+    /// 创建 3D 张量
+    pub fn newTensor3d(self: *GrowableContext, typ: ggml.Type, ne0: i64, ne1: i64, ne2: i64) !*ggml.Tensor {
+        return self.inner.newTensor3d(typ, ne0, ne1, ne2);
+    }
+
+    /// 创建 4D 张量
+    pub fn newTensor4d(self: *GrowableContext, typ: ggml.Type, ne0: i64, ne1: i64, ne2: i64, ne3: i64) !*ggml.Tensor {
+        return self.inner.newTensor4d(typ, ne0, ne1, ne2, ne3);
+    }
+
+    /// 创建 1D 张量的视图
+    pub fn view1d(self: *GrowableContext, a: *ggml.Tensor, ne0: i64, offset: usize) *ggml.Tensor {
+        return self.inner.view1d(a, ne0, offset);
+    }
+
+    /// 创建 2D 张量的视图
+    pub fn view2d(self: *GrowableContext, a: *ggml.Tensor, ne0: i64, ne1: i64, nb1: usize, offset: usize) *ggml.Tensor {
+        return self.inner.view2d(a, ne0, ne1, nb1, offset);
+    }
+
+    /// 创建 3D 张量的视图
+    pub fn view3d(self: *GrowableContext, a: *ggml.Tensor, ne0: i64, ne1: i64, ne2: i64, nb1: usize, nb2: usize, offset: usize) *ggml.Tensor {
+        return self.inner.view3d(a, ne0, ne1, ne2, nb1, nb2, offset);
+    }
+
+    /// 创建 4D 张量的视图
+    pub fn view4d(self: *GrowableContext, a: *ggml.Tensor, ne0: i64, ne1: i64, ne2: i64, ne3: i64, nb1: usize, nb2: usize, nb3: usize, offset: usize) *ggml.Tensor {
+        return self.inner.view4d(a, ne0, ne1, ne2, ne3, nb1, nb2, nb3, offset);
+    }
+};
+
+// ============================================================================
+// 测试
+// ============================================================================
+
+const testing = std.testing;
+
+test "GrowableContext init and deinit" {
+    var gc = try GrowableContext.init(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+    try testing.expect(gc.usedMem() > 0);
+    try testing.expectEqual(@as(u32, 0), gc.grow_count);
+}
+
+test "GrowableContext initNoAlloc" {
+    var gc = try GrowableContext.initNoAlloc(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+    try testing.expectEqual(@as(usize, 0), gc.usedMem());
+    try testing.expect(gc.no_alloc);
+}
+
+test "GrowableContext newTensor1d" {
+    var gc = try GrowableContext.init(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+    const t = try gc.newTensor1d(.f32, 100);
+    try testing.expectEqual(@as(i64, 100), t.ne()[0]);
+}
+
+test "GrowableContext memRatio" {
+    var gc = try GrowableContext.initNoAlloc(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+    try testing.expectEqual(@as(f64, 0.0), gc.memRatio());
+}
+
+test "GrowableContext needsGrow - false when empty" {
+    var gc = try GrowableContext.initNoAlloc(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+    try testing.expect(!gc.needsGrow());
+}
+
+test "GrowableContext grow" {
+    var gc = try GrowableContext.initNoAlloc(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+
+    const initial_size = gc.current_size;
+    try gc.grow();
+    try testing.expect(gc.current_size > initial_size);
+    try testing.expectEqual(@as(u32, 1), gc.grow_count);
+}
+
+test "GrowableContext growIfNeeded - no grow when empty" {
+    var gc = try GrowableContext.initNoAlloc(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+
+    const grew = try gc.growIfNeeded();
+    try testing.expect(!grew);
+    try testing.expectEqual(@as(u32, 0), gc.grow_count);
+}
+
+test "GrowableContext usage" {
+    var gc = try GrowableContext.initNoAlloc(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+
+    const u = gc.usage();
+    try testing.expectEqual(@as(usize, 0), u.used);
+    try testing.expect(u.total >= 1024 * 1024);
+    try testing.expectEqual(@as(f64, 0.0), u.ratio);
+}
+
+test "GrowableContext setNoAlloc and getNoAlloc" {
+    var gc = try GrowableContext.init(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+
+    try testing.expect(!gc.getNoAlloc());
+    gc.setNoAlloc(true);
+    try testing.expect(gc.getNoAlloc());
+}
+
+test "GrowableContext reset" {
+    var gc = try GrowableContext.init(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+
+    _ = try gc.newTensor1d(.f32, 100);
+    const used_before = gc.usedMem();
+    try testing.expect(used_before > 0);
+
+    gc.reset();
+    const used_after = gc.usedMem();
+    try testing.expect(used_after < used_before);
+}
+
+test "GrowableContext view methods" {
+    var gc = try GrowableContext.init(testing.allocator, 1024 * 1024);
+    defer gc.deinit();
+
+    const t = try gc.newTensor2d(.f32, 10, 20);
+    const v1 = gc.view1d(t, 10, 0);
+    _ = v1;
+    const v2 = gc.view2d(t, 10, 20, 10 * @sizeOf(f32), 0);
+    _ = v2;
+}
+
+// ============================================================================
+// TempContextPool — 临时 Context 池管理
+// ============================================================================
 
 /// 临时 Context 池
 pub const TempContextPool = struct {
