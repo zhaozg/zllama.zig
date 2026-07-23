@@ -136,19 +136,6 @@ zig build test
 3. 在 `model.zig` 的 `Architecture` 枚举中添加新类型
 4. 在 `registry.zig` 的各个 switch 中添加对应 case
 
-## 📊 性能参考
-
-| 模型 | 量化 | 后端 | 硬件 | 速度 (tok/s) |
-|------|------|------|------|---------------|
-| Llama-3.2-3B | Q4_K_M | CPU (6 线程) | Apple M2 | 16.1 TG |
-| Qwen3.5-0.8B | Q4_K_M | CPU (6 线程) | Apple M2 | 56.7 TG |
-| tinyllama-1.1B | Q4_K_M | CPU (6 线程) | Apple M2 | 53.8 TG |
-| Gemma 4 E2B | Q4_K_M | CPU (6 线程) | Apple M2 | 待测 |
-
-## 已知问题:
-
-- `zig build test -Doptimize=ReleaseSafe -Dbundle-ggml=true` 出现非法指令错误
-
 ## 📄 许可证
 
 本项目采用 MIT 许可证。ggml 部分遵循其原始许可证（MIT）。

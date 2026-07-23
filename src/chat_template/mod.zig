@@ -545,6 +545,4 @@ pub fn applyMultiTurn(
     return tmpl.apply(allocator, messages, system_prompt, add_generation_prompt);
 }
 
-test {
-    _ = @import("_tests.zig");
-}
+

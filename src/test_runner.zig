@@ -54,4 +54,5 @@ comptime {
     _ = @import("tests/test_ggml_pad_reflect_1d.zig");
 
     _ = @import("tests/test_stb_image.zig");
+    _ = @import("tests/test_chat_template.zig");
 }
