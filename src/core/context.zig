@@ -19,41 +19,28 @@ const engine_common = @import("engine_common");
 const chat_template = @import("chat_template");
 const multimodal_mod = @import("multimodal");
 
+const memory_pool = @import("memory_pool");
 const CliArgs = @import("../cli_args.zig").CliArgs;
 const loadMMProj = @import("loader.zig").loadMMProj;
 
 const logger = std.log.scoped(.core_context);
 
 // ============================================================================
-// Memory size estimation helpers
+// Memory size estimation helpers (delegated to MemoryEstimator)
 // ============================================================================
 
 /// Estimate the ggml context size needed for KV cache metadata + tensor data.
-/// KV cache: 2 (K/V) × n_layer × n_kv_head × head_dim × max_seq_len × sizeof(f32)
-/// Plus 50% overhead for ggml metadata and alignment.
+/// Delegates to MemoryEstimator for dynamic calculation based on model params.
 fn estimateKVCacheSize(params: *const model_if.ModelParams) usize {
-    const kv_per_token: usize = 2 * // K and V
-        @as(usize, @intCast(params.n_layer)) *
-        @as(usize, @intCast(params.n_kv_head)) *
-        @as(usize, @intCast(params.n_head_dim)) *
-        @sizeOf(f32);
-    const kv_total = kv_per_token * @as(usize, @intCast(params.max_seq_len));
-    // Add overhead for ggml metadata (tensor descriptors, alignment)
-    const overhead = @as(usize, @intCast(params.n_layer)) * 1024; // ~1KB per layer for metadata
-    const total = kv_total + kv_total / 2 + overhead + 64 * 1024 * 1024; // +50% + 64MB safety
-    return total;
+    const estimator = memory_pool.MemoryEstimator.init(params);
+    return estimator.estimateKVCache();
 }
 
 /// Estimate the ggml context size needed for graph building (metadata only, no_alloc).
-/// Graph context stores tensor descriptors and graph nodes, not tensor data.
-/// For multimodal models with large vision graphs, up to ~2 GB may be needed.
-/// P0: Increased from 2 GB to 4 GB to avoid OOM in multimodal prefill.
+/// Delegates to MemoryEstimator for dynamic calculation based on model params.
 fn estimateGraphSize(params: *const model_if.ModelParams) usize {
-    _ = params;
-    // Graph context only stores metadata (no_alloc mode).
-    // For large multimodal prefill (794+ tokens, 35 layers), we need ~2 GB of metadata.
-    // Each tensor descriptor is ~416 bytes, and a full prefill graph can have 2M+ nodes.
-    return 2 * 1024 * 1024 * 1024;
+    const estimator = memory_pool.MemoryEstimator.init(params);
+    return estimator.estimateGraph();
 }
 
 // ============================================================================

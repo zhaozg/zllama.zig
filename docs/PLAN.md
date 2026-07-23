@@ -48,6 +48,7 @@
 | 可增长 Context 包装 | **P2** ✅ | `GrowableContext` 包装 `ggml.Context`，容量不足时自动创建更大的新 context |
 | 自适应阈值 | **P2** ✅ | `MemoryEstimator` 根据序列长度和模型参数动态计算所需内存，替代硬编码估算 |
 | 内存监控与告警 | **P2** ✅ | `MemoryMonitor` 分级告警（90%/95%/99%），自动回收与扩容 |
+| 阶段3 P2 集成 | **P2** ✅ | `MemoryEstimator` 替换硬编码估算，`MemoryMonitor` 接入推理循环 |
 | GPU 后端支持 | **P2** | Metal (macOS)、CUDA (Linux) |
 | 线程池优化 | **P2** | 物理核心数 2/3~3/4 动态调整 |
 

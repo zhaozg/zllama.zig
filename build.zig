@@ -211,6 +211,17 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     memory_pool_mod.addImport("ggml", ggml_mod);
+    memory_pool_mod.addImport("model", model_mod);
+
+    const memory_monitor_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/memory_monitor.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    memory_monitor_mod.addImport("ggml", ggml_mod);
+    memory_monitor_mod.addImport("memory_pool", memory_pool_mod);
+    memory_monitor_mod.addImport("graph_context", graph_context_mod);
 
     const prefill_mod = b.createModule(.{
         .root_source_file = b.path("src/core/prefill.zig"),
@@ -643,6 +654,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("decode", decode_mod);
     exe_mod.addImport("verbose", verbose_mod);
     exe_mod.addImport("memory_pool", memory_pool_mod);
+    exe_mod.addImport("memory_monitor", memory_monitor_mod);
 
     exe_mod.addImport("embedding_gen", embedding_gen_mod);
     exe_mod.addImport("multimodal", multimodal_mod);
@@ -717,6 +729,7 @@ pub fn build(b: *std.Build) void {
 
     test_root_mod.addImport("graph", mm_graph_mod);
     test_root_mod.addImport("memory_pool", memory_pool_mod);
+    test_root_mod.addImport("memory_monitor", memory_monitor_mod);
     test_root_mod.addImport("vision", mm_vision_mod);
 
     // 测试工具模块（src/tests/utils.zig），与 src/utils.zig 不同
@@ -1146,7 +1159,6 @@ pub fn build(b: *std.Build) void {
     // 工具可执行文件
     // ======================================================================
     {
-
         const mod = b.createModule(.{
             .root_source_file = b.path("src/tools/dump_graph.zig"),
             .target = target,

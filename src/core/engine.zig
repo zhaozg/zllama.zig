@@ -24,6 +24,8 @@ const verbose_mod = @import("verbose");
 const embedding_mod = @import("embedding_gen");
 const multimodal_mod = @import("multimodal");
 
+const memory_pool = @import("memory_pool");
+const memory_monitor = @import("memory_monitor");
 const CliArgs = @import("../cli_args.zig").CliArgs;
 
 // Import the three new sub-modules
@@ -60,6 +62,9 @@ pub const InferenceEngine = struct {
     /// Executes compute graphs
     executor: GraphExecutor,
 
+    /// 内存监控器（监控 KV Cache、Graph、Inc 等 context 的内存使用）
+    mem_monitor: memory_monitor.MemoryMonitor,
+
     // ========================================================================
     // init / deinit
     // ========================================================================
@@ -81,14 +86,22 @@ pub const InferenceEngine = struct {
             @as(usize, @intCast(ctx.params.n_vocab)),
         );
 
+        // 初始化内存监控器，注册所有 context
+        var mem_monitor_inst = memory_monitor.MemoryMonitor.init(allocator);
+        try mem_monitor_inst.addContext(memory_monitor.adaptGgmlContext(ctx.ctx_graph, "graph"));
+        try mem_monitor_inst.addContext(memory_monitor.adaptGgmlContext(ctx.ctx_kv_cache, "kv_cache"));
+        try mem_monitor_inst.addContext(memory_monitor.adaptIncContext(&ctx.inc_ctx));
+
         return InferenceEngine{
             .ctx = ctx,
             .planner = planner_inst,
             .executor = executor_inst,
+            .mem_monitor = mem_monitor_inst,
         };
     }
 
     pub fn deinit(self: *InferenceEngine) void {
+        self.mem_monitor.deinit();
         self.planner.deinit();
         self.ctx.deinit();
     }
@@ -193,6 +206,16 @@ pub const InferenceEngine = struct {
 
         try self.planner.reserveDecodeGallocr(&self.ctx.inc_ctx, self.ctx.gallocr);
 
+        // 内存监控：prefill 后检查内存使用
+        const prefill_report = try self.mem_monitor.check();
+        defer self.ctx.allocator.free(prefill_report.contexts);
+        if (prefill_report.max_alert != .normal) {
+            logger.warn("Prefill memory: {d:.1}% used ({s})", .{
+                prefill_report.total_ratio * 100,
+                @tagName(prefill_report.max_alert),
+            });
+        }
+
         const dr = try decode_mod.runDecodeLoop(
             self.ctx.allocator,
             io,
@@ -225,6 +248,17 @@ pub const InferenceEngine = struct {
         const stdout_file = std.Io.File.stdout();
         try stdout_file.writeStreamingAll(io, "\n");
         printStats(self.ctx.arch, self.ctx.params.model_name, self.ctx.n_threads, n_prompt_tokens, dr.gen_count, prefill.pp_time_s, dr.tg_time_s, self.ctx.benchmark);
+
+        // 内存监控：decode 后检查内存使用
+        const decode_report = try self.mem_monitor.check();
+        defer self.ctx.allocator.free(decode_report.contexts);
+        if (decode_report.max_alert != .normal) {
+            logger.warn("Decode memory: {d:.1}% used ({s})", .{
+                decode_report.total_ratio * 100,
+                @tagName(decode_report.max_alert),
+            });
+        }
+
         if (!self.ctx.benchmark) {
             try stdout_file.writeStreamingAll(io, "\n");
         }
@@ -317,6 +351,16 @@ pub const InferenceEngine = struct {
 
             const prefill = try self.textPrefill(input_tokens.items);
             defer self.ctx.allocator.free(prefill.logits);
+
+            // 内存监控：chat prefill 后检查
+            const prefill_report = try self.mem_monitor.check();
+            defer self.ctx.allocator.free(prefill_report.contexts);
+            if (prefill_report.max_alert != .normal) {
+                logger.warn("Chat prefill memory: {d:.1}% used ({s})", .{
+                    prefill_report.total_ratio * 100,
+                    @tagName(prefill_report.max_alert),
+                });
+            }
 
             try self.planner.reserveDecodeGallocr(&self.ctx.inc_ctx, self.ctx.gallocr);
 

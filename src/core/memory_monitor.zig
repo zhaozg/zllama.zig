@@ -165,7 +165,8 @@ pub const MonitoredContext = struct {
 // ============================================================================
 
 /// 为 ggml.Context 创建 MonitoredContext 适配器
-pub fn adaptGgmlContext(ctx: *ggml.Context, label: []const u8) MonitoredContext {
+/// label 必须是编译期已知的字符串字面量
+pub fn adaptGgmlContext(ctx: *ggml.Context, comptime label: []const u8) MonitoredContext {
     const V = struct {
         fn getLabel(_: *anyopaque) []const u8 {
             return label;
@@ -203,7 +204,7 @@ pub fn adaptGgmlContext(ctx: *ggml.Context, label: []const u8) MonitoredContext 
 
 /// 为 GrowableContext 创建 MonitoredContext 适配器
 pub fn adaptGrowableContext(gc: *anyopaque) MonitoredContext {
-    const GC = @import("memory_pool.zig").GrowableContext;
+    const GC = @import("memory_pool").GrowableContext;
     const V = struct {
         fn getLabel(_: *anyopaque) []const u8 {
             return "growable";
@@ -245,7 +246,7 @@ pub fn adaptGrowableContext(gc: *anyopaque) MonitoredContext {
 
 /// 为 IncContext 创建 MonitoredContext 适配器
 pub fn adaptIncContext(ic: *anyopaque) MonitoredContext {
-    const IC = @import("graph_context.zig").IncContext;
+    const IC = @import("graph_context").IncContext;
     const V = struct {
         fn getLabel(_: *anyopaque) []const u8 {
             return "inc_decode";
@@ -298,16 +299,16 @@ pub const MemoryMonitor = struct {
     max_consecutive_alerts: u32 = 3,
 
     pub fn init(allocator: std.mem.Allocator) MemoryMonitor {
-        return .{ .allocator = allocator, .contexts = std.ArrayList(MonitoredContext).init(allocator) };
+        return .{ .allocator = allocator, .contexts = std.ArrayList(MonitoredContext).initCapacity(allocator, 0) catch unreachable };
     }
 
     pub fn deinit(self: *MemoryMonitor) void {
-        self.contexts.deinit();
+        self.contexts.deinit(self.allocator);
         self.* = undefined;
     }
 
     pub fn addContext(self: *MemoryMonitor, ctx: MonitoredContext) !void {
-        try self.contexts.append(ctx);
+        try self.contexts.append(self.allocator, ctx);
     }
 
     pub fn clearContexts(self: *MemoryMonitor) void {
@@ -317,9 +318,9 @@ pub const MemoryMonitor = struct {
     /// 获取所有 context 的快照
     pub fn snapshots(self: *const MemoryMonitor, allocator: std.mem.Allocator) ![]ContextSnapshot {
         var list = try std.ArrayList(ContextSnapshot).initCapacity(allocator, self.contexts.items.len);
-        errdefer list.deinit();
+        errdefer list.deinit(allocator);
         for (self.contexts.items) |ctx| list.appendAssumeCapacity(ctx.snapshot());
-        return list.toOwnedSlice();
+        return list.toOwnedSlice(allocator);
     }
 
     /// 生成完整内存报告
@@ -340,34 +341,34 @@ pub const MemoryMonitor = struct {
 
     /// 检查内存使用情况，触发告警和自动回收
     pub fn check(self: *MemoryMonitor) !MemoryReport {
-        const report = try self.report(self.allocator);
-        errdefer self.allocator.free(report.contexts);
+        const mem_report = try self.report(self.allocator);
+        errdefer self.allocator.free(mem_report.contexts);
 
-        if (report.max_alert != .normal) {
+        if (mem_report.max_alert != .normal) {
             self.consecutive_alerts += 1;
         } else {
             self.consecutive_alerts = 0;
         }
-        self.last_alert = report.max_alert;
+        self.last_alert = mem_report.max_alert;
 
-        switch (report.max_alert) {
+        switch (mem_report.max_alert) {
             .normal => {},
             .warn => {
-                log.warn("Memory usage at {d:.1}% — consider reclaiming memory", .{report.total_ratio * 100});
+                log.warn("Memory usage at {d:.1}% — consider reclaiming memory", .{mem_report.total_ratio * 100});
                 if (self.auto_reclaim) try self.reclaimAll();
             },
             .critical => {
-                log.err("Memory usage at {d:.1}% — initiating memory reclamation", .{report.total_ratio * 100});
+                log.err("Memory usage at {d:.1}% — initiating memory reclamation", .{mem_report.total_ratio * 100});
                 _ = try self.reclaimAll();
                 if (self.auto_grow) try self.growAll();
             },
             .oom => {
-                log.err("Memory usage at {d:.1}% — OOM risk, forcing full reclamation", .{report.total_ratio * 100});
+                log.err("Memory usage at {d:.1}% — OOM risk, forcing full reclamation", .{mem_report.total_ratio * 100});
                 for (self.contexts.items) |ctx| _ = ctx.tryReclaim();
                 if (self.auto_grow) try self.growAll();
             },
         }
-        return report;
+        return mem_report;
     }
 
     fn reclaimAll(self: *MemoryMonitor) !void {
