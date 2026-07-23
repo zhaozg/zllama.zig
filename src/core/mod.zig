@@ -13,3 +13,8 @@ pub const decode = @import("decode");
 pub const verbose = @import("verbose");
 pub const embedding_gen = @import("embedding_gen");
 pub const multimodal = @import("multimodal");
+
+// 阶段 1 重构新增模块
+pub const context = @import("context");
+pub const planner = @import("planner");
+pub const executor = @import("executor");
