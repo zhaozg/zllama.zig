@@ -2,6 +2,38 @@
 
 > **说明：** 本文档描述 **zllama.zig** 当前实现的系统架构。以"编译期强类型 + 显式分配 + VTable 接口"为基石构建白盒插件系统，支撑多模型文本推理与多模态（视觉/音频）编码。
 
+## 设计纲领：三条公理
+
+### 公理 I：显式优于隐式，契约重于继承
+
+`llama.cpp` 的上层建筑（`llama.h`、`common/`、`examples/`）是 C 语言田野式生长的产物——全局变量满天飞、职责边界模糊、模型架构用 `if (arch == GEMMA)` 硬编码。这是"数学家先跑通公式，再顺手搭个脚手架"的典型产物。
+
+**zllama.zig 的反击**：
+
+- **接口即结构体（VTable as Struct）**：不使用 RTTI 或虚函数表继承。将 C++ 的"黑盒多态"转化为 Zig 的"白盒组合"。两大 VTable 家族（`ModelVTable` 与 `VisionEncoderBackend`/`AudioEncoderBackend`）承载所有运行时多态。
+- **数据与行为严格分离**：权重（`Weights`）、超参数（`HParams`）与图构建逻辑（`GraphBuilder`）分属不同结构体，互不渗透。
+- **编译期多态（Comptime Dispatch）**：特性标记（如 `supportBatch`）在初始化时确定，运行时通过 `if (backend.supportBatch)` 分发——编译器可优化为常量。
+
+### 公理 II：分离"数学引擎"与"应用状态"
+
+`llama.cpp` 的 `llama_model` 和 `llama_context` 像两个"巨大的袋子"，装满了权重指针、KV 缓存、位置偏移、采样器，甚至临时计算图。任何模块都能随手改它们，耦合极深。
+
+**zllama.zig 的分离策略**：
+
+- **ggml 封装为纯数学接口**：`Backend` 接口只暴露 `execGraph()`、`allocTensor()`、`copyToDevice()` 三个纯数学操作。
+- **模型元数据（Architecture）与推理状态（Session）彻底解耦**：`Session` 只持有当前批次的 `Token` 和 `Pos`，不触碰权重指针。不同 `Backend`（CPU/Metal）可自由组合而不改上层代码。
+- **"规划"与"执行"两阶段分离**：`planner` 只负责精确计算内存需求并预分配；`executor` 只负责机械地填充节点数据并调用 `ggml_graph_compute`。彻底消灭运行时的 `realloc`。
+
+### 公理 III：资源生命周期显式追踪
+
+`llama.cpp` 的 `llama_free` 需要手工按顺序释放十多个指针，顺序错了就内存泄漏。这是 C 语言的无奈。
+
+**zllama.zig 的 Zig 降维打击**：
+
+- **`defer` 和 `errdefer`**：将资源释放绑定到作用域，而非依赖手工顺序。
+- **KV Cache 作为环形缓冲区（Ring Buffer）**：封装 `rotate()`、`evict()`、`copy()` 操作，上层调用者无需知道物理内存地址。
+- **三段式生命周期框架**：构建期（Build）→ 编译期（Compile）→ 执行期（Exec），每个阶段职责单一、边界清晰。
+
 ---
 
 ## ⛓ 七层 DAG 架构总览
@@ -275,17 +307,7 @@ main.zig
 ```
 时间线:
   init                    推理循环                              exit
-  
-  ctx_weights ──────────── 权重驻留（所有权永不转移）────────────→ free
-  ctx_kv_cache ─────────── KV Cache 驻留 ──────────────────────→ free
-  ctx_graph ─────┐        ctx 在 prefill 中 reset/复用 ────────→ free
-                 │
-  Gallocr (prefill) ───── compute → ★故意泄漏★ ────────────────→ OS 回收
-  Gallocr (decode) ────── IncContext 管理，复用 ────────────────→ free
-```
-时间线:
-  init                    推理循环                              exit
-  
+
   ctx_weights ──────────── 权重驻留（所有权永不转移）────────────→ free
   ctx_kv_cache ─────────── KV Cache 驻留 ──────────────────────→ free
   ctx_graph ─────┐        ctx 在 prefill 中 reset/复用 ────────→ free
