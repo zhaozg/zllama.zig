@@ -312,6 +312,7 @@ pub const MtmdVisionComparator = struct {
             prefix_tokens,
             image_token_id,
             vision_token_count,
+            0, // media_n_pos
             vision_embd_data,
             vision_embd_dim,
             suffix_tokens,

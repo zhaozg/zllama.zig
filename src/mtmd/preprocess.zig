@@ -163,14 +163,21 @@ pub fn resizeAndNormalize(
 
     var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(size.width), @intCast(size.height), 3);
 
+    // 如果 context 是 no_alloc 模式，需要先为 tensor 分配数据缓冲区。
+    // 使用 allocator 分配（而非裸 std.c.malloc），确保内存可追踪。
+    // 注意：gallocr.allocGraph 会重新分配 tensor.data 指针到 gallocr 管理的缓冲区，
+    // 因此这里分配的缓冲区在 allocGraph 后不再被引用。
+    // 遵循项目 "leak-to-exit" 策略：缓冲区由 page_allocator 分配，进程退出时自动回收。
     const no_alloc = ctx.getNoAlloc();
     if (no_alloc) {
         const ds = @as(usize, @intCast(inp.nBytes()));
-        const buf = @as([*]u8, @ptrCast(std.c.malloc(ds) orelse return error.OutOfMemory))[0..ds];
+        const buf = try allocator.alloc(u8, ds);
         @memset(buf, 0);
         inp.setDataPtr(buf);
+        try inp.dataSet(f32, normalized);
+    } else {
+        try inp.dataSet(f32, normalized);
     }
-    try inp.dataSet(f32, normalized);
     return .{ .tensor = inp, .new_width = size.width, .new_height = size.height };
 }
 
@@ -299,10 +306,13 @@ pub fn normalizeToTensor(
 
     var inp = try ctx.newTensor3d(ggml.Type.f32, @intCast(img_width), @intCast(img_height), 3);
 
+    // 如果 context 是 no_alloc 模式，需要先为 tensor 分配数据缓冲区。
+    // 使用 page_allocator 分配（而非裸 std.c.malloc），确保内存可追踪。
     const no_alloc = ctx.getNoAlloc();
     if (no_alloc) {
         const ds = @as(usize, @intCast(inp.nBytes()));
-        const buf = @as([*]u8, @ptrCast(std.c.malloc(ds) orelse return error.OutOfMemory))[0..ds];
+        const buf = try std.heap.page_allocator.alloc(u8, ds);
+        defer std.heap.page_allocator.free(buf);
         @memset(buf, 0);
         inp.setDataPtr(buf);
     }

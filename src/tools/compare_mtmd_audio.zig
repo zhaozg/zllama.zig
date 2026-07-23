@@ -331,6 +331,7 @@ pub const MtmdAudioComparator = struct {
             prefix_tokens,
             audio_token_id,
             audio_token_count,
+            0, // media_n_pos
             audio_embd_data,
             audio_embd_dim,
             suffix_tokens,

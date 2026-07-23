@@ -334,6 +334,12 @@ fn multimodalPrefillUnified(
     const media_offset: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_offset else 0;
     const n_total_tokens: i32 = @intCast(expanded.tokens.items.len);
     const media_count: u32 = if (expanded.offsets.len > 0) expanded.offsets[0].token_count else @intCast(n_media_tokens);
+    // For M-RoPE: n_pos (position counter advance) != n_tokens.
+    // Mirrors C++ mtmd_helper_decode_image_chunk: n_past += mtmd_input_chunk_get_n_pos(chunk).
+    const media_n_pos: i32 = if (expanded.offsets.len > 0 and expanded.offsets[0].n_pos > 0)
+        @intCast(expanded.offsets[0].n_pos)
+    else
+        @intCast(media_count);
     const prefix_tokens = if (media_offset > 0) expanded.tokens.items[0..media_offset] else &[_]u32{};
     const suffix_start: u32 = media_offset + media_count;
     const suffix_tokens = if (suffix_start < n_total_tokens) expanded.tokens.items[suffix_start..@as(usize, @intCast(n_total_tokens))] else &[_]u32{};
@@ -342,6 +348,7 @@ fn multimodalPrefillUnified(
     logger.info("  media_offset    = {d}", .{media_offset});
     logger.info("  media_count     = {d}", .{media_count});
     logger.info("  n_media_tokens  = {d}", .{n_media_tokens});
+    logger.info("  media_n_pos     = {d}", .{media_n_pos});
     logger.info("  prefix_tokens   = {d}", .{prefix_tokens.len});
     logger.info("  suffix_tokens   = {d}", .{suffix_tokens.len});
 
@@ -382,6 +389,7 @@ fn multimodalPrefillUnified(
         prefix_tokens,
         media_token_id,
         @intCast(media_count),
+        media_n_pos,
         embd_heap,
         embd_dim,
         suffix_tokens,
@@ -579,12 +587,31 @@ fn inputChunksToTokenizedSegments(
             .image => {
                 if (media_type == .image) {
                     const n_tokens = chunk.nTokens();
+                    // Forward ImageTokens metadata for M-RoPE position computation.
+                    // Mirrors C++ mtmd_helper_decode_image_chunk which reads nx/ny/pos
+                    // from mtmd_image_tokens for mtmd_helper_image_get_decoder_pos.
+                    const img_tok = chunk.tokens_image;
+                    const img_pos_type: chat_template.ImagePosType = if (img_tok) |it| switch (it.pos) {
+                        .mrope => .mrope,
+                        .hunyuanvl => .hunyuanvl,
+                        .normal => .normal,
+                    } else .normal;
+                    const img_n_pos = chunk.nPos();
+                    const img_grid_nx = if (img_tok) |it| it.nx else 0;
+                    const img_grid_ny = if (img_tok) |it| it.ny else 0;
+                    const img_idx = if (img_tok) |it| it.image_idx else 0;
+
                     try offsets.append(allocator, .{
                         .start = 0,
                         .length = 0,
                         .media_type = .image,
                         .token_count = n_tokens,
                         .token_offset = @intCast(tokens.items.len),
+                        .n_pos = img_n_pos,
+                        .grid_nx = img_grid_nx,
+                        .grid_ny = img_grid_ny,
+                        .pos_type = img_pos_type,
+                        .image_idx = img_idx,
                     });
                     for (0..n_tokens) |_| {
                         try tokens.append(allocator, media_token_id);
@@ -594,12 +621,14 @@ fn inputChunksToTokenizedSegments(
             .audio => {
                 if (media_type == .audio) {
                     const n_tokens = chunk.tokens_audio_n;
+                    const n_pos = chunk.nPos();
                     try offsets.append(allocator, .{
                         .start = 0,
                         .length = 0,
                         .media_type = .audio,
                         .token_count = n_tokens,
                         .token_offset = @intCast(tokens.items.len),
+                        .n_pos = n_pos,
                     });
                     for (0..n_tokens) |_| {
                         try tokens.append(allocator, media_token_id);

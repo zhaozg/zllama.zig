@@ -372,6 +372,7 @@ pub fn threeStagePrefill(
     prefix_tokens: []const u32,
     media_token_id: u32,
     media_token_count: i32,
+    media_n_pos: i32, // 0 = use media_token_count; >0 = M-RoPE n_pos
     media_embeddings_data: []const f32,
     media_embd_dim: u32,
     suffix_tokens: []const u32,
@@ -383,6 +384,8 @@ pub fn threeStagePrefill(
     const prefix_len: i32 = @intCast(prefix_tokens.len);
     const suffix_len: i32 = @intCast(suffix_tokens.len);
     const n_media: i32 = media_token_count;
+    // For M-RoPE: position advancement != token count. Mirrors C++ mtmd_input_chunk_get_n_pos.
+    const n_media_pos: i32 = if (media_n_pos > 0) media_n_pos else media_token_count;
 
     _ = graph_ctx; // 未使用，每个 Pass 使用独立临时 context
 
@@ -391,11 +394,11 @@ pub fn threeStagePrefill(
     // 三阶段预填充参数日志
     log.info("=== Three-stage multimodal prefill ===", .{});
     log.info("  Prefix  (text, causal) : {d} tokens  [pos 0..{d})", .{ prefix_len, prefix_len });
-    log.info("  Media   (embed,non-causal): {d} tokens  [pos {d}..{d})  embd_dim={d}  placeholder_token_id={d}", .{
-        n_media, prefix_len, prefix_len + n_media, media_embd_dim, media_token_id,
+    log.info("  Media   (embed,non-causal): {d} tokens  [pos {d}..{d})  embd_dim={d}  placeholder_token_id={d}  n_pos={d}", .{
+        n_media, prefix_len, prefix_len + n_media_pos, media_embd_dim, media_token_id, n_media_pos,
     });
     log.info("  Suffix  (text, causal) : {d} tokens  [pos {d}..{d})", .{
-        suffix_len, prefix_len + n_media, prefix_len + n_media + suffix_len,
+        suffix_len, prefix_len + n_media_pos, prefix_len + n_media_pos + suffix_len,
     });
     log.info("  Total tokens (3 passes): {d}", .{prefix_len + n_media + suffix_len});
 
@@ -451,10 +454,10 @@ pub fn threeStagePrefill(
 
     // ===================================================================
     // Pass 3: Text suffix only (causal attention) — sample logits from here
-    // Positions: prefix_len + n_media .. prefix_len + n_media + suffix_len - 1
+    // Positions: prefix_len + n_media_pos .. prefix_len + n_media_pos + suffix_len - 1
     // ===================================================================
     const sfx_n: i32 = if (suffix_len > 0) suffix_len else 1;
-    const suffix_start_pos: i32 = prefix_len + n_media;
+    const suffix_start_pos: i32 = prefix_len + n_media_pos;
 
     // 如果没有真实 suffix，使用一个 dummy token
     var suffix_tokens_buf: [1]u32 = undefined;

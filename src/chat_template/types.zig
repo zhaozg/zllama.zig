@@ -66,6 +66,14 @@ pub const AUDIO_PLACEHOLDER = "<|audio|>";
 /// 音频占位符备选（部分模型使用）
 pub const AUDIO_PLACEHOLDER_ALT = "<audio>";
 
+/// 图像位置类型，匹配 mtmd.PosType（定义在 mtmd/mod.zig），
+/// 此处单独声明以避免跨层依赖（chat_template 不依赖 mtmd）。
+pub const ImagePosType = enum {
+    normal,
+    mrope,
+    hunyuanvl,
+};
+
 /// 占位符信息
 pub const PlaceholderInfo = struct {
     /// 占位符在字符串中的起始位置
@@ -78,6 +86,18 @@ pub const PlaceholderInfo = struct {
     token_count: u32,
     /// 占位符在 token 序列中的起始偏移（由 tokenizeWithPlaceholders 填充）
     token_offset: u32 = 0,
+    /// M-RoPE 位置计数（仅 image，来自 ImageTokens.nPos / nTokens）
+    /// 对于 M-RoPE: n_pos = max(nx, ny)，用于 KV cache 位置推进
+    /// 对于 Normal:  n_pos = token_count
+    n_pos: u32 = 0,
+    /// M-RoPE 图像空间尺寸：grid_nx（patch 列数），grid_ny（patch 行数）
+    /// 零值表示非 M-RoPE / 未设置
+    grid_nx: u32 = 0,
+    grid_ny: u32 = 0,
+    /// 位置类型: normal / mrope / hunyuanvl
+    pos_type: ImagePosType = .normal,
+    /// 图像在序列中的序号（用于 HunyuanVL M-RoPE dim-3）
+    image_idx: u32 = 0,
 };
 
 /// 模型特定的媒体标记，用于扩展 scanPlaceholders 的搜索范围

@@ -41,6 +41,7 @@ pub const MediaType = types.MediaType;
 pub const PlaceholderInfo = types.PlaceholderInfo;
 pub const ExpandedPlaceholders = types.ExpandedPlaceholders;
 pub const ScanMarkers = types.ScanMarkers;
+pub const ImagePosType = types.ImagePosType;
 
 // 重新导出多模态辅助函数
 pub const scanPlaceholders = multimodal.scanPlaceholders;
