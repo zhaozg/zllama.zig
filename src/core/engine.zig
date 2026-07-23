@@ -89,6 +89,7 @@ pub const InferenceEngine = struct {
     }
 
     pub fn deinit(self: *InferenceEngine) void {
+        self.planner.deinit();
         self.ctx.deinit();
     }
 

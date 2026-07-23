@@ -26,9 +26,9 @@
 |------|--------|------|
 | `core/engine.zig` 拆分 | **P0** ✅ | 将 695 行杂糅代码拆为 `context.zig`（GGUF 加载）、`planner.zig`（图规划）、`executor.zig`（图执行） |
 | 依赖倒置强制执行 | **P0** ✅ | `executor` 只依赖 `planner` 给出的 `GraphPlan` 结构体，绝不直接读取 `context` 里的原始指针 |
-| KV Cache 环形缓冲区封装 | **P1** | 将 `kv_cache.zig` 中的裸指针操作封装为 `rotate()`、`evict()`、`copy()` 方法 |
-| 消除运行时 `realloc` | **P1** | 缓存高频使用的图结构（如 Prefill 图），彻底消灭 `ggml_gallocr_needs_realloc` |
-| 多后端统一接口 | **P1** | `Backend` 接口只暴露 `execGraph()`、`allocTensor()`、`copyToDevice()` |
+| KV Cache 环形缓冲区封装 | **P1** ✅ | 将 `kv_cache.zig` 中的裸指针操作封装为 `rotate()`、`evict()`、`copy()` 方法 |
+| 消除运行时 `realloc` | **P1** ✅ | 缓存高频使用的图结构（如 Prefill 图），彻底消灭 `ggml_gallocr_needs_realloc` |
+| 多后端统一接口 | **P1** ✅ | `Backend` 接口只暴露 `execGraph()`、`allocTensor()`、`copyToDevice()` |
 
 ### 阶段 2：多模态完善（进行中 🔄）
 

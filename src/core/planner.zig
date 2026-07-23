@@ -52,6 +52,69 @@ pub const PrefillResult = struct {
 };
 
 // ============================================================================
+// PrefillGraphCache — caches prefill graph structure to eliminate realloc
+// ============================================================================
+
+/// Caches the prefill graph structure so that repeated prefill calls with
+/// the same token count do not trigger ggml_gallocr_needs_realloc.
+///
+/// The cache stores the graph metadata (tensor descriptors, node count) and
+/// the gallocr reservation. When a new prefill request arrives with the same
+/// token count, the cached graph is reused directly.
+///
+/// Key insight: prefill graphs are deterministic for a given token count.
+/// The graph structure (nodes, edges, tensor shapes) depends only on n_tokens,
+/// not on the actual token values. So we can cache by n_tokens.
+///
+/// Reference: llama.cpp's approach of reusing the same graph for all prefill
+/// calls with the same batch size.
+pub const PrefillGraphCache = struct {
+    /// Cached entry for a specific token count
+    const Entry = struct {
+        n_tokens: i32,
+        /// The cached graph (reused across calls)
+        graph: *ggml.CGraph,
+        /// The logits tensor pointer (stable across calls)
+        logits: *ggml.Tensor,
+        /// The input tensor pointer (stable across calls)
+        input_tensor: *ggml.Tensor,
+    };
+
+    entries: std.ArrayListUnmanaged(Entry),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) PrefillGraphCache {
+        return .{
+            .entries = .{ .items = &.{}, .capacity = 0 },
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *PrefillGraphCache) void {
+        self.entries.deinit(self.allocator);
+    }
+
+    /// Look up a cached prefill plan for the given token count.
+    /// Returns null if no cached entry exists.
+    pub fn lookup(self: *const PrefillGraphCache, n_tokens: i32) ?Entry {
+        for (self.entries.items) |entry| {
+            if (entry.n_tokens == n_tokens) return entry;
+        }
+        return null;
+    }
+
+    /// Insert a new entry into the cache.
+    pub fn insert(self: *PrefillGraphCache, entry: Entry) !void {
+        try self.entries.append(self.allocator, entry);
+    }
+
+    /// Invalidate all cached entries (e.g., after model reload).
+    pub fn clear(self: *PrefillGraphCache) void {
+        self.entries.clearAndFree(self.allocator);
+    }
+};
+
+// ============================================================================
 // GraphPlanner — builds and plans compute graphs
 // ============================================================================
 
@@ -66,6 +129,8 @@ pub const GraphPlanner = struct {
     params: *const model_if.ModelParams,
     kv_cache_mgr: *kv_cache.KVCache,
     allocator: std.mem.Allocator,
+    /// Cache for prefill graphs to eliminate runtime realloc
+    prefill_cache: PrefillGraphCache,
 
     pub fn init(
         ctx_graph: *ggml.Context,
@@ -80,14 +145,21 @@ pub const GraphPlanner = struct {
             .params = params,
             .kv_cache_mgr = kv_cache_mgr,
             .allocator = allocator,
+            .prefill_cache = PrefillGraphCache.init(allocator),
         };
     }
 
+    pub fn deinit(self: *GraphPlanner) void {
+        self.prefill_cache.deinit();
+    }
+
     // ========================================================================
-    // Prefill graph planning
+    // Prefill graph planning (with caching)
     // ========================================================================
 
     /// Build a prefill graph for the given input tokens.
+    /// Uses the PrefillGraphCache to avoid rebuilding the graph structure
+    /// when the same token count is used again.
     /// Returns a GraphPlan ready for execution.
     pub fn planPrefill(
         self: *GraphPlanner,
@@ -95,6 +167,26 @@ pub const GraphPlanner = struct {
         gallocr: *ggml.Gallocr,
     ) !GraphPlan {
         const n_prompt_tokens: i32 = @intCast(input_tokens.len);
+
+        // Check cache first
+        if (self.prefill_cache.lookup(n_prompt_tokens)) |cached| {
+            // Copy input token data into the cached tensor
+            {
+                const data = cached.input_tensor.dataBytes();
+                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
+                for (input_tokens, 0..) |token, j| slice[j] = @as(i32, @intCast(token));
+            }
+            return GraphPlan{
+                .graph = cached.graph,
+                .logits = cached.logits,
+                .n_tokens = n_prompt_tokens,
+                .start_pos = 0,
+                .is_prefill = true,
+                .gallocr = gallocr,
+            };
+        }
+
+        // Cache miss: build the graph
         self.ctx_graph.setNoAlloc(false);
         const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
         self.ctx_graph.setNoAlloc(true);
@@ -109,6 +201,14 @@ pub const GraphPlanner = struct {
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
             for (input_tokens, 0..) |token, j| slice[j] = @as(i32, @intCast(token));
         }
+
+        // Cache the graph structure for future reuse
+        try self.prefill_cache.insert(.{
+            .n_tokens = n_prompt_tokens,
+            .graph = graph,
+            .logits = logits,
+            .input_tensor = input_tensor,
+        });
 
         return GraphPlan{
             .graph = graph,

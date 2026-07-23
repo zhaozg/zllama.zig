@@ -1,6 +1,8 @@
 //! Backend 与 Graph Allocator 封装
 //!
 //! 提供 ggml_backend 和 ggml_gallocr 的类型安全 Zig 封装。
+//! 同时提供统一的 BackendInterface 虚表，支持多后端（CPU/Metal/CUDA）的
+//! 统一调用方式。
 
 const std = @import("std");
 const cmod = @import("c.zig");
@@ -289,6 +291,98 @@ pub const Gallocr = opaque {
 pub fn setInput(tensor: *Tensor) void {
     c.ggml_set_input(@ptrCast(@alignCast(tensor)));
 }
+
+// ============================================================================
+// 多后端统一接口（BackendInterface）
+// ============================================================================
+
+/// 后端能力标记
+pub const BackendCapabilities = struct {
+    /// 是否支持 GPU 计算
+    is_gpu: bool = false,
+    /// 后端名称（如 "Metal", "CUDA", "CPU"）
+    name: []const u8 = "CPU",
+    /// 是否支持异步计算
+    supports_async: bool = false,
+    /// 是否支持事件同步
+    supports_events: bool = false,
+};
+
+/// 统一后端接口（虚表模式）
+///
+/// 提供 execGraph、allocTensor、copyToDevice 三个核心方法，
+/// 屏蔽 CPU/Metal/CUDA 等不同后端的差异。
+///
+/// 使用方式：
+/// ```zig
+/// const backend = BackendInterface.init(cpu_backend, .{ .name = "CPU" });
+/// try backend.execGraph(graph);
+/// ```
+pub const BackendInterface = struct {
+    /// 底层 ggml_backend 指针
+    inner: *Backend,
+    /// 后端能力标记
+    capabilities: BackendCapabilities,
+
+    /// 从 ggml Backend 创建统一接口
+    pub fn init(backend: *Backend, capabilities: BackendCapabilities) BackendInterface {
+        return .{
+            .inner = backend,
+            .capabilities = capabilities,
+        };
+    }
+
+    /// 从 ggml Backend 自动检测能力并创建统一接口
+    pub fn initAuto(backend: *Backend) BackendInterface {
+        const is_gpu = backendIsGpu(backend);
+        const name = backendName(backend);
+        return .{
+            .inner = backend,
+            .capabilities = .{
+                .is_gpu = is_gpu,
+                .name = name,
+            },
+        };
+    }
+
+    /// 执行计算图
+    /// 返回 true 表示成功，false 表示失败
+    pub fn execGraph(self: *const BackendInterface, graph: *CGraph) bool {
+        return backendGraphCompute(self.inner, graph);
+    }
+
+    /// 为 context 中所有未分配的张量分配内存
+    /// 权重张量（已通过 setDataPtr 设置）不会被重新分配
+    pub fn allocTensor(self: *const BackendInterface, ctx: *Context) !void {
+        return backendAllocCtxTensors(ctx, self.inner);
+    }
+
+    /// 将数据从 host 内存拷贝到设备内存
+    /// 对于 CPU 后端，这是 memcpy；对于 GPU 后端，这是 host->device 传输
+    pub fn copyToDevice(self: *const BackendInterface, tensor: *Tensor, data: []const u8, offset: usize) void {
+        _ = self;
+        backendTensorSet(tensor, data, offset);
+    }
+
+    /// 将数据从设备内存拷贝到 host 内存
+    /// 对于 CPU 后端，这是 memcpy；对于 GPU 后端，这是 device->host 传输
+    pub fn copyToHost(self: *const BackendInterface, tensor: *Tensor, data: []u8, offset: usize) void {
+        _ = self;
+        backendTensorGet(tensor, data, offset);
+    }
+
+    /// 设置 CPU 线程数（仅对 CPU 后端有效）
+    pub fn setNThreads(self: *const BackendInterface, n_threads: i32) void {
+        if (!self.capabilities.is_gpu) {
+            backendCpuSetNThreads(self.inner, n_threads);
+        }
+    }
+
+    /// 获取默认 buffer type
+    pub fn defaultBufferType(self: *const BackendInterface) *BackendBufferType {
+        return backendGetDefaultBufferType(self.inner);
+    }
+};
 
 // ============================================================================
 // 测试

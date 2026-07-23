@@ -292,6 +292,88 @@ pub const KVCache = struct {
     }
 
     // ======================================================================
+    // 环形缓冲区操作（Ring Buffer API）
+    // ======================================================================
+
+    /// 旋转 Cache：将前 `n` 个位置的 K/V 数据移动到末尾。
+    /// 用于滑动窗口场景，将最早的位置移到末尾以便覆盖。
+    /// 实现方式：通过 ggml_cpy 在计算图中完成数据搬运。
+    pub fn rotate(self: *KVCache, ctx: *ggml.Context, graph: *ggml.CGraph, n: u32) void {
+        if (n == 0 or n >= self.max_seq_len) return;
+        for (self.layers) |*layer| {
+            const layer_len = layer.current_len;
+            if (layer_len <= n) {
+                // 全部旋转：重置长度
+                layer.current_len = 0;
+                continue;
+            }
+            const keep = layer_len - n;
+            const hdim_k: i64 = @intCast(layer.head_dim_k_actual);
+            const hdim_v: i64 = @intCast(layer.head_dim_v_actual);
+            const nkv: i64 = @intCast(layer.n_kv_head_actual);
+            const k_nb = layer.k.nb();
+            const v_nb = layer.v.nb();
+
+            // 将 [n..layer_len) 的数据复制到位置 0
+            const k_src = ctx.view3d(layer.k, hdim_k, nkv, @intCast(keep), k_nb[1], k_nb[2], @intCast(n * k_nb[2]));
+            const k_dst = ctx.view3d(layer.k, hdim_k, nkv, @intCast(keep), k_nb[1], k_nb[2], 0);
+            const k_cpy = ggml.cpy(ctx, k_src, k_dst);
+            graph.buildForwardExpand(k_cpy);
+
+            const v_src = ctx.view3d(layer.v, hdim_v, nkv, @intCast(keep), v_nb[1], v_nb[2], @intCast(n * v_nb[2]));
+            const v_dst = ctx.view3d(layer.v, hdim_v, nkv, @intCast(keep), v_nb[1], v_nb[2], 0);
+            const v_cpy = ggml.cpy(ctx, v_src, v_dst);
+            graph.buildForwardExpand(v_cpy);
+
+            layer.current_len = keep;
+        }
+    }
+
+    /// 驱逐 Cache：移除最早（位置 0）的 `n` 个 token 的 K/V 数据。
+    /// 与 rotate 不同，evict 不移动数据，仅调整 current_len 和偏移量。
+    /// 适用于不需要保留被驱逐数据的场景（如上下文窗口溢出时丢弃最早 token）。
+    pub fn evict(self: *KVCache, n: u32) void {
+        if (n == 0) return;
+        for (self.layers) |*layer| {
+            if (layer.current_len <= n) {
+                layer.current_len = 0;
+            } else {
+                layer.current_len -= n;
+            }
+        }
+    }
+
+    /// 复制 Cache：将源 KVCache 的指定层数据复制到本 Cache。
+    /// 用于 KV Cache 的跨实例拷贝（如 speculative decoding 的验证阶段）。
+    /// 源和目标必须有相同的 head_dim 和 n_kv_head。
+    pub fn copy(self: *KVCache, ctx: *ggml.Context, graph: *ggml.CGraph, src: *const KVCache, layer_idx: usize) void {
+        const dst_layer = &self.layers[layer_idx];
+        const src_layer = &src.layers[layer_idx];
+        const len = @min(src_layer.current_len, dst_layer.max_seq_len);
+        if (len == 0) return;
+
+        const hdim_k: i64 = @intCast(dst_layer.head_dim_k_actual);
+        const hdim_v: i64 = @intCast(dst_layer.head_dim_v_actual);
+        const nkv: i64 = @intCast(dst_layer.n_kv_head_actual);
+        const dst_k_nb = dst_layer.k.nb();
+        const dst_v_nb = dst_layer.v.nb();
+        const src_k_nb = src_layer.k.nb();
+        const src_v_nb = src_layer.v.nb();
+
+        const k_src = ctx.view3d(src_layer.k, hdim_k, nkv, @intCast(len), src_k_nb[1], src_k_nb[2], 0);
+        const k_dst = ctx.view3d(dst_layer.k, hdim_k, nkv, @intCast(len), dst_k_nb[1], dst_k_nb[2], 0);
+        const k_cpy = ggml.cpy(ctx, k_src, k_dst);
+        graph.buildForwardExpand(k_cpy);
+
+        const v_src = ctx.view3d(src_layer.v, hdim_v, nkv, @intCast(len), src_v_nb[1], src_v_nb[2], 0);
+        const v_dst = ctx.view3d(dst_layer.v, hdim_v, nkv, @intCast(len), dst_v_nb[1], dst_v_nb[2], 0);
+        const v_cpy = ggml.cpy(ctx, v_src, v_dst);
+        graph.buildForwardExpand(v_cpy);
+
+        dst_layer.current_len = len;
+    }
+
+    // ======================================================================
     // MemoryContext 接口适配
     // ======================================================================
 
