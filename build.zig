@@ -465,14 +465,14 @@ pub fn build(b: *std.Build) void {
     mm_graph_mod.addImport("weight_loader", weight_loader_mod);
     mm_graph_mod.addImport("debug", debug_mod);
 
-    const encoder_debug_mod = b.createModule(.{
-        .root_source_file = b.path("src/mtmd/encoder_debug.zig"),
+    const mtmd_debug_mod = b.createModule(.{
+        .root_source_file = b.path("src/mtmd/debug.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    encoder_debug_mod.addImport("ggml", ggml_mod);
-    encoder_debug_mod.addImport("debug", debug_mod);
+    mtmd_debug_mod.addImport("ggml", ggml_mod);
+    mtmd_debug_mod.addImport("debug", debug_mod);
 
     const mm_audio_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/audio/mod.zig"),
@@ -486,7 +486,7 @@ pub fn build(b: *std.Build) void {
     mm_audio_mod.addImport("fft", fft_mod);
     mm_audio_mod.addImport("graph", mm_graph_mod);
     mm_audio_mod.addImport("debug", debug_mod);
-    mm_audio_mod.addImport("encoder_debug", encoder_debug_mod);
+    mm_audio_mod.addImport("mtmd_debug", mtmd_debug_mod);
 
     const mm_vision_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/vision/mod.zig"),
@@ -499,7 +499,7 @@ pub fn build(b: *std.Build) void {
     mm_vision_mod.addImport("weight_loader", weight_loader_mod);
     mm_vision_mod.addImport("graph", mm_graph_mod);
     mm_vision_mod.addImport("debug", debug_mod);
-    mm_vision_mod.addImport("encoder_debug", encoder_debug_mod);
+    mm_vision_mod.addImport("mtmd_debug", mtmd_debug_mod);
 
     const utils_mod = b.createModule(.{
         .root_source_file = b.path("src/utils.zig"),
@@ -525,15 +525,6 @@ pub fn build(b: *std.Build) void {
     mm_manager_mod.addImport("tokenizer", tokenizer_mod);
 
     mm_manager_mod.addImport("graph", mm_graph_mod);
-
-    const debug_save_chunks_mod = b.createModule(.{
-        .root_source_file = b.path("src/mtmd/debug_save_chunks.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    debug_save_chunks_mod.addImport("mm", mm_manager_mod);
-    mm_manager_mod.addImport("debug_save_chunks", debug_save_chunks_mod);
 
     const mm_preprocess_mod = b.createModule(.{
         .root_source_file = b.path("src/mtmd/preprocess.zig"),
@@ -593,7 +584,6 @@ pub fn build(b: *std.Build) void {
         tokenize_mod.addImport("tokenizer", tokenizer_mod);
         tokenize_mod.addImport("mm", mm_manager_mod);
         tokenize_mod.addImport("preprocess", mm_preprocess_mod);
-        tokenize_mod.addImport("debug_save_chunks", debug_save_chunks_mod);
         mm_manager_mod.addImport("tokenize", tokenize_mod);
     }
 

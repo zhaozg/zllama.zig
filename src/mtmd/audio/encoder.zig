@@ -7,7 +7,6 @@ const ggml = @import("ggml");
 const gguf = @import("gguf");
 const graph = @import("graph");
 const config_mod = @import("config.zig");
-const encoder_debug = @import("encoder_debug");
 const log = std.log.scoped(.audio_encoder);
 pub const AudioEncoderBackend = graph.AudioEncoderBackend;
 

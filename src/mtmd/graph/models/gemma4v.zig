@@ -631,6 +631,8 @@ pub fn buildGraphFromWeights(
     p: *const VisionHParams,
     image_tensor: *ggml.Tensor,
 ) anyerror!*ggml.CGraph {
+    _ = io;
+
     const img_buf = try image_tensor.dataGet(f32, std.heap.page_allocator);
     // Note: img_buf is intentionally leaked (leak-to-exit) since ImageF32
     // is used during graph construction and the data must remain valid.
@@ -641,8 +643,6 @@ pub fn buildGraphFromWeights(
         .nx = img_w,
         .ny = img_h,
     };
-
-    try graph.debug.saveData(io, "debug_vision", "zllama_vision_00_images.json", "images", img_buf);
 
     var hparams = p.*;
     var builder = GraphBuilder{

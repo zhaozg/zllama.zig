@@ -37,9 +37,9 @@
 - **Benchmark 模式**：`--benchmark` 输出 PP/TG 分离的性能数据
 - （可选）CUDA 12.0+ / Metal 支持的 macOS
 
-- **多模态支持**（🚧 进行中）：
+- **多模态支持**（基于 gemma-4-E2B）：
   - ✅ 音频：Conformer 编码器 + Mel 频谱 → LLM（Gemma 4 E2B 已验证）
-  - 🚧 视觉：ViT 图像编码器 → LLM（pipeline 就绪，输出内容待验证）
+  - ✅ 视觉：ViT 图像编码器 → LLM（pipeline 就绪，输出内容待验证）
   - WAV/PPM 预处理（加载 + Resize + 标准化）
 
 ### 运行推理

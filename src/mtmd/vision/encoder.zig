@@ -10,7 +10,6 @@ const config = @import("config.zig");
 const types = @import("types.zig");
 const preprocess = @import("preprocess");
 const graph = @import("graph");
-const encoder_debug = @import("encoder_debug");
 const VisionEncoderParams = config.VisionEncoderParams;
 const VisionEncoderWeights = types.VisionEncoderWeights;
 const log = std.log.scoped(.vision_encoder);
