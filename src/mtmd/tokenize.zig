@@ -20,7 +20,6 @@ const std = @import("std");
 const tokenizer = @import("tokenizer");
 const mtmd = @import("mm");
 const preprocess = @import("preprocess");
-const dbg = @import("debug_save_chunks.zig");
 
 const log = std.log.scoped(.mtmd_tokenize);
 
@@ -159,8 +158,6 @@ pub fn tokenize(ctx: *mtmd.MtmdContext, io: std.Io, allocator: std.mem.Allocator
         }
     }
 
-    try dbg.saveInputChunks(io, allocator, "./", "zllama_vision_mtmd_input_chunks.txt",
-    text.text, &chunks);
     return chunks;
 }
 

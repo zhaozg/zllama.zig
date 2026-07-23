@@ -379,13 +379,14 @@ pub const Gemma4Graph = struct {
                     k_attn = cache.getKView(ctx, il);
                     v_attn = cache.getVView(ctx, il);
                 } else {
-                    // Non-causal (media) pass: write K/V to cache so the suffix
-                    // causal pass can attend to media tokens. Use the current
-                    // cache length as the write offset.
+                    // Non-causal (media) pass: write K/V to cache, then read back
+                    // the full cache view so that the current chunk can attend to
+                    // all previously processed media tokens (from earlier chunks).
+                    // This matches llama.cpp build_attn which always uses the cache
+                    // view for attention computation, regardless of causal mode.
                     cache.setKv(ctx, gf, il, k, v_tensor, @intCast(n_tokens_i64));
-                    // For non-causal attention, attend to all media tokens directly
-                    // (not through cache views, since cache may not be large enough
-                    // for the full media sequence in a single view).
+                    k_attn = cache.getKView(ctx, il);
+                    v_attn = cache.getVView(ctx, il);
                 }
             }
 
@@ -394,9 +395,9 @@ pub const Gemma4Graph = struct {
             const cache_len: i64 = if (causal and kv_cache_mgr != null) blk: {
                 break :blk k_attn.ne()[2];
             } else if (!causal and kv_cache_mgr != null) blk: {
-                // For non-causal pass, use n_tokens as the effective length
-                // since we're attending to all media tokens simultaneously.
-                break :blk n_tokens_i64;
+                // For non-causal pass, use the full cache view length
+                // (which includes all previously processed chunks).
+                break :blk k_attn.ne()[2];
             } else n_tokens_i64;
 
             // For SWA layers, the cache view may be truncated to max_seq_len (window size).
