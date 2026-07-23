@@ -1,19 +1,26 @@
-//! 可增长 Context 包装
+//! 可增长 Context 包装 & 临时 Context 池管理
 //!
-//! 包装 ggml.Context，在容量不足时自动创建更大的新 context。
-//! 支持两种模式：
-//! - no_alloc 模式（图上下文）：张量数据由 Gallocr 管理，只需迁移元数据
-//! - 普通模式（KV Cache 等）：张量数据在 context 内部，需要复制数据
+//! 提供两个核心功能：
+//!
+//! 1. GrowableContext: 包装 ggml.Context，在容量不足时自动创建更大的新 context。
+//!    支持两种模式：
+//!    - no_alloc 模式（图上下文）：张量数据由 Gallocr 管理，只需迁移元数据
+//!    - 普通模式（KV Cache 等）：张量数据在 context 内部，需要复制数据
+//!
+//! 2. TempContextPool: 管理一组可变大小的 ggml_context，按需取用。
 //!
 //! 设计原则：
 //! - 透明替换：调用者无需感知 context 的扩容过程
 //! - 阈值触发：使用率超过阈值时自动触发扩容
 //! - 指数增长：每次扩容翻倍，避免频繁扩容
 //!
-//! 参考：ggml_init / ggml_free / ggml_reset
+//! 参考：ggml_init / ggml_free / ggml_reset, llama.cpp llama_context
 
 const std = @import("std");
 const ggml = @import("ggml");
+
+/// 自适应内存估算器（独立模块）
+pub const MemoryEstimator = @import("memory_estimator.zig").MemoryEstimator;
 
 const log = std.log.scoped(.core_growable);
 
@@ -22,6 +29,10 @@ const GROW_THRESHOLD: f64 = 0.75;
 
 /// 最小扩容大小（避免小幅度扩容）
 const MIN_GROW_SIZE: usize = 64 * 1024 * 1024; // 64 MB
+
+// ============================================================================
+// GrowableContext — 可增长 Context 包装
+// ============================================================================
 
 /// 可增长 Context 包装
 ///
