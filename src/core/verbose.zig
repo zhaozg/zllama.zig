@@ -12,7 +12,7 @@ const log = std.log.scoped(.core_verbose);
 /// Print verbose prompt information: prompt text, token IDs, decoded text, and logits preview.
 /// Matches llama.cpp's --verbose-prompt output format.
 /// If `media_offsets` is provided, media placeholder regions in the token sequence
-/// are displayed as `<__media_<type>_<count>tokens__>` instead of repeating the same token.
+/// are displayed as `<__media__>` instead of repeating the same token.
 pub fn printVerbosePrompt(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -51,12 +51,8 @@ pub fn printVerbosePrompt(
         while (i < input_tokens.len) : (i += 1) {
             if (off_idx < offsets.len and i == offsets[off_idx].token_offset) {
                 const info = offsets[off_idx];
-                const media_label = switch (info.media_type) {
-                    .image => "image",
-                    .audio => "audio",
-                };
-                const line = try std.fmt.bufPrint(&line_buf, "{d:6}: token {d:6} -> '<__media_{s}_{d}tokens__>'  (placeholder, {d} tokens)\n", .{
-                    i, input_tokens[i], media_label, info.token_count, info.token_count,
+                const line = try std.fmt.bufPrint(&line_buf, "{d:6}: token {d:6} -> '<__media__>'  (placeholder, {d} tokens)\n", .{
+                    i, input_tokens[i], info.token_count,
                 });
                 _ = try stderr_file.writeStreamingAll(io, line);
                 i += info.token_count - 1;

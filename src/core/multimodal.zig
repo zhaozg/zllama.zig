@@ -185,7 +185,21 @@ pub fn generateWithImage(ectx: *EngineContext, io: std.Io, prompt: []const u8, i
     const formatted_prompt = if (ectx.no_chat_template) blk: {
         const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .image, ectx.allocator, null);
         break :blk with_ph;
-    } else try applyChatTemplateWithMedia(ectx, prompt, chat_template.Media.init(.image));
+    } else blk: {
+        const model_name: ?[]const u8 = if (ectx.params.model_name.len > 0) ectx.params.model_name else null;
+        const system = if (ectx.system_prompt.len > 0) ectx.system_prompt else null;
+        break :blk try chat_template.applyWithMedia(
+            ectx.allocator,
+            ectx.arch,
+            model_name,
+            ectx.chat_template_source,
+            ectx.no_chat_template,
+            ectx.no_jinja,
+            prompt,
+            chat_template.Media.init(.image),
+            system,
+        );
+    };
     defer ectx.allocator.free(formatted_prompt);
 
     logger.info("formatted_prompt: {s}", .{formatted_prompt});
@@ -298,7 +312,21 @@ pub fn generateWithAudio(ectx: *EngineContext, io: std.Io, prompt: []const u8, a
     const formatted_prompt = if (ectx.no_chat_template) blk: {
         const with_ph = try chat_template.ensurePlaceholderInContent(prompt, .audio, ectx.allocator, null);
         break :blk with_ph;
-    } else try applyChatTemplateWithMedia(ectx, prompt, chat_template.Media.init(.audio));
+    } else blk: {
+        const model_name: ?[]const u8 = if (ectx.params.model_name.len > 0) ectx.params.model_name else null;
+        const system = if (ectx.system_prompt.len > 0) ectx.system_prompt else null;
+        break :blk try chat_template.applyWithMedia(
+            ectx.allocator,
+            ectx.arch,
+            model_name,
+            ectx.chat_template_source,
+            ectx.no_chat_template,
+            ectx.no_jinja,
+            prompt,
+            chat_template.Media.init(.audio),
+            system,
+        );
+    };
     defer ectx.allocator.free(formatted_prompt);
 
     logger.info("formatted_prompt: {s}", .{formatted_prompt});
@@ -358,30 +386,6 @@ fn multimodalPrefillUnified(
     const embd_heap = try ectx.allocator.dupe(f32, embd_raw);
     defer ectx.allocator.free(embd_heap);
 
-    // Embedding validation
-    {
-        const n_total: usize = embd_heap.len;
-        const n_preview: usize = @min(n_total, 5);
-        var all_zero = true;
-        var has_nan = false;
-        for (embd_heap) |v| {
-            if (v != 0.0) all_zero = false;
-            if (std.math.isNan(v)) has_nan = true;
-        }
-        logger.info("Embedding validation: total={d} preview={d:.4} {d:.4} {d:.4} {d:.4} {d:.4} all_zero={} has_nan={}", .{
-            n_total,
-            if (n_preview > 0) embd_heap[0] else @as(f32, 0),
-            if (n_preview > 1) embd_heap[1] else @as(f32, 0),
-            if (n_preview > 2) embd_heap[2] else @as(f32, 0),
-            if (n_preview > 3) embd_heap[3] else @as(f32, 0),
-            if (n_preview > 4) embd_heap[4] else @as(f32, 0),
-            all_zero,
-            has_nan,
-        });
-        if (all_zero) logger.warn("  ⚠ all embedding values are ZERO!", .{});
-        if (has_nan) logger.warn("  ⚠ embedding contains NaN!", .{});
-    }
-
     const pr = try prefill_mod.threeStagePrefill(
         ectx.ctx_graph,
         ectx.model,
@@ -415,7 +419,7 @@ fn multimodalPrefillUnified(
 
     try decode_mod.reserveDecodeGallocr(ectx.allocator, ectx.kv_cache_mgr, ectx.inc_ctx, ectx.model, &ectx.params);
 
-    const dr = try decode_mod.runDecodeLoop(
+    _ = try decode_mod.runDecodeLoop(
         ectx.allocator,
         io,
         ectx.model,
@@ -439,39 +443,11 @@ fn multimodalPrefillUnified(
                     return eng.tok.isSkipToken(@intCast(t));
                 }
             }.f,
+            .onComplete = null,
         },
         @ptrCast(ectx),
         ectx.benchmark,
     );
-
-    if (!ectx.benchmark) {
-        const sf = std.Io.File.stdout();
-        try sf.writeStreamingAll(io, "\n");
-    }
-    const total_time_s = pr.pp_time_s + dr.tg_time_s;
-    if (dr.gen_count > 0) logger.info("{s} Multimodal: {d} tokens in {d:.2}s ({d:.1} t/s)", .{ label, dr.gen_count, total_time_s, @as(f64, @floatFromInt(dr.gen_count)) / total_time_s });
-}
-
-// ============================================================================
-// Shared helpers
-// ============================================================================
-
-fn applyChatTemplateWithMedia(ectx: *EngineContext, user_prompt: []const u8, media: chat_template.Media) ![]const u8 {
-    if (ectx.no_chat_template) return ectx.allocator.dupe(u8, user_prompt);
-    const model_name: ?[]const u8 = if (ectx.params.model_name.len > 0) ectx.params.model_name else null;
-    const source = ectx.chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(ectx.arch, model_name) };
-    var tmpl = try chat_template.resolve(ectx.allocator, source, ectx.arch, model_name, !ectx.no_jinja);
-    defer tmpl.deinit(ectx.allocator);
-
-    const effective_prompt = try chat_template.ensurePlaceholderInContent(user_prompt, media.type, ectx.allocator, null);
-    const needs_free = effective_prompt.ptr != user_prompt.ptr;
-    defer if (needs_free) ectx.allocator.free(effective_prompt);
-
-    const messages = [_]chat_template.ChatMessage{
-        chat_template.ChatMessage.withMedia("user", effective_prompt, media),
-    };
-    const system = if (ectx.system_prompt.len > 0) ectx.system_prompt else null;
-    return tmpl.apply(ectx.allocator, &messages, system, true);
 }
 
 pub fn tokenizeWithMediaPlaceholders(

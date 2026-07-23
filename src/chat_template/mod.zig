@@ -480,7 +480,43 @@ pub fn debugPrintTemplate(
 // Convenience API (backward compatible)
 // ============================================================================
 
-/// Apply a chat template for a single-turn user prompt (convenience wrapper).
+/// Apply a chat template for a single-turn user prompt with optional media.
+/// This is the shared implementation used by both engine.zig and multimodal.zig
+/// to avoid code duplication.
+pub fn applyWithMedia(
+    allocator: std.mem.Allocator,
+    arch: model.Architecture,
+    model_name: ?[]const u8,
+    chat_template_source: ?TemplateSource,
+    no_chat_template: bool,
+    no_jinja: bool,
+    user_prompt: []const u8,
+    media: ?Media,
+    system_prompt: ?[]const u8,
+) ![]const u8 {
+    if (no_chat_template) return allocator.dupe(u8, user_prompt);
+
+    const source = chat_template_source orelse TemplateSource{ .preset = kindForArchitecture(arch, model_name) };
+    var tmpl = try resolve(allocator, source, arch, model_name, !no_jinja);
+    defer tmpl.deinit(allocator);
+
+    // Prepend the media placeholder to the content so it's available for
+    // both Jinja template rendering (where media info is not passed separately)
+    // and preset template rendering (where appendMediaContent will skip adding
+    // the marker if it's already present, avoiding double placeholders).
+    const effective_prompt = if (media) |m| blk: {
+        break :blk try ensurePlaceholderInContent(user_prompt, m.type, allocator, null);
+    } else user_prompt;
+    const needs_free = media != null and effective_prompt.ptr != user_prompt.ptr;
+    defer if (needs_free) allocator.free(effective_prompt);
+
+    const messages = if (media) |m| [_]ChatMessage{
+        ChatMessage.withMedia("user", effective_prompt, m),
+    } else [_]ChatMessage{
+        ChatMessage.init("user", effective_prompt),
+    };
+    return tmpl.apply(allocator, &messages, system_prompt, true);
+}
 /// Uses architecture default template.
 pub fn applySingleTurn(
     allocator: std.mem.Allocator,

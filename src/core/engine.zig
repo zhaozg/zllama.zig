@@ -367,29 +367,19 @@ pub const InferenceEngine = struct {
     }
 
     pub fn applyChatTemplateWithMedia(self: *InferenceEngine, user_prompt: []const u8, media: ?chat_template.Media) ![]const u8 {
-        if (self.no_chat_template) return self.allocator.dupe(u8, user_prompt);
         const model_name: ?[]const u8 = if (self.params.model_name.len > 0) self.params.model_name else null;
-        const source = self.chat_template_source orelse chat_template.TemplateSource{ .preset = chat_template.kindForArchitecture(self.arch, model_name) };
-        var tmpl = try chat_template.resolve(self.allocator, source, self.arch, model_name, !self.no_jinja);
-        defer tmpl.deinit(self.allocator);
-
-        // Prepend the media placeholder to the content so it's available for
-        // both Jinja template rendering (where media info is not passed separately)
-        // and preset template rendering (where appendMediaContent will skip adding
-        // the marker if it's already present, avoiding double placeholders).
-        const effective_prompt = if (media) |m| blk: {
-            break :blk try chat_template.ensurePlaceholderInContent(user_prompt, m.type, self.allocator, null);
-        } else user_prompt;
-        const needs_free = media != null and effective_prompt.ptr != user_prompt.ptr;
-        defer if (needs_free) self.allocator.free(effective_prompt);
-
-        const messages = if (media) |m| [_]chat_template.ChatMessage{
-            chat_template.ChatMessage.withMedia("user", effective_prompt, m),
-        } else [_]chat_template.ChatMessage{
-            chat_template.ChatMessage.init("user", effective_prompt),
-        };
         const system = if (self.system_prompt.len > 0) self.system_prompt else null;
-        return tmpl.apply(self.allocator, &messages, system, true);
+        return chat_template.applyWithMedia(
+            self.allocator,
+            self.arch,
+            model_name,
+            self.chat_template_source,
+            self.no_chat_template,
+            self.no_jinja,
+            user_prompt,
+            media,
+            system,
+        );
     }
 
     pub fn applyChatTemplateMultiTurn(self: *InferenceEngine, chat_history: []const chat_template.ChatMessage) ![]const u8 {
