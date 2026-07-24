@@ -158,16 +158,15 @@ zig-out/bin/zllama -m gemma-4-E2B-it-Q4_K_M.gguf \
 |------|------|----------|----------|
 | ~~**`ModelContext.toMultimodalContext()` 复制 `tok`**~~ | ✅ 已修复: `EngineContext.tok` 改为 `*Tokenizer` 指针，`toMultimodalContext` 改为传递 `&self.tok` | — | — |
 | ~~**`main.zig` 中未使用的 import**~~ | ✅ 已修复: 移除 `model_if`、`tokenizer` 两个未使用 import | — | — |
-| **内存监控报告手动 free 易遗漏** | engine.zig 中 3 处调用 `mem_monitor.check()` 后需手动 `defer allocator.free(report.contexts)` | 容易遗漏导致内存泄漏 | 封装 `checkWithDefer` 辅助函数，或让 `check()` 返回内嵌 defer 的结构 |
+| ~~**内存监控报告手动 free 易遗漏**~~ | ✅ 已修复: 新增 `Checkpoint` enum + `MemoryMonitor.checkAndLog(checkpoint)` 封装 check → defer deinit → conditional warn，3 处调用点简化为 `.prefill`/`.decode`/`.chat_prefill` 枚举值 | — | — |
 
 ### 5.3 低优先级（P2）
 
 | 问题 | 描述 | 影响范围 | 建议方案 |
-|------|------|----------|----------|
-| ~~**`estimateGraphSize` 测试过于简单**~~ | ✅ 已修复: 断言改为范围检查 `> 128MB and < 4GB`，使用 n_layer=32 参数 | — | — |
-| **`GraphPlanner` 测试覆盖不足** | 仅有 `init` 和结构体大小测试 | 核心逻辑无测试覆盖 | 增加 mock 测试验证 `planPrefill` |
----
+| ~~**`GraphPlanner` 测试覆盖不足**~~ | ✅ 已修复: 新增 5 个 `PrefillGraphCache` 测试（init/deinit、insert/lookup、lookup miss、multiple entries、clear）+ 1 个 `planPrefill` mock 模型集成测试 | — | — |
 
+## 六、 近期提交记录
+| ~~**`GraphPlanner` 测试覆盖不足**~~ | ✅ 已修复: 新增 5 个 `PrefillGraphCache` 测试（init/deinit、insert/lookup、lookup miss、multiple entries、clear）+ 1 个 `planPrefill` mock 模型集成测试 | — | — |
 ## 六、 近期提交记录
 
 | 提交 | 描述 |

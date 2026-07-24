@@ -287,9 +287,20 @@ pub fn adaptIncContext(ic: *anyopaque) MonitoredContext {
     } };
 }
 
-// ============================================================================
-// MemoryMonitor — 内存监控器
-// ============================================================================
+/// 内存检查点 — 调用方标识，编译期类型安全替代裸字符串
+pub const Checkpoint = enum {
+    prefill,
+    decode,
+    chat_prefill,
+
+    pub fn label(self: Checkpoint) []const u8 {
+        return switch (self) {
+            .prefill => "Prefill",
+            .decode => "Decode",
+            .chat_prefill => "Chat prefill",
+        };
+    }
+};
 
 /// 内存监控器
 ///
@@ -401,6 +412,20 @@ pub const MemoryMonitor = struct {
     pub fn resetAlerts(self: *MemoryMonitor) void {
         self.consecutive_alerts = 0;
         self.last_alert = .normal;
+    }
+    /// Check memory usage and log a warning if non-normal.
+    /// Encapsulates the check → defer deinit → conditional warn pattern
+    /// so callers never forget to free the report's contexts allocation.
+    pub fn checkAndLog(self: *MemoryMonitor, checkpoint: Checkpoint) !void {
+        const mem_report = try self.check();
+        defer mem_report.deinit(self.allocator);
+        if (mem_report.max_alert != .normal) {
+            log.warn("{s}: {d:.1}% used ({s})", .{
+                checkpoint.label(),
+                mem_report.total_ratio * 100,
+                @tagName(mem_report.max_alert),
+            });
+        }
     }
 };
 

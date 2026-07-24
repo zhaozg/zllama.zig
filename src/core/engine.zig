@@ -227,14 +227,7 @@ pub const InferenceEngine = struct {
         );
 
         // 内存监控：prefill 后检查内存使用
-        const prefill_report = try self.mem_monitor.check();
-        defer prefill_report.deinit(self.ctx.allocator);
-        if (prefill_report.max_alert != .normal) {
-            logger.warn("Prefill memory: {d:.1}% used ({s})", .{
-                prefill_report.total_ratio * 100,
-                @tagName(prefill_report.max_alert),
-            });
-        }
+        try self.mem_monitor.checkAndLog(.prefill);
 
         const dr = try decode_mod.runDecodeLoop(
             self.ctx.allocator,
@@ -270,14 +263,7 @@ pub const InferenceEngine = struct {
         printStats(self.ctx.arch, self.ctx.params.model_name, self.ctx.n_threads, n_prompt_tokens, dr.gen_count, prefill.pp_time_s, dr.tg_time_s, self.ctx.benchmark);
 
         // 内存监控：decode 后检查内存使用
-        const decode_report = try self.mem_monitor.check();
-        defer decode_report.deinit(self.ctx.allocator);
-        if (decode_report.max_alert != .normal) {
-            logger.warn("Decode memory: {d:.1}% used ({s})", .{
-                decode_report.total_ratio * 100,
-                @tagName(decode_report.max_alert),
-            });
-        }
+        try self.mem_monitor.checkAndLog(.decode);
 
         if (!self.ctx.benchmark) {
             try stdout_file.writeStreamingAll(io, "\n");
@@ -384,14 +370,7 @@ pub const InferenceEngine = struct {
             defer self.ctx.allocator.free(prefill.logits);
 
             // 内存监控：chat prefill 后检查
-            const prefill_report = try self.mem_monitor.check();
-            defer prefill_report.deinit(self.ctx.allocator);
-            if (prefill_report.max_alert != .normal) {
-                logger.warn("Chat prefill memory: {d:.1}% used ({s})", .{
-                    prefill_report.total_ratio * 100,
-                    @tagName(prefill_report.max_alert),
-                });
-            }
+            try self.mem_monitor.checkAndLog(.chat_prefill);
 
             try decode_mod.reserveDecodeGallocr(
                 self.ctx.allocator,
