@@ -152,6 +152,7 @@ pub const GraphPlanner = struct {
         allocator: std.mem.Allocator,
         input_tokens: []const u32,
         gallocr: *ggml.Gallocr,
+        start_pos: i32,
     ) !GraphPlan {
         _ = self;
         const n_prompt_tokens: i32 = @intCast(input_tokens.len);
@@ -162,7 +163,7 @@ pub const GraphPlanner = struct {
 
         const graph = try ggml.CGraph.initReserved(ctx_graph, 16384);
         var builder = graph_builder.GraphBuilder.init(ctx_graph, graph, params, allocator);
-        const logits = try model.buildGraph(&builder, input_tensor, n_prompt_tokens, @ptrCast(kv_cache_mgr), 0);
+        const logits = try model.buildGraph(&builder, input_tensor, n_prompt_tokens, @ptrCast(kv_cache_mgr), start_pos);
 
         // Copy input token data into the tensor
         {
@@ -170,12 +171,11 @@ pub const GraphPlanner = struct {
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
             for (input_tokens, 0..) |token, j| slice[j] = @as(i32, @intCast(token));
         }
-
         return GraphPlan{
             .graph = graph,
             .logits = logits,
             .n_tokens = n_prompt_tokens,
-            .start_pos = 0,
+            .start_pos = start_pos,
             .is_prefill = true,
             .gallocr = gallocr,
         };
@@ -374,6 +374,7 @@ test "GraphPlanner planPrefill with mock model" {
         testing.allocator,
         &input_tokens,
         gallocr,
+        0, // start_pos
     );
 
     // Verify: GraphPlan metadata

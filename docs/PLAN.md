@@ -147,7 +147,7 @@ zig-out/bin/zllama -m gemma-4-E2B-it-Q4_K_M.gguf \
 
 | 问题 | 描述 | 影响范围 | 建议方案 |
 |------|------|----------|----------|
-| **多轮对话 KV Cache 仍全量重置** | `chatLoop` 中每轮对话仍调用 `kv_cache_mgr.reset()`，导致上一轮内容无法作为下一轮上下文 | 多轮对话退化为单轮，浪费算力 | 实现增量推理：仅对新输入 token 做 decode，累积 KV Cache |
+| ~~**多轮对话 KV Cache 仍全量重置**~~ | ✅ 已修复: `chatLoop` 实现增量推理——首轮完整 prefill，后续轮次保留 KV Cache 并仅 prefill 新增 token（通过 `n_past` 跟踪已缓存 token 数），避免重复处理历史对话 | — | — |
 | ~~**`reserveDecodeGallocr` 中 `gallocr` 参数未使用**~~ | ✅ 已修复: engine.zig 改用 `decode_mod.reserveDecodeGallocr` 直接调用，planner 重复代码已移除 | — | — |
 | ~~**`planDecode` 未在 generate 主路径中使用（死代码）**~~ | ✅ 已修复: `planDecode` 已从 planner.zig 移除（零调用点） | — | — |
 | ~~⚠️ **`reserveDecodeGallocr` 代码重复**~~ | ✅ 已修复: 统一到 `decode.zig`，planner 中重复代码已移除 | — | — |

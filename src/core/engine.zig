@@ -164,7 +164,7 @@ pub const InferenceEngine = struct {
     // Text prefill
     // ========================================================================
 
-    fn textPrefill(self: *InferenceEngine, input_tokens: []const u32) !PrefillResult {
+    fn textPrefill(self: *InferenceEngine, input_tokens: []const u32, start_pos: i32) !PrefillResult {
         const plan = try self.planner.planPrefill(
             self.ctx.ctx_graph,
             self.ctx.model,
@@ -173,6 +173,7 @@ pub const InferenceEngine = struct {
             self.ctx.allocator,
             input_tokens,
             self.ctx.gallocr,
+            start_pos,
         );
         return try self.executor.executePrefill(&plan, self.ctx.allocator);
     }
@@ -208,7 +209,7 @@ pub const InferenceEngine = struct {
         const n_prompt_tokens: i32 = @intCast(input_tokens.items.len);
         self.ctx.model.resetSSMStates();
 
-        const prefill = try self.textPrefill(input_tokens.items);
+        const prefill = try self.textPrefill(input_tokens.items, 0);
         defer self.ctx.allocator.free(prefill.logits);
 
         if (self.ctx.verbose_prompt) {
@@ -303,7 +304,8 @@ pub const InferenceEngine = struct {
 
         // Track whether this is the first turn (need full prefill) or subsequent (incremental decode)
         var is_first_turn = true;
-
+        // Total tokens already in KV cache (prefill + decode from previous turns)
+        var n_past: u32 = 0;
         while (true) {
             try stdout.writeStreamingAll(io, ">>> ");
             var reader = stdin.reader(io, &line_buf);
@@ -329,12 +331,14 @@ pub const InferenceEngine = struct {
                     self.ctx.kv_cache_mgr.reset();
                     self.ctx.model.resetSSMStates();
                     is_first_turn = true;
+                    n_past = 0;
                     try stdout.writeStreamingAll(io, "KV cache and SSM states reset.\n");
                 } else if (std.mem.eql(u8, line, "/new")) {
                     chat_history.clearAndFree(self.ctx.allocator);
                     self.ctx.kv_cache_mgr.reset();
                     self.ctx.model.resetSSMStates();
                     is_first_turn = true;
+                    n_past = 0;
                     try stdout.writeStreamingAll(io, "New conversation started.\n");
                 } else {
                     try stdout.writeStreamingAll(io, "Unknown command. Try /help.\n");
@@ -345,28 +349,25 @@ pub const InferenceEngine = struct {
             try chat_history.append(self.ctx.allocator, chat_template.ChatMessage.init("user", line));
             const formatted_prompt = try self.ctx.applyChatTemplateMultiTurn(chat_history.items);
             defer self.ctx.allocator.free(formatted_prompt);
-
             if (is_first_turn) {
                 // First turn: full prefill of the entire prompt
                 self.ctx.kv_cache_mgr.reset();
                 self.ctx.model.resetSSMStates();
+                n_past = 0;
                 is_first_turn = false;
-            } else {
-                // Subsequent turns: only prefill the new user input (the chat template
-                // formats the full history, but we only encode the delta).
-                // NOTE: For simplicity, we still prefill the full formatted prompt.
-                // A future optimization would encode only the new tokens and append
-                // them to the existing KV cache via incremental decode.
-                // For now, reset KV cache to avoid context length explosion from
-                // repeated prefill of the full history.
-                self.ctx.kv_cache_mgr.reset();
-                self.ctx.model.resetSSMStates();
             }
+            // Subsequent turns: KV cache already contains previous context;
+            // only prefill the new tokens appended to the existing cache.
 
             var input_tokens = try self.ctx.tok.encode(formatted_prompt, true, true);
             defer input_tokens.deinit(self.ctx.allocator);
 
-            const prefill = try self.textPrefill(input_tokens.items);
+            // Only prefill tokens beyond what's already in KV cache.
+            // On first turn n_past=0 so we prefill everything.
+            const new_tokens = input_tokens.items[@min(n_past, @as(u32, @intCast(input_tokens.items.len)))..];
+            const start_pos: i32 = @intCast(n_past);
+
+            const prefill = try self.textPrefill(new_tokens, start_pos);
             defer self.ctx.allocator.free(prefill.logits);
 
             // 内存监控：chat prefill 后检查
@@ -434,7 +435,8 @@ pub const InferenceEngine = struct {
                 }
                 try chat_history.append(self.ctx.allocator, chat_template.ChatMessage.init("assistant", response_buf.items));
             }
-            _ = dr;
+            // Update n_past: prefill tokens + decoded tokens are now in KV cache
+            n_past += @as(u32, @intCast(new_tokens.len)) + @as(u32, @intCast(dr.gen_count));
         }
     }
 
