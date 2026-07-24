@@ -23,6 +23,20 @@ const model = @import("../model.zig");
 
 const log = std.log.scoped(.model_qwen3vl);
 
+/// 构建 RMS norm: rmsNorm + mul(weight)
+/// 对应参考实现: build_norm(x, weight, NULL, LLM_NORM_RMS, il)
+/// 对于 2D 输入 [n_embd, n_tokens]，使用 rms_norm.rmsNorm
+/// 对于 3D+ 输入 [head_dim, n_head, n_tokens]，手动 rmsNorm + reshape(weight) + mul
+fn buildNorm(ctx: *ggml.Context, x: *ggml.Tensor, weight: *ggml.Tensor, eps: f32) *ggml.Tensor {
+    if (x.ne().len >= 3 and x.ne()[1] > 1) {
+        const result = ggml.rmsNorm(ctx, x, eps);
+        const n_embd = x.ne()[0];
+        const w_br = ggml.reshape3d(ctx, weight, n_embd, 1, 1);
+        return ggml.mul(ctx, result, w_br);
+    }
+    return rms_norm.rmsNorm(ctx, x, weight, eps);
+}
+
 pub const Qwen3VLParams = struct {
     base: model.ModelParams = .{},
     rope_sections: [4]i32 = .{ 0, 0, 0, 0 },
@@ -198,20 +212,13 @@ pub const Qwen3VLModel = struct {
             k = ggml.reshape3d(ctx, ggml.cont(ctx, k), head_dim, n_kv_head, n_tokens_i64);
             v = ggml.reshape3d(ctx, ggml.cont(ctx, v), head_dim, n_kv_head, n_tokens_i64);
 
-            // Q/K normalization (RMS norm) — reference: build_norm(Qcur, attn_q_norm, NULL, LLM_NORM_RMS, il)
+            // Reference: Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
             if (layer.attn_q_norm_weight) |q_norm| {
-                q = ggml.rmsNorm(ctx, q, p.norm_eps);
-                const q_norm_3d = ctx.view3d(q_norm, head_dim, 1, 1, @sizeOf(f32), @sizeOf(f32), 0);
-                const q_norm_target = ctx.newTensor3d(.f32, head_dim, n_head, n_tokens_i64) catch unreachable;
-                const q_norm_rep = ggml.repeat(ctx, q_norm_3d, q_norm_target);
-                q = ggml.mul(ctx, q, q_norm_rep);
+                q = buildNorm(ctx, q, q_norm, p.norm_eps);
             }
+            // Reference: Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
             if (layer.attn_k_norm_weight) |k_norm| {
-                k = ggml.rmsNorm(ctx, k, p.norm_eps);
-                const k_norm_3d = ctx.view3d(k_norm, head_dim, 1, 1, @sizeOf(f32), @sizeOf(f32), 0);
-                const k_norm_target = ctx.newTensor3d(.f32, head_dim, n_kv_head, n_tokens_i64) catch unreachable;
-                const k_norm_rep = ggml.repeat(ctx, k_norm_3d, k_norm_target);
-                k = ggml.mul(ctx, k, k_norm_rep);
+                k = buildNorm(ctx, k, k_norm, p.norm_eps);
             }
 
             // RoPE with multi sections — reference: ggml_rope_multi on Qcur and Kcur

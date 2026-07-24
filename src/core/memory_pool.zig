@@ -505,12 +505,6 @@ pub const TempContextPool = struct {
     }
 };
 
-// ============================================================================
-// 测试
-// ============================================================================
-
-const testing = std.testing;
-
 test "TempContextPool init and deinit" {
     var pool = TempContextPool.init(testing.allocator);
     defer pool.deinit();

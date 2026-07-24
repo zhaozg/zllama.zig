@@ -220,7 +220,6 @@ fn loadViTLayer(
     layer.o_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "attn_out.bias") catch null;
 
     // FFN — Qwen3VL ViT uses standard FFN (up + down, NO gate)
-    // Note: no ffn_gate.weight in Qwen3VL mmproj
     layer.ln_2_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln2.weight") catch null;
     layer.ln_2_b = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ln2.bias") catch null;
     layer.ff_up_w = weight_loader.loadLayerWeight(ctx, gguf_file, prefix, "ffn_up.weight") catch null;
@@ -261,16 +260,16 @@ pub fn buildGraph(
     const p = builder.hparams;
     const img = builder.img;
 
-    const n_embd: i32 = @intCast(p.n_embd);
-    const n_head: i32 = @intCast(p.n_head);
+    const n_embd: i64 = @intCast(p.n_embd);
+    const n_head: i64 = @intCast(p.n_head);
     const d_head = @divExact(n_embd, n_head);
     const img_width: u32 = p.image_size;
     const img_height: u32 = p.image_size;
     const patch_size: i32 = @intCast(p.patch_size);
-    const n_patches_x: i32 = @divTrunc(@as(i32, @intCast(img_width)), patch_size);
-    const n_patches_y: i32 = @divTrunc(@as(i32, @intCast(img_height)), patch_size);
-    const n_patches: i32 = n_patches_x * n_patches_y;
-    const n_batch: i32 = 1;
+    const n_patches_x: i64 = @divTrunc(@as(i64, @intCast(img_width)), patch_size);
+    const n_patches_y: i64 = @divTrunc(@as(i64, @intCast(img_height)), patch_size);
+    const n_patches: i64 = n_patches_x * n_patches_y;
+    const n_batch: i64 = 1;
     const eps = p.eps;
     const kq_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_head)));
 
@@ -279,14 +278,14 @@ pub fn buildGraph(
 
     // Reference: int mrope_sections[4] = {d_head/4, d_head/4, d_head/4, d_head/4};
     const mrope_sections = [_]i32{
-        @intCast(@divExact(d_head, 4)),
-        @intCast(@divExact(d_head, 4)),
-        @intCast(@divExact(d_head, 4)),
-        @intCast(@divExact(d_head, 4)),
+        @intCast(@divExact(d_head, @as(i64, 4))),
+        @intCast(@divExact(d_head, @as(i64, 4))),
+        @intCast(@divExact(d_head, @as(i64, 4))),
+        @intCast(@divExact(d_head, @as(i64, 4))),
     };
 
     // Reference: const int merge_factor = hparams.n_merge > 0 ? hparams.n_merge * hparams.n_merge : 4;
-    const merge_factor: i32 = if (p.n_merge > 0) @intCast(p.n_merge * p.n_merge) else 4;
+    const merge_factor: i64 = if (p.n_merge > 0) @intCast(p.n_merge * p.n_merge) else 4;
 
     log.info("Qwen3VL graph: embd={d}, head={d}, d_head={d}, patches={d}x{d}={d}, merge_factor={d}\n", .{ n_embd, n_head, d_head, n_patches_x, n_patches_y, n_patches, merge_factor });
 
@@ -361,11 +360,15 @@ pub fn buildGraph(
     // Reference: ggml_permute(ctx0, inp, 1, 2, 0, 3) -> [w, h, c, b] -> [c, w, h, b]
     // ============================================================================
     {
-        inp = inp.permute(ctx, 1, 2, 0, 3).cont(ctx);
+        // Reference: inp = ggml_permute(ctx0, inp, 1, 2, 0, 3);
+        inp = inp.permute(ctx, 1, 2, 0, 3);
+        inp = ggml.cont(ctx, inp);
         inp.setName("spatial_permuted");
 
         // Reference: ggml_cont_4d(ctx0, inp, n_embd * 2, n_patches_x / 2, n_patches_y, batch_size)
-        inp = inp.cont4d(ctx, n_embd * 2, @divTrunc(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
+        // ggml_cont_4d = ggml_cont + ggml_reshape_4d
+        inp = ggml.cont(ctx, inp);
+        inp = inp.reshape4d(ctx, n_embd * 2, @divTrunc(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
         inp.setName("spatial_reshaped_1");
 
         // Reference: ggml_reshape_4d(ctx0, inp, n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2))
@@ -373,11 +376,13 @@ pub fn buildGraph(
         inp.setName("spatial_reshaped_2");
 
         // Reference: ggml_permute(ctx0, inp, 0, 2, 1, 3)
-        inp = inp.permute(ctx, 0, 2, 1, 3).cont(ctx);
+        inp = inp.permute(ctx, 0, 2, 1, 3);
+        inp = ggml.cont(ctx, inp);
         inp.setName("spatial_permuted_2");
 
         // Reference: ggml_cont_3d(ctx0, inp, n_embd, n_patches_x * n_patches_y, batch_size)
-        inp = ggml.cont(ctx, inp).reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
+        inp = ggml.cont(ctx, inp);
+        inp = inp.reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
         inp.setName("spatial_merged");
     }
 
@@ -392,15 +397,18 @@ pub fn buildGraph(
 
     // ============================================================================
     // 4. 可学习位置嵌入 (resize_position_embeddings)
-    // Reference: ggml_tensor * learned_pos_embd = resize_position_embeddings();
+    // Reference: ggml_tensor * learned_pos_embd = resize_position_embeddings(
+    //              GGML_SCALE_MODE_BILINEAR | GGML_SCALE_FLAG_ALIGN_CORNERS);
     // ============================================================================
     if (w.position_embeddings) |pos_embd| {
         // Reference: resize_position_embeddings() — interpolates to match n_patches
-        var learned_pos_embd = try graph.resizePositionEmbeddings(ctx, pos_embd, n_patches, 0);
+        // GGML_SCALE_MODE_BILINEAR | GGML_SCALE_FLAG_ALIGN_CORNERS = 1 | 8 = 9
+        var learned_pos_embd = try graph.resizePositionEmbeddings(ctx, pos_embd, n_patches, 9);
 
         // Apply same spatial merge to position embeddings
         // Reference: ggml_cont_4d(ctx0, learned_pos_embd, n_embd * 2, n_patches_x / 2, n_patches_y, batch_size)
-        learned_pos_embd = learned_pos_embd.cont4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
+        learned_pos_embd = ggml.cont(ctx, learned_pos_embd);
+        learned_pos_embd = learned_pos_embd.reshape4d(ctx, n_embd * 2, @divExact(n_patches_x, @as(i64, 2)), n_patches_y, n_batch);
         learned_pos_embd.setName("pos_embd_reshaped_1");
 
         // Reference: ggml_reshape_4d(ctx0, learned_pos_embd, n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2))
@@ -408,11 +416,13 @@ pub fn buildGraph(
         learned_pos_embd.setName("pos_embd_reshaped_2");
 
         // Reference: ggml_permute(ctx0, learned_pos_embd, 0, 2, 1, 3)
-        learned_pos_embd = learned_pos_embd.permute(ctx, 0, 2, 1, 3).cont(ctx);
+        learned_pos_embd = learned_pos_embd.permute(ctx, 0, 2, 1, 3);
+        learned_pos_embd = ggml.cont(ctx, learned_pos_embd);
         learned_pos_embd.setName("pos_embd_permuted");
 
         // Reference: ggml_cont_3d(ctx0, learned_pos_embd, n_embd, n_patches_x * n_patches_y, batch_size)
-        learned_pos_embd = ggml.cont(ctx, learned_pos_embd).reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
+        learned_pos_embd = ggml.cont(ctx, learned_pos_embd);
+        learned_pos_embd = learned_pos_embd.reshape3d(ctx, n_embd, n_patches_x * n_patches_y, n_batch);
         learned_pos_embd.setName("pos_embd_merged");
 
         // Reference: inp = ggml_add(ctx0, inp, learned_pos_embd);
@@ -440,8 +450,10 @@ pub fn buildGraph(
         positions.setDataPtr(buf);
     }
 
+    // Reference: ggml_set_input(positions);
     ggml.setInput(positions);
 
+    // Fill positions with patch indices (4 copies for M-RoPE)
     {
         const data = positions.dataI32();
         for (0..@as(usize, @intCast(n_patches))) |i| {
@@ -472,7 +484,8 @@ pub fn buildGraph(
     // Reference: for (int il = 0; il < n_layer; il++)
     // ============================================================================
     for (w.layers, 0..) |*layer, il| {
-        var cur = inpL; // inpL = residual, cur = hidden_states
+        // Reference: ggml_tensor * cur = inpL; (inpL = residual, cur = hidden_states)
+        var cur = inpL;
 
         // Reference: cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
         cur = try graph.buildNorm(ctx, cur, layer.ln_1_w orelse return error.MissingNormWeight, layer.ln_1_b, norm_t, eps, @intCast(il));
@@ -481,7 +494,6 @@ pub fn buildGraph(
         {
             // Reference: cur = build_mm(layer.qkv_w, cur);
             // Reference: cur = ggml_add(ctx0, cur, layer.qkv_b);
-            // Use ggml.mulMat directly since Qwen3VL doesn't use clamping
             cur = ggml.mulMat(ctx, layer.qkv_w orelse return error.MissingQKVWeight, cur);
             if (layer.qkv_b) |qkv_b| {
                 cur = cur.add(ctx, qkv_b);
@@ -502,7 +514,8 @@ pub fn buildGraph(
             Vcur.setName("Vcur");
 
             // Reference: M-RoPE
-            // ggml_rope_multi(ctx0, Qcur, positions, nullptr, d_head/2, mrope_sections, GGML_ROPE_TYPE_VISION, 32768, 10000, 1, 0, 1, 32, 1)
+            // ggml_rope_multi(ctx0, Qcur, positions, nullptr, d_head/2, mrope_sections,
+            //   GGML_ROPE_TYPE_VISION, 32768, 10000, 1, 0, 1, 32, 1)
             const rope_type_vision: i32 = 24; // GGML_ROPE_TYPE_VISION
             Qcur = ggml.ropeMulti(ctx, Qcur, positions, null, @intCast(@divExact(d_head, @as(i64, 2))), &mrope_sections, rope_type_vision, 32768, 10000, 1, 0, 1, 32, 1);
             Qcur.setName("Qcur_rope");
@@ -510,9 +523,7 @@ pub fn buildGraph(
             Kcur.setName("Kcur_rope");
 
             // Reference: cur = build_attn(layer.o_w, layer.o_b, Qcur, Kcur, Vcur, nullptr, kq_scale, il);
-            cur = try graph.buildAttn(
-                ctx,
-                builder.gf,
+            cur = try builder.buildAttn(
                 layer.o_w orelse return error.MissingOutputWeight,
                 layer.o_b,
                 Qcur,
@@ -522,10 +533,6 @@ pub fn buildGraph(
                 kq_scale,
                 @intCast(il),
                 layer.attn_sinks,
-                builder.flash_attn_type,
-                defaultBuildMM,
-                null,
-                null,
             );
         }
 
@@ -542,7 +549,8 @@ pub fn buildGraph(
         cur = try graph.buildNorm(ctx, cur, layer.ln_2_w orelse return error.MissingNormWeight, layer.ln_2_b, norm_t, eps, @intCast(il));
 
         // Reference: ffn
-        // build_ffn(cur, layer.ff_up_w, layer.ff_up_b, layer.ff_gate_w, layer.ff_gate_b, layer.ff_down_w, layer.ff_down_b, hparams.ffn_op, il)
+        // build_ffn(cur, layer.ff_up_w, layer.ff_up_b, layer.ff_gate_w, layer.ff_gate_b,
+        //           layer.ff_down_w, layer.ff_down_b, hparams.ffn_op, il)
         cur = try graph.buildFFN(
             ctx,
             cur,
@@ -568,11 +576,16 @@ pub fn buildGraph(
         // if (layer.has_deepstack()) { ... }
         if (layer.hasDeepstack()) {
             // Reference: ggml_reshape_3d(ctx0, cur, n_embd * merge_factor, n_pos / merge_factor, batch_size)
-            var feat = ggml.cont(ctx, cur).reshape3d(ctx, n_embd * merge_factor, @divExact(n_patches, merge_factor), n_batch);
+            var feat = ggml.cont(ctx, cur);
+            feat = feat.reshape3d(ctx, n_embd * merge_factor, @divExact(n_patches, merge_factor), n_batch);
             feat.setName("deepstack_reshape");
 
             // Reference: build_norm(feat, layer.deepstack_norm_w, layer.deepstack_norm_b, norm_t, eps, il)
             feat = try graph.buildNorm(ctx, feat, layer.deepstack_norm_w orelse return error.MissingNormWeight, layer.deepstack_norm_b, norm_t, eps, -1);
+
+            // Reference: build_ffn(feat, layer.deepstack_fc1_w, layer.deepstack_fc1_b,
+            //                     nullptr, nullptr, layer.deepstack_fc2_w, layer.deepstack_fc2_b,
+            //                     ffn_op_type::FFN_GELU, il)
             feat = try graph.buildFFN(
                 ctx,
                 feat,
@@ -614,9 +627,12 @@ pub fn buildGraph(
     // Reference: ggml_reshape_3d(ctx0, embeddings, n_embd * 4, n_pos / 4, batch_size)
     // ============================================================================
     var embeddings = inpL;
-    embeddings = ggml.cont(ctx, embeddings).reshape3d(ctx, n_embd * 4, @divExact(n_patches, @as(i64, 4)), n_batch);
+    embeddings = ggml.cont(ctx, embeddings);
+    embeddings = embeddings.reshape3d(ctx, n_embd * 4, @divExact(n_patches, @as(i64, 4)), n_batch);
     embeddings.setName("mm_reshape");
 
+    // Reference: build_ffn(embeddings, model.mm_0_w, model.mm_0_b, nullptr, nullptr,
+    //                      model.mm_1_w, model.mm_1_b, ffn_op_type::FFN_GELU, -1)
     embeddings = try graph.buildFFN(
         ctx,
         embeddings,
@@ -633,6 +649,8 @@ pub fn buildGraph(
         null,
     );
     embeddings.setName("mm_proj");
+
+    // Reference: if (deepstack_features) { embeddings = ggml_concat(ctx0, embeddings, deepstack_features, 0); }
     if (deepstack_features) |dsf| {
         embeddings = embeddings.concat(ctx, dsf, 0);
         embeddings.setName("mm_with_deepstack");
