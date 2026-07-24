@@ -36,6 +36,27 @@
 
 ---
 
+## 🔗 与 llama.cpp 的关系
+
+### 对齐策略
+
+- **底层（ggml）**：完全对齐，确保数值一致性。所有 ggml C API 通过 `src/ggml/` 模块封装。
+- **上层（模型实现）**：参考 llama.cpp 的模型实现逻辑，但用 Zig 的工程哲学重构——消灭 `if` 森林，引入 VTable 策略模式。
+- **差异记录**：在代码注释或 `docs/` 中记录与参考实现的故意差异及原因。
+
+### 已知差异
+
+| 方面 | llama.cpp | zllama.zig |
+|------|-----------|------------|
+| 语言 | C/C++ | Zig 0.16.0 |
+| 多态机制 | `if (arch == ...)` 硬编码 | VTable 策略模式 |
+| 内存管理 | 手动 new/delete | Arena + defer + 三段式生命周期 |
+| 图构建与执行 | 混合（边构建边执行） | 两阶段分离（规划→执行） |
+| KV Cache | 裸指针 k_cache / v_cache | 环形缓冲区封装 |
+| 多模态编码器 | mtmd_context + clip 分离 | MultiModalManager 统一管理 |
+
+---
+
 ## ⛓ 七层 DAG 架构总览
 
 系统按依赖方向自底向上分为七层。每一层只能依赖比它低编号的层——这是一条**硬性约束**。
@@ -326,7 +347,6 @@ main.zig
 
 ## 🔌 扩展指南
 
-
 ### 新增文本 LLM 架构
 
 1. `src/model.zig`：在 `Architecture` 枚举添加成员，`fromString()` 添加 GGUF 名称映射。
@@ -344,6 +364,22 @@ main.zig
 
 1. `src/ggml/ops.zig`：封装 C 函数为类型安全函数。
 2. `src/ggml/mod.zig`：`pub const` 重新导出。
+
+---
+
+## 🎯 决策矩阵
+
+当需要修改或扩展本系统时，依据以下决策树快速定位设计边界：
+
+| 需求场景 | 设计落脚点 | 禁止行为 |
+| :--- | :--- | :--- |
+| 新增一种文本模型架构 | `src/models/` 新建文件 + `src/model.zig` 加枚举 + `src/models/registry.zig` 注册 | 修改 `InferenceEngine` 或 `decode.zig` 的主循环 |
+| 新增一种视觉/音频编码器 | `src/mtmd/graph/models/` 新建文件 + `src/mtmd/graph/mod.zig` 注册 Backend + `src/mtmd/vision/mod.zig`（或 `audio/mod.zig`）注册 `getBackend` | 修改 `InferenceEngine` 或 `helper.zig` 的主循环 |
+| 新增一种预处理方式 | `src/mtmd/preprocess.zig` 新增函数，在 `src/mtmd/tokenize.zig` 或 `src/mtmd/vision/preprocess.zig` 中调用 | 将预处理代码混入 `graph/` 层 |
+| 优化 CPU 计算性能（如算子融合） | 仅修改 `src/mtmd/graph/` 或 `src/layers/` 下的构建块 | 触碰 `ggml/backend.zig` 或内存释放逻辑 |
+| 支持新的硬件后端（如 Vulkan） | 扩展 `src/ggml/backend.zig` 的 `DeviceType` 枚举，实现 `detectBestBackend` | 在业务层（`helper.zig` 或 `engine.zig`）添加硬件判断分支 |
+| 解决 Logits 精度不匹配 | 追踪 `buildGraph` 中缺失的 `scale`/`bias`/`norm` 操作，对比 llama.cpp 参考实现 | 盲目调整 `ggml` 绑定或后端 buffer 大小 |
+| 新增 ggml 算子 | 在 `src/ggml/ops.zig` 封装，在 `src/ggml/mod.zig` 重新导出 | 业务代码直接 `@cImport` 调用裸 C 函数 |
 
 ---
 

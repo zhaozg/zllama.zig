@@ -34,13 +34,9 @@
 
 ### 前置条件
 
-- **Benchmark 模式**：`--benchmark` 输出 PP/TG 分离的性能数据
+- **Zig 0.16.0**：`zig version` 确认版本
+- **ggml submodule**：`git submodule update --init`
 - （可选）CUDA 12.0+ / Metal 支持的 macOS
-
-- **多模态支持**（基于 gemma-4-E2B）：
-  - ✅ 音频：Conformer 编码器 + Mel 频谱 → LLM（Gemma 4 E2B 已验证）
-  - ✅ 视觉：ViT 图像编码器 → LLM（pipeline 就绪，输出内容待验证）
-  - WAV/PPM 预处理（加载 + Resize + 标准化）
 
 ### 运行推理
 
@@ -62,7 +58,7 @@
 
 # 多模态（需要 --mmproj 投影器文件）
 ./zig-out/bin/zllama -m model.gguf --mmproj /path/to/mmproj.gguf --image input.ppm -p "描述这张图片"
-./zig-out/bin/zllama -m model.gguf --mmproj /path/to/mmproj.gguf --audio input.pcm -p "转录这段音频"
+./zig-out/bin/zllama -m model.gguf --mmproj /path/to/mmproj.gguf --audio input.wav -p "转录这段音频"
 ```
 
 ## 📦 项目结构
@@ -70,48 +66,101 @@
 ```
 zllama.zig/
 ├── src/
-│   ├── main.zig           # CLI 入口（Juicy Main）
-│   ├── ggml.zig           # ggml C API 安全封装 + Tensor 方法式算子
-│   ├── gguf.zig           # GGUF v2/v3 解析器
-│   ├── model.zig          # 模型抽象接口定义
-# 多模态图像（需要 --mmproj 投影器文件）
-./zig-out/bin/zllama -m model.gguf --mmproj /path/to/mmproj.gguf --image input.ppm -p "描述这张图片"
-# 多模态音频（WAV 格式）
-./zig-out/bin/zllama -m model.gguf --mmproj /path/to/mmproj.gguf --audio input.wav -p "转录这段音频"
-│   ├── layers/            # 通用层实现（算子库）
+│   ├── main.zig                # CLI 入口（Juicy Main）
+│   ├── model.zig               # Architecture 枚举、ModelVTable 接口
+│   ├── gguf.zig                # GGUF 解析
+│   ├── core/                   # 引擎、图构建、内存、加载器
+│   │   ├── engine.zig          # InferenceEngine：统一生命周期管理
+│   │   ├── engine_common.zig   # computeGraph / WallTimer / mmapFile
+│   │   ├── graph_builder.zig   # GraphBuilder（文本侧）
+│   │   ├── graph_context.zig   # IncContext / DecodeStep
+│   │   ├── decode.zig          # runDecodeLoop / DecodeCallbacks
+│   │   ├── prefill.zig         # threeStagePrefill
+│   │   ├── multimodal.zig      # 多模态入口
+│   │   ├── memory.zig          # MemoryContext / MemoryVTable
+│   │   └── memory_pool.zig     # TempContextPool
+│   ├── ggml/                   # ggml C API 安全封装
+│   │   ├── mod.zig             # 重新导出
+│   │   ├── c.zig               # 裸 C 函数声明
+│   │   ├── context.zig         # Context 封装
+│   │   ├── tensor.zig          # Tensor 封装
+│   │   ├── graph.zig           # CGraph 封装
+│   │   ├── backend.zig         # Backend / Gallocr / Scheduler
+│   │   ├── ops.zig             # 类型安全算子封装
+│   │   ├── threadpool.zig      # ThreadPool 封装
+│   │   └── gguf.zig            # GGUF 格式的 ggml 层解析
+│   ├── layers/                 # 共享算子（文本侧）
 │   │   ├── rms_norm.zig
 │   │   ├── rope.zig
 │   │   ├── swiglu.zig
 │   │   ├── attention.zig
 │   │   ├── linear.zig
-│   │   └── embed.zig
-│   ├── models/            # 具体模型实现
-│   │   ├── registry.zig   # 模型注册与工厂函数
-│   │   ├── qwen2.zig      # Qwen2 系列
-│   │   ├── qwen35.zig     # Qwen3.5 混合架构
-│   │   ├── llama.zig      # LLaMA 家族
-│   │   ├── gemma3.zig     # Gemma 3
-│   │   └── gemma4.zig     # Gemma 4
-│   ├── core/              # 核心引擎
-│   │   ├── graph_builder.zig
-│   │   ├── graph_context.zig
-│   │   └── memory.zig
-│   ├── mm/                # 多模态模块
-│   │   ├── manager.zig    # 多模态调度器（MMProj 加载）
-│   │   ├── vision.zig     # ViT 视觉编码器
-│   │   ├── audio.zig      # Conformer 音频编码器
-│   │   └── preprocess.zig # 图像/音频预处理
-│   ├── ggml/              # ggml 安全封装子模块
-│   └── tools/             # 调试工具
+│   │   ├── embed.zig
+│   │   └── pooling.zig
+│   ├── models/                 # 具体模型实现
+│   │   ├── registry.zig        # 模型注册与工厂函数
+│   │   ├── llama.zig           # LLaMA 家族
+│   │   ├── qwen2.zig           # Qwen2 系列
+│   │   ├── qwen35.zig          # Qwen3.5 混合架构
+│   │   ├── gemma3.zig          # Gemma 3
+│   │   ├── gemma4.zig          # Gemma 4
+│   │   ├── gemma4_graph.zig    # Gemma 4 图构建（buildMM）
+│   │   ├── qwen3vl.zig         # Qwen3-VL 文本侧
+│   │   └── embedding.zig       # 嵌入模型
+│   ├── mtmd/                   # 多模态模块
+│   │   ├── mod.zig             # MultiModalManager
+│   │   ├── helper.zig          # evalChunks / imageGetDecoderPos
+│   │   ├── preprocess.zig      # 图像/音频预处理
+│   │   ├── tokenize.zig        # 文本+媒体标记混合 tokenize
+│   │   ├── vision/             # 视觉编码器
+│   │   │   ├── encoder.zig
+│   │   │   ├── preprocess.zig
+│   │   │   ├── config.zig
+│   │   │   ├── loader.zig
+│   │   │   └── postprocess.zig
+│   │   ├── audio/              # 音频编码器
+│   │   │   ├── encoder.zig
+│   │   │   ├── framing.zig
+│   │   │   ├── mel.zig
+│   │   │   ├── log_transform.zig
+│   │   │   └── mel_spectrogram.zig
+│   │   └── graph/              # 多模态图构建块
+│   │       ├── mod.zig         # VisionEncoderBackend / AudioEncoderBackend
+│   │       ├── builder.zig     # GraphBuilder（多模态侧）
+│   │       ├── attn.zig / ffn.zig / norm.zig
+│   │       ├── vit.zig / patch.zig / rope.zig / merge.zig
+│   │       ├── mm.zig / clamp.zig / stack.zig
+│   │       ├── types.zig / debug.zig
+│   │       └── models/         # 多模态模型图
+│   │           ├── gemma4v.zig / gemma4a.zig
+│   │           ├── gemma4uv.zig
+│   │           ├── qwen2vl.zig / qwen3vl.zig
+│   ├── tokenizer/              # BPE 分词器
+│   │   ├── mod.zig
+│   │   └── vocab.zig
+│   ├── chat_template/          # 对话模板
+│   │   └── mod.zig
+│   ├── sampler.zig             # 采样器
+│   ├── kv_cache.zig            # KV Cache
+│   ├── cli_args.zig            # CLI 参数定义
+│   └── tools/                  # 调试工具
 │       ├── dump_graph.zig
 │       ├── compare_logits.zig
 │       └── generate_reference.zig
-├── deps/ggml/             # ggml 源码（submodule）
-├── build.zig              # Zig 构建脚本
-├── AGENTS.md              # AI 协作入口
-├── ROADMAP.md             # 开发路线图
-├── README.md              # 本文件
-└── docs/                  # 设计文档
+├── deps/
+│   ├── ggml/                   # ggml 源码（submodule）
+│   └── llama.cpp/              # 参考实现（只读）
+├── build.zig / build.zig.zon   # Zig 构建
+├── AGENTS.md                   # AI 协作入口
+├── ROADMAP.md                  # 开发路线图
+├── README.md                   # 本文件
+└── docs/                       # 设计文档
+    ├── ARCHITECTURE.md         # 架构设计文档
+    ├── GGML_BINDING.md         # ggml 绑定设计规范
+    ├── MTMD.md                 # 多模态模块详细设计
+    ├── HOW_TO_ADD_NEW_MODEL.md # 新增模型指南
+    ├── MEM.md                  # 内存管理详解
+    └── TEST.md                 # 测试体系
 ```
 
 ## 🔧 开发与贡献
@@ -132,9 +181,9 @@ zig build test
 ### 扩展新模型
 
 1. 在 `src/models/` 下创建新文件（如 `mistral.zig`）
-2. 实现 `init`、`deinit`、`forward`、`params`、`weights` 方法
+2. 实现 `ModelVTable` 的函数指针，导出 `pub const vtable = ModelVTable{...}`
 3. 在 `model.zig` 的 `Architecture` 枚举中添加新类型
-4. 在 `registry.zig` 的各个 switch 中添加对应 case
+4. 在 `registry.zig` 的 `createModel()` 中添加对应 case
 
 ## 📄 许可证
 
