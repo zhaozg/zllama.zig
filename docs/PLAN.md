@@ -29,6 +29,8 @@
 | KV Cache 环形缓冲区封装 | **P1** ✅ | 将 `kv_cache.zig` 中的裸指针操作封装为 `rotate()`、`evict()`、`copy()` 方法 |
 | 消除运行时 `realloc` | **P1** ✅ | 缓存高频使用的图结构（如 Prefill 图），彻底消灭 `ggml_gallocr_needs_realloc` |
 | 多后端统一接口 | **P1** ✅ | `Backend` 接口只暴露 `execGraph()`、`allocTensor()`、`copyToDevice()` |
+| **GraphPlanner 无状态化** | **P1** ✅ | 移除 `GraphPlanner` 对 `ModelContext` 字段的指针存储，改为所有方法通过参数传递所需引用，彻底消除悬空指针风险 |
+| **InferenceEngine.finalizeInit()** | **P1** ✅ | 新增 `finalizeInit()` 方法，在 `InferenceEngine` 移动到最终内存位置后注册 `IncContext` 到内存监控器，解决 `ctx` move 后指针悬空问题 |
 
 ### 阶段 2：多模态完善（已完成 ✅）
 
@@ -130,6 +132,49 @@ zig-out/bin/zllama -m gemma-4-E2B-it-Q4_K_M.gguf \
 | 支持新的硬件后端（如 Vulkan） | 扩展 `src/ggml/backend.zig` 的 `DeviceType` 枚举，实现 `detectBestBackend` | 在业务层（`helper.zig` 或 `engine.zig`）添加硬件判断分支 |
 | 解决 Logits 精度不匹配 | 追踪 `buildGraph` 中缺失的 `scale`/`bias`/`norm` 操作，对比 llama.cpp 参考实现 | 盲目调整 `ggml` 绑定或后端 buffer 大小 |
 | 新增 ggml 算子 | 在 `src/ggml/ops.zig` 封装，在 `src/ggml/mod.zig` 重新导出 | 业务代码直接 `@cImport` 调用裸 C 函数 |
+
+---
+
+## 五、 遗留问题与已知风险
+
+> 以下问题在最近一次重构（阶段 1 核心重构）后识别，需要在后续迭代中解决。
+
+### 5.1 高优先级（P0）
+
+| 问题 | 描述 | 影响范围 | 建议方案 |
+|------|------|----------|----------|
+| **PrefillGraphCache 被移除** | `GraphPlanner` 无状态化重构中移除了 `PrefillGraphCache`，每次 prefill 都重新构建图结构 | 重复 prefill 场景（如 chat 多轮对话）性能下降 | 在 `InferenceEngine` 层重新实现缓存，或使用 `GrowableContext` 复用图内存 |
+| **`reserveDecodeGallocr` 中 `gallocr` 参数未使用** | `reserveDecodeGallocr` 接收 `gallocr` 参数但使用 `inc_ctx.reserveGallocr()` 内部管理 | 接口混淆，调用者可能误以为 gallocr 在此处被使用 | 移除 `gallocr` 参数，或统一 gallocr 管理路径 |
+| **`planDecode` 未在 generate 主路径中使用** | `generate()` 和 `chatLoop()` 直接调用 `decode_mod.runDecodeLoop`，未使用 `planner.planDecode` | `planDecode` 成为死代码，decode 图构建逻辑分散 | 将 `runDecodeLoop` 内部改为调用 `planner.planDecode`，或移除 `planDecode` |
+
+### 5.2 中优先级（P1）
+
+| 问题 | 描述 | 影响范围 | 建议方案 |
+|------|------|----------|----------|
+| **`ModelContext.toMultimodalContext()` 复制 `tok`** | `toMultimodalContext()` 中 `tok = self.tok.*` 复制了整个 Tokenizer 值 | 存在潜在的重复释放或悬空指针风险 | 改为传递指针 `tok = &self.tok`，或确保 `EngineContext` 不拥有所有权 |
+| **`engine.zig.bak` 残留** | 重构后 `engine.zig.bak` 备份文件未清理 | 代码库整洁性 | 删除备份文件 |
+| **`main.zig` 中未使用的 import** | `gguf`、`registry`、`graph_builder`、`graph_context`、`memory`、`sampler`、`kv_cache`、`mm`、`preprocess`、`prefill_mod`、`chat_template`、`loadMMProj` 等 import 在 `main.zig` 中未直接使用 | 编译警告，代码可读性 | 清理未使用的 import |
+| **`engine_common.zig` 日志作用域命名** | `engine_common.zig` 使用 `.core_engine` 作为日志作用域，与 `engine.zig` 的 `.core_engine` 冲突 | 日志过滤时无法区分两个模块 | 将 `engine_common.zig` 的日志作用域改为 `.core_engine_common` |
+
+### 5.3 低优先级（P2）
+
+| 问题 | 描述 | 影响范围 | 建议方案 |
+|------|------|----------|----------|
+| **`estimateKVCacheSize` 测试硬编码** | `test "estimateKVCacheSize basic"` 中硬编码了 1.7GB 的期望值 | 测试脆弱，参数变化时容易失败 | 改为基于公式动态计算期望值 |
+| **`estimateGraphSize` 测试过于简单** | 仅检查返回值是否为 2GB | 测试无实际验证意义 | 增加更精确的估算验证 |
+| **`GraphPlanner` 测试覆盖不足** | 仅有 `init` 和结构体大小测试 | 核心逻辑无测试覆盖 | 增加 mock 测试验证 `planPrefill` 和 `planDecode` |
+
+---
+
+## 六、 近期提交记录
+
+| 提交 | 描述 |
+|------|------|
+| `689c7ef` | fix: 修复 InferenceEngine.init 中 GraphPlanner.kv_cache_mgr 悬空指针问题 |
+| `337f9af` | refactor: 优化 Qwen3VL 模型实现 |
+| `1d72663` | refactor: 将 chat_template/_tests.zig 移至 tests/test_chat_template.zig |
+| `799f71b` | fix: 修复测试中的内存泄漏和 log.err 导致的测试失败 |
+| `2b7f7ce` | 阶段3 P2: 集成 GrowableContext / MemoryEstimator / MemoryMonitor |
 
 ---
 

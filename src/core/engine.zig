@@ -72,35 +72,34 @@ pub const InferenceEngine = struct {
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
         var ctx = try ModelContext.init(io, allocator, model_path, cli_args);
         errdefer ctx.deinit();
-        // planner 将在 engine 构建后初始化，以确保指针有效性
+
+        const planner_inst = GraphPlanner.init();
 
         const executor_inst = GraphExecutor.init(
             ctx.n_threads,
             @as(usize, @intCast(ctx.params.n_vocab)),
         );
 
-        // 初始化内存监控器，注册所有 context
+        // 初始化内存监控器
+        // NOTE: adaptIncContext stores &ctx.inc_ctx which becomes dangling
+        // after ctx is moved. We register it in finalizeInit() instead.
         var mem_monitor_inst = memory_monitor.MemoryMonitor.init(allocator);
         try mem_monitor_inst.addContext(memory_monitor.adaptGgmlContext(ctx.ctx_graph, "graph"));
         try mem_monitor_inst.addContext(memory_monitor.adaptGgmlContext(ctx.ctx_kv_cache, "kv_cache"));
-        try mem_monitor_inst.addContext(memory_monitor.adaptIncContext(&ctx.inc_ctx));
 
-        // 先构建 InferenceEngine，确保 ctx 不会被移动
-        var engine = InferenceEngine{
+        return InferenceEngine{
             .ctx = ctx,
-            .planner = undefined,
+            .planner = planner_inst,
             .executor = executor_inst,
             .mem_monitor = mem_monitor_inst,
         };
-        // 现在 planner 可以安全地引用 engine.ctx.kv_cache_mgr
-        engine.planner = GraphPlanner.init(
-            engine.ctx.ctx_graph,
-            engine.ctx.model,
-            &engine.ctx.params,
-            &engine.ctx.kv_cache_mgr,
-            allocator,
-        );
-        return engine;
+    }
+
+    /// Finalize initialization after the engine is in its final memory location.
+    /// Must be called once after init(), before any generate/chat calls.
+    /// Registers the IncContext adapter with the memory monitor.
+    pub fn finalizeInit(self: *InferenceEngine) !void {
+        try self.mem_monitor.addContext(memory_monitor.adaptIncContext(&self.ctx.inc_ctx));
     }
 
     pub fn deinit(self: *InferenceEngine) void {
@@ -162,7 +161,15 @@ pub const InferenceEngine = struct {
     // ========================================================================
 
     fn textPrefill(self: *InferenceEngine, input_tokens: []const u32) !PrefillResult {
-        const plan = try self.planner.planPrefill(input_tokens, self.ctx.gallocr);
+        const plan = try self.planner.planPrefill(
+            self.ctx.ctx_graph,
+            self.ctx.model,
+            &self.ctx.params,
+            &self.ctx.kv_cache_mgr,
+            self.ctx.allocator,
+            input_tokens,
+            self.ctx.gallocr,
+        );
         return try self.executor.executePrefill(&plan, self.ctx.allocator);
     }
 
@@ -207,7 +214,14 @@ pub const InferenceEngine = struct {
         const first_token = sampler.Sampler.sampleGreedyFromLogits(prefill.logits);
         try self.streamPromptTokens(io, input_tokens.items);
 
-        try self.planner.reserveDecodeGallocr(&self.ctx.inc_ctx, self.ctx.gallocr);
+        try self.planner.reserveDecodeGallocr(
+            self.ctx.model,
+            &self.ctx.params,
+            &self.ctx.kv_cache_mgr,
+            self.ctx.allocator,
+            &self.ctx.inc_ctx,
+            self.ctx.gallocr,
+        );
 
         // 内存监控：prefill 后检查内存使用
         const prefill_report = try self.mem_monitor.check();
@@ -365,7 +379,14 @@ pub const InferenceEngine = struct {
                 });
             }
 
-            try self.planner.reserveDecodeGallocr(&self.ctx.inc_ctx, self.ctx.gallocr);
+            try self.planner.reserveDecodeGallocr(
+                self.ctx.model,
+                &self.ctx.params,
+                &self.ctx.kv_cache_mgr,
+                self.ctx.allocator,
+                &self.ctx.inc_ctx,
+                self.ctx.gallocr,
+            );
 
             // Collect output tokens via afterToken callback for building assistant message.
             var output_tokens = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };

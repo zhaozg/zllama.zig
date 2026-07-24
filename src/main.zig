@@ -15,24 +15,12 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
-const gguf = @import("gguf");
 const model_if = @import("model");
-const registry = @import("registry");
-const graph_builder = @import("graph_builder");
-const graph_context = @import("graph_context");
-const memory = @import("memory");
 const tokenizer = @import("tokenizer");
-const sampler = @import("sampler");
-const kv_cache = @import("kv_cache");
-const mm = @import("mtmd");
-const preprocess = @import("preprocess");
 const engine_common = @import("engine_common");
-const prefill_mod = @import("prefill");
-const chat_template = @import("chat_template");
 
 const CliArgs = @import("cli_args.zig").CliArgs;
 const InferenceEngine = @import("core/engine.zig").InferenceEngine;
-const loadMMProj = @import("core/loader.zig").loadMMProj;
 
 pub const std_options: std.Options = .{ .log_level = .info, .logFn = engine_common.logFilter, .log_scope_levels = &[_]std.log.ScopeLevel{
     .{ .scope = .ggml, .level = .info },
@@ -98,6 +86,10 @@ pub fn main(init: std.process.Init) !void {
     logger.info("Loading model: {s}", .{args.model_path});
     var engine = InferenceEngine.init(io, allocator, args.model_path, &args) catch |err| {
         logger.err("Failed to initialize inference engine: {}\n", .{err});
+        return;
+    };
+    engine.finalizeInit() catch |err| {
+        logger.err("Failed to finalize engine init: {}\n", .{err});
         return;
     };
     defer engine.deinit();

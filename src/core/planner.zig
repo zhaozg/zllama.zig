@@ -124,76 +124,43 @@ pub const PrefillGraphCache = struct {
 /// The planner holds a reference to the ModelContext for accessing
 /// the model's buildGraph vtable, KV cache, and graph context.
 pub const GraphPlanner = struct {
-    ctx_graph: *ggml.Context,
-    model: model_if.ModelInstance,
-    params: *const model_if.ModelParams,
-    kv_cache_mgr: *kv_cache.KVCache,
-    allocator: std.mem.Allocator,
-    /// Cache for prefill graphs to eliminate runtime realloc
-    prefill_cache: PrefillGraphCache,
+    /// STATELESS DESIGN: Does NOT store pointers to ModelContext fields.
+    /// All methods accept required references as parameters to avoid
+    /// dangling pointer issues when InferenceEngine is moved.
+    pub fn init() GraphPlanner {
+        return .{};
+    }
 
-    pub fn init(
+    pub fn deinit(self: *GraphPlanner) void {
+        _ = self;
+    }
+
+    // ========================================================================
+    // Prefill graph planning
+    // ========================================================================
+
+    /// Build a prefill graph for the given input tokens.
+    /// Returns a GraphPlan ready for execution.
+    pub fn planPrefill(
+        self: *GraphPlanner,
         ctx_graph: *ggml.Context,
         model: model_if.ModelInstance,
         params: *const model_if.ModelParams,
         kv_cache_mgr: *kv_cache.KVCache,
         allocator: std.mem.Allocator,
-    ) GraphPlanner {
-        return .{
-            .ctx_graph = ctx_graph,
-            .model = model,
-            .params = params,
-            .kv_cache_mgr = kv_cache_mgr,
-            .allocator = allocator,
-            .prefill_cache = PrefillGraphCache.init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *GraphPlanner) void {
-        self.prefill_cache.deinit();
-    }
-
-    // ========================================================================
-    // Prefill graph planning (with caching)
-    // ========================================================================
-
-    /// Build a prefill graph for the given input tokens.
-    /// Uses the PrefillGraphCache to avoid rebuilding the graph structure
-    /// when the same token count is used again.
-    /// Returns a GraphPlan ready for execution.
-    pub fn planPrefill(
-        self: *GraphPlanner,
         input_tokens: []const u32,
         gallocr: *ggml.Gallocr,
     ) !GraphPlan {
+        _ = self;
         const n_prompt_tokens: i32 = @intCast(input_tokens.len);
 
-        // Check cache first
-        if (self.prefill_cache.lookup(n_prompt_tokens)) |cached| {
-            // Copy input token data into the cached tensor
-            {
-                const data = cached.input_tensor.dataBytes();
-                const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
-                for (input_tokens, 0..) |token, j| slice[j] = @as(i32, @intCast(token));
-            }
-            return GraphPlan{
-                .graph = cached.graph,
-                .logits = cached.logits,
-                .n_tokens = n_prompt_tokens,
-                .start_pos = 0,
-                .is_prefill = true,
-                .gallocr = gallocr,
-            };
-        }
+        ctx_graph.setNoAlloc(false);
+        const input_tensor = try ctx_graph.newTensor1d(.i32, n_prompt_tokens);
+        ctx_graph.setNoAlloc(true);
 
-        // Cache miss: build the graph
-        self.ctx_graph.setNoAlloc(false);
-        const input_tensor = try self.ctx_graph.newTensor1d(.i32, n_prompt_tokens);
-        self.ctx_graph.setNoAlloc(true);
-
-        const graph = try ggml.CGraph.initReserved(self.ctx_graph, 16384);
-        var builder = graph_builder.GraphBuilder.init(self.ctx_graph, graph, self.params, self.allocator);
-        const logits = try self.model.buildGraph(&builder, input_tensor, n_prompt_tokens, @ptrCast(self.kv_cache_mgr), 0);
+        const graph = try ggml.CGraph.initReserved(ctx_graph, 16384);
+        var builder = graph_builder.GraphBuilder.init(ctx_graph, graph, params, allocator);
+        const logits = try model.buildGraph(&builder, input_tensor, n_prompt_tokens, @ptrCast(kv_cache_mgr), 0);
 
         // Copy input token data into the tensor
         {
@@ -201,14 +168,6 @@ pub const GraphPlanner = struct {
             const slice = @as([*]i32, @ptrCast(@alignCast(data.ptr)))[0..@as(usize, @intCast(n_prompt_tokens))];
             for (input_tokens, 0..) |token, j| slice[j] = @as(i32, @intCast(token));
         }
-
-        // Cache the graph structure for future reuse
-        try self.prefill_cache.insert(.{
-            .n_tokens = n_prompt_tokens,
-            .graph = graph,
-            .logits = logits,
-            .input_tensor = input_tensor,
-        });
 
         return GraphPlan{
             .graph = graph,
@@ -228,15 +187,20 @@ pub const GraphPlanner = struct {
     /// Returns a GraphPlan ready for execution.
     pub fn planDecode(
         self: *GraphPlanner,
+        model: model_if.ModelInstance,
+        params: *const model_if.ModelParams,
+        kv_cache_mgr: *kv_cache.KVCache,
+        allocator: std.mem.Allocator,
         token_id: i32,
         pos: i32,
         inc_ctx: *graph_context.IncContext,
         gallocr: *ggml.Gallocr,
     ) !GraphPlan {
+        _ = self;
         const step = try inc_ctx.beginStep();
         step.setToken(token_id);
-        var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, self.params, self.allocator);
-        const inc_logits = try self.model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(self.kv_cache_mgr), pos);
+        var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, params, allocator);
+        const inc_logits = try model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(kv_cache_mgr), pos);
 
         return GraphPlan{
             .graph = step.graph,
@@ -256,20 +220,25 @@ pub const GraphPlanner = struct {
     /// Temporarily sets KV cache lengths to near-max to force worst-case allocation.
     pub fn reserveDecodeGallocr(
         self: *GraphPlanner,
+        model: model_if.ModelInstance,
+        params: *const model_if.ModelParams,
+        kv_cache_mgr: *kv_cache.KVCache,
+        allocator: std.mem.Allocator,
         inc_ctx: *graph_context.IncContext,
         gallocr: *ggml.Gallocr,
     ) !void {
+        _ = self;
         _ = gallocr;
-        const saved_lens = try self.kv_cache_mgr.getAllLengths(self.allocator);
-        defer self.allocator.free(saved_lens);
-        const max_pos: u32 = self.kv_cache_mgr.max_seq_len -| 1;
-        self.kv_cache_mgr.setAllLengths(max_pos);
+        const saved_lens = try kv_cache_mgr.getAllLengths(allocator);
+        defer allocator.free(saved_lens);
+        const max_pos: u32 = kv_cache_mgr.max_seq_len -| 1;
+        kv_cache_mgr.setAllLengths(max_pos);
         const reserve_step = try inc_ctx.beginStep();
         reserve_step.setToken(0);
-        var reserve_builder = graph_builder.GraphBuilder.init(reserve_step.ctx, reserve_step.graph, self.params, self.allocator);
-        _ = try self.model.buildGraph(&reserve_builder, reserve_step.input_token, 1, @ptrCast(self.kv_cache_mgr), @intCast(max_pos));
+        var reserve_builder = graph_builder.GraphBuilder.init(reserve_step.ctx, reserve_step.graph, params, allocator);
+        _ = try model.buildGraph(&reserve_builder, reserve_step.input_token, 1, @ptrCast(kv_cache_mgr), @intCast(max_pos));
         try inc_ctx.reserveGallocr(reserve_step.graph);
-        for (self.kv_cache_mgr.layers, 0..) |*layer, i| layer.current_len = saved_lens[i];
+        for (kv_cache_mgr.layers, 0..) |*layer, i| layer.current_len = saved_lens[i];
     }
 };
 
@@ -280,13 +249,6 @@ test "GraphPlan struct size" {
 }
 
 test "GraphPlanner init" {
-    // Just verify the struct can be created (no runtime test without model)
-    const planner = GraphPlanner{
-        .ctx_graph = undefined,
-        .model = undefined,
-        .params = undefined,
-        .kv_cache_mgr = undefined,
-        .allocator = undefined,
-    };
+    const planner = GraphPlanner.init();
     _ = planner;
 }

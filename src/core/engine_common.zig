@@ -2,9 +2,8 @@ const std = @import("std");
 const ggml = @import("ggml");
 const model_if = @import("model");
 
-const log = std.log.scoped(.core_engine);
+const log = std.log.scoped(.core_engine_common);
 
-// ============================================================================
 // 运行时日志级别控制
 // ============================================================================
 
