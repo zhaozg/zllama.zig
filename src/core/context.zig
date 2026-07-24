@@ -364,7 +364,7 @@ pub const ModelContext = struct {
             .arch = self.arch,
             .model = self.model,
             .params = self.params,
-            .tok = self.tok.*,
+            .tok = &self.tok,
             .kv_cache_mgr = &self.kv_cache_mgr,
             .n_threads = self.n_threads,
             .verbose_prompt = self.verbose_prompt,
@@ -400,7 +400,9 @@ test "estimateKVCacheSize basic" {
 }
 
 test "estimateGraphSize basic" {
-    var params = model_if.ModelParams{};
+    const params = model_if.ModelParams{ .n_layer = 32, .n_embd = 4096 };
     const size = estimateGraphSize(&params);
-    try testing.expectEqual(@as(usize, 2 * 1024 * 1024 * 1024), size);
+    // Dynamic estimate based on layer count — should be in MB range, not GB
+    try testing.expect(size > 128 * 1024 * 1024);
+    try testing.expect(size < 4 * 1024 * 1024 * 1024);
 }

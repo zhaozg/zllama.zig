@@ -47,7 +47,7 @@ pub const EngineContext = struct {
     arch: model_if.Architecture,
     model: model_if.ModelInstance,
     params: model_if.ModelParams,
-    tok: tokenizer.Tokenizer,
+    tok: *tokenizer.Tokenizer,
     kv_cache_mgr: *kv_cache.KVCache,
     n_threads: i32,
     verbose_prompt: bool,
@@ -404,7 +404,7 @@ fn multimodalPrefillUnified(
     );
 
     if (ectx.verbose_prompt) {
-        try verbose_mod.printVerbosePrompt(io, ectx.allocator, &ectx.tok, prompt_text, expanded.tokens.items, pr.logits, expanded.offsets);
+        try verbose_mod.printVerbosePrompt(io, ectx.allocator, ectx.tok, prompt_text, expanded.tokens.items, pr.logits, expanded.offsets);
     }
 
     var best_idx: i32 = 0;
@@ -424,7 +424,7 @@ fn multimodalPrefillUnified(
         io,
         ectx.model,
         &ectx.params,
-        &ectx.tok,
+        ectx.tok,
         ectx.kv_cache_mgr,
         ectx.inc_ctx,
         ectx.n_threads,
