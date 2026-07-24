@@ -1,8 +1,12 @@
-//! Graph planner — builds and plans compute graphs for prefill and decode.
+//! Graph planner — builds and plans compute graphs for prefill.
 //!
 //! Extracted from engine.zig (refact.md §1) to keep files ≤600 lines.
 //! The planner receives a ModelContext reference and produces GraphPlan
 //! objects that the executor can run without accessing raw context pointers.
+//!
+//! Note: Decode graph construction is handled inline in decode.zig's
+//! runDecodeLoop, and gallocr reservation is in decode.zig's
+//! reserveDecodeGallocr. These were previously duplicated here.
 //!
 //! Reference: llama.cpp llm_graph_context / llama_build_graph
 
@@ -10,9 +14,7 @@ const std = @import("std");
 const ggml = @import("ggml");
 const model_if = @import("model");
 const graph_builder = @import("graph_builder");
-const graph_context = @import("graph_context");
 const kv_cache = @import("kv_cache");
-const engine_common = @import("engine_common");
 
 const logger = std.log.scoped(.core_planner);
 
@@ -177,68 +179,6 @@ pub const GraphPlanner = struct {
             .is_prefill = true,
             .gallocr = gallocr,
         };
-    }
-
-    // ========================================================================
-    // Decode graph planning
-    // ========================================================================
-
-    /// Build a single-token decode graph.
-    /// Returns a GraphPlan ready for execution.
-    pub fn planDecode(
-        self: *GraphPlanner,
-        model: model_if.ModelInstance,
-        params: *const model_if.ModelParams,
-        kv_cache_mgr: *kv_cache.KVCache,
-        allocator: std.mem.Allocator,
-        token_id: i32,
-        pos: i32,
-        inc_ctx: *graph_context.IncContext,
-        gallocr: *ggml.Gallocr,
-    ) !GraphPlan {
-        _ = self;
-        const step = try inc_ctx.beginStep();
-        step.setToken(token_id);
-        var inc_builder = graph_builder.GraphBuilder.init(step.ctx, step.graph, params, allocator);
-        const inc_logits = try model.buildGraph(&inc_builder, step.input_token, 1, @ptrCast(kv_cache_mgr), pos);
-
-        return GraphPlan{
-            .graph = step.graph,
-            .logits = inc_logits,
-            .n_tokens = 1,
-            .start_pos = pos,
-            .is_prefill = false,
-            .gallocr = gallocr,
-        };
-    }
-
-    // ========================================================================
-    // Gallocr reservation
-    // ========================================================================
-
-    /// Reserve gallocr space for the worst-case incremental decode graph.
-    /// Temporarily sets KV cache lengths to near-max to force worst-case allocation.
-    pub fn reserveDecodeGallocr(
-        self: *GraphPlanner,
-        model: model_if.ModelInstance,
-        params: *const model_if.ModelParams,
-        kv_cache_mgr: *kv_cache.KVCache,
-        allocator: std.mem.Allocator,
-        inc_ctx: *graph_context.IncContext,
-        gallocr: *ggml.Gallocr,
-    ) !void {
-        _ = self;
-        _ = gallocr;
-        const saved_lens = try kv_cache_mgr.getAllLengths(allocator);
-        defer allocator.free(saved_lens);
-        const max_pos: u32 = kv_cache_mgr.max_seq_len -| 1;
-        kv_cache_mgr.setAllLengths(max_pos);
-        const reserve_step = try inc_ctx.beginStep();
-        reserve_step.setToken(0);
-        var reserve_builder = graph_builder.GraphBuilder.init(reserve_step.ctx, reserve_step.graph, params, allocator);
-        _ = try model.buildGraph(&reserve_builder, reserve_step.input_token, 1, @ptrCast(kv_cache_mgr), @intCast(max_pos));
-        try inc_ctx.reserveGallocr(reserve_step.graph);
-        for (kv_cache_mgr.layers, 0..) |*layer, i| layer.current_len = saved_lens[i];
     }
 };
 

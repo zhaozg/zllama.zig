@@ -218,13 +218,12 @@ pub const InferenceEngine = struct {
         const first_token = sampler.Sampler.sampleGreedyFromLogits(prefill.logits);
         try self.streamPromptTokens(io, input_tokens.items);
 
-        try self.planner.reserveDecodeGallocr(
+        try decode_mod.reserveDecodeGallocr(
+            self.ctx.allocator,
+            &self.ctx.kv_cache_mgr,
+            &self.ctx.inc_ctx,
             self.ctx.model,
             &self.ctx.params,
-            &self.ctx.kv_cache_mgr,
-            self.ctx.allocator,
-            &self.ctx.inc_ctx,
-            self.ctx.gallocr,
         );
 
         // 内存监控：prefill 后检查内存使用
@@ -394,13 +393,12 @@ pub const InferenceEngine = struct {
                 });
             }
 
-            try self.planner.reserveDecodeGallocr(
+            try decode_mod.reserveDecodeGallocr(
+                self.ctx.allocator,
+                &self.ctx.kv_cache_mgr,
+                &self.ctx.inc_ctx,
                 self.ctx.model,
                 &self.ctx.params,
-                &self.ctx.kv_cache_mgr,
-                self.ctx.allocator,
-                &self.ctx.inc_ctx,
-                self.ctx.gallocr,
             );
 
             // Collect output tokens via afterToken callback for building assistant message.

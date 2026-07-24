@@ -15,8 +15,6 @@
 
 const std = @import("std");
 const ggml = @import("ggml");
-const model_if = @import("model");
-const tokenizer = @import("tokenizer");
 const engine_common = @import("engine_common");
 
 const CliArgs = @import("cli_args.zig").CliArgs;

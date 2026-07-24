@@ -45,7 +45,7 @@
 | M-RoPE 位置计算分发 | **P1** ✅ | 通过 `PosType` 枚举分发到 `imageGetDecoderPos()` |
 | 多模态 tokenize | **P1** ✅ | 文本+媒体标记混合 tokenize |
 
-### 阶段 3：性能优化（计划中 📋）
+### 阶段 3：性能优化（进行中 📋）
 
 | 任务 | 优先级 | 说明 |
 |------|--------|------|
@@ -140,30 +140,33 @@ zig-out/bin/zllama -m gemma-4-E2B-it-Q4_K_M.gguf \
 ## 五、 遗留问题与已知风险
 
 > 以下问题在最近一次重构（阶段 1 核心重构）后识别，需要在后续迭代中解决。
+>
+> **审核日期**: 2026-07-24 — 所有问题均已核实，代码状态与文档一致。
 
 ### 5.1 高优先级（P0）
 
 | 问题 | 描述 | 影响范围 | 建议方案 |
 |------|------|----------|----------|
 | **多轮对话 KV Cache 仍全量重置** | `chatLoop` 中每轮对话仍调用 `kv_cache_mgr.reset()`，导致上一轮内容无法作为下一轮上下文 | 多轮对话退化为单轮，浪费算力 | 实现增量推理：仅对新输入 token 做 decode，累积 KV Cache |
-| **`reserveDecodeGallocr` 中 `gallocr` 参数未使用** | `reserveDecodeGallocr` 接收 `gallocr` 参数但使用 `inc_ctx.reserveGallocr()` 内部管理 | 接口混淆，调用者可能误以为 gallocr 在此处被使用 | 移除 `gallocr` 参数，或统一 gallocr 管理路径 |
-| **`planDecode` 未在 generate 主路径中使用** | `generate()` 和 `chatLoop()` 直接调用 `decode_mod.runDecodeLoop`，未使用 `planner.planDecode` | `planDecode` 成为死代码，decode 图构建逻辑分散 | 将 `runDecodeLoop` 内部改为调用 `planner.planDecode`，或移除 `planDecode` |
+| **`reserveDecodeGallocr` 中 `gallocr` 参数未使用** | `planner.reserveDecodeGallocr` 接收 `gallocr` 参数但使用 `inc_ctx.reserveGallocr()` 内部管理（`_ = gallocr;`） | 接口混淆，调用者可能误以为 gallocr 在此处被使用 | 移除 `gallocr` 参数；同步更新 engine.zig 中两处调用点 |
+| **`planDecode` 未在 generate 主路径中使用（死代码）** | `generate()` 和 `chatLoop()` 直接调用 `decode_mod.runDecodeLoop`，未使用 `planner.planDecode`；`planDecode` 零调用点 | 死代码占用维护成本；decode 图构建逻辑在 `runDecodeLoop` 中内联重复 | 移除 `planDecode`，统一使用 `runDecodeLoop` 的内联构建 |
+| ⚠️ **`reserveDecodeGallocr` 代码重复** | `planner.zig` 和 `decode.zig` 各自实现了功能相同的 `reserveDecodeGallocr`（区别仅 planner 版本多了未使用的 `gallocr` 参数） | 维护两份相同逻辑，容易产生分歧 | 统一到 `decode.zig` 的版本（无 gallocr），planner 版本改为委托 |
 
 ### 5.2 中优先级（P1）
 
 | 问题 | 描述 | 影响范围 | 建议方案 |
 |------|------|----------|----------|
 | **`ModelContext.toMultimodalContext()` 复制 `tok`** | `toMultimodalContext()` 中 `tok = self.tok.*` 复制了整个 Tokenizer 值 | 存在潜在的重复释放或悬空指针风险 | 改为传递指针 `tok = &self.tok`，或确保 `EngineContext` 不拥有所有权 |
-| **`main.zig` 中未使用的 import** | `model_if`、`tokenizer` 等 import 在 `main.zig` 中未直接使用 | 编译警告，代码可读性 | 清理未使用的 import |
-| **内存监控报告手动 free 易遗漏** | 多处调用 `mem_monitor.check()` 后需手动 `defer allocator.free(report.contexts)` | 容易遗漏导致内存泄漏 | 封装 `checkWithDefer` 辅助函数，或让 `check()` 返回内嵌 defer 的结构 |
+| **`main.zig` 中未使用的 import** | `model_if`、`tokenizer` 两个 import 在 `main.zig` 中未直接使用 | 编译警告，代码可读性 | 清理未使用的 import |
+| **内存监控报告手动 free 易遗漏** | engine.zig 中 3 处调用 `mem_monitor.check()` 后需手动 `defer allocator.free(report.contexts)` | 容易遗漏导致内存泄漏 | 封装 `checkWithDefer` 辅助函数，或让 `check()` 返回内嵌 defer 的结构 |
 
 ### 5.3 低优先级（P2）
 
 | 问题 | 描述 | 影响范围 | 建议方案 |
 |------|------|----------|----------|
-| **`estimateKVCacheSize` 测试硬编码** | `test "estimateKVCacheSize basic"` 中硬编码了 1.7GB 的期望值 | 测试脆弱，参数变化时容易失败 | 改为基于公式动态计算期望值 |
-| **`estimateGraphSize` 测试过于简单** | 仅检查返回值是否为 2GB | 测试无实际验证意义 | 增加更精确的估算验证 |
-| **`GraphPlanner` 测试覆盖不足** | 仅有 `init` 和结构体大小测试 | 核心逻辑无测试覆盖 | 增加 mock 测试验证 `planPrefill` 和 `planDecode` |
+| ~~`estimateKVCacheSize` 测试硬编码~~ | ✅ 已修复：函数已改为委托 `MemoryEstimator.estimateKVCache()`，不再硬编码 | — | — |
+| **`estimateGraphSize` 测试过于简单** | `context.zig` 测试仅检查返回值 `== 2GB`，但函数已委托 `MemoryEstimator` 动态计算 | 测试无法验证估算正确性 | 改为范围检查（如 `> 500MB and < 4GB`） |
+| **`GraphPlanner` 测试覆盖不足** | 仅有 `init` 和结构体大小测试 | 核心逻辑无测试覆盖 | 增加 mock 测试验证 `planPrefill` 和 `reserveDecodeGallocr` |
 
 ---
 
