@@ -98,6 +98,11 @@ pub const MemoryReport = struct {
             });
         }
     }
+
+    /// Release memory owned by this report.
+    pub fn deinit(self: *const MemoryReport, allocator: std.mem.Allocator) void {
+        allocator.free(self.contexts);
+    }
 };
 
 // ============================================================================
@@ -342,7 +347,7 @@ pub const MemoryMonitor = struct {
     /// 检查内存使用情况，触发告警和自动回收
     pub fn check(self: *MemoryMonitor) !MemoryReport {
         const mem_report = try self.report(self.allocator);
-        errdefer self.allocator.free(mem_report.contexts);
+        errdefer mem_report.deinit(self.allocator);
 
         if (mem_report.max_alert != .normal) {
             self.consecutive_alerts += 1;
@@ -427,12 +432,12 @@ test "MemoryMonitor init, add, report, check" {
     try testing.expectEqual(@as(usize, 1), monitor.contexts.items.len);
 
     const report = try monitor.report(testing.allocator);
-    defer testing.allocator.free(report.contexts);
+    defer report.deinit(testing.allocator);
     try testing.expect(report.contexts.len > 0);
     try testing.expectEqualStrings("test_ctx", report.contexts[0].label);
 
     const check_report = try monitor.check();
-    defer testing.allocator.free(check_report.contexts);
+    defer check_report.deinit(testing.allocator);
     try testing.expectEqual(.normal, check_report.max_alert);
 
     monitor.clearContexts();
@@ -448,7 +453,7 @@ test "MemoryMonitor high usage triggers alert" {
     try monitor.addContext(adaptGgmlContext(ctx, "tiny_ctx"));
 
     const report = try monitor.check();
-    defer testing.allocator.free(report.contexts);
+    defer report.deinit(testing.allocator);
     try testing.expect(report.max_alert != .normal);
     try testing.expect(monitor.consecutiveAlerts() > 0);
 }

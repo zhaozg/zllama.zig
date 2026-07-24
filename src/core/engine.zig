@@ -228,7 +228,7 @@ pub const InferenceEngine = struct {
 
         // 内存监控：prefill 后检查内存使用
         const prefill_report = try self.mem_monitor.check();
-        defer self.ctx.allocator.free(prefill_report.contexts);
+        defer prefill_report.deinit(self.ctx.allocator);
         if (prefill_report.max_alert != .normal) {
             logger.warn("Prefill memory: {d:.1}% used ({s})", .{
                 prefill_report.total_ratio * 100,
@@ -271,7 +271,7 @@ pub const InferenceEngine = struct {
 
         // 内存监控：decode 后检查内存使用
         const decode_report = try self.mem_monitor.check();
-        defer self.ctx.allocator.free(decode_report.contexts);
+        defer decode_report.deinit(self.ctx.allocator);
         if (decode_report.max_alert != .normal) {
             logger.warn("Decode memory: {d:.1}% used ({s})", .{
                 decode_report.total_ratio * 100,
@@ -385,7 +385,7 @@ pub const InferenceEngine = struct {
 
             // 内存监控：chat prefill 后检查
             const prefill_report = try self.mem_monitor.check();
-            defer self.ctx.allocator.free(prefill_report.contexts);
+            defer prefill_report.deinit(self.ctx.allocator);
             if (prefill_report.max_alert != .normal) {
                 logger.warn("Chat prefill memory: {d:.1}% used ({s})", .{
                     prefill_report.total_ratio * 100,
