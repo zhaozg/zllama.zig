@@ -72,14 +72,7 @@ pub const InferenceEngine = struct {
     pub fn init(io: std.Io, allocator: std.mem.Allocator, model_path: [:0]const u8, cli_args: *const CliArgs) !InferenceEngine {
         var ctx = try ModelContext.init(io, allocator, model_path, cli_args);
         errdefer ctx.deinit();
-
-        const planner_inst = GraphPlanner.init(
-            ctx.ctx_graph,
-            ctx.model,
-            &ctx.params,
-            &ctx.kv_cache_mgr,
-            allocator,
-        );
+        // planner 将在 engine 构建后初始化，以确保指针有效性
 
         const executor_inst = GraphExecutor.init(
             ctx.n_threads,
@@ -92,12 +85,22 @@ pub const InferenceEngine = struct {
         try mem_monitor_inst.addContext(memory_monitor.adaptGgmlContext(ctx.ctx_kv_cache, "kv_cache"));
         try mem_monitor_inst.addContext(memory_monitor.adaptIncContext(&ctx.inc_ctx));
 
-        return InferenceEngine{
+        // 先构建 InferenceEngine，确保 ctx 不会被移动
+        var engine = InferenceEngine{
             .ctx = ctx,
-            .planner = planner_inst,
+            .planner = undefined,
             .executor = executor_inst,
             .mem_monitor = mem_monitor_inst,
         };
+        // 现在 planner 可以安全地引用 engine.ctx.kv_cache_mgr
+        engine.planner = GraphPlanner.init(
+            engine.ctx.ctx_graph,
+            engine.ctx.model,
+            &engine.ctx.params,
+            &engine.ctx.kv_cache_mgr,
+            allocator,
+        );
+        return engine;
     }
 
     pub fn deinit(self: *InferenceEngine) void {
