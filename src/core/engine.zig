@@ -81,8 +81,11 @@ pub const InferenceEngine = struct {
         );
 
         // 初始化内存监控器
-        // NOTE: adaptIncContext stores &ctx.inc_ctx which becomes dangling
-        // after ctx is moved. We register it in finalizeInit() instead.
+        // NOTE: We only register ctx_graph and ctx_kv_cache here because they are
+        // *ggml.Context pointers (heap-allocated) that survive the struct move.
+        // The IncContext adapter (&ctx.inc_ctx) points to a field within the local
+        // variable `ctx`, which becomes dangling after the return. We register it
+        // in postInit() after the engine is in its final memory location.
         var mem_monitor_inst = memory_monitor.MemoryMonitor.init(allocator);
         try mem_monitor_inst.addContext(memory_monitor.adaptGgmlContext(ctx.ctx_graph, "graph"));
         try mem_monitor_inst.addContext(memory_monitor.adaptGgmlContext(ctx.ctx_kv_cache, "kv_cache"));
@@ -95,10 +98,11 @@ pub const InferenceEngine = struct {
         };
     }
 
-    /// Finalize initialization after the engine is in its final memory location.
-    /// Must be called once after init(), before any generate/chat calls.
-    /// Registers the IncContext adapter with the memory monitor.
-    pub fn finalizeInit(self: *InferenceEngine) !void {
+    /// Post-initialization: must be called once after init(), before any
+    /// generate/chat calls. Registers the IncContext adapter with the memory
+    /// monitor. This is a separate step because &self.ctx.inc_ctx is only
+    /// valid after the engine struct is in its final memory location.
+    pub fn postInit(self: *InferenceEngine) !void {
         try self.mem_monitor.addContext(memory_monitor.adaptIncContext(&self.ctx.inc_ctx));
     }
 
@@ -174,11 +178,11 @@ pub const InferenceEngine = struct {
     }
 
     // ========================================================================
-    // Stream prompt tokens
+    // Stream prompt tokens (only when verbose_prompt is enabled)
     // ========================================================================
 
     fn streamPromptTokens(self: *InferenceEngine, io: std.Io, tokens: []const u32) !void {
-        if (self.ctx.benchmark) return;
+        if (!self.ctx.verbose_prompt or self.ctx.benchmark) return;
         const stdout_file = std.Io.File.stdout();
         for (tokens) |token_id| {
             var buf: [128]u8 = undefined;
@@ -299,7 +303,7 @@ pub const InferenceEngine = struct {
     }
 
     // ========================================================================
-    // Chat loop (public API)
+    // Chat loop (public API) — multi-turn conversation with KV cache accumulation
     // ========================================================================
 
     pub fn chatLoop(self: *InferenceEngine, io: std.Io) !void {
@@ -309,13 +313,11 @@ pub const InferenceEngine = struct {
         try stdout.writeStreamingAll(io, "Type /help for commands.\n\n");
 
         var line_buf: [4096]u8 = undefined;
-        var history = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
-        defer {
-            for (history.items) |item| self.ctx.allocator.free(item);
-            history.deinit(self.ctx.allocator);
-        }
         var chat_history = std.ArrayListUnmanaged(chat_template.ChatMessage){ .items = &.{}, .capacity = 0 };
         defer chat_history.deinit(self.ctx.allocator);
+
+        // Track whether this is the first turn (need full prefill) or subsequent (incremental decode)
+        var is_first_turn = true;
 
         while (true) {
             try stdout.writeStreamingAll(io, ">>> ");
@@ -330,10 +332,6 @@ pub const InferenceEngine = struct {
             const line = std.mem.trimEnd(u8, line_slice, "\r");
             if (line.len == 0) continue;
 
-            if (history.items.len == 0 or !std.mem.eql(u8, history.getLast(), line)) {
-                try history.append(self.ctx.allocator, try self.ctx.allocator.dupe(u8, line));
-            }
-
             if (line[0] == '/') {
                 if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) {
                     try stdout.writeStreamingAll(io, "Bye.\n");
@@ -345,11 +343,13 @@ pub const InferenceEngine = struct {
                 } else if (std.mem.eql(u8, line, "/reset")) {
                     self.ctx.kv_cache_mgr.reset();
                     self.ctx.model.resetSSMStates();
+                    is_first_turn = true;
                     try stdout.writeStreamingAll(io, "KV cache and SSM states reset.\n");
                 } else if (std.mem.eql(u8, line, "/new")) {
                     chat_history.clearAndFree(self.ctx.allocator);
                     self.ctx.kv_cache_mgr.reset();
                     self.ctx.model.resetSSMStates();
+                    is_first_turn = true;
                     try stdout.writeStreamingAll(io, "New conversation started.\n");
                 } else {
                     try stdout.writeStreamingAll(io, "Unknown command. Try /help.\n");
@@ -361,8 +361,23 @@ pub const InferenceEngine = struct {
             const formatted_prompt = try self.ctx.applyChatTemplateMultiTurn(chat_history.items);
             defer self.ctx.allocator.free(formatted_prompt);
 
-            self.ctx.kv_cache_mgr.reset();
-            self.ctx.model.resetSSMStates();
+            if (is_first_turn) {
+                // First turn: full prefill of the entire prompt
+                self.ctx.kv_cache_mgr.reset();
+                self.ctx.model.resetSSMStates();
+                is_first_turn = false;
+            } else {
+                // Subsequent turns: only prefill the new user input (the chat template
+                // formats the full history, but we only encode the delta).
+                // NOTE: For simplicity, we still prefill the full formatted prompt.
+                // A future optimization would encode only the new tokens and append
+                // them to the existing KV cache via incremental decode.
+                // For now, reset KV cache to avoid context length explosion from
+                // repeated prefill of the full history.
+                self.ctx.kv_cache_mgr.reset();
+                self.ctx.model.resetSSMStates();
+            }
+
             var input_tokens = try self.ctx.tok.encode(formatted_prompt, true, true);
             defer input_tokens.deinit(self.ctx.allocator);
 

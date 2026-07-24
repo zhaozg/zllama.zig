@@ -88,8 +88,10 @@ pub fn main(init: std.process.Init) !void {
         logger.err("Failed to initialize inference engine: {}\n", .{err});
         return;
     };
-    engine.finalizeInit() catch |err| {
-        logger.err("Failed to finalize engine init: {}\n", .{err});
+    // postInit must be called after the engine is in its final memory location.
+    // It registers the IncContext adapter with the memory monitor.
+    engine.postInit() catch |err| {
+        logger.err("Failed to post-init engine: {}\n", .{err});
         return;
     };
     defer engine.deinit();

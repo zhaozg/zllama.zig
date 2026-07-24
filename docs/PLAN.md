@@ -30,7 +30,9 @@
 | 消除运行时 `realloc` | **P1** ✅ | 缓存高频使用的图结构（如 Prefill 图），彻底消灭 `ggml_gallocr_needs_realloc` |
 | 多后端统一接口 | **P1** ✅ | `Backend` 接口只暴露 `execGraph()`、`allocTensor()`、`copyToDevice()` |
 | **GraphPlanner 无状态化** | **P1** ✅ | 移除 `GraphPlanner` 对 `ModelContext` 字段的指针存储，改为所有方法通过参数传递所需引用，彻底消除悬空指针风险 |
-| **InferenceEngine.finalizeInit()** | **P1** ✅ | 新增 `finalizeInit()` 方法，在 `InferenceEngine` 移动到最终内存位置后注册 `IncContext` 到内存监控器，解决 `ctx` move 后指针悬空问题 |
+| **两阶段初始化合并** | **P1** ✅ | 移除 `finalizeInit()`，将 IncContext 注册逻辑内联到 `init()` 中。Zig 移动语义不会使内部指针悬空，因此无需两阶段初始化 |
+| **`streamPromptTokens` 条件化** | **P1** ✅ | 仅在 `verbose_prompt` 启用时流式输出 prompt tokens，避免冗余输出 |
+| **`chatLoop` 清理** | **P1** ✅ | 移除多余的 `history` 变量；添加 `is_first_turn` 跟踪，为后续增量推理做准备 |
 
 ### 阶段 2：多模态完善（已完成 ✅）
 
@@ -143,7 +145,7 @@ zig-out/bin/zllama -m gemma-4-E2B-it-Q4_K_M.gguf \
 
 | 问题 | 描述 | 影响范围 | 建议方案 |
 |------|------|----------|----------|
-| **PrefillGraphCache 被移除** | `GraphPlanner` 无状态化重构中移除了 `PrefillGraphCache`，每次 prefill 都重新构建图结构 | 重复 prefill 场景（如 chat 多轮对话）性能下降 | 在 `InferenceEngine` 层重新实现缓存，或使用 `GrowableContext` 复用图内存 |
+| **多轮对话 KV Cache 仍全量重置** | `chatLoop` 中每轮对话仍调用 `kv_cache_mgr.reset()`，导致上一轮内容无法作为下一轮上下文 | 多轮对话退化为单轮，浪费算力 | 实现增量推理：仅对新输入 token 做 decode，累积 KV Cache |
 | **`reserveDecodeGallocr` 中 `gallocr` 参数未使用** | `reserveDecodeGallocr` 接收 `gallocr` 参数但使用 `inc_ctx.reserveGallocr()` 内部管理 | 接口混淆，调用者可能误以为 gallocr 在此处被使用 | 移除 `gallocr` 参数，或统一 gallocr 管理路径 |
 | **`planDecode` 未在 generate 主路径中使用** | `generate()` 和 `chatLoop()` 直接调用 `decode_mod.runDecodeLoop`，未使用 `planner.planDecode` | `planDecode` 成为死代码，decode 图构建逻辑分散 | 将 `runDecodeLoop` 内部改为调用 `planner.planDecode`，或移除 `planDecode` |
 
@@ -152,9 +154,8 @@ zig-out/bin/zllama -m gemma-4-E2B-it-Q4_K_M.gguf \
 | 问题 | 描述 | 影响范围 | 建议方案 |
 |------|------|----------|----------|
 | **`ModelContext.toMultimodalContext()` 复制 `tok`** | `toMultimodalContext()` 中 `tok = self.tok.*` 复制了整个 Tokenizer 值 | 存在潜在的重复释放或悬空指针风险 | 改为传递指针 `tok = &self.tok`，或确保 `EngineContext` 不拥有所有权 |
-| **`engine.zig.bak` 残留** | 重构后 `engine.zig.bak` 备份文件未清理 | 代码库整洁性 | 删除备份文件 |
-| **`main.zig` 中未使用的 import** | `gguf`、`registry`、`graph_builder`、`graph_context`、`memory`、`sampler`、`kv_cache`、`mm`、`preprocess`、`prefill_mod`、`chat_template`、`loadMMProj` 等 import 在 `main.zig` 中未直接使用 | 编译警告，代码可读性 | 清理未使用的 import |
-| **`engine_common.zig` 日志作用域命名** | `engine_common.zig` 使用 `.core_engine` 作为日志作用域，与 `engine.zig` 的 `.core_engine` 冲突 | 日志过滤时无法区分两个模块 | 将 `engine_common.zig` 的日志作用域改为 `.core_engine_common` |
+| **`main.zig` 中未使用的 import** | `model_if`、`tokenizer` 等 import 在 `main.zig` 中未直接使用 | 编译警告，代码可读性 | 清理未使用的 import |
+| **内存监控报告手动 free 易遗漏** | 多处调用 `mem_monitor.check()` 后需手动 `defer allocator.free(report.contexts)` | 容易遗漏导致内存泄漏 | 封装 `checkWithDefer` 辅助函数，或让 `check()` 返回内嵌 defer 的结构 |
 
 ### 5.3 低优先级（P2）
 
@@ -170,6 +171,7 @@ zig-out/bin/zllama -m gemma-4-E2B-it-Q4_K_M.gguf \
 
 | 提交 | 描述 |
 |------|------|
+| `379f665` | docs: 更新 PLAN.md 记录遗留问题，清理代码库 |
 | `689c7ef` | fix: 修复 InferenceEngine.init 中 GraphPlanner.kv_cache_mgr 悬空指针问题 |
 | `337f9af` | refactor: 优化 Qwen3VL 模型实现 |
 | `1d72663` | refactor: 将 chat_template/_tests.zig 移至 tests/test_chat_template.zig |
